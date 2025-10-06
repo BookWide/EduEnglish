@@ -85,6 +85,52 @@
   #phScore{font-size:24px;font-weight:900}
   #phFeedback{font-size:12px;color:#444}
 </style>
+
+<style>
+/* ===== FocusMobile v3.0.1 base ===== */
+#verBadgeTop{
+  position: fixed; top: 8px; right: 10px; z-index: 10050;
+  background: rgba(15,23,42,.9); color: #e6efff;
+  border: 1px solid rgba(100,116,139,.5);
+  padding: 4px 8px; border-radius: 8px; font-size: 12px;
+}
+@media (max-width:860px) and (orientation:portrait){
+  /* Two-page track */
+  #mainWrap.pager-track, .layout.pager-track{
+    display: flex !important;
+    flex-direction: row !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    scroll-snap-type: x mandatory !important;
+    -webkit-overflow-scrolling: touch !important;
+    gap: 0 !important;
+  }
+  .pager-page{
+    flex: 0 0 100vw !important;
+    max-width: 100vw !important;
+    height: calc(100vh - 58px);
+    scroll-snap-align: start;
+    overflow-y: auto;
+  }
+  .pager-page > .left, .pager-page > .right{
+    width: 100% !important;
+    max-width: 100% !important;
+    border-radius: 0 !important;
+    border-left: 0 !important; border-right: 0 !important;
+  }
+  /* 工具列預設展開 */
+  #controlsDrawer, .controls, .toolbar, .player-toolbar{
+    max-height: none !important; opacity: 1 !important; visibility: visible !important;
+  }
+  #btnExitFocus{
+    position: fixed; right: 16px; bottom: 16px;
+    z-index: 10020; display: none;
+    padding:8px 12px;border-radius:10px;border:1px solid rgba(100,116,139,.5);
+    background:#0f172a;color:#e6efff;
+  }
+  .at-right-page #btnExitFocus{ display: inline-flex; }
+}
+</style>
 </head>
 <body>
 <header>
@@ -428,6 +474,147 @@ $$('.tabs .tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab
     };
     document.getElementById("player")?.addEventListener("play", logOnce, { once: true });
   }
+</script>
+
+<script>
+/* ===== Mobile Two-Page Freeze-Guard v3.0.1 ===== */
+(function () {
+  const qs = new URLSearchParams(location.search);
+  if (qs.get('noPager') === '1') return;   // 緊急關閉：?noPager=1
+  const isMobile = () => matchMedia('(max-width:860px) and (orientation:portrait)').matches;
+  const $  = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+
+  const TRACK_SEL = '#mainWrap, .layout';
+  const LEFT_SEL  = '#leftPanel, .left';
+  const RIGHT_SEL = '#rightPanel, .right';
+
+  let inited = false;
+  let rafInit = 0;
+  let rafScroll = 0;
+
+  function ensureBadge() {
+    let b = $('#verBadgeTop');
+    if (!b) {
+      b = document.createElement('div');
+      b.id = 'verBadgeTop';
+      document.body.appendChild(b);
+    }
+    b.textContent = '2025.10.14 FocusMobile v3.0.1';
+  }
+
+  function setPage(idx) {
+    const track = $(TRACK_SEL);
+    if (!track) return;
+    const w = track.clientWidth;
+    track.scrollTo({ left: idx * w, behavior: 'smooth' });
+    document.body.classList.toggle('at-right-page', idx === 1);
+    const back = $('#btnExitFocus');
+    if (back) back.style.display = idx === 1 ? 'inline-flex' : 'none';
+  }
+
+  function bindTopTabsOnce() {
+    const labels = new Set(['字幕', '測驗', '單字']);
+    const buttons = $$('button,a,[role="tab"]');
+    const groups = new Map();
+    buttons.forEach((el) => {
+      const t = (el.textContent || '').trim();
+      if (!labels.has(t)) return;
+      const c = el.closest('.tabs, nav, .tabbar, .tabs-container, section, div') || el.parentElement;
+      if (!c) return;
+      const s = groups.get(c) || new Set();
+      s.add(t); groups.set(c, s);
+    });
+    const topBars = Array.from(groups.entries())
+      .filter(([c, set]) => set.has('字幕') && set.has('測驗') && set.has('單字'))
+      .map(([c]) => c);
+    if (!topBars.length) return;
+    const topBar = topBars[0];
+    $$('button,a,[role="tab"]', topBar).forEach((el) => {
+      const t = (el.textContent || '').trim();
+      if (!labels.has(t) || el.dataset._pagerBound) return;
+      el.dataset._pagerBound = '1';
+      el.addEventListener('click', () => setPage(1), { passive: true });
+    });
+  }
+
+  function ensureBackButton() {
+    if ($('#btnExitFocus')) return;
+    const btn = document.createElement('button');
+    btn.id = 'btnExitFocus';
+    btn.textContent = '返回影片';
+    document.body.appendChild(btn);
+    btn.addEventListener('click', () => setPage(0));
+  }
+
+  // 只做一次包裝
+  function ensurePagerOnce() {
+    const track = $(TRACK_SEL);
+    if (!track) return;
+    track.classList.add('pager-track');
+
+    if (!$('#mPageLeft')) {
+      const left = $(LEFT_SEL, track);
+      if (left) {
+        const leftPage = document.createElement('section');
+        leftPage.id = 'mPageLeft'; leftPage.className = 'pager-page';
+        left.before(leftPage); leftPage.appendChild(left);
+      }
+    }
+    if (!$('#mPageRight')) {
+      const right = $(RIGHT_SEL, track);
+      if (right) {
+        const rightPage = document.createElement('section');
+        rightPage.id = 'mPageRight'; rightPage.className = 'pager-page';
+        right.before(rightPage); rightPage.appendChild(right);
+      }
+    }
+  }
+
+  function onScrollSync() {
+    const track = $(TRACK_SEL);
+    if (!track) return;
+    const idx = track.scrollLeft >= track.clientWidth * 0.5 ? 1 : 0;
+    document.body.classList.toggle('at-right-page', idx === 1);
+    const back = $('#btnExitFocus');
+    if (back) back.style.display = idx === 1 ? 'inline-flex' : 'none';
+  }
+
+  function scheduleInit() {
+    cancelAnimationFrame(rafInit);
+    rafInit = requestAnimationFrame(init);
+  }
+
+  function init() {
+    if (!isMobile()) return;
+    ensureBadge();
+    ensureBackButton();
+    ensurePagerOnce();
+    bindTopTabsOnce();
+    onScrollSync();
+    inited = true;
+  }
+
+  window.addEventListener('resize', scheduleInit, { passive: true });
+  window.addEventListener('orientationchange', scheduleInit, { passive: true });
+  document.addEventListener('DOMContentLoaded', scheduleInit);
+
+  document.addEventListener('scroll', (e) => {
+    const t = e.target;
+    const track = $(TRACK_SEL);
+    if (!track) return;
+    if (t !== track && !(t.matches && t.matches(TRACK_SEL))) return;
+    cancelAnimationFrame(rafScroll);
+    rafScroll = requestAnimationFrame(onScrollSync);
+  }, { passive: true, capture: true });
+
+  // 只監聽 track 的直接子項變化
+  const mo = new MutationObserver(() => scheduleInit());
+  document.addEventListener('DOMContentLoaded', () => {
+    const track = $(TRACK_SEL);
+    if (track) mo.observe(track, { childList: true, subtree: false });
+  });
+})();
 </script>
 </body>
 </html>
