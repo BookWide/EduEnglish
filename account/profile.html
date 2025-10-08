@@ -1,0 +1,99 @@
+<!doctype html><meta charset="utf-8">
+<title>我的資料</title>
+<link rel="stylesheet" href="./account.css">
+<script>
+  // Ensure Supabase keys exist even if not injected globally
+  window.SUPABASE_URL = window.SUPABASE_URL || 'https://YOUR-PROJECT.supabase.co';
+  window.SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || 'YOUR-ANON-KEY';
+</script>
+
+<header class="bar"><a href="/" class="link">← 回首頁</a><h1>我的資料</h1></header>
+
+<main class="wrap">
+  <section class="card">
+    <h2>基本資料</h2>
+    <div id="u">載入中…</div>
+    <div class="row gap">
+      <button id="btnReset" class="btn">寄送重設密碼信</button>
+      <button id="btnExport" class="btn btn-outline">下載我的資料（JSON）</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>最近交卷</h2>
+    <ol id="attempts" class="list"></ol>
+  </section>
+
+  <section class="card">
+    <h2>最近看片</h2>
+    <ol id="watches" class="list"></ol>
+  </section>
+</main>
+
+<script type="module" src="./_shared.js"></script>
+<script type="module">
+import { supa, requireUser, fmtDateTime } from './_shared.js'
+
+function html (strings, ...vals){return strings.map((s,i)=>s+(vals[i]??'')).join('')}
+
+(async () => {
+  const user = await requireUser()
+
+  // profiles（可無）
+  let profile = null
+  try {
+    const { data } = await supa.from('profiles')
+      .select('*').eq('user_id', user.id).maybeSingle()
+    profile = data
+  } catch {}
+
+  const u = document.getElementById('u')
+  u.innerHTML = html`
+    <p>UID：<code>${user.id}</code></p>
+    <p>Email：<code>${user.email ?? '-'}</code></p>
+    <p>暱稱：<code>${profile?.display_name ?? '-'}</code></p>
+    <p>建立時間：<code>${fmtDateTime(user.created_at)}</code></p>
+    <p>最近登入：<code>${fmtDateTime(user.last_sign_in_at)}</code></p>
+  `
+
+  // 密碼重設（Email 使用者）
+  document.getElementById('btnReset').onclick = async () => {
+    if (!user.email) return alert('非 Email 登入，請至提供者修改密碼')
+    const { error } = await supa.auth
+      .resetPasswordForEmail(user.email, { redirectTo: location.href })
+    alert(error ? error.message : '已寄出重設密碼信')
+  }
+
+  // 匯出 JSON
+  document.getElementById('btnExport').onclick = () => {
+    const blob = new Blob([JSON.stringify(user, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = Object.assign(document.createElement('a'), { href: url, download: 'my-data.json' })
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  // 最近交卷
+  const { data: atts } = await supa.from('quiz_attempts')
+    .select('video_slug, score, total, submitted_at')
+    .order('submitted_at', { ascending: false }).limit(10)
+
+  document.getElementById('attempts').innerHTML =
+    (atts?.length ? atts.map(a =>
+      `<li>${fmtDateTime(a.submitted_at)}｜${a.video_slug}｜${a.score}/${a.total}</li>`
+    ).join('') : '<li class="muted">尚無</li>')
+
+  // 最近看片（若未啟用 watch_logs 會顯示「未啟用」）
+  try {
+    const { data: w } = await supa.from('watch_logs')
+      .select('video_slug, position_ms, last_seen_at')
+      .order('last_seen_at', { ascending: false }).limit(10)
+    document.getElementById('watches').innerHTML =
+      (w?.length ? w.map(x =>
+        `<li>${fmtDateTime(x.last_seen_at)}｜${x.video_slug}｜${Math.round((x.position_ms || 0) / 1000)}s</li>`
+      ).join('') : '<li class="muted">尚無</li>')
+  } catch {
+    document.getElementById('watches').innerHTML = '<li class="muted">未啟用</li>'
+  }
+})()
+</script>

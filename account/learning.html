@@ -1,1 +1,79 @@
+<!doctype html><meta charset="utf-8">
+<title>我的學習曲線</title>
+<link rel="stylesheet" href="./account.css">
+<script>
+  // Ensure Supabase keys exist even if not injected globally
+  window.SUPABASE_URL = window.SUPABASE_URL || 'https://YOUR-PROJECT.supabase.co';
+  window.SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || 'YOUR-ANON-KEY';
+</script>
 
+<header class="bar"><a href="/" class="link">← 回首頁</a><h1>我的學習曲線</h1></header>
+
+<main class="wrap">
+  <section class="card">
+    <canvas id="chart" height="120"></canvas>
+    <div id="stats" class="muted" style="margin-top:8px"></div>
+  </section>
+
+  <section class="card">
+    <h2>交卷明細</h2>
+    <table class="tbl" id="tbl">
+      <thead><tr><th>日期</th><th>影片</th><th>正確率</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="row gap" style="margin-top:10px">
+      <button id="btnCsv" class="btn btn-outline">匯出 CSV</button>
+    </div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script type="module" src="./_shared.js"></script>
+<script type="module">
+import { supa, requireUser, fmtDate } from './_shared.js'
+
+function toCSV(rows){
+  const header = 'date,video_slug,percent\n'
+  return header + rows.map(r=>`${r.date},${r.slug},${r.pct}`).join('\n')
+}
+
+;(async () => {
+  await requireUser()
+  const { data: atts } = await supa.from('quiz_attempts')
+    .select('video_slug, score, total, submitted_at')
+    .order('submitted_at', { ascending: true }).limit(500)
+
+  const rows = (atts || []).map(a => ({
+    date: fmtDate(a.submitted_at),
+    slug: a.video_slug,
+    pct: Math.round((a.score / a.total) * 100)
+  }))
+
+  // Chart
+  const ctx = document.getElementById('chart')
+  new Chart(ctx, {
+    type: 'line',
+    data: { labels: rows.map(r => r.date), datasets: [{ label: '正確率(%)', data: rows.map(r => r.pct) }] },
+    options: { responsive: true, scales: { y: { min: 0, max: 100 } }, plugins: { legend: { display: false } } }
+  })
+
+  // Stats
+  const avg = rows.length ? Math.round(rows.reduce((s, r) => s + r.pct, 0) / rows.length) : 0
+  const best = rows.length ? Math.max(...rows.map(r => r.pct)) : 0
+  const worst = rows.length ? Math.min(...rows.map(r => r.pct)) : 0
+  document.getElementById('stats').textContent =
+    `作答次數：${rows.length}，平均：${avg}%，最高：${best}%，最低：${worst}%`
+
+  // Table
+  document.querySelector('#tbl tbody').innerHTML =
+    rows.map(r => `<tr><td>${r.date}</td><td>${r.slug}</td><td>${r.pct}%</td></tr>`).join('')
+
+  // CSV
+  document.getElementById('btnCsv').onclick = () => {
+    const blob = new Blob([toCSV(rows)], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = Object.assign(document.createElement('a'), { href: url, download: 'learning.csv' })
+    a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+})()
+</script>
