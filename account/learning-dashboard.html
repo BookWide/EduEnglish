@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>學習控制台 · BookWide</title>
+  <meta name="description" content="BookWide 學習控制台：繼續播放、最近看過、今日複習與學習曲線。"/>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <style>
+    :root{
+      --ink:#0a0f1a; --muted:#667085; --border:#e5e7eb; --card:#ffffff; --bg:#fafafa;
+      --primary:#0b53ff;
+    }
+    *{box-sizing:border-box} html,body{height:100%;margin:0;font-family:ui-sans-serif,system-ui,"Noto Sans TC",Arial}
+    body{background:var(--bg);color:var(--ink)}
+    a{color:inherit;text-decoration:none}
+    .wrap{max-width:1100px;margin:0 auto;padding:18px 16px}
+    .h1{font-size:26px;font-weight:800;margin:4px 0 14px}
+    .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:14px}
+    .card h3{margin:0 0 8px;font-size:18px}
+    .list .item{display:block;padding:10px 10px;border:1px solid var(--border);border-radius:10px;margin:8px 0;background:#fff}
+    .list .item:hover{background:#f8fbff;border-color:#cfe0ff}
+    .title{font-weight:700}
+    .meta{color:var(--muted);font-size:12px;margin-top:4px}
+    .pill{display:inline-block;font-size:12px;padding:4px 8px;border-radius:999px;background:#eef2ff;color:#334155;border:1px solid #dbe4ff}
+    .empty{color:var(--muted)}
+    .row{display:flex;gap:10px;align-items:center;justify-content:space-between}
+    .chart-wrap{background:#fff;border:1px solid var(--border);border-radius:14px;padding:12px}
+    @media (max-width:860px){ .grid{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="h1">學習控制台</div>
+
+    <div class="grid">
+      <!-- 繼續播放 -->
+      <section class="card">
+        <div class="row">
+          <h3>繼續播放</h3>
+          <span class="pill">未完成 &lt; 90%</span>
+        </div>
+        <div id="continueBox" class="list">載入中…</div>
+      </section>
+
+      <!-- 今日複習（先預留，可之後接排程資料） -->
+      <section class="card">
+        <div class="row">
+          <h3>今日複習</h3>
+          <span class="pill">預留位</span>
+        </div>
+        <div id="reviewBox" class="list empty">今日沒有到期的複習項目。</div>
+      </section>
+
+      <!-- 最近看過 -->
+      <section class="card">
+        <h3>最近看過</h3>
+        <div id="recentBox" class="list">載入中…</div>
+      </section>
+
+      <!-- 我的清單（如未來要接 favorites） -->
+      <section class="card">
+        <div class="row">
+          <h3>我的清單</h3>
+          <span class="pill">收藏預留</span>
+        </div>
+        <div id="favBox" class="list empty">尚未收藏任何影片。</div>
+      </section>
+    </div>
+
+    <!-- 學習曲線 -->
+    <section style="margin-top:14px">
+      <div class="chart-wrap">
+        <h3 style="margin:0 0 8px">學習曲線（最近 7 天）</h3>
+        <canvas id="learningChart" height="160"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <!-- Chart.js（只用於學習曲線） -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- 主程式：讀 watch_logs，渲染四區塊 -->
+  <script type="module">
+    // ✅ 路徑重點：learning-dashboard.html 在 /account/ 底下，所以 supa.js 用 ../../
+    import { supabase } from '../../supa.js';
+
+    const $=(s,e=document)=>e.querySelector(s);
+    const continueBox=$('#continueBox'), recentBox=$('#recentBox'), favBox=$('#favBox');
+    const chartEl=$('#learningChart');
+
+    const pct = x => Math.round((x||0)*100);
+    const ago = iso => {
+      const d=new Date(iso), diff=(Date.now()-d.getTime())/1000;
+      if(diff<60) return '剛剛';
+      if(diff<3600) return Math.floor(diff/60)+' 分鐘前';
+      if(diff<86400) return Math.floor(diff/3600)+' 小時前';
+      return Math.floor(diff/86400)+' 天前';
+    };
+
+    async function me(){
+      const { data, error } = await supabase.auth.getUser();
+      if(error || !data?.user) return null;
+      return data.user;
+    }
+
+    // 1) 繼續播放：progress_pct < 0.9（未完成）
+    async function loadContinue(){
+      const user = await me();
+      if(!user){ continueBox.innerHTML='<div class="empty">請先登入</div>'; return; }
+
+      const { data, error } = await supabase
+        .from('watch_logs')
+        .select('video_slug, progress_pct, updated_at, position_sec, duration_sec')
+        .eq('user_id', user.id)
+        .lt('progress_pct', 0.9)
+        .order('updated_at', { ascending:false })
+        .limit(8);
+
+      if(error){ continueBox.innerHTML='<div class="empty">讀取失敗</div>'; return; }
+      if(!data?.length){ continueBox.innerHTML='<div class="empty">目前沒有未看完的影片。</div>'; return; }
+
+      continueBox.innerHTML = data.map(r=>{
+        const slug = r.video_slug || r.slug || '';
+        const href = `../player.html?slug=${encodeURIComponent(slug)}`;
+        return `<a class="item" href="${href}">
+          <div class="title">${slug||'(未命名)'}</div>
+          <div class="meta">已看 ${pct(r.progress_pct)}% · ${ago(r.updated_at)}</div>
+        </a>`;
+      }).join('');
+    }
+
+    // 2) 最近看過：最新 10 筆（同影片會重複顯示最新一次）
+    async function loadRecent(){
+      const user = await me();
+      if(!user){ recentBox.innerHTML='<div class="empty">請先登入</div>'; return; }
+
+      const { data, error } = await supabase
+        .from('watch_logs')
+        .select('video_slug, progress_pct, updated_at')
+        .eq('user_id', user.id)
+        .order('updated_at', { ascending:false })
+        .limit(10);
+
+      if(error){ recentBox.innerHTML='<div class="empty">讀取失敗</div>'; return; }
+      if(!data?.length){ recentBox.innerHTML='<div class="empty">尚無觀看紀錄。</div>'; return; }
+
+      recentBox.innerHTML = data.map(r=>{
+        const slug = r.video_slug || r.slug || '';
+        const href = `../player.html?slug=${encodeURIComponent(slug)}`;
+        return `<a class="item" href="${href}">
+          <div class="title">${slug||'(未命名)'}</div>
+          <div class="meta">${ago(r.updated_at)} · 進度 ${pct(r.progress_pct)}%</div>
+        </a>`;
+      }).join('');
+    }
+
+    // 3) 我的清單（預留接 favorites 表；先顯示空）
+    function loadFavorites(){
+      favBox.innerHTML = '<div class="empty">尚未收藏任何影片。</div>';
+    }
+
+    // 4) 學習曲線：統計最近 7 天的 watch_logs（以 updated_at）
+    async function loadCurve(){
+      const user = await me();
+      if(!user || !chartEl) return;
+
+      const { data, error } = await supabase
+        .from('watch_logs')
+        .select('updated_at')
+        .eq('user_id', user.id)
+        .order('updated_at', { ascending:true });
+
+      if(error || !data?.length) return;
+
+      const counts = {};
+      for(const r of data){
+        const day = new Date(r.updated_at).toISOString().split('T')[0];
+        counts[day] = (counts[day] || 0) + 1;
+      }
+      const keys = Object.keys(counts).sort();
+      const labels = keys.slice(-7);
+      const values = labels.map(d=>counts[d]);
+
+      new Chart(chartEl.getContext('2d'), {
+        type:'line',
+        data:{ labels, datasets:[{ label:'每日觀看次數', data:values, borderColor:'#0b53ff', tension:.2, fill:false }] },
+        options:{ scales:{ y:{ beginAtZero:true, ticks:{ stepSize:1 }}}}
+      });
+    }
+
+    // 啟動
+    (async function(){
+      await loadContinue();
+      await loadRecent();
+      loadFavorites();
+      await loadCurve();
+    })();
+  </script>
+</body>
+</html>
+
+
