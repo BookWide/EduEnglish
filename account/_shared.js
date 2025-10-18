@@ -3,9 +3,9 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 // 讀你全站已定義的常數；若沒有，就填 ENV
 const SUPABASE_URL =
-  window.SUPABASE_URL || 'https://qtgwedankftrqjmzuset.supabase.co'
+  window.SUPABASE_URL || 'https://jeajrwpmrgczimmrflxo.supabase.co'
 const SUPABASE_ANON_KEY =
-  window.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF0Z3dlZGFua2Z0cnFqbXp1c2V0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTg4NDYxMDMsImV4cCI6MjA3NDQyMjEwM30.jyETpt09pgm66aCZheMgsjtbKlVmYo-lt-hrrt6BF8g'
+  window.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do'
 
 export const supa = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 
@@ -28,4 +28,5 @@ export const fmtDate = (d) => {
   const t = new Date(d)
   return isNaN(t) ? '-' : t.toLocaleDateString()
 }
+
 
