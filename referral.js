@@ -1,90 +1,27 @@
-<!DOCTYPE html>
-<html lang="zh-Hant">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>推薦分潤</title>
-<style>
-  body {
-    font-family: "Noto Sans TC", sans-serif;
-    background: #f0f2f5;
-    margin: 0;
-    padding: 40px 0;
-    color: #222;
-  }
-  main {
-    max-width: 800px;
-    margin: auto;
-    background: #fff;
-    border-radius: 12px;
-    padding: 40px 32px;
-    box-shadow: 0 3px 10px rgba(0,0,0,0.05);
-  }
-  h1 {
-    font-size: 28px;
-    margin-bottom: 16px;
-    text-align: center;
-  }
-  p.desc {
-    text-align: center;
-    color: #555;
-    margin-bottom: 24px;
-  }
-  .referral-link-box, #referralStats {
-    background: #f8f9fb;
-    border-radius: 12px;
-    padding: 20px 24px;
-    margin-top: 16px;
-  }
-  input[type=text] {
-    width: calc(100% - 100px);
-    padding: 10px;
-    border: 1px solid #ccc;
-    border-radius: 6px;
-  }
-  button {
-    padding: 10px 16px;
-    border: none;
-    background: #666;
-    color: #fff;
-    border-radius: 6px;
-    cursor: pointer;
-  }
-  #referralStats ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-  #referralStats li {
-    margin: 6px 0;
-  }
-</style>
-<script type="module" src="./referral.js"></script>
-</head>
-<body>
-<main>
-  <a href="../index.html" style="text-decoration:none;">← 回首頁</a>
-  <h1>推薦分潤</h1>
-  <p class="desc">將專屬連結分享給朋友，每當他們註冊並訂閱課程，你都能獲得分潤獎勵 🎉</p>
+import { supabase } from './supa.js'
 
-  <div class="referral-link-box">
-    <h3>我的推薦連結</h3>
-    <p><input type="text" id="referralLink" value="載入失敗，請重新整理"> <button>複製</button></p>
-    <p>推薦碼：<span id="referralCode">—</span></p>
-  </div>
+// 建立或更新推薦紀錄
+export async function recordReferral(user_id, amount) {
+  const { data, error } = await supabase
+    .from('referral_stats')
+    .upsert({ user_id, total_amount: amount }, { onConflict: 'user_id' })
+  
+  if (error) {
+    console.error('Insert/Update failed:', error.message)
+  } else {
+    console.log('Referral record saved:', data)
+  }
+}
 
-  <!-- 🧾 推薦成效總覽（上移後） -->
-  <section id="referralStats">
-    <h3>推薦成效總覽</h3>
-    <ul>
-      <li>✅ 成功推薦：-- 位</li>
-      <li>💰 累積金額：-- 元</li>
-      <li>⌛ 有效期限：--</li>
-    </ul>
-  </section>
-</main>
-</body>
-</html>
-
-
-
+// 讀取目前登入者的推薦紀錄
+export async function getMyReferralStats() {
+  const { data, error } = await supabase
+    .from('referral_stats')
+    .select('*')
+  
+  if (error) {
+    console.error('Read failed:', error.message)
+  } else {
+    console.log('My referral stats:', data)
+  }
+}
