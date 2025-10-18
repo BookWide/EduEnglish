@@ -1,59 +1,33 @@
-// checkout-referral.js
-import { supabase } from './supa.js'; // checkout.html 與 supa.js 同層
+<!-- 如果你是用 <script type="module" src="checkout-referral.js"></script> 引入，覆蓋這個檔案即可 -->
+<script type="module">
+// === checkout-referral.js · fixed ===
+// 僅負責：讀取網址上的 ?ref= 並在「有帶」時儲存；沒帶就清除，避免殘留
 
-const STORAGE_KEY = 'referrer_code';
+const STORAGE_KEY = 'ref_code';
 
-(function bootstrapReferrer() {
-  const params = new URLSearchParams(location.search);
-  const ref = params.get('ref');
+/** 讀URL參數 */
+const p = new URLSearchParams(location.search);
+const ref = (p.get('ref') || '').trim();
+
+/** 有帶推薦碼就更新，沒帶就清空 */
+try {
   if (ref) {
     localStorage.setItem(STORAGE_KEY, ref);
     console.debug('[referral] stored from URL:', ref);
+  } else {
+    localStorage.removeItem(STORAGE_KEY);
+    console.debug('[referral] cleared (no ref in URL)');
   }
-})();
-
-export function getReferrer() {
-  return localStorage.getItem(STORAGE_KEY) || null;
+} catch (e) {
+  console.warn('[referral] localStorage error:', e);
 }
 
-export function setReferrer(code) {
-  if (code) localStorage.setItem(STORAGE_KEY, code);
-  else localStorage.removeItem(STORAGE_KEY);
+/** 導出工具（如果其他頁面要用可以匯入） */
+export function getReferralCode() {
+  try { return localStorage.getItem(STORAGE_KEY) || ''; } catch { return ''; }
 }
-
-export async function recordSubscription({ plan, amount, meta = {} } = {}) {
-  try {
-    const { data: { user }, error: uerr } = await supabase.auth.getUser();
-    if (uerr) throw uerr;
-    if (!user) {
-      alert('尚未登入，請先登入再結帳');
-      return { ok: false, error: 'NO_USER' };
-    }
-
-    const payload = {
-      user_id: user.id,
-      plan: plan || 'story-monthly',
-      amount: amount ?? 0,
-      referrer_code: getReferrer(),
-      paid_at: new Date().toISOString(),
-      meta
-    };
-
-    const { error } = await supabase.from('subscriptions').insert(payload);
-    if (error) throw error;
-
-    console.log('[subscription] created:', payload);
-    return { ok: true };
-  } catch (err) {
-    console.error('[subscription] failed:', err);
-    alert('建立訂閱紀錄失敗，請聯絡客服');
-    return { ok: false, error: err?.message || String(err) };
-  }
+export function clearReferralCode() {
+  try { localStorage.removeItem(STORAGE_KEY); } catch {}
 }
+</script>
 
-const autoBtn = document.querySelector('#btnConfirm, .confirm-pay');
-if (autoBtn) {
-  autoBtn.addEventListener('click', async () => {
-    await recordSubscription({ plan: 'story-monthly', amount: 200 });
-  });
-}
