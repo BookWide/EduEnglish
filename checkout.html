@@ -11,109 +11,141 @@
     :root{--bg:#0b1324;--panel:#0f172a;--border:#1f2a44;--ink:#e6efff;--muted:#9fb0c9;--accent:#22c55e}
     *{box-sizing:border-box}
     html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui,"Noto Sans TC"}
+    a{color:#9ecbff;text-decoration:none}
     .wrap{max-width:980px;margin:0 auto;padding:20px}
+    .back{display:inline-flex;align-items:center;gap:8px;color:#b7c7e6;margin-bottom:10px}
     .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px}
     h1{font-size:20px;margin:0 0 14px}
     .row{display:flex;justify-content:space-between;align-items:center;border-top:1px solid #14233d;padding:10px 0}
     .row:first-of-type{border-top:0}
     .muted{color:var(--muted)}
-    .btn{display:inline-block;background:var(--accent);color:#001b0a;border:0;border-radius:12px;padding:12px 18px;font-weight:800;cursor:pointer}
+    .btn{display:block;width:100%;text-align:center;background:var(--accent);color:#001b0a;border:0;border-radius:12px;padding:14px 18px;font-weight:800;cursor:pointer}
     .btn[disabled]{opacity:.6;cursor:not-allowed}
     .note{margin-top:10px;color:#9fb0c9}
     .hidden{display:none !important}
     .price{font-variant-numeric: tabular-nums}
+    .chips{display:flex;gap:8px;flex-wrap:wrap}
+    .chip{background:#10243e;border:1px solid #274a78;border-radius:999px;padding:4px 10px;font-size:12px;color:#dbe9ff}
   </style>
 </head>
 <body>
   <div class="wrap">
+    <a class="back" href="pricing.html">← 返回方案與定價</a>
+
     <h1>訂單摘要</h1>
     <div id="summary" class="card">
-      <div class="row"><div>方案：<span id="planTags" class="muted">—</span></div><div>週期：<span id="termTag" class="muted">—</span></div></div>
-      <div id="lines"></div>
+      <div class="row">
+        <div>方案：
+          <span id="planTags" class="chips">
+            <span class="chip muted">—</span>
+          </span>
+        </div>
+        <div>週期：<span id="termTag" class="muted">—</span></div>
+      </div>
+
+      <!-- 商品明細會插在這裡 -->
+      <div id="lineItems"></div>
+
       <div class="row"><div>小計</div><div id="subtotal" class="price">$0</div></div>
-      <div class="row" id="discountRow" hidden><div>折扣</div><div id="discount" class="price">-$0</div></div>
+      <div class="row hidden" id="discountRow"><div>折扣</div><div id="discount" class="price">-$0</div></div>
       <div class="row"><div>稅額（0%）</div><div class="price">$0</div></div>
-      <div class="row" style="font-weight:900;font-size:18px"><div>應付金額</div><div id="total" class="price">$0</div></div>
+      <div class="row" style="font-weight:900;font-size:18px">
+        <div>應付金額</div><div id="total" class="price">$0</div>
+      </div>
+
       <div id="refNote" class="note hidden"></div>
-      <div style="margin-top:14px"><button id="btnPay" class="btn" type="button">確認付款</button></div>
-      <div class="note">※ 按下確認付款後才會串接綠界。</div>
+
+      <div style="margin-top:16px">
+        <button id="btnPay" class="btn" type="button">確認付款</button>
+      </div>
+      <div class="note">按下確認付款後，才會導向綠界進行支付。</div>
     </div>
   </div>
 
-  <!-- 主邏輯（defer + cache bust） -->
+  <!-- 結帳邏輯（defer + 確保不讀舊 cache） -->
   <script defer>
   (function(){
     const $ = (s, r=document)=>r.querySelector(s);
+    const el = {
+      planTags: $('#planTags'),
+      termTag : $('#termTag'),
+      lineBox : $('#lineItems'),
+      subtotal: $('#subtotal'),
+      discount: $('#discount'),
+      discountRow: $('#discountRow'),
+      total   : $('#total'),
+      refNote : $('#refNote'),
+      btnPay  : $('#btnPay')
+    };
 
     // 讀參數
-    const qs   = new URLSearchParams(location.search);
-    const itemsParam = (qs.get('items')||'').trim();     // e.g. "story,music"
-    const period     = (qs.get('period')||'month').trim(); // month | half | year
-    const ref        = (qs.get('ref')||'').trim();       // 只有 URL 帶才算
+    const qs     = new URLSearchParams(location.search);
+    const items  = (qs.get('items')||'').split(',').map(s=>s.trim()).filter(Boolean); // 允許多主題
+    const period = (qs.get('period')||'month').trim(); // month | half | year
+    const ref    = (qs.get('ref')||'').trim();         // 只有 URL 帶才算
 
-    // 版面填入「方案」與「週期」
+    // 顯示方案與週期
     const termMap = { month:'月', half:'半年', year:'年' };
-    const itemNames = (itemsParam? itemsParam.split(','):[]).map(x=>x.trim()).filter(Boolean);
-    $('#planTags').textContent = itemNames.length ? itemNames.join('、') : '—';
-    $('#termTag').textContent  = termMap[period] || '月';
+    el.termTag.textContent = termMap[period] || '月';
+    el.planTags.innerHTML = items.length
+      ? items.map(x=>`<span class="chip">${x}</span>`).join('')
+      : `<span class="chip">單一主題</span>`;
 
-    // 安全處理推薦碼：有帶就存，沒帶就清
-    try {
-      if (ref) localStorage.setItem('ref_code', ref);
-      else localStorage.removeItem('ref_code');
-    } catch(_) {}
-
-    // 價格（每主題 200 / 月）
-    const PRICE = 200;
-    const qty   = Math.max(1, itemNames.length || 1); // 至少 1 個主題
-    const subtotal = PRICE * qty;
-    const discount = ref ? Math.round(subtotal * 0.1) * -1 : 0; // 9 折
+    // === 計價邏輯 ===
+    const PRICE_PER_TOPIC = 200;   // 每主題每月 200
+    const qty      = Math.max(1, items.length || 1);
+    const subtotal = PRICE_PER_TOPIC * qty;
+    const discount = ref ? Math.round(subtotal * 0.1) * -1 : 0; // 有 ref → 9 折
     const total    = subtotal + discount;
 
-    // 顯示每個主題一行（純顯示用）
-    const lines = $('#lines');
-    lines.innerHTML = '';
-    itemNames.forEach(name=>{
-      const row = document.createElement('div');
-      row.className='row';
-      row.innerHTML = `<div>${name}</div><div class="price">$${PRICE}</div>`;
-      lines.appendChild(row);
+    // 列出每個主題一行
+    el.lineBox.innerHTML = '';
+    const list = (items.length ? items : ['單一主題']);
+    list.forEach(name=>{
+      const div = document.createElement('div');
+      div.className = 'row';
+      div.innerHTML = `<div>${name}</div><div class="price">$${PRICE_PER_TOPIC}</div>`;
+      el.lineBox.appendChild(div);
     });
-
-    // 沒指定 items（例如只有單一方案）也要顯示一行
-    if (!itemNames.length){
-      const row = document.createElement('div');
-      row.className='row';
-      row.innerHTML = `<div>單一主題</div><div class="price">$${PRICE}</div>`;
-      lines.appendChild(row);
-    }
 
     // 小計 / 折扣 / 總計
-    $('#subtotal').textContent = `$${subtotal}`;
-    if (discount){
-      $('#discount').textContent = `-$${Math.abs(discount)}`;
-      $('#discountRow').hidden = false;
-      $('#refNote').classList.remove('hidden');
-      $('#refNote').textContent = `推薦碼：${ref}（已套用 9 折）`;
-    }else{
-      $('#discountRow').hidden = true;
-      $('#refNote').classList.add('hidden');
-      $('#refNote').textContent = '';
+    el.subtotal.textContent = `$${subtotal}`;
+    if (discount) {
+      el.discount.textContent = `-$${Math.abs(discount)}`;
+      el.discountRow.classList.remove('hidden');
+      el.refNote.classList.remove('hidden');
+      el.refNote.textContent = `推薦碼：${ref}（已套用 9 折）`;
+    } else {
+      el.discountRow.classList.add('hidden');
+      el.refNote.classList.add('hidden');
+      el.refNote.textContent = '';
     }
-    $('#total').textContent = `$${total}`;
+    el.total.textContent = `$${total}`;
 
-    // 「確認付款」之後再串綠界
-    $('#btnPay').addEventListener('click', (e)=>{
+    // 點「確認付款」才導向綠界（在這裡串接你原本的流程）
+    el.btnPay.addEventListener('click', (e)=>{
       e.preventDefault();
-      // TODO: 在這裡接你原先的 goECPay / 產訂單程式
-      // window.goECPay?.({ items: itemNames, period, total, ref });
 
-      alert(`（示範）將導向綠界。\n主題：${itemNames.join(',')||'1個'}\n週期：${termMap[period]||'月'}\n金額：$${total}\n推薦碼：${ref||'（無）'}`);
+      // 這裡放你原本的串綠界程式（建立訂單 → 取得表單 → submit）
+      // 範例：window.goECPay?.({ items: list, period, total, ref });
+      // 為了示範，先做提醒：
+      alert(
+        `（示範）即將導向綠界：\n` +
+        `主題：${list.join(', ')}\n` +
+        `週期：${termMap[period]||'月'}\n` +
+        `金額：$${total}\n` +
+        `推薦碼：${ref || '（無）'}`
+      );
     });
+
+    // 不帶 ref 就不要用任何 localStorage 殘留
+    try{ if(!ref){ localStorage.removeItem('ref_code'); } }catch(_){}
   })();
   </script>
 </body>
 </html>
+
+
 
 
 
