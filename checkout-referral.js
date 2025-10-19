@@ -1,59 +1,96 @@
 // checkout-referral.js
+// 需求：supa.js 要 export { supabase }
 import { supabase } from './supa.js';
 
+const $ = (sel) => document.querySelector(sel);
+const formatMoney = (n) => `$${(Math.round(n)).toLocaleString()}`;
+
 document.addEventListener('DOMContentLoaded', async () => {
-  const urlParams = new URLSearchParams(window.location.search);
-  const items = (urlParams.get('items') || '').split(',').filter(Boolean);
-  const period = urlParams.get('period') || 'month';
-  const refCode = urlParams.get('ref'); // 取得推薦碼
+  const url = new URL(window.location.href);
+  const params = url.searchParams;
 
-  const planList = document.querySelector('#plan-list');
-  const subtotalEl = document.querySelector('#subtotal');
-  const totalEl = document.querySelector('#total');
-  const referralEl = document.querySelector('#referral');
-  
-  const priceMap = { month: 200, half: 960, year: 1680 };
-  const unitPrice = priceMap[period] / (period === 'month' ? 1 : (period === 'half' ? 6 : 12));
+  // 1) 讀取 query：items、period、ref
+  const items = (params.get('items') || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
 
-  // 計算價格
-  const subtotal = items.length * unitPrice;
+  const period = (params.get('period') || 'month'); // month / half / year
+  const refCode = params.get('ref') || '';          // 推薦碼（可空）
+
+  // 2) UI：標示週期
+  $('#period-pill').textContent = `週期：${period === 'month' ? '月' : period === 'half' ? '半年' : '年'}`;
+
+  // 3) 沒選方案就保護
+  if (!items.length) {
+    $('#plan-list').innerHTML = `<span class="chip">尚未選擇方案</span>`;
+    $('#err').style.display = 'block';
+    $('#err').textContent = '未選擇任何主題，請返回上一頁。';
+    $('#checkoutBtn').disabled = true;
+    return;
+  }
+
+  // 4) 列出方案 chip
+  $('#plan-list').innerHTML = items.map(i => `<span class="chip">${i}</span>`).join('');
+
+  // 5) 計價
+  // 單價邏輯：月 200 / 半年 960 => 160 * 6 / 年 1680 => 140 * 12
+  const unitMap = { month: 200, half: 160, year: 140 }; // 每月單價
+  const unitPrice = unitMap[period] ?? 200;
+  const months = period === 'month' ? 1 : period === 'half' ? 6 : 12;
+  const subtotal = items.length * unitPrice * months;
+
   let discount = 0;
   let total = subtotal;
 
-  // 有推薦碼就折扣
   if (refCode) {
-    discount = subtotal * 0.1;  // 折扣 10%
+    // 範例：推薦碼 9 折
+    discount = Math.round(subtotal * 0.10);
     total = subtotal - discount;
-    referralEl.innerHTML = `<p>推薦碼：${refCode}</p><p>已套用 9 折優惠</p>`;
+
+    $('#referral').innerHTML = `
+      <div class="ok">推薦碼：<strong>${refCode}</strong> 已套用 9 折優惠</div>
+    `;
+    $('#discount-row').style.display = 'flex';
+    $('#discount').textContent = `-${formatMoney(discount)}`;
   } else {
-    referralEl.innerHTML = `<p>無推薦碼</p>`;
+    $('#referral').innerHTML = `<div class="none">無推薦碼</div>`;
+    $('#discount-row').style.display = 'none';
   }
 
-  // 更新畫面
-  planList.innerHTML = items.map(i => `<div>${i}</div>`).join('');
-  subtotalEl.textContent = `$${subtotal}`;
-  totalEl.textContent = `$${total}`;
+  $('#subtotal').textContent = formatMoney(subtotal);
+  $('#total').textContent = formatMoney(total);
 
-  // 綁定按鈕
-  document.querySelector('#checkoutBtn').addEventListener('click', async () => {
-    const user = (await supabase.auth.getUser()).data.user;
-    const body = {
-      user_id: user?.id,
-      items,
-      period,
-      total,
-      referral_code: refCode || null
-    };
+  // 6) 綁定確認付款 → 呼叫 Edge Function 建立綠界訂單
+  $('#checkoutBtn').addEventListener('click', async () => {
+    try {
+      $('#checkoutBtn').disabled = true;
 
-    const { data, error } = await supabase.functions.invoke('create-ecpay-order', {
-      body
-    });
+      // 取得登入使用者（未登入也允許建立訂單，但 user_id 會是 null）
+      const { data: userData } = await supabase.auth.getUser();
+      const user_id = userData?.user?.id ?? null;
 
-    if (error) {
-      alert('建立訂單失敗：' + error.message);
-      return;
+      const payload = {
+        user_id,
+        items,
+        period,     // "month" / "half" / "year"
+        total,      // 實際金額（已含折扣）
+        referral_code: refCode || null
+      };
+
+      const { data, error } = await supabase.functions.invoke('create-ecpay-order', { body: payload });
+
+      if (error) throw error;
+      if (!data?.ecpay_url) throw new Error('沒有取得金流導向網址');
+
+      // 導向綠界
+      window.location.href = data.ecpay_url;
+    } catch (err) {
+      console.error(err);
+      $('#err').style.display = 'block';
+      $('#err').textContent = `建立訂單失敗：${err.message || err}`;
+      $('#checkoutBtn').disabled = false;
     }
-    window.location.href = data.ecpay_url;
   });
 });
 
