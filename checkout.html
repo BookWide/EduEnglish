@@ -1,92 +1,120 @@
-<script>
-// === checkout.html · pricing calc fixed ===
-// 規則：只有網址真的帶 ?ref=XXXX 才做 9 折，且顯示「推薦碼」提示列；沒帶就不折扣也不顯示。
-// 另外亦會同步把 localStorage 的舊推薦碼清掉，避免殘留影響計價。
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>BookWide｜結帳</title>
+  <style>
+    :root{--bg:#0b1324;--panel:#0f172a;--border:#1f2a44;--ink:#e6efff;--muted:#9fb0c9;--accent:#22c55e}
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui,"Noto Sans TC"}
+    .wrap{max-width:980px;margin:0 auto;padding:20px}
+    .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px}
+    h1{font-size:20px;margin:0 0 14px}
+    .row{display:flex;justify-content:space-between;align-items:center;border-top:1px solid #14233d;padding:10px 0}
+    .row:first-of-type{border-top:0}
+    .muted{color:var(--muted)}
+    .btn{display:inline-block;background:var(--accent);color:#001b0a;border:0;border-radius:12px;padding:12px 18px;font-weight:800;cursor:pointer}
+    .btn[disabled]{opacity:.6;cursor:not-allowed}
+    .note{margin-top:10px;color:#9fb0c9}
+    .hidden{display:none !important}
+    .price{font-variant-numeric: tabular-nums}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>訂單摘要</h1>
+    <div id="summary" class="card">
+      <div class="row"><div>方案：<span id="planTags" class="muted">—</span></div><div>週期：<span id="termTag" class="muted">—</span></div></div>
+      <div id="lines"></div>
+      <div class="row"><div>小計</div><div id="subtotal" class="price">$0</div></div>
+      <div class="row" id="discountRow" hidden><div>折扣</div><div id="discount" class="price">-$0</div></div>
+      <div class="row"><div>稅額（0%）</div><div class="price">$0</div></div>
+      <div class="row" style="font-weight:900;font-size:18px"><div>應付金額</div><div id="total" class="price">$0</div></div>
+      <div id="refNote" class="note hidden"></div>
+      <div style="margin-top:14px"><button id="btnPay" class="btn" type="button">確認付款</button></div>
+      <div class="note">※ 按下確認付款後才會串接綠界。</div>
+    </div>
+  </div>
 
-(() => {
-  const $ = (s, r=document) => r.querySelector(s);
-  const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
-  const p = new URLSearchParams(location.search);
+  <!-- 主邏輯（defer + cache bust） -->
+  <script defer>
+  (function(){
+    const $ = (s, r=document)=>r.querySelector(s);
 
-  // 取得使用者選擇
-  const plan  = (p.get('plan')   || 'story').trim();   // 方案名稱（只用於顯示）
-  const term  = (p.get('term')   || 'month').trim();   // month | half | year
-  const ref   = (p.get('ref')    || '').trim() || null; // 只有 URL 帶到才算數
+    // 讀參數
+    const qs   = new URLSearchParams(location.search);
+    const itemsParam = (qs.get('items')||'').trim();     // e.g. "story,music"
+    const period     = (qs.get('period')||'month').trim(); // month | half | year
+    const ref        = (qs.get('ref')||'').trim();       // 只有 URL 帶才算
 
-  // 清理/儲存 ref，避免殘留
-  try {
-    if (ref) localStorage.setItem('ref_code', ref);
-    else     localStorage.removeItem('ref_code');
-  } catch (_) {}
+    // 版面填入「方案」與「週期」
+    const termMap = { month:'月', half:'半年', year:'年' };
+    const itemNames = (itemsParam? itemsParam.split(','):[]).map(x=>x.trim()).filter(Boolean);
+    $('#planTags').textContent = itemNames.length ? itemNames.join('、') : '—';
+    $('#termTag').textContent  = termMap[period] || '月';
 
-  // 價格資料（保持你原本 200 / 主題 的邏輯）
-  const PRICE = 200; // $200/主題/「月」的單價
-  const TERM_MULTIPLIER = { month: 1, half: 6, year: 12 };
+    // 安全處理推薦碼：有帶就存，沒帶就清
+    try {
+      if (ref) localStorage.setItem('ref_code', ref);
+      else localStorage.removeItem('ref_code');
+    } catch(_) {}
 
-  // 你的頁面目前是「單一主題」結帳（依你截圖），若未來改為多主題，可改由 URL 或 DOM 統計數量
-  const quantity = 1; // 單一主題
-  const months   = TERM_MULTIPLIER[term] || 1;
+    // 價格（每主題 200 / 月）
+    const PRICE = 200;
+    const qty   = Math.max(1, itemNames.length || 1); // 至少 1 個主題
+    const subtotal = PRICE * qty;
+    const discount = ref ? Math.round(subtotal * 0.1) * -1 : 0; // 9 折
+    const total    = subtotal + discount;
 
-  // 原價（不含折扣）
-  const subtotal = PRICE * quantity;          // 顯示區塊內的「本期小計（單位：月）」截圖呈現單一主題
-  // 折扣：只有有 ref 才給 9 折（-10%）
-  const discount = ref ? Math.round(subtotal * 0.1) * -1 : 0;
-
-  // 應付金額（你截圖裡是顯示月金額；若你想乘以月份，改為 subtotal*months + discount*months）
-  const total = subtotal + discount;
-
-  // ============ 把數字寫回畫面（以下選擇器請對應你頁面現有 DOM） ============
-  // 小計
-  const elSub = $('[data-price="subtotal"]') || $('#subtotal');
-  if (elSub) elSub.textContent = `$${subtotal}`;
-
-  // 折扣列（沒折扣就顯示 $0 或者直接把整列隱藏）
-  const elDiscount = $('[data-price="discount"]') || $('#discount');
-  if (elDiscount) {
-    if (discount) {
-      elDiscount.textContent = `-$${Math.abs(discount)}`;
-      elDiscount.closest('.row')?.classList.remove('hidden');
-    } else {
-      elDiscount.textContent = '$0';
-      // 若你希望「沒折扣就不顯示此列」，改成：
-      // elDiscount.closest('.row')?.classList.add('hidden');
-    }
-  }
-
-  // 應付金額
-  const elTotal = $('[data-price="total"]') || $('#total');
-  if (elTotal) elTotal.textContent = `$${total}`;
-
-  // 額外「推薦碼」提示行：只有 ref 才插入
-  if (ref) {
-    const note = document.createElement('div');
-    note.style.marginTop = '16px';
-    note.style.fontSize = '15px';
-    note.style.color = '#9fb0c9';
-    note.textContent = `推薦碼：${ref}（已套用 9 折）`;
-    // 插在你的頁尾小字（.footnote）前；若你的結構不同，換一個定位點
-    const anchor = document.querySelector('.footnote') || elTotal?.closest('.card') || document.body;
-    anchor?.parentNode?.insertBefore(note, anchor);
-  }
-
-  // 「確認付款」按鈕邏輯保留：按下後才導去綠界（如果你用別的 JS 控制，這段可不動）
-  const btnPay = $('#btnPay') || $('[data-action="pay"]');
-  if (btnPay) {
-    btnPay.addEventListener('click', (e) => {
-      e.preventDefault();
-      // 這裡才去呼叫你既有的建立訂單 → 串綠界的流程
-      // 例如：window.goECPay({ plan, term, total, ref });
-      // 此處只示範：導向後端/或你原本 JS 函式
-      if (typeof window.goECPay === 'function') {
-        window.goECPay({ plan, term, total, ref });
-      } else {
-        console.log('simulate pay:', { plan, term, total, ref });
-        alert('（示範）這裡才串綠界；測試站會看到 CheckMacValue 錯誤屬正常。');
-      }
+    // 顯示每個主題一行（純顯示用）
+    const lines = $('#lines');
+    lines.innerHTML = '';
+    itemNames.forEach(name=>{
+      const row = document.createElement('div');
+      row.className='row';
+      row.innerHTML = `<div>${name}</div><div class="price">$${PRICE}</div>`;
+      lines.appendChild(row);
     });
-  }
-})();
-</script>
+
+    // 沒指定 items（例如只有單一方案）也要顯示一行
+    if (!itemNames.length){
+      const row = document.createElement('div');
+      row.className='row';
+      row.innerHTML = `<div>單一主題</div><div class="price">$${PRICE}</div>`;
+      lines.appendChild(row);
+    }
+
+    // 小計 / 折扣 / 總計
+    $('#subtotal').textContent = `$${subtotal}`;
+    if (discount){
+      $('#discount').textContent = `-$${Math.abs(discount)}`;
+      $('#discountRow').hidden = false;
+      $('#refNote').classList.remove('hidden');
+      $('#refNote').textContent = `推薦碼：${ref}（已套用 9 折）`;
+    }else{
+      $('#discountRow').hidden = true;
+      $('#refNote').classList.add('hidden');
+      $('#refNote').textContent = '';
+    }
+    $('#total').textContent = `$${total}`;
+
+    // 「確認付款」之後再串綠界
+    $('#btnPay').addEventListener('click', (e)=>{
+      e.preventDefault();
+      // TODO: 在這裡接你原先的 goECPay / 產訂單程式
+      // window.goECPay?.({ items: itemNames, period, total, ref });
+
+      alert(`（示範）將導向綠界。\n主題：${itemNames.join(',')||'1個'}\n週期：${termMap[period]||'月'}\n金額：$${total}\n推薦碼：${ref||'（無）'}`);
+    });
+  })();
+  </script>
+</body>
+</html>
+
 
 
 
