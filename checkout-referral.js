@@ -1,97 +1,123 @@
 // checkout-referral.js
-// 需求：supa.js 要 export { supabase }
-import { supabase } from './supa.js';
+// 功能：解析 URL → 渲染各主題金額 → 顯示推薦碼(若存在) → 計算折扣、總額
+// 不會直接 submit 到綠界（只負責畫面＆金額）
 
-const $ = (sel) => document.querySelector(sel);
-const formatMoney = (n) => `$${(Math.round(n)).toLocaleString()}`;
+// ---- 基本定價（每主題） ----
+const PRICE_MAP = {
+  month: 200,        // NT$200 / 月 / 主題
+  half:  960,        // NT$960 / 半年 / 主題
+  year:  1680        // NT$1680 / 年 / 主題
+};
+const PERIOD_LABEL = { month: "月", half: "半年", year: "年" };
 
-document.addEventListener('DOMContentLoaded', async () => {
-  const url = new URL(window.location.href);
-  const params = url.searchParams;
+// ---- DOM ----
+const planTagsEl        = document.getElementById("planTags");
+const periodTagEl       = document.getElementById("periodTag");
+const itemsRowsEl       = document.getElementById("itemsRows");
+const refBadgeEl        = document.getElementById("refBadge");
+const discountRowEl     = document.getElementById("discountRow");
+const discountAmountEl  = document.getElementById("discountAmount");
+const subtotalAmountEl  = document.getElementById("subtotalAmount");
+const taxAmountEl       = document.getElementById("taxAmount");
+const totalAmountEl     = document.getElementById("totalAmount");
+const payBtn            = document.getElementById("payBtn");
 
-  // 1) 讀取 query：items、period、ref
-  const items = (params.get('items') || '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean);
+// ---- 解析 URL ----
+const params = new URLSearchParams(location.search);
+const itemsParam  = params.get("items") || "";          // e.g. "story,music"
+const periodParam = (params.get("period") || "month").toLowerCase();
 
-  const period = (params.get('period') || 'month'); // month / half / year
-  const refCode = params.get('ref') || '';          // 推薦碼（可空）
+const chosenItems = itemsParam
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
 
-  // 2) UI：標示週期
-  $('#period-pill').textContent = `週期：${period === 'month' ? '月' : period === 'half' ? '半年' : '年'}`;
+const perSubjectPrice = PRICE_MAP[periodParam] ?? PRICE_MAP.month;
 
-  // 3) 沒選方案就保護
-  if (!items.length) {
-    $('#plan-list').innerHTML = `<span class="chip">尚未選擇方案</span>`;
-    $('#err').style.display = 'block';
-    $('#err').textContent = '未選擇任何主題，請返回上一頁。';
-    $('#checkoutBtn').disabled = true;
-    return;
+// ---- 畫面：週期 & 方案 chips ----
+periodTagEl.textContent = PERIOD_LABEL[periodParam] || "月";
+planTagsEl.innerHTML = "";
+chosenItems.forEach(name => {
+  const tag = document.createElement("span");
+  tag.className = "chip";
+  tag.textContent = name;
+  planTagsEl.appendChild(tag);
+});
+
+// ---- 建立單一 row（主題 + 金額） ----
+function row(text, money) {
+  const wrap = document.createElement("div");
+  wrap.className = "row";
+  const left = document.createElement("div");
+  left.textContent = text;
+  const right = document.createElement("div");
+  right.className = "money";
+  right.textContent = formatMoney(money);
+  wrap.append(left, right);
+  return wrap;
+}
+
+function formatMoney(n) {
+  return `$${Number(n).toLocaleString()}`;
+}
+
+// ---- 讀推薦碼（優先順序：URL ?ref=xxx → localStorage） ----
+function getReferralCode() {
+  const urlRef = params.get("ref");
+  if (urlRef) return urlRef;
+
+  // 與 referral.html 對應的儲存 key（你前面頁面用的，可改成一致的 key）
+  const lsKeys = ["bw_referral_code", "referral_code", "bw_ref_code"];
+  for (const k of lsKeys) {
+    const v = localStorage.getItem(k);
+    if (v) return v;
   }
+  return "";
+}
 
-  // 4) 列出方案 chip
-  $('#plan-list').innerHTML = items.map(i => `<span class="chip">${i}</span>`).join('');
+const referralCode = getReferralCode();
+if (referralCode) {
+  refBadgeEl.textContent = referralCode;
+  refBadgeEl.classList.remove("muted");
+} else {
+  refBadgeEl.textContent = "無推薦碼";
+  refBadgeEl.classList.add("muted");
+}
 
-  // 5) 計價
-  // 單價邏輯：月 200 / 半年 960 => 160 * 6 / 年 1680 => 140 * 12
-  const unitMap = { month: 200, half: 160, year: 140 }; // 每月單價
-  const unitPrice = unitMap[period] ?? 200;
-  const months = period === 'month' ? 1 : period === 'half' ? 6 : 12;
-  const subtotal = items.length * unitPrice * months;
+// ---- 渲染主題明細 ----
+itemsRowsEl.innerHTML = "";
+let subtotal = 0;
+for (const item of chosenItems) {
+  // 每主題金額
+  itemsRowsEl.appendChild(row(item, perSubjectPrice));
+  subtotal += perSubjectPrice;
+}
 
-  let discount = 0;
-  let total = subtotal;
+// ---- 折扣（如果有推薦碼：9 折） ----
+let discount = 0;
+if (referralCode) {
+  discount = Math.round(subtotal * 0.1); // 顯示「已套用 9 折」→ 折抵 10%
+  discountAmountEl.textContent = `-${formatMoney(discount)}`;
+  discountRowEl.classList.remove("hide");
+} else {
+  discountRowEl.classList.add("hide");
+}
 
-  if (refCode) {
-    // 範例：推薦碼 9 折
-    discount = Math.round(subtotal * 0.10);
-    total = subtotal - discount;
+// ---- 稅額＆總額 ----
+const tax = 0;
+const total = subtotal - discount + tax;
 
-    $('#referral').innerHTML = `
-      <div class="ok">推薦碼：<strong>${refCode}</strong> 已套用 9 折優惠</div>
-    `;
-    $('#discount-row').style.display = 'flex';
-    $('#discount').textContent = `-${formatMoney(discount)}`;
-  } else {
-    $('#referral').innerHTML = `<div class="none">無推薦碼</div>`;
-    $('#discount-row').style.display = 'none';
-  }
+subtotalAmountEl.textContent = formatMoney(subtotal);
+taxAmountEl.textContent      = formatMoney(tax);
+totalAmountEl.textContent    = formatMoney(total);
 
-  $('#subtotal').textContent = formatMoney(subtotal);
-  $('#total').textContent = formatMoney(total);
-
-  // 6) 綁定確認付款 → 呼叫 Edge Function 建立綠界訂單
-  $('#checkoutBtn').addEventListener('click', async () => {
-    try {
-      $('#checkoutBtn').disabled = true;
-
-      // 取得登入使用者（未登入也允許建立訂單，但 user_id 會是 null）
-      const { data: userData } = await supabase.auth.getUser();
-      const user_id = userData?.user?.id ?? null;
-
-      const payload = {
-        user_id,
-        items,
-        period,     // "month" / "half" / "year"
-        total,      // 實際金額（已含折扣）
-        referral_code: refCode || null
-      };
-
-      const { data, error } = await supabase.functions.invoke('create-ecpay-order', { body: payload });
-
-      if (error) throw error;
-      if (!data?.ecpay_url) throw new Error('沒有取得金流導向網址');
-
-      // 導向綠界
-      window.location.href = data.ecpay_url;
-    } catch (err) {
-      console.error(err);
-      $('#err').style.display = 'block';
-      $('#err').textContent = `建立訂單失敗：${err.message || err}`;
-      $('#checkoutBtn').disabled = false;
-    }
-  });
+// ---- 付款按鈕（僅示範：導去你的 edge function 建立訂單 → 再轉綠界） ----
+payBtn.addEventListener("click", () => {
+  // 這裡先保留空白：不直接送綠界
+  // 你要串 edge function 時，用 fetch 呼叫自己的 create-order，
+  // 將 { items: chosenItems, period: periodParam, total, referral_code: referralCode } 帶過去，
+  // 再把回傳的支付頁 URL 導轉即可。
+  alert("目前僅顯示結帳金額，未直接送出。");
 });
 
 
