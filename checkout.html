@@ -16,6 +16,7 @@
     .hide{display:none}
     .btn-primary{display:block;width:100%;background:#18d165;color:#041016;
       border-radius:12px;border:0;padding:18px;font-size:18px;font-weight:700;cursor:pointer}
+    .btn-primary[disabled]{opacity:.6;cursor:not-allowed}
     .btn-primary:active{transform:translateY(1px)}
     .note{font-size:12px;opacity:.75;margin-top:8px}
     @media (min-width:920px){ .grid{display:grid;grid-template-columns:1fr;} }
@@ -34,7 +35,7 @@
         <div id="periodTag" class="chip">月</div>
       </div>
 
-      <!-- 方案 tags -->
+      <!-- 方案 chips -->
       <div class="row" style="flex-wrap:wrap;gap:8px">
         <div class="muted">方案：</div>
         <div id="planTags"></div>
@@ -76,14 +77,163 @@
       <div style="margin-top:16px">
         <button id="payBtn" class="btn-primary">確認付款</button>
         <div class="note">按下「確認付款」後，會導向綠界金流頁面完成付款。</div>
+        <div id="errBox" class="note" style="color:#ffb4b4;display:none;margin-top:10px"></div>
       </div>
     </div>
   </div>
 
-  <!-- 算金額 / 顯示推薦碼 / 不會直接送綠界 -->
-  <script type="module" src="./checkout-referral.js"></script>
+  <script>
+    // === 可調參數 ===
+    // 若你的邊緣函式名稱不同，把這個改掉即可
+    const FN_NAME = 'create-ecpay-order'; // e.g. create-ecpay-order
+    // 稅率（目前 0%）
+    const TAX_RATE = 0;
+
+    // --- 定價（每主題） ---
+    const PRICE_MAP = { month: 200, half: 960, year: 1680 };
+    const PERIOD_LABEL = { month: "月", half: "半年", year: "年" };
+
+    // --- DOM ---
+    const planTagsEl       = document.getElementById("planTags");
+    const periodTagEl      = document.getElementById("periodTag");
+    const itemsRowsEl      = document.getElementById("itemsRows");
+    const refBadgeEl       = document.getElementById("refBadge");
+    const discountRowEl    = document.getElementById("discountRow");
+    const discountAmountEl = document.getElementById("discountAmount");
+    const subtotalAmountEl = document.getElementById("subtotalAmount");
+    const taxAmountEl      = document.getElementById("taxAmount");
+    const totalAmountEl    = document.getElementById("totalAmount");
+    const payBtn           = document.getElementById("payBtn");
+    const errBox           = document.getElementById("errBox");
+
+    // --- 解析 URL ---
+    const params = new URLSearchParams(location.search);
+    const itemsParam  = (params.get("items") || "").trim();     // e.g. "story,music"
+    const periodParam = (params.get("period") || "month").toLowerCase();
+
+    const chosenItems = itemsParam.split(",").map(s => s.trim()).filter(Boolean);
+    const perSubjectPrice = PRICE_MAP[periodParam] ?? PRICE_MAP.month;
+
+    // --- 畫面：週期 / 方案 chips ---
+    periodTagEl.textContent = PERIOD_LABEL[periodParam] || "月";
+    planTagsEl.innerHTML = "";
+    chosenItems.forEach(name => {
+      const tag = document.createElement("span");
+      tag.className = "chip";
+      tag.textContent = name;
+      planTagsEl.appendChild(tag);
+    });
+
+    // --- 推薦碼：URL ?ref=xxx → localStorage (bw_referral_code / referral_code / bw_ref_code) ---
+    function getReferralCode() {
+      const urlRef = params.get("ref");
+      if (urlRef) return urlRef;
+      const keys = ["bw_referral_code", "referral_code", "bw_ref_code"];
+      for (const k of keys) {
+        const v = localStorage.getItem(k);
+        if (v) return v;
+      }
+      return "";
+    }
+    const referralCode = getReferralCode();
+    if (referralCode) {
+      refBadgeEl.textContent = referralCode;
+      refBadgeEl.classList.remove("muted");
+    } else {
+      refBadgeEl.textContent = "無推薦碼";
+      refBadgeEl.classList.add("muted");
+    }
+
+    // --- 建 row ---
+    function row(label, money){
+      const wrap = document.createElement("div");
+      wrap.className = "row";
+      const l = document.createElement("div"); l.textContent = label;
+      const r = document.createElement("div"); r.className = "money"; r.textContent = toMoney(money);
+      wrap.append(l, r);
+      return wrap;
+    }
+    function toMoney(n){ return "$" + Number(n).toLocaleString(); }
+
+    // --- 明細與小計 ---
+    itemsRowsEl.innerHTML = "";
+    let subtotal = 0;
+    for (const name of chosenItems) {
+      itemsRowsEl.appendChild(row(name, perSubjectPrice));
+      subtotal += perSubjectPrice;
+    }
+
+    // --- 折扣：有推薦碼 → 9 折（折抵 10%） ---
+    let discount = 0;
+    if (referralCode) {
+      discount = Math.round(subtotal * 0.1);
+      discountAmountEl.textContent = "-" + toMoney(discount);
+      discountRowEl.classList.remove("hide");
+    } else {
+      discountRowEl.classList.add("hide");
+    }
+
+    // --- 稅 / 總額 ---
+    const tax = Math.round(subtotal * TAX_RATE);
+    const total = subtotal - discount + tax;
+    subtotalAmountEl.textContent = toMoney(subtotal);
+    taxAmountEl.textContent      = toMoney(tax);
+    totalAmountEl.textContent    = toMoney(total);
+
+    // === 送出到 Edge Function 建立綠界訂單 ===
+    payBtn.addEventListener("click", async () => {
+      errBox.style.display = "none";
+      errBox.textContent = "";
+
+      if (chosenItems.length === 0) {
+        errBox.textContent = "請先回上頁選擇至少一個主題。";
+        errBox.style.display = "block";
+        return;
+      }
+
+      payBtn.disabled = true;
+      payBtn.textContent = "建立訂單中…";
+
+      try {
+        // 注意：這是「相對路徑」請求 Supabase Edge Function。
+        // Supabase 會把 /functions/v1/<name> 代理到你的專案函式。
+        const res = await fetch(`/functions/v1/${FN_NAME}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            items: chosenItems,       // ["story","music"]
+            period: periodParam,      // "month" | "half" | "year"
+            total,                    // 前端計好的總額（後端仍需自行驗證）
+            referral_code: referralCode || null
+          })
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          throw new Error(`建立訂單失敗（${res.status}）：${text}`);
+        }
+
+        const data = await res.json();
+        // 後端請回傳 { payment_url: "https://..." }
+        if (!data || !data.payment_url) {
+          throw new Error("回應格式不正確，沒有 payment_url。");
+        }
+
+        // 轉址到綠界付款頁
+        location.href = data.payment_url;
+
+      } catch (err) {
+        console.error(err);
+        errBox.textContent = String(err.message || err);
+        errBox.style.display = "block";
+        payBtn.disabled = false;
+        payBtn.textContent = "確認付款";
+      }
+    });
+  </script>
 </body>
 </html>
+
 
 
 
