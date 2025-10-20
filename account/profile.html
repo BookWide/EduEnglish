@@ -228,5 +228,73 @@
     // 初始載入
     (async()=>{ try { await loadProfile(); } catch(e){ console.error(e); }})();
   </script>
+  <script>
+/* ===== Quick Patch: 允許空白儲存 + 無唯一鍵時的 update→insert ===== */
+(function () {
+  const $ = (s) => document.querySelector(s);
+  const $name = $('#name'), $phone = $('#phone'), $line = $('#line'),
+        $taxid = $('#taxid'), $address = $('#address');
+
+  // 取目前登入者
+  async function getUser() {
+    if (!window.supabase) { alert('Supabase 尚未載入'); throw new Error('no supabase'); }
+    const { data: { user }, error } = await supabase.auth.getUser();
+    if (error || !user) { alert('尚未登入'); throw error || new Error('no user'); }
+    return user;
+  }
+
+  // 主要：允許空白也儲存；若無資料先 update 失敗時再 insert
+  async function saveEvenIfEmpty() {
+    const user = await getUser();
+
+    // 👉 若你的 profiles 鍵是 id，改成 id: user.id 並把下面 eq('id', …) 一併改掉
+    const payload = {
+      user_id: user.id,
+      name   : ($name.value ?? '').trim(),
+      phone  : ($phone.value ?? '').trim(),
+      line_id: ($line.value ?? '').trim(),
+      tax_id : ($taxid.value ?? '').trim(),
+      address: ($address.value ?? '').trim(),
+    };
+
+    // 1) 先試著 update
+    let { error: upErr, count } = await supabase
+      .from('profiles')
+      .update(payload)
+      .eq('user_id', user.id)                // ← 若鍵是 id，改成 .eq('id', user.id)
+      .select('user_id', { count: 'exact', head: true });
+
+    if (upErr) {
+      console.error('[profiles.update] error', upErr);
+      alert('儲存失敗（update）');
+      return;
+    }
+
+    // 2) 沒有資料才插入
+    if (!count) {
+      const { error: insErr } = await supabase
+        .from('profiles')
+        .insert(payload);
+
+      if (insErr) {
+        console.error('[profiles.insert] error', insErr);
+        alert('儲存失敗（insert）');
+        return;
+      }
+    }
+
+    // 成功
+    const t = document.getElementById('toast');
+    if (t) { t.textContent = '已儲存完成'; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 1600); }
+  }
+
+  // 把你的儲存按鈕事件「覆蓋」為這個容錯版
+  document.getElementById('btnSave')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    saveEvenIfEmpty().catch(console.error);
+  });
+})();
+</script>
+
 </body>
 </html>
