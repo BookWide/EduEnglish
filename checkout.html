@@ -1,150 +1,95 @@
-<!DOCTYPE html>
-<html lang="zh-Hant">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>BookWide | 結帳</title>
-  <style>
-    :root{
-      --bg:#fff; --text:#111; --muted:#555; --panel:#fff; --border:#e5e7eb;
-      --pill:#111; --pillText:#fff; --accent:#111;
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+(async function(){
+  const UNIT = { month:200, half:960, year:1680 };
+  const PERIOD_TEXT = { month:'月', half:'半年', year:'年' };
+  const DISCOUNT_RATE = 0.9;
+
+  // Supabase 初始化（請保留你原本的 SB_URL / SB_ANON）
+  const supabase = window.supabase.createClient(window.SB_URL, window.SB_ANON);
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return alert("請先登入帳號後再結帳");
+
+  // URL 參數
+  const usp = new URLSearchParams(location.search);
+  const items = (usp.get('items')||'').split(',').map(s=>s.trim()).filter(Boolean);
+  const period = usp.get('period') || 'month';
+  const refCode = (usp.get('ref')||'').trim() || null;
+
+  if (!items.length){ location.replace('./pricing.html'); return; }
+
+  // DOM
+  const elPeriod = document.getElementById('periodLabel');
+  const elItems = document.getElementById('itemsChips');
+  const elRef = document.getElementById('refLabel');
+  const elLineItems = document.getElementById('lineItems');
+  const elSubtotal = document.getElementById('subtotal');
+  const elRowDiscount = document.getElementById('rowDiscount');
+  const elDiscount = document.getElementById('discount');
+  const elGrand = document.getElementById('grand');
+  const btnPay = document.getElementById('btnPay');
+
+  // 顯示資料
+  elPeriod.textContent = PERIOD_TEXT[period] || '月';
+  elItems.innerHTML = items.map(it=>`<span class="chip">${it}</span>`).join('');
+  if (refCode){
+    elRef.textContent = refCode;
+    elRef.classList.remove('muted');
+    elRef.classList.add('chip');
+  }
+
+  const unit = UNIT[period] ?? 200;
+  elLineItems.innerHTML = items.map(it=>(
+    `<div class="row"><div>${it}</div><div class="price">$${unit}</div></div>`
+  )).join('');
+
+  const subtotal = unit * items.length;
+  let discountAmt = 0;
+  if (refCode){
+    const grandX = Math.round(subtotal * DISCOUNT_RATE);
+    discountAmt = subtotal - grandX;
+    elRowDiscount.style.display = '';
+    elDiscount.textContent = `-$${discountAmt}`;
+  }
+  const grand = subtotal - discountAmt;
+  elSubtotal.textContent = `$${subtotal}`;
+  elGrand.textContent = `$${grand}`;
+
+  // === 確認付款按鈕 ===
+  btnPay.addEventListener('click', async ()=>{
+    btnPay.disabled = true;
+
+    try {
+      // 1️⃣ 建立訂單（create-order）
+      const { data: session } = await supabase.auth.getSession();
+      const res1 = await fetch('/functions/v1/create-order', {
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'Authorization':`Bearer ${session?.session?.access_token || ''}`
+        },
+        body: JSON.stringify({ items, period, ref: refCode })
+      });
+      const data1 = await res1.json();
+      if (!res1.ok) throw new Error(data1.error || '建立訂單失敗');
+
+      const orderId = data1.order.id;
+      console.log('🧾 已建單', orderId);
+
+      // 2️⃣ 呼叫 create-ecpay-order（自動導向綠界）
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = '/functions/v1/create-ecpay-order';
+      form.innerHTML = `<input type="hidden" name="order_id" value="${orderId}">`;
+      document.body.appendChild(form);
+      form.submit();
+    } catch(err){
+      alert('❌ 付款啟動失敗：' + err.message);
+      btnPay.disabled = false;
     }
-    html,body{background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans TC","Microsoft JhengHei",Arial,sans-serif;margin:0}
-    .wrap{max-width:880px; margin:28px auto; padding:0 16px;}
-    a.back{color:#5b21b6; text-decoration:none; display:inline-block; margin-bottom:10px}
-    h1{font-size:30px; margin:6px 0 18px}
-    .card{border:1px solid var(--border); border-radius:16px; background:var(--panel); padding:22px}
-    .row{display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); padding:14px 0}
-    .row:last-child{border-bottom:0}
-    .muted{color:var(--muted)}
-    .chips{display:flex; gap:8px}
-    .chip{background:#111; color:#fff; padding:6px 10px; border-radius:999px; font-size:14px}
-    .price{min-width:90px; text-align:right}
-    .total{font-size:22px; font-weight:700}
-    .btn{width:100%; margin-top:18px; padding:18px 20px; background:var(--accent); color:#fff; font-weight:700; border:0; border-radius:12px; cursor:pointer; font-size:18px}
-    .note{color:var(--muted); font-size:13px; margin-top:10px}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <a class="back" href="./pricing.html">← 返回方案與定價</a>
-    <h1>訂單摘要</h1>
-
-    <div class="card">
-      <div class="row">
-        <div class="muted">週期：</div>
-        <div id="periodLabel" class="chip">月</div>
-      </div>
-
-      <div class="row">
-        <div class="muted">方案：</div>
-        <div id="itemsChips" class="chips"></div>
-      </div>
-
-      <div class="row" id="refRow">
-        <div class="muted">推薦碼：</div>
-        <div id="refLabel" class="muted">無推薦碼</div>
-      </div>
-
-      <div id="lineItems"></div>
-
-      <div class="row">
-        <div class="muted">小計</div>
-        <div id="subtotal" class="price">$0</div>
-      </div>
-
-      <div id="rowDiscount" class="row" style="display:none">
-        <div class="muted">折扣</div>
-        <div id="discount" class="price">-$0</div>
-      </div>
-
-      <div class="row">
-        <div class="muted">稅額（0%）</div>
-        <div id="tax" class="price">$0</div>
-      </div>
-
-      <div class="row">
-        <div class="total">應付金額</div>
-        <div id="grand" class="total price">$0</div>
-      </div>
-
-      <button id="btnPay" class="btn">確認付款</button>
-      <div class="note">此按鈕可再接上 Supabase Edge Function 建立綠界訂單；目前僅示意。</div>
-    </div>
-  </div>
-
-  <script>
-  (function(){
-    const UNIT = { month:200, half:960, year:1680 };
-    const PERIOD_TEXT = { month:'月', half:'半年', year:'年' };
-    const DISCOUNT_RATE = 0.9; // 有推薦碼 → 9 折
-
-    // 讀參數／localStorage
-    const usp = new URLSearchParams(location.search);
-    const items = (usp.get('items')||'').split(',').map(s=>s.trim()).filter(Boolean);
-    const period = usp.get('period') || 'month';
-    const referral = (usp.get('ref')||'').trim();
-    // 僅依網址的 ref 顯示；不再使用 localStorage，避免殘留
-
-    if (!items.length){ location.replace('./pricing.html'); return; }
-
-    // DOM
-    const elPeriod = document.getElementById('periodLabel');
-    const elItems = document.getElementById('itemsChips');
-    const elRef = document.getElementById('refLabel');
-    const elLineItems = document.getElementById('lineItems');
-    const elSubtotal = document.getElementById('subtotal');
-    const elRowDiscount = document.getElementById('rowDiscount');
-    const elDiscount = document.getElementById('discount');
-    const elGrand = document.getElementById('grand');
-    const btnPay = document.getElementById('btnPay');
-
-    // 週期
-    elPeriod.textContent = PERIOD_TEXT[period] || '月';
-
-    // 方案膠囊
-    elItems.innerHTML = items.map(it=>`<span class="chip">${it}</span>`).join('');
-
-    // 推薦碼顯示
-    if (referral){
-      elRef.textContent = referral;
-      elRef.classList.remove('muted');
-      elRef.classList.add('chip');
-    } else {
-      // 若無推薦碼，整列隱藏
-      const rr = document.getElementById('refRow');
-      if (rr) rr.style.display = 'none';
-    }
-
-    // 列品項
-    const unit = UNIT[period] ?? 200;
-    elLineItems.innerHTML = items.map(it=>(
-      `<div class="row"><div>${it}</div><div class="price">$${unit}</div></div>`
-    )).join('');
-
-    // 計算
-    const subtotal = unit * items.length;
-    let discountAmt = 0;
-    if (referral){
-      const grandX = Math.round(subtotal * DISCOUNT_RATE);
-      discountAmt = subtotal - grandX;
-      elRowDiscount.style.display = '';
-      elDiscount.textContent = `-$${discountAmt}`;
-    } else {
-      elRowDiscount.style.display = 'none';
-    }
-    const grand = subtotal - discountAmt;
-    elSubtotal.textContent = `$${subtotal}`;
-    elGrand.textContent = `$${grand}`;
-
-    // 付款（範例：之後可改為呼叫 create-ecpay-order）
-    btnPay.addEventListener('click', ()=>{
-      alert('示意：這裡可串接 Edge Function 建立綠界訂單。\n已帶推薦碼：' + (referral || '（無）'));
-    });
-  })();
-  </script>
-</body>
-</html>
+  });
+})();
+</script>
 
 
 
