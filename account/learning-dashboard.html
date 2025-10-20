@@ -44,13 +44,13 @@
         <div id="continueBox" class="list">載入中…</div>
       </section>
 
-      <!-- 今日複習（先預留，可之後接排程資料） -->
+      <!-- 今日複習：到期清單（若無資料/未建表，顯示空狀態） -->
       <section class="card">
         <div class="row">
           <h3>今日複習</h3>
-          <span class="pill">預留位</span>
+          <span class="pill">到期清單</span>
         </div>
-        <div id="reviewBox" class="list empty">今日沒有到期的複習項目。</div>
+        <div id="reviewBox" class="list empty">載入中…</div>
       </section>
 
       <!-- 最近看過 -->
@@ -59,13 +59,13 @@
         <div id="recentBox" class="list">載入中…</div>
       </section>
 
-      <!-- 我的清單（如未來要接 favorites） -->
+      <!-- 我的清單：favorites（若未建表亦顯示空） -->
       <section class="card">
         <div class="row">
           <h3>我的清單</h3>
-          <span class="pill">收藏預留</span>
+          <span class="pill">收藏</span>
         </div>
-        <div id="favBox" class="list empty">尚未收藏任何影片。</div>
+        <div id="favBox" class="list empty">載入中…</div>
       </section>
     </div>
 
@@ -81,13 +81,13 @@
   <!-- Chart.js（只用於學習曲線） -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-  <!-- 主程式：讀 watch_logs，渲染四區塊 -->
+  <!-- 主程式：讀 watch_logs / review_tasks / favorites，渲染四區塊 -->
   <script type="module">
-    // ✅ 路徑重點：learning-dashboard.html 在 /account/ 底下，所以 supa.js 用 ../../
-    import { supabase } from '../../supa.js';
+    // ✅ 路徑重點：learning-dashboard.html 在 /account/ 底下，所以 supa.js 用 ././
+    import { supabase } from '././supa.js';
 
     const $=(s,e=document)=>e.querySelector(s);
-    const continueBox=$('#continueBox'), recentBox=$('#recentBox'), favBox=$('#favBox');
+    const continueBox=$('#continueBox'), recentBox=$('#recentBox'), favBox=$('#favBox'), reviewBox=$('#reviewBox');
     const chartEl=$('#learningChart');
 
     const pct = x => Math.round((x||0)*100);
@@ -98,7 +98,9 @@
       if(diff<86400) return Math.floor(diff/3600)+' 小時前';
       return Math.floor(diff/86400)+' 天前';
     };
+    const todayIso = () => new Date().toISOString().split('T')[0];
 
+    // 封裝：目前登入者
     async function me(){
       const { data, error } = await supabase.auth.getUser();
       if(error || !data?.user) return null;
@@ -123,7 +125,7 @@
 
       continueBox.innerHTML = data.map(r=>{
         const slug = r.video_slug || r.slug || '';
-        const href = `../player.html?slug=${encodeURIComponent(slug)}`;
+        const href = `./player.html?slug=${encodeURIComponent(slug)}`;
         return `<a class="item" href="${href}">
           <div class="title">${slug||'(未命名)'}</div>
           <div class="meta">已看 ${pct(r.progress_pct)}% · ${ago(r.updated_at)}</div>
@@ -131,7 +133,7 @@
       }).join('');
     }
 
-    // 2) 最近看過：最新 10 筆（同影片會重複顯示最新一次）
+    // 2) 最近看過：最新 10 筆
     async function loadRecent(){
       const user = await me();
       if(!user){ recentBox.innerHTML='<div class="empty">請先登入</div>'; return; }
@@ -148,7 +150,7 @@
 
       recentBox.innerHTML = data.map(r=>{
         const slug = r.video_slug || r.slug || '';
-        const href = `../player.html?slug=${encodeURIComponent(slug)}`;
+        const href = `./player.html?slug=${encodeURIComponent(slug)}`;
         return `<a class="item" href="${href}">
           <div class="title">${slug||'(未命名)'}</div>
           <div class="meta">${ago(r.updated_at)} · 進度 ${pct(r.progress_pct)}%</div>
@@ -156,12 +158,85 @@
       }).join('');
     }
 
-    // 3) 我的清單（預留接 favorites 表；先顯示空）
-    function loadFavorites(){
-      favBox.innerHTML = '<div class="empty">尚未收藏任何影片。</div>';
+    // 3) 我的清單 favorites（若未建表或無資料，顯示空）
+    async function loadFavorites(){
+      const user = await me();
+      if(!user){ favBox.innerHTML='<div class="empty">請先登入</div>'; return; }
+
+      try{
+        const { data, error } = await supabase
+          .from('favorites')               // 建議表：favorites(user_id uuid, video_slug text, created_at timestamptz)
+          .select('video_slug, created_at')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending:false })
+          .limit(10);
+
+        if(error){
+          // 表不存在時，Supabase 會回傳 relation does not exist；視為未啟用收藏功能
+          favBox.innerHTML='<div class="empty">尚未收藏任何影片。</div>';
+          return;
+        }
+
+        if(!data?.length){
+          favBox.innerHTML='<div class="empty">尚未收藏任何影片。</div>';
+          return;
+        }
+
+        favBox.innerHTML = data.map(r=>{
+          const slug = r.video_slug || '';
+          const href = `./player.html?slug=${encodeURIComponent(slug)}`;
+          return `<a class="item" href="${href}">
+            <div class="title">${slug||'(未命名)'}</div>
+            <div class="meta">收藏於 ${new Date(r.created_at).toLocaleDateString()}</div>
+          </a>`;
+        }).join('');
+      }catch(_e){
+        favBox.innerHTML='<div class="empty">尚未收藏任何影片。</div>';
+      }
     }
 
-    // 4) 學習曲線：統計最近 7 天的 watch_logs（以 updated_at）
+    // 4) 今日複習 review_tasks（若未建表或無到期資料，顯示空）
+    async function loadReview(){
+      const user = await me();
+      if(!user){ reviewBox.textContent='請先登入'; reviewBox.classList.add('empty'); return; }
+
+      try{
+        // 建議表：review_tasks(user_id uuid, title text, video_slug text, due_date date, status text)
+        const { data, error } = await supabase
+          .from('review_tasks')
+          .select('title, video_slug, due_date, status, updated_at')
+          .eq('user_id', user.id)
+          .lte('due_date', todayIso())     // 到今天為止要複習
+          .neq('status','done')            // 尚未完成
+          .order('due_date', { ascending:true })
+          .limit(20);
+
+        if(error){
+          reviewBox.innerHTML = '<div class="empty">今日沒有到期的複習項目。</div>';
+          return;
+        }
+        if(!data?.length){
+          reviewBox.innerHTML = '<div class="empty">今日沒有到期的複習項目。</div>';
+          return;
+        }
+
+        reviewBox.classList.remove('empty');
+        reviewBox.innerHTML = data.map(r=>{
+          const slug = r.video_slug || '';
+          const href = slug ? `./player.html?slug=${encodeURIComponent(slug)}#review` : '#';
+          const title = r.title || (slug||'(未命名)');
+          const due = new Date(r.due_date).toLocaleDateString();
+          return `<a class="item" href="${href}">
+            <div class="title">🧠 ${title}</div>
+            <div class="meta">到期：${due}${r.updated_at ? ' · 更新於 '+ago(r.updated_at) : ''}</div>
+          </a>`;
+        }).join('');
+      }catch(_e){
+        reviewBox.innerHTML = '<div class="empty">今日沒有到期的複習項目。</div>';
+      }
+    }
+
+    // 5) 學習曲線：統計最近 7 天的 watch_logs（以 updated_at）
     async function loadCurve(){
       const user = await me();
       if(!user || !chartEl) return;
@@ -194,11 +269,14 @@
     (async function(){
       await loadContinue();
       await loadRecent();
-      loadFavorites();
+      await loadFavorites();
+      await loadReview();
       await loadCurve();
     })();
   </script>
 </body>
 </html>
+
+
 
 
