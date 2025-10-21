@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>學習控制台</title>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <style>
     :root{
       --card-bg:#fff; --muted:#6b7280; --fg:#111827; --pill:#eef2ff;
@@ -23,11 +24,11 @@
     .nav__inner{max-width:1100px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:12px}
     .back{color:var(--brand);text-decoration:none;font-weight:600}
     .email{margin-left:auto;color:var(--muted);font-size:14px}
-    a.video-link{color:var(--brand);text-decoration:none;font-weight:bold}
     @media (max-width:900px){ .grid{grid-template-columns:1fr} }
   </style>
 </head>
 <body>
+  <!-- 頂部導覽：返回首頁 + 顯示登入帳號 -->
   <div class="nav">
     <div class="nav__inner">
       <a class="back" href="/EduEnglish/index.html">← 回首頁</a>
@@ -39,21 +40,25 @@
     <h1>學習控制台</h1>
 
     <div class="grid">
+      <!-- 繼續播放 -->
       <section class="card" id="secContinue">
         <h2>繼續播放 <span id="continueBadge" class="pill" style="display:none"></span></h2>
         <div id="continueBody" class="muted">載入中…</div>
       </section>
 
+      <!-- 今日複習 -->
       <section class="card" id="secReview">
         <h2>今日複習</h2>
         <div id="reviewBody" class="muted">載入中…</div>
       </section>
 
+      <!-- 最近看過 -->
       <section class="card" id="secRecent">
         <h2>最近看過</h2>
         <div id="recentBody" class="muted">載入中…</div>
       </section>
 
+      <!-- 我的清單（收藏） -->
       <section class="card" id="secFav">
         <h2>我的清單</h2>
         <div id="favBody" class="muted">載入中…</div>
@@ -66,8 +71,10 @@
     </section>
   </main>
 
+  <!-- 主程式：串 Supabase（從 /account/ 回上一層找 supa.js） -->
   <script type="module">
-    import { supabase } from '../supa.js';
+    import { supabase } from '../supa.js'; // ← 確認這個檔案放在專案根目錄
+
     const $ = (s)=>document.querySelector(s);
     const userEmailEl = $('#userEmail');
     const continueBody = $('#continueBody');
@@ -79,14 +86,8 @@
     function fmtDate(d){
       try{
         const x = new Date(d);
-        const diffMin = Math.floor((Date.now()-x)/60000);
-        if(diffMin<1) return '剛剛';
-        if(diffMin<60) return `${diffMin} 分鐘前`;
-        const diffHr=Math.floor(diffMin/60);
-        if(diffHr<24) return `${diffHr} 小時前`;
-        const diffDay=Math.floor(diffHr/24);
-        return `${diffDay} 天前`;
-      }catch{return d}
+        return x.toLocaleString('zh-TW',{hour12:false});
+      }catch{ return d }
     }
 
     async function getUser() {
@@ -94,11 +95,13 @@
       return user ?? null;
     }
 
+    // 安全查詢：若資料表尚未建立 / 欄位不存在，不會整頁炸掉
     async function safeQuery(fn, fallback=null){
       try{ return await fn() }catch(e){ console.warn('[safeQuery]', e); return fallback }
     }
 
     async function boot(){
+      // 1) 取得使用者
       const user = await getUser();
       if(!user){
         userEmailEl.textContent = '尚未登入';
@@ -108,7 +111,7 @@
       }
       userEmailEl.textContent = user.email ?? '(未具名)';
 
-      // 繼續播放
+      // 2) 繼續播放：從 watch_logs 找 progress_pct < 100 的最後一筆
       const watchRes = await safeQuery(async () => {
         return await supabase
           .from('watch_logs')
@@ -116,87 +119,106 @@
           .eq('user_id', user.id)
           .lt('progress_pct', 100)
           .order('updated_at', { ascending:false })
-          .limit(2);
+          .limit(1);
       }, { data: null });
 
       if(watchRes?.data?.length){
-        continueBody.innerHTML = watchRes.data.map(w=>`
-          <div style="margin-bottom:8px">
-            <a class="video-link" href="/EduEnglish/player.html?slug=${w.video_slug}">${w.video_slug}</a><br>
-            <span class="muted">已看 ${Math.round(w.progress_pct)}%・${fmtDate(w.updated_at)}</span>
-          </div>`).join('');
-        continueBadge.style.display='inline-block';
-        continueBadge.textContent=`未完成`;
+        const w = watchRes.data[0];
+        continueBody.innerHTML = `
+          <div>上次看到：<b>${w.video_slug}</b></div>
+          <div class="muted">進度：${Math.round(w.progress_pct)}%　更新：${fmtDate(w.updated_at)}</div>
+        `;
+        continueBadge.style.display = 'inline-block';
+        continueBadge.textContent = `未完成 < ${Math.round(w.progress_pct)}%`;
       }else{
-        continueBody.innerHTML=`<span class="empty">目前沒有未看完的影片。</span>`;
+        continueBody.innerHTML = `<span class="empty">目前沒有未看完的影片。</span>`;
       }
 
-      // 最近看過
-      const recentRes = await safeQuery(async ()=>{
+      // 3) 最近看過：watch_logs 取最新 3 筆
+      const recentRes = await safeQuery(async () => {
         return await supabase
           .from('watch_logs')
           .select('video_slug, progress_pct, updated_at')
           .eq('user_id', user.id)
-          .order('updated_at',{ascending:false})
+          .order('updated_at', { ascending:false })
           .limit(3);
-      },{data:null});
+      }, { data: null });
+
       if(recentRes?.data?.length){
-        recentBody.innerHTML=recentRes.data.map(r=>`
-          <div style="margin-bottom:8px">
-            <a class="video-link" href="/EduEnglish/player.html?slug=${r.video_slug}">${r.video_slug}</a><br>
-            <span class="muted">${fmtDate(r.updated_at)}・進度 ${Math.round(r.progress_pct)}%</span>
-          </div>`).join('');
+        recentBody.innerHTML = `<ul class="list">` + recentRes.data.map(r => `
+          <li><b>${r.video_slug}</b>　
+            <span class="muted">進度 ${Math.round(r.progress_pct)}%・${fmtDate(r.updated_at)}</span>
+          </li>`).join('') + `</ul>`;
       }else{
-        recentBody.innerHTML=`<span class="empty">尚無觀看紀錄。</span>`;
+        recentBody.innerHTML = `<span class="empty">尚無觀看紀錄。</span>`;
       }
 
-      // 我的清單
-      const favRes = await safeQuery(async()=>{
+      // 4) 收藏：favorites 取最新 3 筆 + 計數
+      const favCountRes = await safeQuery(async () => {
+        return await supabase
+          .from('favorites')
+          .select('id', { count:'exact', head:true })
+          .eq('user_id', user.id);
+      }, { count: 0 });
+
+      const favListRes = await safeQuery(async () => {
         return await supabase
           .from('favorites')
           .select('video_slug, created_at')
           .eq('user_id', user.id)
-          .order('created_at',{ascending:false})
+          .order('created_at', { ascending:false })
           .limit(3);
-      },{data:[]});
-      if(favRes?.data?.length){
-        favBody.innerHTML=favRes.data.map(f=>`
-          <div style="margin-bottom:8px">
-            <a class="video-link" href="/EduEnglish/player.html?slug=${f.video_slug}">${f.video_slug}</a><br>
-            <span class="muted">${fmtDate(f.created_at)}</span>
-          </div>`).join('');
+      }, { data: [] });
+
+      const cnt = favCountRes?.count ?? 0;
+      if(cnt === 0){
+        favBody.innerHTML = `<span class="empty">尚未收藏任何影片。</span>`;
       }else{
-        favBody.innerHTML=`<span class="empty">尚未收藏任何影片。</span>`;
+        favBody.innerHTML = `
+          <div class="muted" style="margin-bottom:6px">共收藏 <b>${cnt}</b> 部影片</div>
+          <ul class="list">
+            ${ (favListRes?.data ?? []).map(f => `
+              <li><b>${f.video_slug}</b>　
+                <span class="muted">${fmtDate(f.created_at)}</span>
+              </li>`).join('') }
+          </ul>
+        `;
       }
 
-      // 今日複習
+      // 5) 今日複習：review_tasks 若有 next_review_at（或 due_at）<= 今天
+      // 若表不存在 / 欄位不存在，優雅降級成「今日沒有到期的複習項目」
       let reviewText = `<span class="empty">今日沒有到期的複習項目。</span>`;
       const nowIso = new Date().toISOString();
-      const reviewRes = await safeQuery(async()=>{
+      const reviewRes = await safeQuery(async () => {
+        // 嘗試用 next_review_at
         const r1 = await supabase
           .from('review_tasks')
-          .select('video_slug, next_review_at, created_at')
+          .select('video_slug, next_review_at')
           .eq('user_id', user.id)
           .lte('next_review_at', nowIso)
-          .order('next_review_at',{ascending:true})
+          .order('next_review_at', { ascending:true })
           .limit(5);
-        if(r1.error && r1.error.message?.includes('column "next_review_at"')){
+        if(r1.error && r1.error.message?.includes('column "next_review_at"')) {
+          // 欄位不存在 → 用 created_at 當作 fallback
           return await supabase
             .from('review_tasks')
             .select('video_slug, created_at')
             .eq('user_id', user.id)
             .lte('created_at', nowIso)
-            .order('created_at',{ascending:true})
+            .order('created_at', { ascending:true })
             .limit(5);
         }
         return r1;
-      },{data:[]});
+      }, { data: [] });
+
       if(reviewRes?.data?.length){
-        reviewText = reviewRes.data.map(r=>`
-          <div style="margin-bottom:8px">
-            <a class="video-link" href="/EduEnglish/player.html?slug=${r.video_slug}">${r.video_slug}</a><br>
-            <span class="muted">${fmtDate(r.next_review_at ?? r.created_at)}</span>
-          </div>`).join('');
+        reviewText = `
+          <ul class="list">
+            ${reviewRes.data.map(r => `
+              <li><b>${r.video_slug}</b>　
+                <span class="muted">${fmtDate(r.next_review_at ?? r.created_at)}</span>
+              </li>`).join('')}
+          </ul>`;
       }
       reviewBody.innerHTML = reviewText;
     }
@@ -205,6 +227,7 @@
   </script>
 </body>
 </html>
+
 
 
 
