@@ -246,90 +246,88 @@
 
     payBtn.addEventListener('click', submitOrder);
   </script>
-<script>
-window.addEventListener('load', () => {
-  // 0) 取得推薦碼：URL 優先，沒有就用 localStorage
+</body>
+  <script>
+/* ---- Referral discount display (safe & non-invasive) ---- */
+(function () {
   const usp = new URLSearchParams(location.search);
-  const ref = (usp.get('ref') || localStorage.getItem('referral_code') || '').trim();
+  const ref = usp.get('ref') || localStorage.getItem('referral_code') || '';
   if (ref) localStorage.setItem('referral_code', ref);
-  if (!ref) return; // 沒推薦碼就什麼都不做
 
-  const DISCOUNT = 20; // 這裡改折扣
+  // 取數值 / 格式化
+  const parseNTD = (s) => Number(String(s || '').replace(/[^\d]/g, '')) || 0;
+  const fmt = (n) => `NT$${Number(n).toLocaleString('en-US')}`;
 
-  // 工具：把 "NT$200" 轉數字 / 反向格式化
-  const toNumber = (s) => Number(String(s||'').replace(/[^\d.-]/g,''));
-  const toNTD    = (n) => `NT$${Number(n).toLocaleString('en-US')}`;
+  // 找到小計與總計顯示節點（盡量不假設你的結構）
+  const totalEl =
+    document.querySelector('#total') ||
+    document.querySelector('[data-id="total"]') ||
+    document.querySelector('[data-total]');
 
-  // 1) 找到「稅額」那一列（避免精準比對，改用包含）
-  function findRowContains(txt){
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
-    let node;
-    while ((node = walker.nextNode())) {
-      const t = node.textContent?.trim() || '';
-      if (t.includes(txt)) {
-        // 取「這個節點所屬的列」：用上一層單列容器（直接用父子關係即可）
-        const row = node.closest('*');
-        // 再保守一點：往上找第一個直接掛在卡片裡的那層
-        return row?.parentElement?.closest('*') || row?.parentElement || row;
-      }
+  const subtotalEl =
+    document.querySelector('#subtotal') ||
+    document.querySelector('[data-id="subtotal"]') ||
+    document.querySelector('[data-subtotal]');
+
+  // 總覽容器（用來插入一列折扣）
+  const container =
+    (totalEl && (totalEl.closest('.row')?.parentElement || totalEl.parentElement?.parentElement)) ||
+    document.querySelector('.summary') ||
+    document.querySelector('.card') ||
+    document.querySelector('main') ||
+    document.body;
+
+  // 沒抓到數字就不動作（避免破壞畫面）
+  const base = parseNTD(subtotalEl?.textContent);
+  if (!base) return;
+
+  const discount = ref ? Math.round(base * 0.1) : 0; // 這裡是 9 折 => 折扣 10%
+  const newTotal = Math.max(base - discount, 0);
+
+  // 畫面插入「折扣（推薦碼）」— 放在總計前一列
+  if (ref && discount > 0 && totalEl) {
+    const totalRow = totalEl.closest('.row') || totalEl.parentElement;
+    const row = document.createElement('div');
+    row.className = (totalRow && totalRow.className) ? totalRow.className : 'row';
+    row.style.display = row.style.display || 'flex';
+    row.style.justifyContent = row.style.justifyContent || 'space-between';
+    row.style.padding = row.style.padding || '16px 20px';
+    row.style.borderTop = row.style.borderTop || '1px solid #eef1f4';
+    row.innerHTML =
+      `<div class="muted" style="color:#667085">折扣（推薦碼 ${ref}）</div>` +
+      `<div class="right" style="font-weight:600">−${fmt(discount)}</div>`;
+    if (totalRow && totalRow.parentNode) {
+      totalRow.parentNode.insertBefore(row, totalRow);
+    } else {
+      container.appendChild(row);
     }
-    return null;
+    // 更新總計文字
+    totalEl.textContent = fmt(newTotal);
   }
-  const taxRow = findRowContains('稅額');
-  if (!taxRow) return;
 
-  // 2) 小計在稅額「上一列」，應付金額在稅額「下一列」
-  const subtotalRow = taxRow.previousElementSibling;
-  const totalRow    = taxRow.nextElementSibling;
-  if (!subtotalRow || !totalRow) return;
+  // 讓既有建立訂單函式（若存在）自動帶上 referral_code，但不改內部實作
+  const originalCreate =
+    window.__createOrderAndGoEcpay ||
+    window.createOrderAndGoEcpay ||
+    window.__createOrder ||
+    window.createOrder;
 
-  // 3) 從列中抓金額節點（第一個帶 NT$ 的元素；抓不到就用最後子節點）
-  function findAmountEl(row){
-    const els = row.querySelectorAll('*');
-    for (const el of els) if (/NT\$/.test(el.textContent)) return el;
-    return row.lastElementChild || row;
+  if (typeof originalCreate === 'function') {
+    const wrapper = async function (payload) {
+      const enriched = { ...(payload || {}) };
+      // 只在原本沒有帶時附上，避免覆蓋你已經設定的值
+      if (ref && !enriched.referral_code) enriched.referral_code = ref;
+      return await originalCreate(enriched);
+    };
+    // 盡量回寫到原本的對外名稱（不破壞你頁面其它呼叫）
+    if (window.__createOrderAndGoEcpay) window.__createOrderAndGoEcpay = wrapper;
+    if (window.createOrderAndGoEcpay) window.createOrderAndGoEcpay = wrapper;
+    if (window.__createOrder) window.__createOrder = wrapper;
+    if (window.createOrder) window.createOrder = wrapper;
   }
-  const subtotalEl = findAmountEl(subtotalRow);
-  const totalEl    = findAmountEl(totalRow);
-
-  const subtotal = toNumber(subtotalEl.textContent);
-  if (!isFinite(subtotal) || subtotal <= 0) return;
-
-  // 4) 複製「稅額」那列 → 變成「推薦碼 / 折扣」
-  const refRow = taxRow.cloneNode(true);
-
-  // 左邊文字：推薦碼 + badge
-  // 找左側第一個文字節點，直接整列清空再重建
-  refRow.innerHTML = taxRow.innerHTML; // 確保樣式一致
-  // 嘗試把左側文字容器找出來（取第一個子元素）
-  const leftBox  = refRow.children[0] || refRow.firstElementChild || refRow;
-  const rightBox = refRow.children[refRow.children.length-1] || refRow.lastElementChild || refRow;
-
-  // 左側內容改成：推薦碼 + 小圓角框
-  leftBox.textContent = '推薦碼：';
-  const badge = document.createElement('span');
-  badge.textContent = ref;
-  badge.style.display = 'inline-block';
-  badge.style.marginLeft = '8px';
-  badge.style.padding = '2px 10px';
-  badge.style.border = '1px solid #ced4da';
-  badge.style.borderRadius = '999px';
-  badge.style.fontSize = '12px';
-  leftBox.appendChild(badge);
-
-  // 右側金額改成 -NT$20
-  rightBox.textContent = `- ${toNTD(DISCOUNT)}`;
-
-  // 插到小計與稅額之間
-  taxRow.parentElement.insertBefore(refRow, taxRow);
-
-  // 5) 更新「應付金額」
-  const newTotal = Math.max(0, toNumber(totalEl.textContent) - DISCOUNT);
-  totalEl.textContent = toNTD(newTotal);
-});
+})();
 </script>
 
-</body>
 </html>
 
 
