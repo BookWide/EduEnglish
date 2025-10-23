@@ -175,6 +175,111 @@
     refresh();
     init();
   </script>
+  <script type="module">
+  import { supabase } from './supa.js';
+
+  // 讀取網址上的推薦碼 (?ref=xxxx)
+  function readRef() {
+    try {
+      const sp = new URLSearchParams(location.search);
+      return (sp.get('ref') || '').trim();
+    } catch { return ''; }
+  }
+
+  // 開啟你現有的「Email 登入」UI（盡量不改你的 HTML 結構）
+  function openEmailLoginUI() {
+    // 1) 有 Bootstrap Modal：#loginModal
+    const modalEl = document.querySelector('#loginModal');
+    if (modalEl && window.bootstrap?.Modal) {
+      new window.bootstrap.Modal(modalEl, { backdrop: 'static' }).show();
+      return;
+    }
+    // 2) 有「登入」按鈕可以打開視窗
+    const loginBtn =
+      document.querySelector('[data-bs-target="#loginModal"]') ||
+      document.querySelector('[data-action="open-login"]') ||
+      document.querySelector('button.login, a.login');
+    if (loginBtn) { loginBtn.click(); return; }
+
+    // 3) 沒有 modal，就至少把焦點移到 email 欄
+    const emailInput = document.querySelector('input[type="email"], input[name*="email" i]');
+    if (emailInput) {
+      emailInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => emailInput.focus(), 300);
+    }
+  }
+
+  // 把右上的帳號顯示更新為「未登入」（或你頁面上對應的元素）
+  function setHeaderToLoggedOut() {
+    const accText = document.querySelector('#accBox, .acc, .account-email');
+    if (accText) accText.textContent = '未登入';
+  }
+
+  // 主流程：處理推薦碼與登入狀態
+  async function handleReferralOnPricing() {
+    const ref = readRef();
+    if (!ref) return; // 沒有 ref 就不干預任何東西
+
+    // 1) 找出推薦碼的擁有者
+    const { data: owner, error } = await supabase
+      .from('profiles')
+      .select('id')
+      .eq('referral_code', ref)
+      .single();
+
+    if (error || !owner) return; // 找不到這個推薦碼就不處理
+
+    // 2) 查目前登入使用者
+    const { data: auth } = await supabase.auth.getUser();
+    const me = auth?.user?.id || null;
+
+    if (me && owner.id === me) {
+      // ✅ 自己推薦自己 → 立即登出，並把 UI 切回未登入
+      try { await supabase.auth.signOut(); } catch (e) {}
+      setHeaderToLoggedOut();
+
+      // 有 toast/提示就用，沒有就 alert
+      try {
+        const toastMsg = document.querySelector('#toastMsg');
+        const toastEl  = document.querySelector('#toast');
+        if (toastMsg && toastEl && window.bootstrap) {
+          toastMsg.textContent = '不能使用自己的推薦碼，已為你登出。';
+          new window.bootstrap.Toast(toastEl).show();
+        } else {
+          alert('不能使用自己的推薦碼，已為你登出。');
+        }
+      } catch {}
+
+      // （可選）避免重複彈提示
+      sessionStorage.setItem('self_ref_logged_out', '1');
+      return;
+    }
+
+    if (!me) {
+      // ✅ 別人的推薦碼 & 目前未登入 → 直接打開登入視窗
+      // 避免來回重新整理一直跳，僅一次
+      if (sessionStorage.getItem('opened_login_for_ref') !== '1') {
+        sessionStorage.setItem('opened_login_for_ref', '1');
+        openEmailLoginUI();
+      }
+    }
+  }
+
+  // 自動執行
+  handleReferralOnPricing();
+
+  // 若登入狀態變化（例如剛登入），重新檢查一次
+  supabase.auth.onAuthStateChange((_evt, session) => {
+    if (session?.user) {
+      // 已登入後，不再彈
+      sessionStorage.removeItem('opened_login_for_ref');
+    } else {
+      // 已登出，再次遇到別人推薦碼時允許彈一次
+      sessionStorage.removeItem('opened_login_for_ref');
+    }
+  });
+</script>
+
 </body>
 </html>
 
