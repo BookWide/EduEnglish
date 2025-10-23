@@ -41,16 +41,16 @@
         <div id="periodUI" class="badge-plan">—</div>
       </div>
 
-      
-<div class="row-item">
+      <div class="row-item">
         <div class="label">方案：</div>
         <div id="itemsUI" class="list-inline"></div>
       </div>
+
+      <!-- 訂購人（登入後顯示） -->
       <div class="row-item" id="buyerRow" style="display:none">
         <div class="label">訂購人</div>
         <div id="buyerUI" class="money" style="font-size:16px;font-weight:600">—</div>
       </div>
-
 
       <div class="row-item">
         <div class="label">小計</div>
@@ -68,7 +68,7 @@
       </div>
 
       <div class="row-item" style="justify-content:center">
-        <button id="payBtn" class="btn btn-primary btn-lg px-5">
+        <button id="payBtn" class="btn btn-primary btn-lg px-5" type="button">
           <span class="btn-text">確認付款</span>
         </button>
       </div>
@@ -87,20 +87,16 @@
 
   <!-- Bootstrap JS -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <!-- Supabase：用你的 supa.js（/EduEnglish/supa.js） -->
+
+  <!-- 主程式 -->
   <script type="module">
     import { supabase } from './supa.js';
 
     // === 可調整：你的 Edge Function URL（create-ecpay-order） ===
-    // 若你的 function 位址不同，改這一行即可：
     const FUNCTION_URL = 'https://jeajrwpmrgczimmrflxo.functions.supabase.co/create-ecpay-order';
 
     // 定價表
-    const PRICE_TABLE = {
-      month: 200,   // 每主題 / 月
-      half:  960,   // 每主題 / 半年
-      year:  1680   // 每主題 / 年
-    };
+    const PRICE_TABLE = { month:200, half:960, year:1680 };
 
     // UI
     const periodUI   = document.getElementById('periodUI');
@@ -112,16 +108,56 @@
     const toastEl    = document.getElementById('toast');
     const toastMsgEl = document.getElementById('toastMsg');
     const toast      = new bootstrap.Toast(toastEl);
-    // ===== Buyer info & referral helpers =====
+
+    const TAX_RATE = 0.05;
+    const PERIOD_MAP = { month:'月繳', half:'半年', year:'年繳' };
+
+    function showToast(msg){ toastMsgEl.textContent = msg; toast.show(); }
+    const fmtNTD = (n) => `NT$${Number(n||0).toLocaleString('en-US')}`;
+
+    function readRef(){
+      try{
+        let ref = (new URLSearchParams(location.search).get('ref') || '').trim();
+        if (!ref){
+          const m=(location.search||'').match(/(?:\?|&)"?ref="?([^&"]+)/i);
+          if (m && m[1]) ref = decodeURIComponent(m[1].replace(/(^"|"$)/g,''));
+        }
+        return ref;
+      }catch{ return ''; }
+    }
+
+    function computeAmounts(subtotal, useRef){
+      subtotal = Number(subtotal||0);
+      const discount = useRef ? Math.round(subtotal*0.10) : 0;
+      const taxable  = Math.max(0, subtotal - discount);
+      const tax      = Math.round(taxable*TAX_RATE);
+      return { discount, tax, total: taxable + tax };
+    }
+
+    function ensureRefRow(ref, discount){
+      const taxRow = taxUI?.closest('.row-item');
+      if (!taxRow) return;
+      let row = document.getElementById('referralUI')?.closest('.row-item');
+      if (ref){
+        if (!row){
+          row = document.createElement('div');
+          row.className = 'row-item';
+          row.innerHTML = `
+            <div class="label">折扣（推薦碼） <span class="mute" style="font-weight:400;margin-left:.5rem;">${ref}</span></div>
+            <div id="referralUI" class="money">-</div>`;
+          taxRow.parentNode.insertBefore(row, taxRow);
+        }
+        const ui = document.getElementById('referralUI');
+        if (ui) ui.textContent = '- ' + fmtNTD(discount||0);
+      }else if(row){ row.remove(); }
+    }
+
     async function renderBuyer(){
       const row = document.getElementById('buyerRow');
       const ui  = document.getElementById('buyerUI');
       if (!row || !ui) return;
       const { data:auth } = await supabase.auth.getUser();
-      if (!auth?.user){
-        row.style.display = 'none';
-        return;
-      }
+      if (!auth?.user){ row.style.display = 'none'; return; }
       let display = auth.user.email || '';
       try{
         const { data:prof } = await supabase
@@ -130,8 +166,8 @@
           .eq('id', auth.user.id)
           .single();
         const name = prof?.full_name || prof?.nickname || auth.user.user_metadata?.name || '';
-        if (name) display = `${name} (${auth.user.email || ''})`;
-      }catch(e){}
+        if (name) display = `${name} (${auth.user.email||''})`;
+      }catch{}
       ui.textContent = display;
       row.style.display = '';
     }
@@ -149,44 +185,36 @@
       return { ref, valid: !self, self, ownerId: data.id };
     }
 
-
-    function showToast(msg){ toastMsgEl.textContent = msg; toast.show(); }
-
     // 解析查詢參數
     const qp = new URLSearchParams(location.search);
     let items  = (qp.get('items') || '').split(',').map(s=>s.trim()).filter(Boolean);
     let period = (qp.get('period') || 'month').toLowerCase();
 
-    // 友善顯示
-    const PERIOD_MAP = { month:'月繳', half:'半年', year:'年繳' };
-
     function renderSummary(){
-      // 週期
-      periodUI.textContent = PERIOD_MAP[period] || period;
-
-      // 方案清單
-      itemsUI.innerHTML = items.map(s => `<span class="pill">${s}</span>`).join('');
-
-      // 計價
-      const unit = PRICE_TABLE[period] ?? PRICE_TABLE.month;
-      const cnt  = items.length;
-      const subtotal = unit * cnt;
-      const tax      = 0;          // 若未課稅
-      const total    = subtotal + tax;
-
-      subtotalUI.textContent = `NT$${subtotal.toLocaleString()}`;
-      taxUI.textContent      = `NT$${tax.toLocaleString()}`;
-      totalUI.textContent    = `NT$${total.toLocaleString()}`;
-
-      return { unit, cnt, subtotal, tax, total };
+      try{
+        periodUI.textContent = PERIOD_MAP[period] || period;
+        itemsUI.innerHTML = items.map(s => `<span class="pill">${s}</span>`).join('');
+        const unit = PRICE_TABLE[period] ?? PRICE_TABLE.month;
+        const subtotal = unit * items.length;
+        const ref = readRef();
+        const {discount, tax, total} = computeAmounts(subtotal, Boolean(ref));
+        subtotalUI.textContent = fmtNTD(subtotal);
+        const taxLabel = taxUI?.previousElementSibling; if (taxLabel) taxLabel.innerHTML = `稅額 <span class="mute">(5%)</span>`;
+        taxUI.textContent   = fmtNTD(tax);
+        totalUI.textContent = fmtNTD(total);
+        ensureRefRow(ref, discount);
+        return { unit, subtotal, discount, tax, total, ref };
+      }catch(e){
+        console.error('[renderSummary]', e);
+        showToast('頁面載入異常，請重新整理或回定價頁再試。');
+      }
     }
 
     // 初次渲染
-    const calc = renderSummary();
+    renderSummary();
     renderBuyer();
     supabase.auth.onAuthStateChange(()=>renderBuyer());
 
-    // 建立訂單號（簡易）
     function makeOrderId(){
       const t = new Date().toISOString().replace(/[-:TZ.]/g,'').slice(0,14);
       const r = Math.random().toString(36).slice(2,8).toUpperCase();
@@ -194,14 +222,10 @@
     }
 
     async function getJwt(){
-      // 先用 getSession（速度較快）
       let { data:sessionData } = await supabase.auth.getSession();
       let jwt = sessionData?.session?.access_token || '';
-
       if (!jwt){
-        // 再用 getUser 兜底
-        const { data: userData, error } = await supabase.auth.getUser();
-        if (error) console.warn('[getUser]', error.message);
+        const { data: userData } = await supabase.auth.getUser();
         jwt = userData?.session?.access_token || '';
       }
       return jwt;
@@ -210,18 +234,13 @@
     async function submitOrder(){
       // 檢查登入
       const { data: auth } = await supabase.auth.getUser();
-      if (!auth?.user){
-        showToast('請先登入帳號再結帳。');
-        return;
-      }
+      if (!auth?.user){ showToast('請先登入帳號後再結帳。'); return; }
 
       // 取得 JWT
       const token = await getJwt();
-      if (!token){
-        showToast('無法取得授權憑證，請重新登入後再試。');
-        return;
-      }
-      // 計算金額 + 驗證推薦碼（自推不給折扣）
+      if (!token){ showToast('無法取得授權憑證，請重新登入後再試。'); return; }
+
+      // 金額與推薦碼驗證（禁止自推）
       const unit     = PRICE_TABLE[period] ?? PRICE_TABLE.month;
       const subtotal = unit * items.length;
       const vref     = await validateReferral(auth.user.id);
@@ -233,7 +252,6 @@
       taxUI.textContent   = fmtNTD(amounts.tax);
       totalUI.textContent = fmtNTD(amounts.total);
       if (vref.self){ showToast('不能使用自己的推薦碼（不計折扣與分潤）'); }
-    
 
       // UI busy
       payBtn.disabled = true;
@@ -243,52 +261,33 @@
 
       try{
         const payload = {
-order_id: makeOrderId(),
-            user_id:  auth.user.id,
-            email:    auth.user.email || '',
-            items,
-            period,
-            amount: (PRICE_TABLE[period] ?? PRICE_TABLE.month) * items.length,
-            source: 'web-github-pages'
-  subtotal: subtotal,
-  discount: amounts.discount,
-  tax: amounts.tax,
-  amount: amounts.total,
-  ref_code: vref.ref || '',
-  ref_valid: useRef,
-  ref_owner_id: vref.ownerId
-};
+          order_id: makeOrderId(),
+          user_id:  auth.user.id,
+          email:    auth.user.email || '',
+          items,
+          period,
+          subtotal: subtotal,
+          discount: amounts.discount,
+          tax:      amounts.tax,
+          amount:   amounts.total,
+          ref_code: vref.ref || '',
+          ref_valid: useRef,
+          ref_owner_id: vref.ownerId,
+          source: 'web-github-pages'
+        };
 
-        // 主要採 Authorization: Bearer
         console.log('[create-ecpay-order] payload', payload, FUNCTION_URL);
+
         const res = await fetch(FUNCTION_URL, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`  // 主要授權
+            'Authorization': `Bearer ${token}`
           },
           body: JSON.stringify(payload),
-          // 把 cookie 排除在外（Functions 不吃到第三方 cookie）
           credentials: 'omit',
           mode: 'cors'
         });
-
-        // 如果你的 function 端採用 formData 解析，也一併準備 (後備方案)：
-        if (res.status === 401){
-          const form = new FormData();
-          form.set('token', token);
-          form.set('order_id', payload.order_id);
-          form.set('json', JSON.stringify(payload));
-          const res2 = await fetch(FUNCTION_URL, { method:'POST', body:form, mode:'cors' });
-          const data2 = await res2.json().catch(()=>({}));
-          if (!res2.ok){
-            console.warn('[form-fallback]', data2);
-            throw new Error(data2?.message || '建立訂單失敗（form）');
-          }
-          showToast('訂單建立成功（form）');
-          // TODO: 導到綠界
-          return;
-        }
 
         const data = await res.json().catch(()=>({}));
         if (!res.ok){
@@ -297,8 +296,8 @@ order_id: makeOrderId(),
         }
 
         showToast('訂單建立成功！即將導向金流頁面…');
-        // TODO: 依回傳引導到綠界（data 內容依你的 function 決定）
-        // location.href = data.payment_url;
+        // TODO: 若 Function 回傳金流網址，可在此導轉：
+        // if (data?.payment_url) location.href = data.payment_url;
       }
       catch(err){
         console.error(err);
@@ -310,10 +309,50 @@ order_id: makeOrderId(),
       }
     }
 
-    payBtn.addEventListener('click', submitOrder);
+    // 付款按鈕：未登入則引導登入並回送單；已登入直接送單
+    async function handlePayClick(ev){
+      ev.preventDefault();
+      const { data:auth } = await supabase.auth.getUser();
+      if (auth?.user){ await submitOrder(); return; }
+      try {
+        sessionStorage.setItem('bw_next', location.href);
+        sessionStorage.setItem('bw_submit_after_login','1');
+      }catch{}
+      const emailInput = document.querySelector('input[type="email"], input[name*="email" i]');
+      if (emailInput){
+        emailInput.scrollIntoView({behavior:'smooth', block:'center'});
+        setTimeout(()=> emailInput.focus(), 300);
+      }
+      showToast('請先登入帳號後再結帳。');
+    }
+
+    supabase.auth.onAuthStateChange((event, session)=>{
+      if (session?.user){
+        let flag=false;
+        try{ flag = sessionStorage.getItem('bw_submit_after_login')==='1'; sessionStorage.removeItem('bw_submit_after_login'); }catch{}
+        if (flag) submitOrder();
+      }
+    });
+
+    payBtn.addEventListener('click', handlePayClick, { capture:true });
+  </script>
+
+  <!-- 後備錯誤攔截（保命機制） -->
+  <script>
+  (function(){
+    function show(msg){
+      try{
+        const el=document.getElementById('toastMsg'); const t=document.getElementById('toast');
+        if(el&&t&&window.bootstrap){ el.textContent=msg; new window.bootstrap.Toast(t).show(); }
+      }catch{}
+    }
+    window.addEventListener('error', e=>{ console.error('[checkout:error]', e); show('程式錯誤：'+(e.message||e.error||'')); });
+    window.addEventListener('unhandledrejection', e=>{ const m=(e.reason&&(e.reason.message||e.reason))||e; console.error('[checkout:promise]', e); show('程式錯誤：'+m); });
+  })();
   </script>
 </body>
 </html>
+
 
 
 
