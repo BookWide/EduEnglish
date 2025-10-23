@@ -246,63 +246,91 @@
 
     payBtn.addEventListener('click', submitOrder);
   </script>
-<script type="module">
-import { supabase } from './supa.js';
+<script>
+/* ===== Referral row + discount (non-invasive) ===== */
+(() => {
+  // 1) 取得推薦碼（URL 優先，其次 localStorage）
+  const usp = new URLSearchParams(location.search);
+  const ref = (usp.get('ref') || localStorage.getItem('referral_code') || '').trim();
+  if (ref) localStorage.setItem('referral_code', ref);
 
-const ref = new URLSearchParams(location.search).get('ref') || '';
-const isReferral = Boolean(ref);
+  // 沒有推薦碼 → 不做任何事，保持頁面原狀
+  if (!ref) return;
 
-const PRICE_TABLE = {
-  month: 200,
-  half: 960,
-  year: 1680
-};
-const PERIOD_MAP = { month: '月繳', half: '半年', year: '年繳' };
+  // 2) 工具：抓數字、格式化 NTD
+  const parseNTD = (s) => Number(String(s||'').replace(/[^\d.-]/g,''));
+  const fmtNTD   = (n) => `NT$${Number(n).toLocaleString('en-US')}`;
 
-// 稅率
-const TAX_RATE = 0.05;
+  // 3) 找到「小計」與「應付金額」兩個列（不假設 class，只比對中文標籤）
+  function findRowByLabel(labelText){
+    const all = document.body.querySelectorAll('*');
+    for (const el of all){
+      if (el.children.length === 0 && el.textContent.trim() === labelText){
+        // 取父層當作一整列
+        const row = el.closest('*');
+        // 行內通常會跟著右側金額，所以再往上一階，避免只抓到 label span
+        return row?.parentElement?.closest('*') || row?.parentElement || row;
+      }
+    }
+    return null;
+  }
+  const subtotalRow = findRowByLabel('小計');
+  const totalRow    = findRowByLabel('應付金額');
 
-// 補上推薦碼區塊（若無推薦碼才加上）
-if (!isReferral) {
-  const taxRow = document.querySelector('#taxUI').closest('.row-item');
-  const newRow = document.createElement('div');
-  newRow.className = 'row-item';
-  newRow.innerHTML = `
-    <div class="label">折扣（推薦碼）</div>
-    <div id="referralUI" class="money text-success">—</div>
-  `;
-  taxRow.parentNode.insertBefore(newRow, taxRow.nextSibling);
-}
+  if (!subtotalRow || !totalRow) return; // 結構若不同就安靜退出，不影響結帳
 
-// 重新渲染摘要
-(function renderSummary() {
-  const qp = new URLSearchParams(location.search);
-  const items = (qp.get('items') || '').split(',').map(s => s.trim()).filter(Boolean);
-  const period = (qp.get('period') || 'month').toLowerCase();
+  // 4) 從小計列右側抓金額文字
+  function findAmountInRow(row){
+    // 嘗試從該列中尋找含 NT$ 的節點
+    const cand = row.querySelectorAll('*');
+    for (const n of cand){
+      if (/NT\$/.test(n.textContent)) return n;
+    }
+    // 找不到就回傳該列最後一個子節點
+    return row.lastElementChild || row;
+  }
+  const subtotalEl = findAmountInRow(subtotalRow);
+  const totalEl    = findAmountInRow(totalRow);
 
-  const periodUI = document.getElementById('periodUI');
-  const itemsUI = document.getElementById('itemsUI');
-  const subtotalUI = document.getElementById('subtotalUI');
-  const taxUI = document.getElementById('taxUI');
-  const totalUI = document.getElementById('totalUI');
-  const refUI = document.getElementById('referralUI');
+  const subtotal = parseNTD(subtotalEl.textContent);
+  if (!isFinite(subtotal) || subtotal <= 0) return;
 
-  const unit = PRICE_TABLE[period] ?? PRICE_TABLE.month;
-  const cnt = items.length;
-  const subtotal = unit * cnt;
+  // 5) 計算折扣（依你目前規則：固定 NT$20）
+  const discount = 20;
 
-  // 若無推薦碼 → 折扣 10%
-  const discount = !isReferral ? Math.round(subtotal * 0.1) : 0;
-  const tax = Math.round((subtotal - discount) * TAX_RATE);
-  const total = subtotal - discount + tax;
+  // 6) 建立「推薦碼 / 折扣」列（樣式沿用父容器，盡量不帶自訂 CSS）
+  const refRow = document.createElement('div');
+  refRow.style.display = 'flex';
+  refRow.style.justifyContent = 'space-between';
+  refRow.style.alignItems = 'center';
+  refRow.style.padding = getComputedStyle(subtotalRow).padding || '12px 16px';
+  refRow.style.borderTop = getComputedStyle(subtotalRow).borderTop || '1px solid rgba(0,0,0,0.08)';
 
-  // UI
-  periodUI.textContent = PERIOD_MAP[period] || period;
-  itemsUI.innerHTML = items.map(s => `<span class="pill">${s}</span>`).join('');
-  subtotalUI.textContent = `NT$${subtotal.toLocaleString()}`;
-  taxUI.textContent = `NT$${tax.toLocaleString()}`;
-  totalUI.textContent = `NT$${total.toLocaleString()}`;
-  if (refUI) refUI.textContent = discount > 0 ? `-NT$${discount.toLocaleString()}` : '—';
+  const left = document.createElement('span');
+  left.textContent = '推薦碼：';
+  const codeBadge = document.createElement('span');
+  codeBadge.textContent = ref;
+  codeBadge.style.display = 'inline-block';
+  codeBadge.style.padding = '2px 10px';
+  codeBadge.style.borderRadius = '999px';
+  codeBadge.style.border = '1px solid #ced4da';
+  codeBadge.style.fontSize = '12px';
+  codeBadge.style.marginLeft = '6px';
+  left.appendChild(codeBadge);
+
+  const right = document.createElement('strong');
+  right.textContent = `- ${fmtNTD(discount)}`;
+  right.style.color = '#1f2937';
+
+  refRow.appendChild(left);
+  refRow.appendChild(right);
+
+  // 7) 插入「推薦碼」列：在小計之後、應付金額之前
+  totalRow.parentElement.insertBefore(refRow, totalRow);
+
+  // 8) 更新「應付金額」
+  const newTotal = Math.max(0, subtotal - discount);
+  totalEl.textContent = fmtNTD(newTotal);
 })();
 </script>
 
