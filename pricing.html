@@ -9,11 +9,11 @@
     :root{ --bw-bg:#f7f9fc; --bw-text:#111827; --bw-card:#ffffff; --bw-mute:#6b7280; }
     body{ background:var(--bw-bg); color:var(--bw-text); }
     .topbar{ display:flex; align-items:center; justify-content:space-between; padding:14px 20px; }
-    .acc-link{ font-weight:700; font-size:1.5rem; cursor:pointer; user-select:none; }
+    .acc-link{ font-weight:800; font-size:1.5rem; cursor:pointer; user-select:none; }
     .acc-link:hover{ text-decoration:underline; }
     .wrap{ max-width:1100px; margin:0 auto; padding:0 16px 40px; }
     .deck{ display:flex; gap:16px; flex-wrap:nowrap; overflow-x:auto; padding-bottom:10px; }
-    .topic-card{ background:var(--bw-card); border:1px solid #e5e7eb; border-radius:16px; padding:16px; min-width: 210px; box-shadow:0 2px 8px rgba(15,23,42,.05); }
+    .topic-card{ background:var(--bw-card); border:1px solid #e5e7eb; border-radius:16px; padding:16px; min-width:210px; box-shadow:0 2px 8px rgba(15,23,42,.05); }
     .topic-title{ font-size:1.35rem; font-weight:800; margin-bottom:.5rem; }
     .topic-price{ font-weight:800; margin-bottom:.5rem; }
     .muted{ color:var(--bw-mute); }
@@ -31,7 +31,7 @@
     <h1 class="display-5 fw-bold mb-3">BookWide | 方案與定價</h1>
     <p class="muted mb-4">每個主題皆為 <b>NT$200 / 月</b>；你可以一次勾選多個主題，一筆訂單一起結帳。</p>
 
-    <!-- 五張主題卡：務必排成一列（可水平捲動） -->
+    <!-- 五張主題卡：排成一列（可水平捲動） -->
     <div id="deck" class="deck">
       <div class="topic-card">
         <div class="topic-title">故事 Story</div>
@@ -135,6 +135,7 @@
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
+          <div id="loginError" class="alert alert-danger py-2 d-none"></div>
           <div class="mb-3">
             <label class="form-label">Email</label>
             <input id="loginEmail" type="email" class="form-control" placeholder="you@example.com">
@@ -143,7 +144,7 @@
             <label class="form-label">密碼</label>
             <input id="loginPwd" type="password" class="form-control" placeholder="••••••••">
           </div>
-          <div class="form-text text-light">（示範視窗；串接 Supabase 時將此區改為真正登入）</div>
+          <div class="form-text text-light">使用你的 BookWide 帳號登入。</div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
@@ -154,7 +155,9 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script>
+  <script type="module">
+    import { supabase } from './supa.js';
+
     const accBox = document.getElementById('accBox');
     const deck = document.getElementById('deck');
     const goBtn = document.getElementById('goBtn');
@@ -162,25 +165,8 @@
     const qp = new URLSearchParams(location.search);
     const ref = (qp.get('ref')||'').trim(); // 保留推薦碼以便帶到 checkout
 
-    let isLoggedIn = false; // 預設未登入
-
-    // 控制可勾選 / 不可勾選
-    function updateLockUI(){
-      const checks = document.querySelectorAll('.itemCheck');
-      if(!isLoggedIn){
-        checks.forEach(c=>{ c.checked=false; c.disabled=true; });
-        deck.classList.add('disabled-mask');
-        goBtn.disabled = true;
-        lockHint.style.display = '';
-        accBox.textContent = '請登入';
-      }else{
-        checks.forEach(c=>{ c.disabled=false; });
-        deck.classList.remove('disabled-mask');
-        lockHint.style.display = 'none';
-        accBox.textContent = '已登入';
-        updateGoBtn();
-      }
-    }
+    let isLoggedIn = false;
+    let loginModal;
 
     function selectedItems(){
       return Array.from(document.querySelectorAll('.itemCheck:checked')).map(c=>c.value);
@@ -192,28 +178,37 @@
     function updateGoBtn(){
       goBtn.disabled = !isLoggedIn || selectedItems().length===0;
     }
+    function updateLockUI(email=''){
+      const checks = document.querySelectorAll('.itemCheck');
+      if(!isLoggedIn){
+        checks.forEach(c=>{ c.checked=false; c.disabled=true; });
+        deck.classList.add('disabled-mask');
+        lockHint.style.display = '';
+        accBox.textContent = '請登入';
+      }else{
+        checks.forEach(c=>{ c.disabled=false; });
+        deck.classList.remove('disabled-mask');
+        lockHint.style.display = 'none';
+        accBox.textContent = email ? `已登入：${email}` : '已登入';
+      }
+      updateGoBtn();
+    }
 
-    // 點擊右上「請登入」=> 開啟登入視窗
-    let loginModal;
-    window.addEventListener('DOMContentLoaded', ()=>{
-      loginModal = new bootstrap.Modal(document.getElementById('loginModal'));
-      accBox.addEventListener('click', ()=> loginModal.show());
-      document.getElementById('loginSubmit').addEventListener('click', ()=>{
-        const email = document.getElementById('loginEmail').value.trim();
-        // 模擬登入成功（實作 Supabase 時改為 signIn）
-        isLoggedIn = !!email;
-        accBox.textContent = isLoggedIn ? `已登入：${email}` : '請登入';
-        loginModal.hide();
-        updateLockUI();
-      });
+    async function syncAuthUI(){
+      const { data:sessionData } = await supabase.auth.getSession();
+      const email = sessionData?.session?.user?.email || '';
+      isLoggedIn = !!sessionData?.session?.user;
+      updateLockUI(email);
+      // 需求：若有推薦碼且目前未登入 → 自動跳出登入窗
+      if(ref && !isLoggedIn){
+        setTimeout(()=> loginModal.show(), 300);
+      }
+    }
 
-      // 勾選/更換週期時，更新按鈕可用狀態
-      document.querySelectorAll('.itemCheck, input[name="period"]').forEach(el=>{
-        el.addEventListener('change', updateGoBtn);
-      });
-
-      updateLockUI();
-    });
+    async function signIn(email, password){
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if(error) throw error;
+    }
 
     // 前往結帳：組 URL 並帶上推薦碼（若有）
     goBtn.addEventListener('click', ()=>{
@@ -223,9 +218,46 @@
       if(ref){ url += `&ref=${encodeURIComponent(ref)}`; }
       location.href = url;
     });
+
+    // DOM Ready
+    window.addEventListener('DOMContentLoaded', ()=>{
+      loginModal = new bootstrap.Modal(document.getElementById('loginModal'));
+      // 點擊右上登入
+      accBox.addEventListener('click', ()=>{
+        if(!isLoggedIn) loginModal.show();
+      });
+      // 登入送出
+      document.getElementById('loginSubmit').addEventListener('click', async ()=>{
+        const email = document.getElementById('loginEmail').value.trim();
+        const pwd = document.getElementById('loginPwd').value;
+        const errBox = document.getElementById('loginError');
+        errBox.classList.add('d-none');
+        try{
+          await signIn(email, pwd);
+          loginModal.hide();
+        }catch(e){
+          errBox.textContent = e?.message || '登入失敗';
+          errBox.classList.remove('d-none');
+        }
+      });
+
+      // 勾選/更換週期時，更新按鈕可用狀態
+      document.querySelectorAll('.itemCheck, input[name="period"]').forEach(el=>{
+        el.addEventListener('change', updateGoBtn);
+      });
+
+      // 初始同步狀態
+      syncAuthUI();
+    });
+
+    // Supabase 狀態變更時自動同步（例如從首頁已登入再開這頁）
+    supabase.auth.onAuthStateChange((_e, session)=>{
+      isLoggedIn = !!session?.user;
+      const email = session?.user?.email || '';
+      updateLockUI(email);
+    });
   </script>
 </body>
 </html>
 
-</html>
 
