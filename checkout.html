@@ -52,6 +52,11 @@
       </div>
 
       <div class="row-item">
+        <div class="label">折扣（推薦碼）</div>
+        <div id="referralUI" class="money">—</div>
+      </div>
+
+      <div class="row-item">
         <div class="label">稅額 <span class="mute">(0%)</span></div>
         <div id="taxUI" class="money">NT$0</div>
       </div>
@@ -106,6 +111,37 @@
     const toastEl    = document.getElementById('toast');
     const toastMsgEl = document.getElementById('toastMsg');
     const toast      = new bootstrap.Toast(toastEl);
+    // --- Pricing helpers ---
+    const TAX_RATE = 0.05; // 5% VAT added
+
+    function parseNTD(s){ return Number(String(s||'').replace(/[^\d.-]/g,'')); }
+    function fmtNTD(n){ return `NT$${Number(n).toLocaleString('en-US')}`; }
+
+    // Robust ref reader: URL (handles quotes) -> sessionStorage -> window.name
+    function readRef(){
+      let ref = '';
+      try { ref = (new URLSearchParams(location.search).get('ref') || '').trim(); } catch(e){}
+      if (!ref) {
+        const m = (location.search||'').match(/(?:\?|&)"?ref="?([^&"]+)/i);
+        if (m && m[1]) ref = decodeURIComponent(m[1].replace(/(^"|"$)/g, '')).trim();
+      }
+      if (!ref) {
+        ref = sessionStorage.getItem('bw_ref') || '';
+        if (!ref) {
+          try { ref = (JSON.parse(window.name||'{}').bw_ref || ''); } catch(e){}
+        }
+      }
+      return ref;
+    }
+
+    function computeAmounts(subtotal, refPresent, refValid){
+      const discount = (refPresent && refValid) ? Math.round(subtotal * 0.10) : 0;
+      const taxable  = Math.max(0, subtotal - discount);
+      const tax      = Math.round(taxable * TAX_RATE);
+      const total    = taxable + tax;
+      return { discount, tax, total };
+    }
+
 
     function showToast(msg){ toastMsgEl.textContent = msg; toast.show(); }
 
@@ -128,12 +164,24 @@
       const unit = PRICE_TABLE[period] ?? PRICE_TABLE.month;
       const cnt  = items.length;
       const subtotal = unit * cnt;
-      const tax      = 0;          // 若未課稅
-      const total    = subtotal + tax;
+
+      // 讀取推薦碼（此處先假設有效，純顯示；實際在 submit 再驗證）
+      const ref = readRef();
+      const { discount, tax, total } = computeAmounts(subtotal, Boolean(ref), true);
 
       subtotalUI.textContent = `NT$${subtotal.toLocaleString()}`;
+      const taxLabel = taxUI?.previousElementSibling;
+      if (taxLabel) taxLabel.innerHTML = `稅額 <span class="mute">(5%)</span>`;
       taxUI.textContent      = `NT$${tax.toLocaleString()}`;
       totalUI.textContent    = `NT$${total.toLocaleString()}`;
+
+      // 折扣列顯示
+      const refUI = document.getElementById('referralUI');
+      if (ref) {
+        refUI.textContent = `-NT$${discount.toLocaleString()}`;
+      } else {
+        refUI.textContent = '—';
+      }
 
       return { unit, cnt, subtotal, tax, total };
     }
@@ -149,6 +197,22 @@
     }
 
     async function getJwt(){
+      // Validate referral code: must exist and not be self
+      async function validateReferral(userId){
+        const ref = readRef();
+        if (!ref) return { ref, valid: false, refOwnerId: null };
+
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('id, referral_code')
+          .eq('referral_code', ref)
+          .single();
+
+        if (error || !data) return { ref, valid: false, refOwnerId: null };
+        if (data.id === userId) return { ref, valid: false, refOwnerId: data.id }; // self-referral not allowed
+        return { ref, valid: true, refOwnerId: data.id };
+      }
+
       // 先用 getSession（速度較快）
       let { data:sessionData } = await supabase.auth.getSession();
       let jwt = sessionData?.session?.access_token || '';
@@ -247,42 +311,24 @@
     payBtn.addEventListener('click', submitOrder);
   </script>
 
+<!-- Tab-only capture of referral code (no cookies/localStorage), to survive pre-login navigation within the tab -->
 <script>
-/* Final patch: add 5% tax; if URL has ?ref=..., keep original subtotal (no referral discount/row) */
-window.addEventListener('load', () => {
-  try {
-    const subtotalEl = document.getElementById('subtotalUI');
-    const taxEl      = document.getElementById('taxUI');
-    const totalEl    = document.getElementById('totalUI');
-    if (!subtotalEl || !taxEl || !totalEl) return;
-
-    const usp = new URLSearchParams(location.search);
-    const ref = (usp.get('ref') || '').trim();
-
-    const parseNTD = s => Number(String(s || '').replace(/[^\d.-]/g, ''));
-    const fmtNTD   = n => `NT$${Number(n).toLocaleString('en-US')}`;
-
-    const subtotal = parseNTD(subtotalEl.textContent || '0');
-    const TAX_RATE = 0.05;
-
-    // No referral discount at all (even if ref is present). Keep original amount.
-    const discount = 0;
-
-    // Compute tax based on (subtotal - discount), add-on 5%
-    const taxable = Math.max(0, subtotal - discount);
-    const tax = Math.round(taxable * TAX_RATE);
-    const total = taxable + tax;
-
-    // Update UI
-    // also update the tax label to 5%
-    const taxLabel = taxEl.previousElementSibling;
-    if (taxLabel) taxLabel.innerHTML = `稅額 <span class="mute">(5%)</span>`;
-    taxEl.textContent   = fmtNTD(tax);
-    totalEl.textContent = fmtNTD(total);
-  } catch (e) {
-    console && console.warn && console.warn('[checkout patch]', e);
+(function () {
+  var qs = location.search || "";
+  var ref = "";
+  try { ref = (new URLSearchParams(qs).get('ref') || "").trim(); } catch(e){}
+  if (!ref) {
+    var m = qs.match(/(?:\?|&)"?ref="?([^&"]+)/i);
+    if (m && m[1]) ref = decodeURIComponent(m[1].replace(/(^"|"$)/g, '')).trim();
   }
-});
+  if (ref) {
+    try { sessionStorage.setItem('bw_ref', ref); } catch(e){}
+    try {
+      var stash = {}; try{ stash = JSON.parse(window.name||"{}"); }catch(e){}
+      stash.bw_ref = ref; window.name = JSON.stringify(stash);
+    } catch(e){}
+  }
+})();
 </script>
 </body>
 </html>
