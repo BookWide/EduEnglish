@@ -7,17 +7,20 @@
 <style>
   :root{--ink:#e6f0ff;--bg:#0b1520;--card:#0f2030;--line:#264a6a}
   *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font-family:ui-sans-serif,system-ui}
+  a{color:inherit;text-decoration:none}
   .wrap{max-width:1200px;margin:24px auto;padding:0 16px}
-  .layout{display:grid;grid-template-columns:1.2fr .8fr;gap:16px}
+  .layout{display:grid;grid-template-columns:1.25fr .75fr;gap:16px}
   .panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}
   iframe{width:100%;aspect-ratio:16/9;border:0;border-radius:12px}
+  .toolbar{margin-top:12px;background:#0c1a28;border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .btn{padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#10334d;color:var(--ink);cursor:pointer}
   .tabs{display:flex;gap:8px;margin-bottom:12px}
   .tabs button{padding:8px 12px;border-radius:10px;border:1px solid var(--line);background:#0c1a28;color:var(--ink);cursor:pointer}
   .tabs button.on{background:#10334d}
   table{width:100%;border-collapse:separate;border-spacing:0 8px}
   th,td{vertical-align:top}
   .time{opacity:.8;white-space:nowrap;width:60px}
-  .en{font-size:16px;line-height:1.4}
+  .en{font-size:16px;line-height:1.45}
   .zh{opacity:.85;margin-top:4px}
   .q{margin:10px 0;padding:12px;border:1px solid var(--line);border-radius:10px}
   .choices label{display:block;margin:6px 0;cursor:pointer}
@@ -27,9 +30,30 @@
 </head>
 <body>
 <div class="wrap">
-  <a href="./index.html" style="padding:8px 10px;border:1px solid var(--line);border-radius:10px;text-decoration:none;color:inherit">← 回音樂清單</a>
+  <a href="./index.html" class="btn">← 回音樂清單</a>
+
   <div class="layout" style="margin-top:12px">
-    <div class="panel"><div id="media"></div></div>
+    <!-- 左：影片 + 工具列 -->
+    <div class="panel">
+      <div id="media"></div>
+
+      <!-- 工具列 -->
+      <div class="toolbar">
+        <button class="btn" id="btnPrev">上一句</button>
+        <button class="btn" id="btnPlay">播放/暫停</button>
+        <button class="btn" id="btnNext">下一句</button>
+        <button class="btn" id="btnRepeat">重複本句</button>
+        <label style="margin-left:6px"><input type="checkbox" id="follow" checked> 跟隨</label>
+        <label>偏移 <input id="offset" type="number" step="0.1" value="0" style="width:70px">s</label>
+        <label>速度
+          <select id="rate">
+            <option>0.75</option><option selected>1.0</option><option>1.25</option><option>1.5</option><option>1.75</option><option>2</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <!-- 右：歌詞 / 測驗 / AI互動 -->
     <div class="panel">
       <div class="tabs">
         <button class="t on" data-tab="lyrics">歌詞</button>
@@ -43,23 +67,28 @@
   </div>
 </div>
 
+<!-- YouTube IFrame API（控制播放/跳播/倍速必須） -->
+<script src="https://www.youtube.com/iframe_api"></script>
+
 <script type="module">
-  const qs = new URLSearchParams(location.search);
+  const qs   = new URLSearchParams(location.search);
   const slug = qs.get('slug');
 
+  // 讀清單
   const list = await (await fetch('./data/index.json')).json();
   const meta = list.find(x=>x.slug===slug) || list[0];
-  const YT = (id, start=0)=>`https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&start=${Math.floor(start)}`;
 
-  // 左：YouTube
-  const media = document.getElementById('media');
-  function loadVideo(at=0){ media.innerHTML =
-    `<iframe src="${YT(meta.youtubeId, at)}"
-      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-      allowfullscreen></iframe>`; }
-  loadVideo(0);
+  // 影片 iframe（注意 enablejsapi=1）
+  const YTURL = (id, start=0)=>`https://www.youtube.com/embed/${id}?enablejsapi=1&rel=0&modestbranding=1&start=${Math.floor(start)}`;
+  function mountVideo(at=0){
+    document.getElementById('media').innerHTML =
+      `<iframe id="ytp" src="${YTURL(meta.youtubeId,at)}"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        allowfullscreen></iframe>`;
+  }
+  mountVideo(0);
 
-  // 右：分頁
+  // 分頁切換
   document.querySelectorAll('.t').forEach(b=>{
     b.onclick=()=>{
       document.querySelectorAll('.t').forEach(x=>x.classList.remove('on'));
@@ -71,63 +100,126 @@
     };
   });
 
-  // 歌詞（JSON：/music/data/cues-<slug>.json）
+  // 歌詞（載入 cues-<slug>.json）
   const lyrBox = document.getElementById('tab-lyrics');
   lyrBox.innerHTML = `<h2 style="margin:.2rem 0">${meta.title}</h2>
-  <div style="opacity:.85">${meta.artist}</div>
-  <div style="opacity:.8;margin:.5rem 0">${meta.level} · ${meta.topic||''}</div>
+  <div style="opacity:.85">${meta.artist||''}</div>
+  <div style="opacity:.8;margin:.5rem 0">${meta.level||''} · ${meta.topic||''}</div>
   <div id="lyrics-body" class="hint">載入歌詞中…</div>`;
 
+  let cues = [];
   try{
-    const cuesResp = await fetch(`./data/cues-${meta.slug}.json`);
-    if (cuesResp.ok){
-      const {cues=[]} = await cuesResp.json();
+    const r = await fetch(`./data/cues-${meta.slug}.json`);
+    if(r.ok){
+      const data = await r.json();
+      cues = data.cues || [];
       document.getElementById('lyrics-body').innerHTML = renderLyrics(cues);
+      // 點一句 → 跳播
       document.getElementById('lyrics-body').addEventListener('click', e=>{
         const tr = e.target.closest('tr[data-t]'); if(!tr) return;
-        loadVideo(Number(tr.dataset.t)); window.scrollTo({top:0,behavior:'smooth'});
+        jumpToTime(Number(tr.dataset.t));
+        window.scrollTo({top:0,behavior:'smooth'});
       });
     }else{
-      document.getElementById('lyrics-body').innerHTML =
-        `（找不到 <code>cues-${meta.slug}.json</code>。先用這份示範，之後請換成你有授權或 CC 的歌詞。）`;
+      document.getElementById('lyrics-body').innerHTML = `（找不到 <code>cues-${meta.slug}.json</code>）`;
     }
-  }catch{ /* ignore */ }
+  }catch{ document.getElementById('lyrics-body').textContent='（歌詞載入失敗）'; }
 
-  // 測驗（/music/data/quiz-<slug>.json）
+  // 測驗（可選）
   const quizBox = document.getElementById('tab-quiz');
   try{
-    const qResp = await fetch(`./data/quiz-${meta.slug}.json`);
-    if (qResp.ok){
-      const {questions=[]} = await qResp.json();
+    const q = await fetch(`./data/quiz-${meta.slug}.json`);
+    if(q.ok){
+      const {questions=[]} = await q.json();
       quizBox.innerHTML = renderQuiz(questions);
       quizBox.addEventListener('click', e=>{
-        const b = e.target.closest('button[data-q]');
-        if(!b) return;
-        const qi = Number(b.dataset.q);
-        const ans = b.dataset.ans;
+        const b = e.target.closest('button[data-q]'); if(!b) return;
+        const qi = Number(b.dataset.q), ans=b.dataset.ans;
         const pick = quizBox.querySelector(`input[name="q${qi}"]:checked`)?.value;
-        const msg = quizBox.querySelector(`#msg${qi}`);
+        const msg  = quizBox.querySelector(`#msg${qi}`);
         msg.textContent = (pick===ans) ? '✔ 正確！' : '✘ 再想想';
-        msg.className = (pick===ans) ? 'ok' : 'bad';
+        msg.className   = (pick===ans) ? 'ok' : 'bad';
       });
     }else{
-      quizBox.innerHTML = `（之後接 <code>quiz-${meta.slug}.json</code> 測驗檔）`;
+      quizBox.innerHTML = '（之後可加入 quiz-*.json 題目）';
     }
-  }catch{ /* ignore */ }
+  }catch{ quizBox.textContent = '（測驗載入失敗）'; }
 
-  // helpers
+  // 工具列（透過 IFrame API 控制）
+  let ytPlayer=null, curIdx=0, repeat=false, offset=0;
+
+  // 這段是給非 module 的 onYouTubeIframeAPIReady 使用
+  window.__setCues = (arr)=>{ cues = Array.isArray(arr)?arr:[]; };
+  window.__getCues = ()=>cues;
+  window.__jumpByIdx = (i)=> jumpByIndex(i);
+
+  // 掛工具列事件
+  document.getElementById('btnPrev').onclick = ()=> jumpByIndex(curIdx-1);
+  document.getElementById('btnNext').onclick = ()=> jumpByIndex(curIdx+1);
+  document.getElementById('btnPlay').onclick = ()=>{
+    const s = ytPlayer?.getPlayerState?.();
+    (s===1) ? ytPlayer.pauseVideo() : ytPlayer.playVideo();
+  };
+  document.getElementById('btnRepeat').onclick = ()=> repeat = !repeat;
+  document.getElementById('rate').onchange = e=> ytPlayer?.setPlaybackRate(parseFloat(e.target.value));
+  document.getElementById('offset').oninput = e=> offset = parseFloat(e.target.value||0);
+
+  // 輪詢：定位當前句、處理 repeat、歌詞跟隨
+  function tick(){
+    if(ytPlayer && cues.length){
+      const ct = ytPlayer.getCurrentTime?.() || 0;
+      // 找目前句
+      for(let i=0;i<cues.length;i++){
+        const start = cues[i].t + offset;
+        const end   = (cues[i+1]?.t ?? 1e9) + offset;
+        if(ct >= start && ct < end){ curIdx=i; break; }
+      }
+      // repeat
+      if(repeat){
+        const start = cues[curIdx]?.t + offset;
+        const end   = (cues[curIdx+1]?.t ?? 1e9) + offset;
+        if(ct >= end - 0.05) ytPlayer.seekTo(Math.max(0,start), true);
+      }
+      // 跟隨歌詞
+      if(document.getElementById('follow').checked){
+        const row = document.querySelector(`tr[data-t="${cues[curIdx]?.t}"]`);
+        if(row && !row.classList.contains('cur')){
+          document.querySelectorAll('#lyrics-body tr.cur').forEach(x=>x.classList.remove('cur'));
+          row.classList.add('cur');
+          row.scrollIntoView({block:'center',behavior:'smooth'});
+        }
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+
+  // 跳到指定 index
+  function jumpByIndex(i){
+    if(!cues.length) return;
+    curIdx = Math.min(Math.max(0,i), cues.length-1);
+    jumpToTime(cues[curIdx].t);
+  }
+  // 跳到秒數
+  function jumpToTime(sec){
+    const t = Math.max(0,(sec||0)+offset);
+    if(ytPlayer?.seekTo){ ytPlayer.seekTo(t,true); ytPlayer.playVideo(); }
+    else mountVideo(t); // 後備
+  }
+
+  // 工具：renderers
   function fmt(sec){const m=Math.floor(sec/60).toString().padStart(2,'0'); const s=Math.floor(sec%60).toString().padStart(2,'0'); return `${m}:${s}`;}
-  function esc(s){return s.replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));}
-  function renderLyrics(cues){
+  function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));}
+  function renderLyrics(arr){
     return `<table><thead><tr><th class="time">時間</th><th>內容</th></tr></thead><tbody>
-      ${cues.map(c=>`
-      <tr data-t="${c.t}">
-        <td class="time">${fmt(c.t)}</td>
-        <td>
-          <div class="en">${esc(c.en||'')}</div>
-          ${c.zh?`<div class="zh">${esc(c.zh)}</div>`:''}
-        </td>
-      </tr>`).join('')}
+      ${arr.map(c=>`
+        <tr data-t="${c.t}">
+          <td class="time">${fmt(c.t)}</td>
+          <td>
+            <div class="en">${esc(c.en)}</div>
+            ${c.zh?`<div class="zh">${esc(c.zh)}</div>`:''}
+          </td>
+        </tr>`).join('')}
     </tbody></table>`;
   }
   function renderQuiz(qs){
@@ -135,14 +227,36 @@
       <div class="q">
         <div style="margin-bottom:6px"><b>Q${i+1}.</b> ${esc(q.text)}</div>
         <div class="choices">
-          ${q.choices.map((c,j)=>`
-            <label><input type="radio" name="q${i}" value="${esc(c)}"> ${esc(c)}</label>
-          `).join('')}
+          ${q.choices.map(c=>`<label><input type="radio" name="q${i}" value="${esc(c)}"> ${esc(c)}</label>`).join('')}
         </div>
-        <button data-q="${i}" data-ans="${esc(q.answer)}">提交</button>
+        <button class="btn" data-q="${i}" data-ans="${esc(q.answer)}">提交</button>
         <span id="msg${i}" style="margin-left:8px"></span>
       </div>`).join('');
   }
+
+  // 把 cues 提供給非 module 腳本
+  window.__setCues(cues);
+</script>
+
+<!-- 非 module：YouTube API 需要全域 callback -->
+<script>
+let ytPlayer=null;
+function onYouTubeIframeAPIReady(){
+  ytPlayer = new YT.Player('ytp', {
+    events:{ 'onReady': onReady }
+  });
+}
+function onReady(){
+  // 可用倍速 → 同步選單
+  try{
+    const rates = ytPlayer.getAvailablePlaybackRates?.() || [];
+    const sel = document.getElementById('rate');
+    if(rates.length){
+      const keep = new Set(rates.map(String));
+      [...sel.options].forEach(o=>{ if(!keep.has(o.value)) o.remove(); });
+    }
+  }catch(e){}
+}
 </script>
 </body>
 </html>
