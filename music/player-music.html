@@ -19,30 +19,26 @@
   .time{opacity:.8;white-space:nowrap;width:60px}
   .en{font-size:16px;line-height:1.4}
   .zh{opacity:.85;margin-top:4px}
-  .hint{opacity:.8}
+  .q{margin:10px 0;padding:12px;border:1px solid var(--line);border-radius:10px}
+  .choices label{display:block;margin:6px 0;cursor:pointer}
+  .ok{color:#8ef58e}.bad{color:#ff9f9f}
   @media (max-width:960px){.layout{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <p><a href="./index.html" style="padding:8px 10px;border:1px solid var(--line);border-radius:10px;text-decoration:none;color:inherit">← 回音樂清單</a></p>
-
-  <div class="layout">
-    <div class="panel">
-      <div id="media"></div>
-      <!-- 之後可在這裡加：上一句 / 下一句 / AB Loop / 速度 -->
-    </div>
-
+  <a href="./index.html" style="padding:8px 10px;border:1px solid var(--line);border-radius:10px;text-decoration:none;color:inherit">← 回音樂清單</a>
+  <div class="layout" style="margin-top:12px">
+    <div class="panel"><div id="media"></div></div>
     <div class="panel">
       <div class="tabs">
         <button class="t on" data-tab="lyrics">歌詞</button>
         <button class="t" data-tab="quiz">測驗</button>
         <button class="t" data-tab="ai">AI互動</button>
       </div>
-
       <div id="tab-lyrics"></div>
-      <div id="tab-quiz" hidden>（之後接 quiz 模組）</div>
-      <div id="tab-ai" hidden>（之後接 AI 模組）</div>
+      <div id="tab-quiz" hidden></div>
+      <div id="tab-ai" hidden>（之後接 AI 功能）</div>
     </div>
   </div>
 </div>
@@ -53,49 +49,17 @@
 
   const list = await (await fetch('./data/index.json')).json();
   const meta = list.find(x=>x.slug===slug) || list[0];
+  const YT = (id, start=0)=>`https://www.youtube.com/embed/${id}?rel=0&modestbranding=1&start=${Math.floor(start)}`;
 
-  // 左：YouTube embed
-  const YT = (id)=>`https://www.youtube.com/embed/${id}?rel=0&modestbranding=1`;
-  document.getElementById('media').innerHTML =
-    `<iframe src="${YT(meta.youtubeId)}"
+  // 左：YouTube
+  const media = document.getElementById('media');
+  function loadVideo(at=0){ media.innerHTML =
+    `<iframe src="${YT(meta.youtubeId, at)}"
       allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-      allowfullscreen></iframe>`;
+      allowfullscreen></iframe>`; }
+  loadVideo(0);
 
-  // 右：歌詞區（先顯示標題資訊；之後可接 VTT -> 表格）
-  const lyr = document.getElementById('tab-lyrics');
-  lyr.innerHTML = `
-    <h2 style="margin:.2rem 0">${meta.title}</h2>
-    <div style="opacity:.85">${meta.artist}</div>
-    <div class="hint" style="margin:.6rem 0 1rem">${meta.level} · ${meta.topic||''}</div>
-    <div id="lyrics-body" class="hint">若你有 VTT/JSON 歌詞檔，可在 <code>/music/data/cues-${meta.slug}.vtt</code> 與 <code>trans-${meta.slug}.json</code>，我幫你載入顯示中英對照。</div>
-  `;
-
-  // 若你之後放了 VTT 與中文對照，這段會自動載入與渲染（檔案可選）
-  try {
-    const [vttResp, zhResp] = await Promise.all([
-      fetch(`./data/cues-${meta.slug}.vtt`).catch(()=>null),
-      fetch(`./data/trans-${meta.slug}.json`).catch(()=>null)
-    ]);
-    if (vttResp && vttResp.ok) {
-      const vttText = await vttResp.text();
-      const zhMap = (zhResp && zhResp.ok) ? await zhResp.json() : {};
-      const cues = parseVTT(vttText);
-      document.getElementById('lyrics-body').innerHTML = renderLyrics(cues, zhMap);
-      // 點擊一句 → 在 YouTube 內跳播：用時間片段參數 start=
-      document.getElementById('lyrics-body').addEventListener('click', e=>{
-        const tr = e.target.closest('tr[data-t]');
-        if(!tr) return;
-        const t = Number(tr.dataset.t);
-        document.getElementById('media').innerHTML =
-          `<iframe src="${YT(meta.youtubeId)}&start=${Math.floor(t)}"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-            allowfullscreen></iframe>`;
-        window.scrollTo({top:0,behavior:'smooth'});
-      });
-    }
-  } catch(e){ /* 沒有歌詞檔就保持提示文字 */ }
-
-  // 分頁切換
+  // 右：分頁
   document.querySelectorAll('.t').forEach(b=>{
     b.onclick=()=>{
       document.querySelectorAll('.t').forEach(x=>x.classList.remove('on'));
@@ -107,43 +71,79 @@
     };
   });
 
-  // --- helpers ---
-  function parseVTT(text){
-    return text
-      .replace(/\r/g,'')
-      .split('\n\n')
-      .map(block=>{
-        const m = block.match(/(\d+):(\d+):(\d+\.\d+)\s*-->\s*(\d+):(\d+):(\d+\.\d+)/);
-        if(!m) return null;
-        const [_,h1,m1,s1,h2,m2,s2]=m;
-        const start = (+h1)*3600+(+m1)*60+(+s1);
-        const end   = (+h2)*3600+(+m2)*60+(+s2);
-        const lines = block.split('\n').slice(1).join(' ').trim();
-        return {start,end,text:lines};
-      }).filter(Boolean);
+  // 歌詞（JSON：/music/data/cues-<slug>.json）
+  const lyrBox = document.getElementById('tab-lyrics');
+  lyrBox.innerHTML = `<h2 style="margin:.2rem 0">${meta.title}</h2>
+  <div style="opacity:.85">${meta.artist}</div>
+  <div style="opacity:.8;margin:.5rem 0">${meta.level} · ${meta.topic||''}</div>
+  <div id="lyrics-body" class="hint">載入歌詞中…</div>`;
+
+  try{
+    const cuesResp = await fetch(`./data/cues-${meta.slug}.json`);
+    if (cuesResp.ok){
+      const {cues=[]} = await cuesResp.json();
+      document.getElementById('lyrics-body').innerHTML = renderLyrics(cues);
+      document.getElementById('lyrics-body').addEventListener('click', e=>{
+        const tr = e.target.closest('tr[data-t]'); if(!tr) return;
+        loadVideo(Number(tr.dataset.t)); window.scrollTo({top:0,behavior:'smooth'});
+      });
+    }else{
+      document.getElementById('lyrics-body').innerHTML =
+        `（找不到 <code>cues-${meta.slug}.json</code>。先用這份示範，之後請換成你有授權或 CC 的歌詞。）`;
+    }
+  }catch{ /* ignore */ }
+
+  // 測驗（/music/data/quiz-<slug>.json）
+  const quizBox = document.getElementById('tab-quiz');
+  try{
+    const qResp = await fetch(`./data/quiz-${meta.slug}.json`);
+    if (qResp.ok){
+      const {questions=[]} = await qResp.json();
+      quizBox.innerHTML = renderQuiz(questions);
+      quizBox.addEventListener('click', e=>{
+        const b = e.target.closest('button[data-q]');
+        if(!b) return;
+        const qi = Number(b.dataset.q);
+        const ans = b.dataset.ans;
+        const pick = quizBox.querySelector(`input[name="q${qi}"]:checked`)?.value;
+        const msg = quizBox.querySelector(`#msg${qi}`);
+        msg.textContent = (pick===ans) ? '✔ 正確！' : '✘ 再想想';
+        msg.className = (pick===ans) ? 'ok' : 'bad';
+      });
+    }else{
+      quizBox.innerHTML = `（之後接 <code>quiz-${meta.slug}.json</code> 測驗檔）`;
+    }
+  }catch{ /* ignore */ }
+
+  // helpers
+  function fmt(sec){const m=Math.floor(sec/60).toString().padStart(2,'0'); const s=Math.floor(sec%60).toString().padStart(2,'0'); return `${m}:${s}`;}
+  function esc(s){return s.replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));}
+  function renderLyrics(cues){
+    return `<table><thead><tr><th class="time">時間</th><th>內容</th></tr></thead><tbody>
+      ${cues.map(c=>`
+      <tr data-t="${c.t}">
+        <td class="time">${fmt(c.t)}</td>
+        <td>
+          <div class="en">${esc(c.en||'')}</div>
+          ${c.zh?`<div class="zh">${esc(c.zh)}</div>`:''}
+        </td>
+      </tr>`).join('')}
+    </tbody></table>`;
   }
-  function fmt(sec){
-    const m=Math.floor(sec/60).toString().padStart(2,'0');
-    const s=Math.floor(sec%60).toString().padStart(2,'0');
-    return `${m}:${s}`;
+  function renderQuiz(qs){
+    return qs.map((q,i)=>`
+      <div class="q">
+        <div style="margin-bottom:6px"><b>Q${i+1}.</b> ${esc(q.text)}</div>
+        <div class="choices">
+          ${q.choices.map((c,j)=>`
+            <label><input type="radio" name="q${i}" value="${esc(c)}"> ${esc(c)}</label>
+          `).join('')}
+        </div>
+        <button data-q="${i}" data-ans="${esc(q.answer)}">提交</button>
+        <span id="msg${i}" style="margin-left:8px"></span>
+      </div>`).join('');
   }
-  function renderLyrics(cues, zh){
-    return `
-      <table>
-        <thead><tr><th class="time">時間</th><th>內容</th></tr></thead>
-        <tbody>
-          ${cues.map(c=>`
-            <tr data-t="${c.start}">
-              <td class="time">${fmt(c.start)}</td>
-              <td>
-                <div class="en">${escapeHTML(c.text)}</div>
-                ${zh[c.start]?.trim()?`<div class="zh">${escapeHTML(zh[c.start])}</div>`:''}
-              </td>
-            </tr>`).join('')}
-        </tbody>
-      </table>`;
-  }
-  function escapeHTML(s){return s.replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));}
 </script>
 </body>
 </html>
+
