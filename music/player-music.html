@@ -11,7 +11,7 @@
   .wrap{max-width:1200px;margin:24px auto;padding:0 16px}
   .layout{display:grid;grid-template-columns:1.25fr .75fr;gap:16px}
   .panel{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}
-  iframe{width:100%;aspect-ratio:16/9;border:0;border-radius:12px}
+  iframe,video{width:100%;aspect-ratio:16/9;border:0;border-radius:12px;background:#000}
   .toolbar{margin-top:12px;background:#0c1a28;border:1px solid var(--line);border-radius:12px;padding:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
   .btn{padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#10334d;color:var(--ink);cursor:pointer}
   .tabs{display:flex;gap:8px;margin-bottom:12px}
@@ -25,6 +25,7 @@
   .q{margin:10px 0;padding:12px;border:1px solid var(--line);border-radius:10px}
   .choices label{display:block;margin:6px 0;cursor:pointer}
   .ok{color:#8ef58e}.bad{color:#ff9f9f}
+  #lyrics-body tr.cur{outline:2px solid #2b7fff;outline-offset:2px;border-radius:6px}
   @media (max-width:960px){.layout{grid-template-columns:1fr}}
 </style>
 </head>
@@ -35,7 +36,7 @@
   <div class="layout" style="margin-top:12px">
     <!-- 左：影片 + 工具列 -->
     <div class="panel">
-      <div id="media"></div>
+      <div id="mediaMount"></div>
 
       <!-- 工具列 -->
       <div class="toolbar">
@@ -47,7 +48,8 @@
         <label>偏移 <input id="offset" type="number" step="0.1" value="0" style="width:70px">s</label>
         <label>速度
           <select id="rate">
-            <option>0.75</option><option selected>1.0</option><option>1.25</option><option>1.5</option><option>1.75</option><option>2</option>
+            <option>0.75</option><option selected>1.0</option><option>1.25</option>
+            <option>1.5</option><option>1.75</option><option>2</option>
           </select>
         </label>
       </div>
@@ -77,30 +79,67 @@
   // 讀清單
   const list = await (await fetch('./data/index.json')).json();
   const meta = list.find(x=>x.slug===slug) || list[0];
+  const isYT = !!meta.youtubeId;
 
-  // 影片 iframe（注意 enablejsapi=1）
-  const YTURL = (id, start=0)=>`https://www.youtube.com/embed/${id}?enablejsapi=1&rel=0&modestbranding=1&start=${Math.floor(start)}`;
-  function mountVideo(at=0){
-    document.getElementById('media').innerHTML =
-      `<iframe id="ytp" src="${YTURL(meta.youtubeId,at)}"
-        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-        allowfullscreen></iframe>`;
-  }
-  mountVideo(0);
+  // 共用播放介面：YouTube / HTML5 都走同一套 API
+  const Media = {
+    mode: isYT ? 'yt' : 'html5',
+    ready: false,
+    _el: null,      // HTMLVideoElement
+    _yt: null,      // YT.Player
+    mount(start=0){
+      const mount = document.getElementById('mediaMount');
+      if (this.mode==='yt'){
+        mount.innerHTML =
+          `<iframe id="ytp"
+             src="https://www.youtube.com/embed/${meta.youtubeId}?enablejsapi=1&rel=0&modestbranding=1&start=${Math.floor(start)}"
+             allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+             allowfullscreen></iframe>`;
+        // YT 準備好後才算 ready
+        window.__onYTReady = () => {
+          this._yt = new YT.Player('ytp', {
+            events: { 'onReady': () => {
+              this.ready = true;
+              syncAvailableRates(this._yt);
+            }}
+          });
+        };
+        if (window.YT && window.YT.Player) window.__onYTReady();
+        else window.onYouTubeIframeAPIReady = window.__onYTReady;
+      }else{
+        // 本地 mp4：路徑回到專案根 videos（../videos）
+        const src = meta.file ? `../videos/${meta.file}` : `../videos/${meta.slug}.mp4`;
+        mount.innerHTML = `<video id="v" src="${src}" controls playsinline></video>`;
+        this._el = document.getElementById('v');
+        this._el.onloadeddata = () => { this.ready = true; };
+        if (start) this._el.currentTime = start;
+      }
+    },
+    play(){ this.mode==='yt' ? this._yt?.playVideo() : this._el?.play(); },
+    pause(){ this.mode==='yt' ? this._yt?.pauseVideo() : this._el?.pause(); },
+    toggle(){ const s=this.state(); (s==='playing')?this.pause():this.play(); },
+    seek(t){ t=Math.max(0,t); this.mode==='yt' ? this._yt?.seekTo(t,true) : (this._el && (this._el.currentTime=t)); },
+    time(){ return this.mode==='yt' ? (this._yt?.getCurrentTime?.()||0) : (this._el?.currentTime||0); },
+    setRate(r){ this.mode==='yt' ? this._yt?.setPlaybackRate?.(r) : (this._el && (this._el.playbackRate=r)); },
+    getRate(){ return this.mode==='yt' ? (this._yt?.getPlaybackRate?.()||1) : (this._el?.playbackRate||1); },
+    state(){
+      if (this.mode==='yt'){ const s=this._yt?.getPlayerState?.(); return s===1?'playing':(s===2?'paused':'idle'); }
+      if (!this._el) return 'idle'; return this._el.paused?'paused':'playing';
+    }
+  };
+  Media.mount(0);
 
-  // 分頁切換
+  // 畫面分頁
   document.querySelectorAll('.t').forEach(b=>{
     b.onclick=()=>{
       document.querySelectorAll('.t').forEach(x=>x.classList.remove('on'));
       b.classList.add('on');
       const id=b.dataset.tab;
-      ['lyrics','quiz','ai'].forEach(k=>{
-        document.getElementById('tab-'+k).hidden=(k!==id);
-      });
+      ['lyrics','quiz','ai'].forEach(k=>{ document.getElementById('tab-'+k).hidden=(k!==id); });
     };
   });
 
-  // 歌詞（載入 cues-<slug>.json）
+  // 右側：歌詞
   const lyrBox = document.getElementById('tab-lyrics');
   lyrBox.innerHTML = `<h2 style="margin:.2rem 0">${meta.title}</h2>
   <div style="opacity:.85">${meta.artist||''}</div>
@@ -111,8 +150,7 @@
   try{
     const r = await fetch(`./data/cues-${meta.slug}.json`);
     if(r.ok){
-      const data = await r.json();
-      cues = data.cues || [];
+      cues = (await r.json()).cues || [];
       document.getElementById('lyrics-body').innerHTML = renderLyrics(cues);
       // 點一句 → 跳播
       document.getElementById('lyrics-body').addEventListener('click', e=>{
@@ -125,7 +163,7 @@
     }
   }catch{ document.getElementById('lyrics-body').textContent='（歌詞載入失敗）'; }
 
-  // 測驗（可選）
+  // 右側：測驗（可選）
   const quizBox = document.getElementById('tab-quiz');
   try{
     const q = await fetch(`./data/quiz-${meta.slug}.json`);
@@ -143,46 +181,44 @@
     }else{
       quizBox.innerHTML = '（之後可加入 quiz-*.json 題目）';
     }
-  }catch{ quizBox.textContent = '（測驗載入失敗）'; }
+  }catch{ quizBox.textContent='（測驗載入失敗）'; }
 
-  // 工具列（透過 IFrame API 控制）
-  let ytPlayer=null, curIdx=0, repeat=false, offset=0;
+  // 工具列邏輯（同影片播放器）
+  let curIdx=0, repeat=false, offset=0;
+  const $ = s=>document.querySelector(s);
+  $('#btnPlay').onclick   = ()=> Media.toggle();
+  $('#btnPrev').onclick   = ()=> jumpByIndex(curIdx-1);
+  $('#btnNext').onclick   = ()=> jumpByIndex(curIdx+1);
+  $('#btnRepeat').onclick = ()=> repeat = !repeat;
+  $('#rate').onchange     = e => Media.setRate(parseFloat(e.target.value));
+  $('#offset').oninput    = e => offset = parseFloat(e.target.value||0);
 
-  // 這段是給非 module 的 onYouTubeIframeAPIReady 使用
-  window.__setCues = (arr)=>{ cues = Array.isArray(arr)?arr:[]; };
-  window.__getCues = ()=>cues;
-  window.__jumpByIdx = (i)=> jumpByIndex(i);
+  function jumpByIndex(i){
+    if(!cues.length) return;
+    curIdx = Math.min(Math.max(0,i), cues.length-1);
+    jumpToTime(cues[curIdx].t);
+  }
+  function jumpToTime(sec){
+    const t = Math.max(0,(sec||0)+offset);
+    Media.seek(t); Media.play();
+  }
 
-  // 掛工具列事件
-  document.getElementById('btnPrev').onclick = ()=> jumpByIndex(curIdx-1);
-  document.getElementById('btnNext').onclick = ()=> jumpByIndex(curIdx+1);
-  document.getElementById('btnPlay').onclick = ()=>{
-    const s = ytPlayer?.getPlayerState?.();
-    (s===1) ? ytPlayer.pauseVideo() : ytPlayer.playVideo();
-  };
-  document.getElementById('btnRepeat').onclick = ()=> repeat = !repeat;
-  document.getElementById('rate').onchange = e=> ytPlayer?.setPlaybackRate(parseFloat(e.target.value));
-  document.getElementById('offset').oninput = e=> offset = parseFloat(e.target.value||0);
-
-  // 輪詢：定位當前句、處理 repeat、歌詞跟隨
-  function tick(){
-    if(ytPlayer && cues.length){
-      const ct = ytPlayer.getCurrentTime?.() || 0;
-      // 找目前句
+  // 定時更新：鎖定當前句 / repeat / 跟隨歌詞
+  (function tick(){
+    if(Media.ready && cues.length){
+      const ct = Media.time();
       for(let i=0;i<cues.length;i++){
         const start = cues[i].t + offset;
         const end   = (cues[i+1]?.t ?? 1e9) + offset;
         if(ct >= start && ct < end){ curIdx=i; break; }
       }
-      // repeat
       if(repeat){
         const start = cues[curIdx]?.t + offset;
         const end   = (cues[curIdx+1]?.t ?? 1e9) + offset;
-        if(ct >= end - 0.05) ytPlayer.seekTo(Math.max(0,start), true);
+        if(ct >= end - 0.05) Media.seek(Math.max(0,start));
       }
-      // 跟隨歌詞
-      if(document.getElementById('follow').checked){
-        const row = document.querySelector(`tr[data-t="${cues[curIdx]?.t}"]`);
+      if($('#follow').checked){
+        const row = document.querySelector(`#lyrics-body tr[data-t="${cues[curIdx]?.t}"]`);
         if(row && !row.classList.contains('cur')){
           document.querySelectorAll('#lyrics-body tr.cur').forEach(x=>x.classList.remove('cur'));
           row.classList.add('cur');
@@ -191,23 +227,9 @@
       }
     }
     requestAnimationFrame(tick);
-  }
-  tick();
+  })();
 
-  // 跳到指定 index
-  function jumpByIndex(i){
-    if(!cues.length) return;
-    curIdx = Math.min(Math.max(0,i), cues.length-1);
-    jumpToTime(cues[curIdx].t);
-  }
-  // 跳到秒數
-  function jumpToTime(sec){
-    const t = Math.max(0,(sec||0)+offset);
-    if(ytPlayer?.seekTo){ ytPlayer.seekTo(t,true); ytPlayer.playVideo(); }
-    else mountVideo(t); // 後備
-  }
-
-  // 工具：renderers
+  // Utils
   function fmt(sec){const m=Math.floor(sec/60).toString().padStart(2,'0'); const s=Math.floor(sec%60).toString().padStart(2,'0'); return `${m}:${s}`;}
   function esc(s){return String(s||'').replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));}
   function renderLyrics(arr){
@@ -216,7 +238,7 @@
         <tr data-t="${c.t}">
           <td class="time">${fmt(c.t)}</td>
           <td>
-            <div class="en">${esc(c.en)}</div>
+            <div class="en">${esc(c.en||'')}</div>
             ${c.zh?`<div class="zh">${esc(c.zh)}</div>`:''}
           </td>
         </tr>`).join('')}
@@ -234,29 +256,17 @@
       </div>`).join('');
   }
 
-  // 把 cues 提供給非 module 腳本
-  window.__setCues(cues);
-</script>
-
-<!-- 非 module：YouTube API 需要全域 callback -->
-<script>
-let ytPlayer=null;
-function onYouTubeIframeAPIReady(){
-  ytPlayer = new YT.Player('ytp', {
-    events:{ 'onReady': onReady }
-  });
-}
-function onReady(){
-  // 可用倍速 → 同步選單
-  try{
-    const rates = ytPlayer.getAvailablePlaybackRates?.() || [];
-    const sel = document.getElementById('rate');
-    if(rates.length){
-      const keep = new Set(rates.map(String));
-      [...sel.options].forEach(o=>{ if(!keep.has(o.value)) o.remove(); });
-    }
-  }catch(e){}
-}
+  // 依 YouTube 可用倍速修剪下拉選單
+  function syncAvailableRates(player){
+    try{
+      const rates = player.getAvailablePlaybackRates?.() || [];
+      const sel = document.getElementById('rate');
+      if(rates.length){
+        const keep = new Set(rates.map(String));
+        [...sel.options].forEach(o=>{ if(!keep.has(o.value)) o.remove(); });
+      }
+    }catch(e){}
+  }
 </script>
 </body>
 </html>
