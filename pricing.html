@@ -2,33 +2,36 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>BookWide | 方案與定價</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <style>
     :root{ --bw-bg:#f7f9fc; --bw-text:#111827; --bw-card:#ffffff; --bw-mute:#6b7280; }
     body{ background:var(--bw-bg); color:var(--bw-text); }
     .topbar{ display:flex; align-items:center; justify-content:space-between; padding:14px 20px; }
-    .acc-link{ font-weight:800; font-size:1.5rem; cursor:pointer; user-select:none; }
+    /* 未登入時右上角字樣：恢復為一般按鈕大小 */
+    .acc-link{ font-weight:800; font-size:1.05rem; cursor:pointer; user-select:none; }
     .acc-link:hover{ text-decoration:underline; }
     .wrap{ max-width:1100px; margin:0 auto; padding:0 16px 40px; }
+    /* 五張主題卡排成一列，可水平捲動 */
     .deck{ display:flex; gap:16px; flex-wrap:nowrap; overflow-x:auto; padding-bottom:10px; }
     .topic-card{ background:var(--bw-card); border:1px solid #e5e7eb; border-radius:16px; padding:16px; min-width:210px; box-shadow:0 2px 8px rgba(15,23,42,.05); }
-    .topic-title{ font-size:1.35rem; font-weight:800; margin-bottom:.5rem; }
-    .topic-price{ font-weight:800; margin-bottom:.5rem; }
+    .topic-title{ font-size:1.24rem; font-weight:800; margin-bottom:.45rem; }
+    .topic-price{ font-weight:800; margin-bottom:.45rem; }
     .muted{ color:var(--bw-mute); }
     .disabled-mask{ pointer-events:none; opacity:.5; }
-    .btn-xl{ padding:.85rem 1.5rem; font-size:1.15rem; font-weight:800; }
+    .btn-xl{ padding:.85rem 1.5rem; font-size:1.05rem; font-weight:800; }
   </style>
 </head>
 <body>
   <div class="topbar">
     <a class="text-decoration-none" href="./index.html">← 回首頁</a>
-    <div id="accBox" class="acc-link">請登入</div>
+    <!-- 未登入顯示「登入」，已登入顯示「已登入：email」 -->
+    <div id="accBox" class="acc-link">登入</div>
   </div>
 
   <div class="wrap">
-    <h1 class="display-5 fw-bold mb-3">BookWide | 方案與定價</h1>
+    <h1 class="display-6 fw-bold mb-3">BookWide | 方案與定價</h1>
     <p class="muted mb-4">每個主題皆為 <b>NT$200 / 月</b>；你可以一次勾選多個主題，一筆訂單一起結帳。</p>
 
     <!-- 五張主題卡：排成一列（可水平捲動） -->
@@ -126,7 +129,17 @@
     <button id="goBtn" class="btn btn-primary btn-xl" disabled>前往結帳</button>
   </div>
 
-  <!-- 登入 Modal -->
+  <!-- Toast（右下提示） -->
+  <div class="position-fixed end-0 bottom-0 p-3" style="z-index:1060">
+    <div id="toast" class="toast align-items-center text-bg-dark border-0" role="alert" aria-live="polite" aria-atomic="true">
+      <div class="d-flex">
+        <div class="toast-body" id="toastMsg">…</div>
+        <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 登入 Modal（樣式/文案與首頁一致） -->
   <div class="modal fade" id="loginModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
       <div class="modal-content bg-dark text-white">
@@ -156,17 +169,25 @@
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script type="module">
-    import { supabase } from './supa.js';
+    import { supabase } from './supa.js';  /* 保持與站上相同的 client 來源 */
 
-    const accBox = document.getElementById('accBox');
-    const deck = document.getElementById('deck');
-    const goBtn = document.getElementById('goBtn');
+    const accBox   = document.getElementById('accBox');
+    const deck     = document.getElementById('deck');
+    const goBtn    = document.getElementById('goBtn');
     const lockHint = document.getElementById('lockHint');
+
+    const toast = new bootstrap.Toast(document.getElementById('toast'));
+    const toastMsg = document.getElementById('toastMsg');
+    const showToast = (m)=>{ toastMsg.textContent=m; toast.show(); };
+
     const qp = new URLSearchParams(location.search);
-    const ref = (qp.get('ref')||'').trim(); // 保留推薦碼以便帶到 checkout
+    const refFromUrl = (qp.get('ref')||'').trim();        // 可能帶進來的推薦碼（保留／驗證用）
+    if (refFromUrl) { try{ localStorage.setItem('ref_code', refFromUrl); }catch{} }
 
     let isLoggedIn = false;
     let loginModal;
+    let effectiveRef = refFromUrl;      // 實際有效的推薦碼（自推時會被清空）
+    let refValid     = true;
 
     function selectedItems(){
       return Array.from(document.querySelectorAll('.itemCheck:checked')).map(c=>c.value);
@@ -184,7 +205,7 @@
         checks.forEach(c=>{ c.checked=false; c.disabled=true; });
         deck.classList.add('disabled-mask');
         lockHint.style.display = '';
-        accBox.textContent = '請登入';
+        accBox.textContent = '登入';
       }else{
         checks.forEach(c=>{ c.disabled=false; });
         deck.classList.remove('disabled-mask');
@@ -194,15 +215,48 @@
       updateGoBtn();
     }
 
+    async function checkSelfReferral(userId){
+      // 站上 profiles 表使用 user_id 欄位；讀取目前使用者的推薦碼
+      try{
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('referral_code')
+          .eq('user_id', userId)
+          .maybeSingle();
+        if(error) throw error;
+
+        const myCode = (data?.referral_code||'').toString().trim();
+        if (myCode && effectiveRef && myCode === effectiveRef){
+          // 自己推薦自己 → 清除、提示、移除網址參數
+          refValid = false;
+          effectiveRef = '';
+          try{ localStorage.removeItem('ref_code'); }catch{}
+          try{
+            const url = new URL(location.href);
+            url.searchParams.delete('ref');
+            history.replaceState({}, '', url.toString());
+          }catch{}
+          showToast('不能使用自己的推薦碼（已忽略）');
+        }
+      }catch{
+        /* 忽略讀取失敗，當作沒有自推 */
+      }
+    }
+
     async function syncAuthUI(){
       const { data:sessionData } = await supabase.auth.getSession();
-      const email = sessionData?.session?.user?.email || '';
-      isLoggedIn = !!sessionData?.session?.user;
+      const user = sessionData?.session?.user || null;
+      const email = user?.email || '';
+      isLoggedIn = !!user;
       updateLockUI(email);
-      // 需求：若有推薦碼且目前未登入 → 自動跳出登入窗
-      if(ref && !isLoggedIn){
-        setTimeout(()=> loginModal.show(), 300);
+
+      // 有推薦碼而且尚未登入 → 自動跳出登入
+      if(refFromUrl && !isLoggedIn){
+        setTimeout(()=> loginModal.show(), 250);
       }
+
+      // 若已登入，驗證是否「自己推薦自己」
+      if(user){ await checkSelfReferral(user.id); }
     }
 
     async function signIn(email, password){
@@ -210,27 +264,29 @@
       if(error) throw error;
     }
 
-    // 前往結帳：組 URL 並帶上推薦碼（若有）
+    // 前往結帳：帶上有效的推薦碼（若自推已被清除就不帶）
     goBtn.addEventListener('click', ()=>{
       const items = selectedItems();
       const period = selectedPeriod();
       let url = `./checkout.html?items=${encodeURIComponent(items.join(','))}&period=${encodeURIComponent(period)}`;
-      if(ref){ url += `&ref=${encodeURIComponent(ref)}`; }
+      if(effectiveRef && refValid){ url += `&ref=${encodeURIComponent(effectiveRef)}`; }
       location.href = url;
     });
 
     // DOM Ready
     window.addEventListener('DOMContentLoaded', ()=>{
       loginModal = new bootstrap.Modal(document.getElementById('loginModal'));
-      // 點擊右上登入
+
+      // 點右上「登入」
       accBox.addEventListener('click', ()=>{
         if(!isLoggedIn) loginModal.show();
       });
+
       // 登入送出
       document.getElementById('loginSubmit').addEventListener('click', async ()=>{
         const email = document.getElementById('loginEmail').value.trim();
-        const pwd = document.getElementById('loginPwd').value;
-        const errBox = document.getElementById('loginError');
+        const pwd   = document.getElementById('loginPwd').value;
+        const errBox= document.getElementById('loginError');
         errBox.classList.add('d-none');
         try{
           await signIn(email, pwd);
@@ -241,7 +297,7 @@
         }
       });
 
-      // 勾選/更換週期時，更新按鈕可用狀態
+      // 勾選／更換週期時，更新按鈕可用狀態
       document.querySelectorAll('.itemCheck, input[name="period"]').forEach(el=>{
         el.addEventListener('change', updateGoBtn);
       });
@@ -250,134 +306,18 @@
       syncAuthUI();
     });
 
-    // Supabase 狀態變更時自動同步（例如從首頁已登入再開這頁）
-    supabase.auth.onAuthStateChange((_e, session)=>{
+    // Supabase 狀態變更（例如從首頁已登入再開這頁）
+    supabase.auth.onAuthStateChange(async (_e, session)=>{
       isLoggedIn = !!session?.user;
       const email = session?.user?.email || '';
       updateLockUI(email);
+      if(session?.user) await checkSelfReferral(session.user.id);
     });
   </script>
-  <script type="module">
-  import { supabase } from './supa.js';
-
-  // ==== 小工具 ====
-  const qp = new URLSearchParams(location.search);
-  const refFromUrl = (qp.get('ref') || '').trim();
-  const $ = (sel) => document.querySelector(sel);
-
-  // 你頁面上「請登入 / 已登入：xxx」那顆
-  const loginBtn = $('#loginBtn') || $('#accBox') || $('#loginText'); // 盡量相容你既有命名
-  // 所有可勾選 checkbox（五個主題）
-  const planChecks = Array.from(document.querySelectorAll('input[type="checkbox"]'));
-  // 結帳按鈕
-  const goBtn = document.querySelector('[data-role="go-checkout"], #goCheckoutBtn, button.go-checkout');
-
-  // Toast（沒有就簡易做一個）
-  function toast(msg) {
-    let box = document.getElementById('pricing_toast');
-    if (!box) {
-      box = document.createElement('div');
-      box.id = 'pricing_toast';
-      Object.assign(box.style, {
-        position: 'fixed', right: '16px', bottom: '16px', zIndex: 9999,
-        background: 'rgba(0,0,0,.85)', color: '#fff', padding: '10px 14px',
-        borderRadius: '10px', maxWidth: '80vw', fontSize: '14px'
-      });
-      document.body.appendChild(box);
-    }
-    box.textContent = msg;
-    box.style.display = 'block';
-    setTimeout(()=> box.style.display = 'none', 3200);
-  }
-
-  function lockUI(locked) {
-    planChecks.forEach(el => {
-      el.disabled = locked;
-      if (locked) el.checked = false;
-    });
-    if (goBtn) goBtn.disabled = locked;
-  }
-
-  function showLoginUI(){
-    // 右上文字改「請登入」，並且變成可點按鈕（打開登入視窗）
-    if (loginBtn) {
-      loginBtn.textContent = '請登入';
-      loginBtn.style.cursor = 'pointer';
-      loginBtn.onclick = () => {
-        // 若你有現成 modal：window.showLoginModal?.()
-        // 或你的登入區塊按鈕：document.querySelector('#openLogin')?.click()
-        // 下面這行可以自行改成你站上的真正「打開登入視窗」方式
-        document.querySelector('#openLogin')?.click();
-      };
-    }
-  }
-
-  // 取得推薦碼擁有者（profiles.referral_code == ref）
-  async function fetchRefOwner(ref) {
-    if (!ref) return null;
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id')
-      .eq('referral_code', ref)
-      .single();
-    if (error || !data) return null;
-    return data.id;
-  }
-
-  // 移除網址上的 ref，避免迴圈
-  function stripRefFromURL(){
-    const url = new URL(location.href);
-    url.searchParams.delete('ref');
-    history.replaceState({}, '', url.toString());
-  }
-
-  // 主流程：偵測是否「自己推薦自己」
-  async function checkSelfReferralAndGuard() {
-    const { data: auth } = await supabase.auth.getUser();
-    const userId = auth?.user?.id || '';
-
-    // 未登入：僅顯示「請登入」、鎖住勾選
-    if (!userId) {
-      showLoginUI();
-      lockUI(true);
-      return;
-    }
-
-    // 已登入：如果帶 ref 就比對是否自己
-    if (refFromUrl) {
-      const ownerId = await fetchRefOwner(refFromUrl);
-      if (ownerId && ownerId === userId) {
-        // 自己推薦自己 → 立即登出、移除 ref、鎖UI
-        try {
-          toast('不能使用自己的推薦碼，已為你登出。');
-          await supabase.auth.signOut();
-        } catch(_) {}
-        stripRefFromURL();
-        showLoginUI();
-        lockUI(true);
-        return;
-      }
-    }
-
-    // 其餘情況：已登入、且不是自己的推薦碼 → 放行
-    if (loginBtn) {
-      const email = auth.user.email || '';
-      loginBtn.textContent = `已登入：${email}`;
-      loginBtn.style.cursor = 'default';
-      loginBtn.onclick = null;
-    }
-    lockUI(false);
-  }
-
-  // 首次載入
-  checkSelfReferralAndGuard();
-
-  // 登入/登出狀態改變時，也再檢查一次（從首頁點到這頁 or 在此頁登入）
-  supabase.auth.onAuthStateChange(() => checkSelfReferralAndGuard());
-</script>
-
 </body>
 </html>
+
+
 
 
 
