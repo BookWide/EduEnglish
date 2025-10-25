@@ -2452,111 +2452,52 @@ if(document.readyState === 'loading'){
 </script>
 <!-- ▼ A：極簡降載（關字幕 + 只抓 metadata） -->
 <script>
-(() => {
-  // 1) 視訊不預載影格，避免一開始就吃記憶體
-  const v = document.querySelector('#player');
-  if (v) { v.preload = 'metadata'; v.removeAttribute('autoplay'); }
+/* BookWide「總攔截」補丁：
+   - 目的：不改動既有程式碼，直接在執行期把所有舊路徑 fetch 改寫成新結構
+   - 新結構規則：./data/<cat>/(ai|cues|quiz|vocab)-<slug>.json
+     以及 ./data/<cat>/<cat>-index.json
+   - <cat> 由 URL 參數 ?cat 取得（預設 story）
+*/
+(function () {
+  var params = new URLSearchParams(location.search);
+  var cat = (params.get('cat') || 'story').trim().toLowerCase();
 
-  // 2) 先把字幕面板整塊關掉（你要再開時，刪掉這兩行即可）
-  const subsWrap = document.querySelector('#subsWrap') || document.querySelector('.subs-wrap') || document.querySelector('#subtitlePanel');
-  if (subsWrap) subsWrap.style.display = 'none';
+  var _fetch = window.fetch;
+  function rewrite(input) {
+    try {
+      var url = (typeof input === 'string') ? input : input.url;
+      var u = url;
 
-  // 3) 擋掉外掛 overlay（Grammarly、Monica…）避免插入大量shadow DOM
-  const css = `[data-grammarly-shadow-root],grammarly-desktop-integration,.monica-widget,#monica-content-root{display:none!important}`;
-  const style = document.createElement('style'); style.textContent = css; document.head.appendChild(style);
-})();
-</script>
-<!-- ▲ A：極簡降載 -->
-<script>
-(() => {
-  // 讀網址參數
-  const params = new URLSearchParams(location.search);
-  const cat  = (params.get('cat')  || 'story').trim();   // story | music | movie | news | pro（預留）
-  const slug = (params.get('slug') || '').trim();
-  if (!slug) {
-    console.warn('缺少 slug 參數'); 
-    return;
-  }
+      // 舊：./data/cues-<slug>.json?...
+      var re1 = /^(?:\.\/)?data\/(ai|cues|quiz|vocab)-([a-z0-9\-]+)\.json(\?[^#]*)?$/i;
+      // 舊：./english-videos/data/cues-<slug>.json?...
+      var re2 = /^(?:\.\/)?english-videos\/data\/(ai|cues|quiz|vocab)-([a-z0-9\-]+)\.json(\?[^#]*)?$/i;
+      // 舊：./data/index.json 或任何舊 index 名稱
+      var reIdx = /^(?:\.\/)?data\/(?:index|story-index|music-index)\.json(\?[^#]*)?$/i;
 
-  // 新資料根目錄（唯一來源）
-  const BASE = `./data/${cat}/`;
-  // 對應各類別的 index 檔名（story-index.json, music-index.json, ...）
-  const INDEX_FILE = `${cat}-index.json`;
-
-  // 方便舊程式呼叫：統一的 JSON 讀取器
-  async function loadJSON(kind) {
-    const url = `${BASE}${kind}-${slug}.json?v=${Date.now()}`;
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`${kind} 讀取失敗: ${url}`);
-    return r.json();
-  }
-
-  // 讀清單（拿 youtubeId、標題等）
-  async function loadIndex() {
-    const r = await fetch(`${BASE}${INDEX_FILE}?v=${Date.now()}`);
-    if (!r.ok) throw new Error(`index 讀取失敗: ${BASE}${INDEX_FILE}`);
-    return r.json();
-  }
-
-  // ========= 取代舊 fetch =========
-  // 全域掛鉤，讓原本的事件/按鈕可直接用
-  window.BW = window.BW || {};
-  window.BW.cat  = cat;
-  window.BW.slug = slug;
-  window.BW.loadCues  = () => loadJSON('cues');
-  window.BW.loadQuiz  = () => loadJSON('quiz');
-  window.BW.loadVocab = () => loadJSON('vocab');
-  window.BW.loadAI    = () => loadJSON('ai');
-  window.BW.loadIndex = () => loadIndex();
-
-  // ========= 載入影片 =========
-  (async () => {
-    // 如果是 story：本地 mp4
-    if (cat === 'story') {
-      const video = document.querySelector('video');
-      if (video) {
-        video.src = `./videos/${slug}.mp4`;
-        video.load();
+      if (re1.test(u)) {
+        // 例：./data/cues-mid-autumn.json  ->  ./data/<cat>/cues-mid-autumn.json
+        u = u.replace(re1, './data/' + cat + '/$1-$2.json$3');
+      } else if (re2.test(u)) {
+        // 例：./english-videos/data/quiz-houyi.json -> ./data/<cat>/quiz-houyi.json
+        u = u.replace(re2, './data/' + cat + '/$1-$2.json$3');
+      } else if (reIdx.test(u)) {
+        // 例：./data/index.json -> ./data/<cat>/<cat>-index.json
+        u = './data/' + cat + '/' + cat + '-index.json';
       }
-      return;
+      return (typeof input === 'string') ? u : new Request(u, input);
+    } catch (e) {
+      return input;
     }
-
-    // 如果是 music：用 YouTube
-    if (cat === 'music') {
-      const list = await loadIndex();         // 讀 music-index.json
-      const row  = list.find(x => x.slug === slug);
-      if (!row || !row.youtubeId) {
-        console.warn('找不到對應的 youtubeId：', slug);
-        return;
-      }
-      const vidWrap = document.querySelector('#player-yt') || buildYT();
-      vidWrap.querySelector('iframe').src =
-        `https://www.youtube.com/embed/${row.youtubeId}?rel=0&modestbranding=1`;
-      return;
-    }
-
-    // 其他類別（movie/news/pro）之後要接，只要照同規則加就好
-  })();
-
-  // 建一個 YouTube 容器（只在 music 用得到）
-  function buildYT() {
-    const videoBox = document.querySelector('#videoBox') || document.querySelector('main,body');
-    const wrap = document.createElement('div');
-    wrap.id = 'player-yt';
-    wrap.innerHTML = `
-      <div class="ytbox" style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:12px;border:1px solid #223;">
-        <iframe allowfullscreen
-          style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;"></iframe>
-      </div>`;
-    // 隱藏原本 <video>（如果有）
-    const v = document.querySelector('video'); if (v) v.style.display = 'none';
-    videoBox.prepend(wrap);
-    return wrap;
   }
 
+  window.fetch = function (input, init) {
+    return _fetch.call(this, rewrite(input), init);
+  };
 })();
 </script>
 
 </body>
 
 </html>
+
