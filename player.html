@@ -2452,52 +2452,112 @@ if(document.readyState === 'loading'){
 </script>
 <!-- ▼ A：極簡降載（關字幕 + 只抓 metadata） -->
 <script>
-/* BookWide「總攔截」補丁：
-   - 目的：不改動既有程式碼，直接在執行期把所有舊路徑 fetch 改寫成新結構
-   - 新結構規則：./data/<cat>/(ai|cues|quiz|vocab)-<slug>.json
-     以及 ./data/<cat>/<cat>-index.json
-   - <cat> 由 URL 參數 ?cat 取得（預設 story）
-*/
+(() => {
+  // 1) 視訊不預載影格，避免一開始就吃記憶體
+  const v = document.querySelector('#player');
+  if (v) { v.preload = 'metadata'; v.removeAttribute('autoplay'); }
+
+  // 2) 先把字幕面板整塊關掉（你要再開時，刪掉這兩行即可）
+  const subsWrap = document.querySelector('#subsWrap') || document.querySelector('.subs-wrap') || document.querySelector('#subtitlePanel');
+  if (subsWrap) subsWrap.style.display = 'none';
+
+  // 3) 擋掉外掛 overlay（Grammarly、Monica…）避免插入大量shadow DOM
+  const css = `[data-grammarly-shadow-root],grammarly-desktop-integration,.monica-widget,#monica-content-root{display:none!important}`;
+  const style = document.createElement('style'); style.textContent = css; document.head.appendChild(style);
+})();
+</script>
+<!-- ▲ A：極簡降載 -->
+
+
+<!-- BookWide player 統一路徑補丁：支援 story/music/movie/news/pro -->
+<script>
 (function () {
-  var params = new URLSearchParams(location.search);
-  var cat = (params.get('cat') || 'story').trim().toLowerCase();
+  const params = new URLSearchParams(location.search);
+  const cat  = (params.get('cat')  || 'story').trim();
+  const slug = (params.get('slug') || '').trim();
+  if (!slug) { console.warn('缺少 slug'); return; }
 
-  var _fetch = window.fetch;
-  function rewrite(input) {
-    try {
-      var url = (typeof input === 'string') ? input : input.url;
-      var u = url;
+  const BASE = `./data/${cat}/`;
 
-      // 舊：./data/cues-<slug>.json?...
-      var re1 = /^(?:\.\/)?data\/(ai|cues|quiz|vocab)-([a-z0-9\-]+)\.json(\?[^#]*)?$/i;
-      // 舊：./english-videos/data/cues-<slug>.json?...
-      var re2 = /^(?:\.\/)?english-videos\/data\/(ai|cues|quiz|vocab)-([a-z0-9\-]+)\.json(\?[^#]*)?$/i;
-      // 舊：./data/index.json 或任何舊 index 名稱
-      var reIdx = /^(?:\.\/)?data\/(?:index|story-index|music-index)\.json(\?[^#]*)?$/i;
-
-      if (re1.test(u)) {
-        // 例：./data/cues-mid-autumn.json  ->  ./data/<cat>/cues-mid-autumn.json
-        u = u.replace(re1, './data/' + cat + '/$1-$2.json$3');
-      } else if (re2.test(u)) {
-        // 例：./english-videos/data/quiz-houyi.json -> ./data/<cat>/quiz-houyi.json
-        u = u.replace(re2, './data/' + cat + '/$1-$2.json$3');
-      } else if (reIdx.test(u)) {
-        // 例：./data/index.json -> ./data/<cat>/<cat>-index.json
-        u = './data/' + cat + '/' + cat + '-index.json';
+  async function fetchWithFallback(primaryUrl, fallbackUrl, tag){
+    try{
+      const r = await fetch(primaryUrl, {cache:'no-store'});
+      if(r.ok){
+        const data = await r.json();
+        console.debug(`[${tag}] 用 primary`, primaryUrl);
+        return {data, used:'primary'};
       }
-      return (typeof input === 'string') ? u : new Request(u, input);
-    } catch (e) {
-      return input;
+      throw new Error(r.status);
+    }catch(e){
+      if(!fallbackUrl) throw e;
+      const r2 = await fetch(fallbackUrl, {cache:'no-store'});
+      if(!r2.ok) throw new Error(`[${tag}] primary+fallback 都失敗`);
+      const data2 = await r2.json();
+      console.debug(`[${tag}] 用 fallback`, fallbackUrl);
+      return {data:data2, used:'fallback'};
     }
   }
 
-  window.fetch = function (input, init) {
-    return _fetch.call(this, rewrite(input), init);
-  };
+  async function loadCues(){
+    const pri = `${BASE}cues-${slug}.json?v=${Date.now()}`;
+    const fb  = `${BASE}cues-${slug}.json?v=${Date.now()}`;
+    return fetchWithFallback(pri, fb, 'cues');
+  }
+  async function loadQuiz(){
+    const pri = `${BASE}quiz-${slug}.json?v=${Date.now()}`;
+    const fb  = `${BASE}quiz-${slug}.json?v=${Date.now()}`;
+    return fetchWithFallback(pri, fb, 'quiz');
+  }
+  async function loadAI(){
+    const pri = `${BASE}ai-${slug}.json?v=${Date.now()}`;
+    const fb  = `${BASE}ai-${slug}.json?v=${Date.now()}`;
+    return fetchWithFallback(pri, fb, 'ai');
+  }
+  async function loadVocab(){
+    const pri = `${BASE}vocab-${slug}.json?v=${Date.now()}`;
+    const fb  = `${BASE}vocab-${slug}.json?v=${Date.now()}`;
+    return fetchWithFallback(pri, fb, 'vocab');
+  }
+
+  async function setupVideoAndCover(){
+    const videoEl = document.querySelector('video');
+    const coverEl = document.querySelector('.cover img');
+    if (cat === 'story') {
+      if (videoEl) videoEl.src = `./videos/${slug}.mp4`;
+      if (coverEl) coverEl.src = `./videos/${slug}.jpg`;
+      return;
+    }
+    if (cat === 'music') {
+      const r = await fetch(`./data/music/music-index.json?v=${Date.now()}`, {cache:'no-store'});
+      const list = r.ok ? await r.json() : [];
+      const item = list.find(x => x.slug === slug);
+      const youtubeId = item?.youtubeId || '';
+      if (coverEl) coverEl.src = youtubeId
+        ? `https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg`
+        : '';
+      const iframe = document.querySelector('#ytFrame');
+      if (iframe && youtubeId){
+        iframe.src = `https://www.youtube.com/embed/${youtubeId}?rel=0&modestbranding=1`;
+      }
+      if (videoEl) videoEl.style.display = 'none';
+      return;
+    }
+  }
+
+  (async () => {
+    await setupVideoAndCover();
+    try {
+      const cues  = await loadCues();
+      const quiz  = await loadQuiz();
+      const ai    = await loadAI();
+      const vocab = await loadVocab();
+      console.log('載入完成', {cues, quiz, ai, vocab});
+    } catch(e) {
+      console.error('[fatal]', e);
+    }
+  })();
 })();
 </script>
 
 </body>
-
 </html>
-
