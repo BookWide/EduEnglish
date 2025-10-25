@@ -481,11 +481,44 @@ const params=new URLSearchParams(location.search);
 const primarySlug=params.get('slug')||'mid-autumn';
 let slug=primarySlug;
 
+
+// === Category support: story / music / movie / news / pro ===
+const rawCat = (params.get('cat') || 'story').toLowerCase();
+const allowedCats = new Set(['story','music','movie','news','pro']);
+const cat = allowedCats.has(rawCat) ? rawCat : 'story';
+
+// Fallback slug if the requested resource is missing for a category
+const FALLBACK_BY_CAT = {
+  story: 'mid-autumn',     // ✅ exists
+  music: 'see-you-again',  // ✅ exists in your repo
+  movie: 'mid-autumn',     // temp → reuse story as placeholder
+  news:  'mid-autumn',     // temp → reuse story as placeholder
+  pro:   'mid-autumn'      // temp → reuse story as placeholder
+};
 /* ---------- 資源載入（含回退） ---------- */
-async function fetchWithFallback(p,f,kind){
-  try{const r=await fetch(p,{cache:'no-store'}); if(!r.ok)throw 0; return {data:await r.json(),used:'primary'};}
-  catch{ try{const r2=await fetch(f,{cache:'no-store'}); if(!r2.ok)throw 0; slug='mid-autumn'; return {data:await r2.json(),used:'fallback'};}
-  catch(e2){ console.error(`[fatal] ${kind} 讀取失敗`,e2); return {data:null,used:'error'};}}
+
+async function fetchWithFallback(kind, wantedSlug){
+  // Try a list of candidate URLs in order; return first that succeeds.
+  const slugToUse = wantedSlug || primarySlug;
+  const fbSlug    = FALLBACK_BY_CAT[cat] || 'mid-autumn';
+  const stamp     = Date.now();
+  const files = (s) => [
+    `./data/${kind}-${s}.json?v=${stamp}`,
+    `./data/${cat}/${kind}-${s}.json?v=${stamp}`
+  ];
+  const candidates = [...files(slugToUse), ...files(fbSlug)];
+  for (const url of candidates){
+    try{
+      const r = await fetch(url, { cache: 'no-store' });
+      if (r.ok){
+        const data = await r.json();
+        const used = url.includes(fbSlug) ? 'fallback' : 'primary';
+        return { data, used, url };
+      }
+    }catch(e){ /* continue */ }
+  }
+  console.error(`[fatal] ${kind} 讀取全部失敗`, { kind, slugToUse, cat });
+  return { data: null, used: 'error' };
 }
 
 /* ---------- DOM ---------- */
@@ -501,55 +534,53 @@ function setOffset(v){offset=Number(v)||0; offsetVal.textContent=`${offset.toFix
 window.player={ setOffset, clearRepeat:()=>{ loopSentence=false; btnReplay?.classList.remove('blue'); } };
 
 /* ---------- 影片 & 字幕 ---------- */
+
+
 async function loadVideo(){
-  const src=s=>`./videos/${s}.mp4`;
-  video.src=src(primarySlug);
-  video.addEventListener('error',()=>{ video.src=src('mid-autumn'); },{once:true});
-}
-async function loadCues(){
-  cuesStatus.textContent='（字幕載入中…）';
-  const {data,used}=await fetchWithFallback(`./data/cues-${primarySlug}.json?v=${Date.now()}`,`./data/cues-mid-autumn.json?v=${Date.now()}`,'cues');
-  if(!data){ cuesStatus.textContent='⚠️ 字幕讀取失敗'; return; }
-  cues=data.map(x=>({t:toSec(x.time),en:x.en||'',zh:x.zh||''}));
-  cuesBody.innerHTML=cues.map((c,i)=>`<tr data-i="${i}"><td class="muted" style="width:80px">${c.t?fmt(c.t):''}</td><td>${esc(c.en)}</td><td style="width:40%">${esc(c.zh)}</td></tr>`).join('');
-  $$('#cuesBody tr').forEach(tr=>tr.addEventListener('click',()=>{const i=+tr.dataset.i; seekTo(i,true);}));
-  cuesStatus.textContent=used==='fallback' ? '已載入字幕（mid-autumn 回退）' : `已載入字幕（${primarySlug}）`;
-}
-function currentIndex(){ const t=video.currentTime+offset; let i=0; while(i+1<cues.length&&cues[i+1].t<=t+0.0001)i++; return i; }
-function highlightRow(idx){ const trs=$$('#cuesBody tr'); trs.forEach(tr=>tr.classList.remove('active')); const tr=trs[idx]; if(!tr)return; tr.classList.add('active'); if(chkFollow.checked) tr.scrollIntoView({block:'center',behavior:'smooth'}); }
-function seekTo(idx,play=true){ if(!cues[idx])return; video.currentTime=Math.max(0,cues[idx].t-offset+0.0001); highlightRow(idx); if(play) video.play(); }
-function sentenceRange(i){ if(!cues[i])return[0,0]; const s=cues[i].t,e=(i+1<cues.length?cues[i+1].t:s+3); return[s,e]; }
-
-/* ---------- 測驗 ---------- */
-async function loadQuiz(){
-  const listEl=$('#quizList',paneQuiz), metaEl=$('#quizMeta',paneQuiz);
-  const {data,used}=await fetchWithFallback(`./data/quiz-${primarySlug}.json?v=${Date.now()}`,`./data/quiz-mid-autumn.json?v=${Date.now()}`,'quiz');
-  if(!data){ metaEl.textContent='⚠️ 題庫讀取失敗'; return; }
-
-  let questions=[];
-  if(Array.isArray(data)){
-    questions=data.map(q=>({section:(q.section||'Mixed'),type:(String(q.type||'MCQ').toUpperCase()==='SA')?'SA':'MCQ',
-      question:q.question||q.q||'',options:q.options||q.choices||[],answer:q.answer??q.ans??''}));
-  }else if(data.sections){
-    const push=(sec,arr=[])=>arr?.forEach(q=>questions.push({section:sec,type:(String(q.type||'MCQ').toUpperCase()==='SA')?'SA':'MCQ',
-      question:q.question||'',options:q.options||[],answer:q.answer??''}));
-    push('Vocabulary',data.sections.vocab); push('Grammar',data.sections.grammar);
-    push('Reading',data.sections.reading); push('Mixed',data.sections.mixed);
+  // 🎵 Music: prefer YouTube iframe if we have a mapping
+  if (cat === 'music'){
+    const ytIds = {
+      'see-you-again': 'RgKAFK5djSk',
+      'fight-song': 'xo1VInw-SKc',
+      'let-it-go': 'L0MK7qz13bU',
+      'perfect': '2Vv-BfVoq4g',
+      'count-on-me': 'yJYXItns2ik'
+    };
+    const vid = ytIds[primarySlug];
+    if (vid){
+      const wrap = document.getElementById('videoWrap');
+      wrap.innerHTML = '';
+      const iframe = document.createElement('iframe');
+      iframe.width = '100%';
+      iframe.height = '100%';
+      iframe.src = `https://www.youtube.com/embed/${vid}?autoplay=0&controls=1`;
+      iframe.title = 'YouTube video player';
+      iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+      iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+      iframe.allowFullscreen = true;
+      wrap.appendChild(iframe);
+      return; // ✅ handled via YouTube
+    }
   }
-  metaEl.textContent=used==='fallback'?`已載入（mid-autumn 回退），共 ${questions.length} 題`:`已載入（${primarySlug}），共 ${questions.length} 題`;
 
-  function renderSection(sec){
-    const arr=questions.filter(q=>q.section===sec);
-    if(!arr.length){ listEl.innerHTML='<li style="color:#9fb3ff">（此分區無題目）</li>'; return; }
-    listEl.innerHTML=arr.map((q,i)=>{
-      const idx=i+1;
-      if(q.type==='MCQ'){
-        const opts=q.options.map(opt=>`<label style="display:block;margin:4px 0"><input type="radio" name="q${sec}-${idx}" value="${String(opt)}"> ${String(opt)}</label>`).join('');
-        return `<li data-type="MCQ" data-ans="${String(q.answer)}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question)}</div><div>${opts}</div><div class="msg" style="margin-top:4px"></div><div class="exp" style="margin-top:4px;color:#9fb3ff"></div></li>`;
-      }else{
-        return `<li data-type="SA" data-ans="${String(q.answer)}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question)}</div><input type="text" placeholder="輸入答案…" style="padding:6px 8px;border:1px solid #334155;border-radius:6px;background:#0f223b;color:#dbe7ff"><button class="btn btn-check" style="margin-left:6px">檢查</button><div class="msg" style="margin-top:4px"></div><div class="exp" style="margin-top:4px;color:#9fb3ff"></div></li>`;
-      }
-    }).join('');
+  // Default/local video fallback (story/movie/news/pro or unknown music)
+  const build = (s) => [
+    `./videos/${cat}/${s}.mp4`,
+    `./videos/${s}.mp4`
+  ];
+  const tryList = [...build(primarySlug), ...build(FALLBACK_BY_CAT[cat] || 'mid-autumn')];
+  let tried = 0;
+  function setNext(){
+    if (tried >= tryList.length) return;
+    const url = tryList[tried++];
+    const video = document.getElementById('player');
+    video.src = url;
+  }
+  const video = document.getElementById('player');
+  video.addEventListener('error', setNext);
+  setNext();
+}
+).join('');
     listEl.addEventListener('click',e=>{
       if(!e.target.classList.contains('btn-check'))return;
       const li=e.target.closest('li'); const ipt=li.querySelector('input');
@@ -618,7 +649,7 @@ async function loadQuiz(){
 /* ---------- 字彙卡 ---------- */
 async function loadVocab(){
   const vStatus=$('#vocabStatus'), vBox=$('#vocabBox');
-  const {data,used}=await fetchWithFallback(`./data/vocab-${primarySlug}.json?v=${Date.now()}`,`./data/vocab-mid-autumn.json?v=${Date.now()}`,'vocab');
+  const {data, used} = await fetchWithFallback('vocab', primarySlug);
   if(!data||!data.length){ vStatus.textContent='⚠️ 查無單字資料'; vBox.innerHTML=''; return; }
   vStatus.textContent=used==='fallback'?'已載入單字（mid-autumn 回退）':`已載入單字（${primarySlug}）`;
   const go=t=>{ const p=toSec(t); video.currentTime=Math.max(0,p); video.play(); };
