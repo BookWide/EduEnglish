@@ -2467,95 +2467,65 @@ if(document.readyState === 'loading'){
 })();
 </script>
 <!-- ▲ A：極簡降載 -->
-
-
-<!-- BookWide player 統一路徑補丁：支援 story/music/movie/news/pro -->
 <script>
+/* ===== BookWide：資料路徑補丁（支援 ./data/<cat>/…；舊路徑放後面、可刪） ===== */
 (function () {
+  // 讀取網址參數
   const params = new URLSearchParams(location.search);
-  const cat  = (params.get('cat')  || 'story').trim();
-  const slug = (params.get('slug') || '').trim();
-  if (!slug) { console.warn('缺少 slug'); return; }
+  const CAT   = (params.get('cat')  || 'story').trim();   // story | music | movie | news | pro…
+  const SLUG  = (params.get('slug') || '').trim();
+  if (!SLUG) console.warn('缺少 slug 參數；僅能載入播放器外觀。');
 
-  const BASE = `./data/${cat}/`;
-
-  async function fetchWithFallback(primaryUrl, fallbackUrl, tag){
-    try{
-      const r = await fetch(primaryUrl, {cache:'no-store'});
-      if(r.ok){
-        const data = await r.json();
-        console.debug(`[${tag}] 用 primary`, primaryUrl);
-        return {data, used:'primary'};
-      }
-      throw new Error(r.status);
-    }catch(e){
-      if(!fallbackUrl) throw e;
-      const r2 = await fetch(fallbackUrl, {cache:'no-store'});
-      if(!r2.ok) throw new Error(`[${tag}] primary+fallback 都失敗`);
-      const data2 = await r2.json();
-      console.debug(`[${tag}] 用 fallback`, fallbackUrl);
-      return {data:data2, used:'fallback'};
+  // 工具：依序嘗試多個 URL，第一個成功即返回
+  async function fetchJSONWithFallback(urls, label) {
+    for (const url of urls) {
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (res.ok) {
+          const json = await res.json();
+          console.debug(`[${label}] 使用`, url);
+          return { data: json, used: url };
+        }
+      } catch (e) {}
     }
+    throw new Error(`[${label}] 讀取失敗：\n` + urls.join('\n'));
   }
 
-  async function loadCues(){
-    const pri = `${BASE}cues-${slug}.json?v=${Date.now()}`;
-    const fb  = `${BASE}cues-${slug}.json?v=${Date.now()}`;
-    return fetchWithFallback(pri, fb, 'cues');
-  }
-  async function loadQuiz(){
-    const pri = `${BASE}quiz-${slug}.json?v=${Date.now()}`;
-    const fb  = `${BASE}quiz-${slug}.json?v=${Date.now()}`;
-    return fetchWithFallback(pri, fb, 'quiz');
-  }
-  async function loadAI(){
-    const pri = `${BASE}ai-${slug}.json?v=${Date.now()}`;
-    const fb  = `${BASE}ai-${slug}.json?v=${Date.now()}`;
-    return fetchWithFallback(pri, fb, 'ai');
-  }
-  async function loadVocab(){
-    const pri = `${BASE}vocab-${slug}.json?v=${Date.now()}`;
-    const fb  = `${BASE}vocab-${slug}.json?v=${Date.now()}`;
-    return fetchWithFallback(pri, fb, 'vocab');
+  // 產生一組候選路徑（新結構優先、舊結構後備；你若不想保留舊路徑，改用第②段）
+  function paths(file) {
+    const v = 'v=' + Date.now();
+    const NEW1 = `./data/${CAT}/${file}?${v}`;           // ✅ 新結構（相對）
+    const NEW2 = `../data/${CAT}/${file}?${v}`;          // ✅ 若 player 可能被搬動就留作保險
+    const OLD1 = `./data/${file}?${v}`;                  // 舊：根下 data/xxx.json
+    const OLD2 = `./english-videos/data/${file}?${v}`;   // 舊：english-videos 子路徑
+    return [NEW1, NEW2, OLD1, OLD2];
   }
 
-  async function setupVideoAndCover(){
-    const videoEl = document.querySelector('video');
-    const coverEl = document.querySelector('.cover img');
-    if (cat === 'story') {
-      if (videoEl) videoEl.src = `./videos/${slug}.mp4`;
-      if (coverEl) coverEl.src = `./videos/${slug}.jpg`;
-      return;
-    }
-    if (cat === 'music') {
-      const r = await fetch(`./data/music/music-index.json?v=${Date.now()}`, {cache:'no-store'});
-      const list = r.ok ? await r.json() : [];
-      const item = list.find(x => x.slug === slug);
-      const youtubeId = item?.youtubeId || '';
-      if (coverEl) coverEl.src = youtubeId
-        ? `https://img.youtube.com/vi/${youtubeId}/hqdefault.jpg`
-        : '';
-      const iframe = document.querySelector('#ytFrame');
-      if (iframe && youtubeId){
-        iframe.src = `https://www.youtube.com/embed/${youtubeId}?rel=0&modestbranding=1`;
-      }
-      if (videoEl) videoEl.style.display = 'none';
-      return;
-    }
-  }
+  // 導出到全域，取代舊程式的直接 fetch
+  window.$BW_DATA = {
+    CAT, SLUG,
+    // 類目清單
+    getIndex: () => {
+      // 你的檔名：story-index.json、music-index.json（放各自資料夾）
+      const name = `${CAT}-index.json`;
+      return fetchJSONWithFallback(paths(name), 'index');
+    },
+    // 分類檔（依你新結構命名）
+    getCues  : () => fetchJSONWithFallback(paths(`cues-${SLUG}.json`),   'cues'),
+    getQuiz  : () => fetchJSONWithFallback(paths(`quiz-${SLUG}.json`),   'quiz'),
+    getAI    : () => fetchJSONWithFallback(paths(`ai-${SLUG}.json`),     'ai'),
+    getVocab : () => fetchJSONWithFallback(paths(`vocab-${SLUG}.json`),  'vocab'),
+  };
 
-  (async () => {
-    await setupVideoAndCover();
-    try {
-      const cues  = await loadCues();
-      const quiz  = await loadQuiz();
-      const ai    = await loadAI();
-      const vocab = await loadVocab();
-      console.log('載入完成', {cues, quiz, ai, vocab});
-    } catch(e) {
-      console.error('[fatal]', e);
-    }
-  })();
+  // 若你的主程式會自己組 URL 讀檔，請改成呼叫上面的方法；例如：
+  // const {data: cues}  = await $BW_DATA.getCues();
+  // const {data: quiz}  = await $BW_DATA.getQuiz();
+  // const {data: ai}    = await $BW_DATA.getAI();
+  // const {data: vocab} = await $BW_DATA.getVocab();
+  // const {data: index} = await $BW_DATA.getIndex();
+
+  // 另外，把任何硬寫： ./data/cues-*.json、./data/quiz-*.json、./data/ai-*.json 的 fetch
+  // 全改為呼叫 $BW_DATA 對應的 get*()，就不會再出現 404 舊路徑了。
 })();
 </script>
 
