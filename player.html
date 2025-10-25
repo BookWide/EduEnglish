@@ -2452,82 +2452,52 @@ if(document.readyState === 'loading'){
 </script>
 <!-- ▼ A：極簡降載（關字幕 + 只抓 metadata） -->
 <script>
-(() => {
-  // 1) 視訊不預載影格，避免一開始就吃記憶體
-  const v = document.querySelector('#player');
-  if (v) { v.preload = 'metadata'; v.removeAttribute('autoplay'); }
-
-  // 2) 先把字幕面板整塊關掉（你要再開時，刪掉這兩行即可）
-  const subsWrap = document.querySelector('#subsWrap') || document.querySelector('.subs-wrap') || document.querySelector('#subtitlePanel');
-  if (subsWrap) subsWrap.style.display = 'none';
-
-  // 3) 擋掉外掛 overlay（Grammarly、Monica…）避免插入大量shadow DOM
-  const css = `[data-grammarly-shadow-root],grammarly-desktop-integration,.monica-widget,#monica-content-root{display:none!important}`;
-  const style = document.createElement('style'); style.textContent = css; document.head.appendChild(style);
-})();
-</script>
-<!-- ▲ A：極簡降載 -->
-<script>
-/* ===== BookWide：資料路徑補丁（支援 ./data/<cat>/…；舊路徑放後面、可刪） ===== */
+/* BookWide「總攔截」補丁：
+   - 目的：不改動既有程式碼，直接在執行期把所有舊路徑 fetch 改寫成新結構
+   - 新結構規則：./data/<cat>/(ai|cues|quiz|vocab)-<slug>.json
+     以及 ./data/<cat>/<cat>-index.json
+   - <cat> 由 URL 參數 ?cat 取得（預設 story）
+*/
 (function () {
-  // 讀取網址參數
-  const params = new URLSearchParams(location.search);
-  const CAT   = (params.get('cat')  || 'story').trim();   // story | music | movie | news | pro…
-  const SLUG  = (params.get('slug') || '').trim();
-  if (!SLUG) console.warn('缺少 slug 參數；僅能載入播放器外觀。');
+  var params = new URLSearchParams(location.search);
+  var cat = (params.get('cat') || 'story').trim().toLowerCase();
 
-  // 工具：依序嘗試多個 URL，第一個成功即返回
-  async function fetchJSONWithFallback(urls, label) {
-    for (const url of urls) {
-      try {
-        const res = await fetch(url, { cache: 'no-store' });
-        if (res.ok) {
-          const json = await res.json();
-          console.debug(`[${label}] 使用`, url);
-          return { data: json, used: url };
-        }
-      } catch (e) {}
+  var _fetch = window.fetch;
+  function rewrite(input) {
+    try {
+      var url = (typeof input === 'string') ? input : input.url;
+      var u = url;
+
+      // 舊：./data/cues-<slug>.json?...
+      var re1 = /^(?:\.\/)?data\/(ai|cues|quiz|vocab)-([a-z0-9\-]+)\.json(\?[^#]*)?$/i;
+      // 舊：./english-videos/data/cues-<slug>.json?...
+      var re2 = /^(?:\.\/)?english-videos\/data\/(ai|cues|quiz|vocab)-([a-z0-9\-]+)\.json(\?[^#]*)?$/i;
+      // 舊：./data/index.json 或任何舊 index 名稱
+      var reIdx = /^(?:\.\/)?data\/(?:index|story-index|music-index)\.json(\?[^#]*)?$/i;
+
+      if (re1.test(u)) {
+        // 例：./data/cues-mid-autumn.json  ->  ./data/<cat>/cues-mid-autumn.json
+        u = u.replace(re1, './data/' + cat + '/$1-$2.json$3');
+      } else if (re2.test(u)) {
+        // 例：./english-videos/data/quiz-houyi.json -> ./data/<cat>/quiz-houyi.json
+        u = u.replace(re2, './data/' + cat + '/$1-$2.json$3');
+      } else if (reIdx.test(u)) {
+        // 例：./data/index.json -> ./data/<cat>/<cat>-index.json
+        u = './data/' + cat + '/' + cat + '-index.json';
+      }
+      return (typeof input === 'string') ? u : new Request(u, input);
+    } catch (e) {
+      return input;
     }
-    throw new Error(`[${label}] 讀取失敗：\n` + urls.join('\n'));
   }
 
-  // 產生一組候選路徑（新結構優先、舊結構後備；你若不想保留舊路徑，改用第②段）
-  function paths(file) {
-    const v = 'v=' + Date.now();
-    const NEW1 = `./data/${CAT}/${file}?${v}`;           // ✅ 新結構（相對）
-    const NEW2 = `../data/${CAT}/${file}?${v}`;          // ✅ 若 player 可能被搬動就留作保險
-    const OLD1 = `./data/${file}?${v}`;                  // 舊：根下 data/xxx.json
-    const OLD2 = `./english-videos/data/${file}?${v}`;   // 舊：english-videos 子路徑
-    return [NEW1, NEW2, OLD1, OLD2];
-  }
-
-  // 導出到全域，取代舊程式的直接 fetch
-  window.$BW_DATA = {
-    CAT, SLUG,
-    // 類目清單
-    getIndex: () => {
-      // 你的檔名：story-index.json、music-index.json（放各自資料夾）
-      const name = `${CAT}-index.json`;
-      return fetchJSONWithFallback(paths(name), 'index');
-    },
-    // 分類檔（依你新結構命名）
-    getCues  : () => fetchJSONWithFallback(paths(`cues-${SLUG}.json`),   'cues'),
-    getQuiz  : () => fetchJSONWithFallback(paths(`quiz-${SLUG}.json`),   'quiz'),
-    getAI    : () => fetchJSONWithFallback(paths(`ai-${SLUG}.json`),     'ai'),
-    getVocab : () => fetchJSONWithFallback(paths(`vocab-${SLUG}.json`),  'vocab'),
+  window.fetch = function (input, init) {
+    return _fetch.call(this, rewrite(input), init);
   };
-
-  // 若你的主程式會自己組 URL 讀檔，請改成呼叫上面的方法；例如：
-  // const {data: cues}  = await $BW_DATA.getCues();
-  // const {data: quiz}  = await $BW_DATA.getQuiz();
-  // const {data: ai}    = await $BW_DATA.getAI();
-  // const {data: vocab} = await $BW_DATA.getVocab();
-  // const {data: index} = await $BW_DATA.getIndex();
-
-  // 另外，把任何硬寫： ./data/cues-*.json、./data/quiz-*.json、./data/ai-*.json 的 fetch
-  // 全改為呼叫 $BW_DATA 對應的 get*()，就不會再出現 404 舊路徑了。
 })();
 </script>
 
 </body>
+
 </html>
+
