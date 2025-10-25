@@ -478,27 +478,40 @@ const esc=s=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replac
 
 /* ---------- 參數 ---------- */
 const params=new URLSearchParams(location.search);
+
 const primarySlug=params.get('slug')||'mid-autumn';
 let slug=primarySlug;
 
+
+// === Category support: story / music / movie / news / pro ===
+const rawCat=(params.get('cat')||'story').toLowerCase();
+const allowedCats=new Set(['story','music','movie','news','pro']);
+const cat=allowedCats.has(rawCat)?rawCat:'story';
+const FALLBACK_BY_CAT={story:'mid-autumn', music:'see-you-again', movie:'mid-autumn', news:'mid-autumn', pro:'mid-autumn'};
 /* ---------- 資源載入（含回退） ---------- */
 
-async function fetchWithFallback(p, f, kind){
-  try{
-    const r = await fetch(p, { cache: 'no-store' });
-    if(!r.ok) throw new Error('primary not ok');
-    return { data: await r.json(), used: 'primary' };
-  }catch(e1){
-    try{
-      const r2 = await fetch(f, { cache: 'no-store' });
-      if(!r2.ok) throw new Error('fallback not ok');
-      slug = 'mid-autumn';
-      return { data: await r2.json(), used: 'fallback' };
-    }catch(e2){
-      console.error(`[fatal] ${kind} 讀取失敗`, e2);
-      return { data: null, used: 'error' };
+async function fetchWithFallback(a,b,c){
+  const stamp=Date.now();
+  if (typeof a==='string' && !a.startsWith('./')){
+    const kind=a;
+    const wantedSlug=b||primarySlug;
+    const fbSlug=FALLBACK_BY_CAT[cat]||'mid-autumn';
+    const files=(slug)=>[
+      `./data/${kind}-${slug}.json?v=${stamp}`,
+      `./data/${cat}/${kind}-${slug}.json?v=${stamp}`
+    ];
+    const candidates=[...files(wantedSlug), ...files(fbSlug)];
+    for (const url of candidates){
+      try{ const r=await fetch(url,{cache:'no-store'}); if(r.ok){ return {data:await r.json(), used: url.includes(fbSlug)?'fallback':'primary', url}; } }catch{}
     }
+    return {data:null, used:'error'};
   }
+  const primaryUrl=a, fallbackUrl=b, kind=c||'cues';
+  const candidates=[primaryUrl, fallbackUrl].filter(Boolean).map(u=>u.includes('?')?u:`${u}?v=${stamp}`);
+  for (const url of candidates){
+    try{ const r=await fetch(url,{cache:'no-store'}); if(r.ok){ return {data:await r.json(), used: (url===fallbackUrl)?'fallback':'primary', url}; } }catch{}
+  }
+  return {data:null, used:'error'};
 }
   catch{ try{const r2=await fetch(f,{cache:'no-store'}); if(!r2.ok)throw 0; slug='mid-autumn'; return {data:await r2.json(),used:'fallback'};}
   catch(e2){ console.error(`[fatal] ${kind} 讀取失敗`,e2); return {data:null,used:'error'};}}
@@ -517,10 +530,55 @@ function setOffset(v){offset=Number(v)||0; offsetVal.textContent=`${offset.toFix
 window.player={ setOffset, clearRepeat:()=>{ loopSentence=false; btnReplay?.classList.remove('blue'); } };
 
 /* ---------- 影片 & 字幕 ---------- */
+
 async function loadVideo(){
-  const src=s=>`./videos/${s}.mp4`;
-  video.src=src(primarySlug);
-  video.addEventListener('error',()=>{ video.src=src('mid-autumn'); },{once:true});
+  function ensureWrap(){
+    let wrap=document.getElementById('videoWrap');
+    const video=document.getElementById('player');
+    if(!wrap){
+      wrap=document.createElement('div');
+      wrap.id='videoWrap'; wrap.style.width='100%'; wrap.style.height='100%';
+      if(video && video.parentNode){ video.parentNode.insertBefore(wrap, video); wrap.appendChild(video); }
+      else{ document.body.prepend(wrap); }
+    }
+    return wrap;
+  }
+  const wrap=ensureWrap();
+  const video=document.getElementById('player');
+  if(cat==='music'){
+    const ytIds={
+      'see-you-again':'RgKAFK5djSk',
+      'fight-song':'xo1VInw-SKc',
+      'let-it-go':'L0MK7qz13bU',
+      'perfect':'2Vv-BfVoq4g',
+      'count-on-me':'yJYXItns2ik'
+    };
+    const vid=ytIds[primarySlug];
+    if(vid){
+      if(video){ video.removeAttribute('src'); video.style.display='none'; }
+      wrap.style.position='relative'; wrap.innerHTML='';
+      const iframe=document.createElement('iframe');
+      iframe.width='100%'; iframe.height='100%'; iframe.style.aspectRatio='16 / 9';
+      iframe.src=`https://www.youtube.com/embed/${vid}?autoplay=0&controls=1`;
+      iframe.title='YouTube video player';
+      iframe.allow='accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+      iframe.referrerPolicy='strict-origin-when-cross-origin';
+      iframe.allowFullscreen=true;
+      wrap.appendChild(iframe);
+      console.log('[video] using YouTube iframe for', primarySlug);
+      return;
+    }
+  }
+  const build=(s)=>[`./videos/${cat}/${s}.mp4`,`./videos/${s}.mp4`];
+  const tryList=[...build(primarySlug), ...build(FALLBACK_BY_CAT[cat]||'mid-autumn')];
+  let i=0;
+  function tryNext(){
+    if(i>=tryList.length){ console.warn('[video] no source found',{cat,slug:primarySlug}); return; }
+    const url=tryList[i++];
+    if(!video){ console.error('[video] <video id="player"> not found'); return; }
+    video.style.display='block'; video.src=url; console.log('[video] try',url);
+  }
+  if(video){ video.addEventListener('error', tryNext); tryNext(); }
 }
 async function loadCues(){
   cuesStatus.textContent='（字幕載入中…）';
@@ -679,7 +737,6 @@ $$('.tabs .tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab
 </script>
 <!-- ===== Supabase 守門 & 觀看紀錄 ===== -->
 <script type="module">
-(async () => {
 import { supabase } from './supa.js?v=20251018';  // ✅ 共用同一 Supabase Client
 
 // 登入守門
@@ -687,7 +744,7 @@ const { data: authData, error: authErr } = await supabase.auth.getUser();
 if (authErr || !authData?.user) {
   alert('請先登入後再看影片。');
   location.href = 'index.html';
-  // return removed in module
+  return;
 }
 
 const user = authData.user;
@@ -710,7 +767,7 @@ console.log('✅ 已紀錄觀看', videoSlug);
     // 第一次播放寫一筆紀錄
     let hasLogged = false;
     const logOnce = async () => {
-      if (hasLogged) // return removed in module
+      if (hasLogged) return;
       hasLogged = true;
       try {
         await supabase.from("watch_logs").insert({
@@ -725,7 +782,6 @@ console.log('✅ 已紀錄觀看', videoSlug);
     };
     document.getElementById("player")?.addEventListener("play", logOnce, { once: true });
   }
-})();
 </script>
 
 <!-- 
