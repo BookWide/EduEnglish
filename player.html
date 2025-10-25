@@ -2469,102 +2469,92 @@ if(document.readyState === 'loading'){
 <!-- ▲ A：極簡降載 -->
 /** BookWide player 補丁：同時支援 /data/story 與 /data/music，新結構優先，舊結構回退 **/
 (function () {
-  // 1) 讀取網址參數（不動你的 query 規格）
+  <script>
+(function () {
+  // 1) 讀取網址參數
   const params = new URLSearchParams(location.search);
   const cat  = (params.get('cat')  || 'story').trim();   // story | music
   const slug = (params.get('slug') || '').trim();
   if (!slug) console.warn('缺少 slug 參數');
-  // 若其它模組需要，保留在全域
-  window.__BW__ = { cat, slug };
 
-  // 2) 基準路徑：新結構優先、舊結構回退（不改你的檔名約定）
-  const NEW_BASE = `./data/${cat}/`;
-  const OLD_BASE = `./data/`;
+  // 2) 路徑與相容層（新結構優先，舊結構回退）
+  const NEW_BASE = `./data/${cat}/`;   // -> ./data/story/ 或 ./data/music/
+  const OLD_BASE = `./data/`;          // 舊：./data/xxx-*.json
 
-  // 3) 讀 JSON：先試新路徑，失敗再回退舊路徑；失敗回傳 reject 讓 UI 顯示「讀取失敗」
   async function fetchJSONSmart(file) {
     // 先試新結構
-    try {
-      const r1 = await fetch(NEW_BASE + file, { cache: 'no-store' });
-      if (r1.ok) return await r1.json();
-    } catch (_) {}
+    let r = await fetch(NEW_BASE + file);
+    if (r.ok) return r.json();
     // 回退舊結構
-    const r2 = await fetch(OLD_BASE + file, { cache: 'no-store' });
-    if (!r2.ok) throw new Error(`無法讀取 ${file}（new/old 皆失敗）`);
-    return r2.json();
+    r = await fetch(OLD_BASE + file);
+    if (r.ok) return r.json();
+    throw new Error(`找不到資料：${NEW_BASE+file} 或 ${OLD_BASE+file}`);
   }
-  // 讓你原本其它程式可沿用
-  window.fetchJSONSmart = fetchJSONSmart;
 
-  // 4) 掛接影片來源（只補「來源」邏輯，不動你原本播放器 UI）
-  (async function wireVideoSource() {
-    // 封裝兩種掛載方式：本地 mp4 / YouTube
-    const setVideoSrc = (src) => {
-      const v = document.querySelector('video');
-      if (v) { v.src = src; v.load(); }
-    };
-    const mountYouTube = (youtubeId) => {
-      // 優先找你原本的播放器容器；找不到就用 video 的父層
-      const host =
-        document.querySelector('#videoBox') ||
-        document.querySelector('.video-box') ||
-        (document.querySelector('video') && document.querySelector('video').parentElement);
-      if (!host) return;
-      host.innerHTML =
-        `<iframe width="100%" height="100%" 
-                 src="https://www.youtube.com/embed/${youtubeId}?rel=0"
-                 frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>`;
-    };
+  // 3) 統一資料讀取（不改你的檔名慣例）
+  async function loadCues()  { return fetchJSONSmart(`cues-${slug}.json`); }
+  async function loadQuiz()  { return fetchJSONSmart(`quiz-${slug}.json`); }
+  async function loadVocab() { return fetchJSONSmart(`vocab-${slug}.json`); }
+  async function loadAI()    { return fetchJSONSmart(`ai-${slug}.json`); }
 
-    try {
-      if (cat === 'music') {
-        // music：從 music-index.json 取 youtubeId；若無，回退本地 mp4（你已經上傳就能播）
-        const idx = await fetchJSONSmart('music-index.json').catch(() => null);
-        const it  = idx && Array.isArray(idx.items)
-          ? idx.items.find(x => x.slug === slug)
-          : null;
-        if (it && it.youtubeId) {
-          mountYouTube(it.youtubeId);
+  // 4) 音樂專用：讀 music-index 取 youtubeId（相容舊 index.json）
+  async function loadMusicMeta() {
+    if (cat !== 'music') return null;
+    const candidates = ['music-index.json', 'index.json', './index.json']; // 依序嘗試
+    for (const file of candidates) {
+      try {
+        const list = await fetchJSONSmart(file);
+        const arr  = Array.isArray(list) ? list
+                   : Array.isArray(list.items) ? list.items : [];
+        const hit  = arr.find(x => (x.slug || '').trim() === slug);
+        if (hit) return hit;       // {youtubeId, title, ...}
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  // 5) 設定影片來源：story 播本地 mp4；music 先試 YouTube（無則回退 mp4）
+  async function setupPlayerSource() {
+    const videoEl  = document.querySelector('video, #player');
+    const iframeEl = document.querySelector('#ytFrame');  // 若你有預留 iframe，就會用它
+
+    if (cat === 'music') {
+      const meta = await loadMusicMeta();
+      if (meta?.youtubeId) {
+        const yt = `https://www.youtube.com/embed/${meta.youtubeId}?rel=0&modestbranding=1`;
+        if (iframeEl) {
+          iframeEl.src = yt;
+          iframeEl.removeAttribute('hidden');
+          if (videoEl) videoEl.setAttribute('hidden','');
         } else {
-          setVideoSrc(`./videos/${slug}.mp4`);
+          // 如果沒有 iframe，這裡換成你既有的 YT 初始化流程
+          console.warn('請把 YouTube 播放器初始化接進來：', yt);
         }
       } else {
-        // story：固定播本地 mp4（沿用你既有上傳）
-        setVideoSrc(`./videos/${slug}.mp4`);
+        // 沒有 youtubeId 就回退本地 mp4（如果你有上傳）
+        if (videoEl) videoEl.src = `./videos/${slug}.mp4`;
       }
-    } catch (e) {
-      console.warn('[wireVideoSource] fallback to local mp4:', e);
-      setVideoSrc(`./videos/${slug}.mp4`);
+    } else {
+      // story：固定播本地 mp4
+      if (videoEl) videoEl.src = `./videos/${slug}.mp4`;
     }
-  })();
+  }
 
-  // 5) 資料接線（只負責把資料取回；渲染仍用你原本的函式）
-  (async function wireData() {
-    const want = (name) => fetchJSONSmart(`${name}-${slug}.json`).catch(() => null);
+  // 讓其餘模組可用（可選）
+  window.fetchJSONSmart = fetchJSONSmart;
+  window.loadCues  = loadCues;
+  window.loadQuiz  = loadQuiz;
+  window.loadVocab = loadVocab;
+  window.loadAI    = loadAI;
 
-    const [cues, quiz, vocab, ai] = await Promise.all([
-      want('cues'),
-      want('quiz'),
-      want('vocab'),
-      want('ai'),
-    ]);
-
-    // 你原本的渲染函式若叫別的名字，就把下面對應一下即可
-    if (cues  && window.renderCues)  window.renderCues(cues);
-    if (quiz  && window.renderQuiz)  window.renderQuiz(quiz);
-    if (vocab && window.renderVocab) window.renderVocab(vocab);
-    if (ai    && window.renderAI)    window.renderAI(ai);
-
-    // 若你採事件驅動，也可以改成：
-    // cues  && document.dispatchEvent(new CustomEvent('bw:cues',  {detail:cues}));
-    // quiz  && document.dispatchEvent(new CustomEvent('bw:quiz',  {detail:quiz}));
-    // vocab && document.dispatchEvent(new CustomEvent('bw:vocab', {detail:vocab}));
-    // ai    && document.dispatchEvent(new CustomEvent('bw:ai',    {detail:ai}));
-  })();
+  // 立即套上來源
+  setupPlayerSource();
 })();
 </script>
+
 
 </body>
 
 </html>
+
 
