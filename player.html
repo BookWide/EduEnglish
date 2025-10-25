@@ -2497,6 +2497,329 @@ if(document.readyState === 'loading'){
 })();
 </script>
 
+<!-- ==== BookWide 標準結構 V001：功能補丁（不改結構/樣式/類名） ==== -->
+<script>
+(function(){
+  if (window.__BOOKWIDE_V001_PATCHED__) return;
+  window.__BOOKWIDE_V001_PATCHED__ = true;
+
+  const params = new URLSearchParams(location.search);
+  const cat  = (params.get('cat') || 'story').trim().toLowerCase();
+  const primarySlug = (params.get('slug') || 'mid-autumn').trim();
+  let slug = primarySlug;
+  const DATA_PRIMARY  = `./data/${cat}/`;
+  const DATA_FALLBACK = `./data/story/`;
+  const cacheBust = () => `v=${Date.now()}`;
+
+  async function fetchJSONWithFallback(primaryUrl, fallbackUrl, kind){
+    try{ const r = await fetch(primaryUrl, { cache: 'no-store' });
+         if(!r.ok) throw 0;
+         return { data: await r.json(), used: 'primary' };
+    }catch{
+      try{ const r2 = await fetch(fallbackUrl, { cache: 'no-store' });
+           if(!r2.ok) throw 0;
+           console.warn(`[fallback:${kind}]`, fallbackUrl);
+           return { data: await r2.json(), used: 'fallback' };
+      }catch(e){
+           console.error(`[error:${kind}]`, primaryUrl, '->', fallbackUrl, e);
+           return { data: null, used: 'error' };
+      }
+    }
+  }
+
+  async function BW_loadVideo_V001(){
+    const wrap  = document.getElementById('videoWrap') || document.querySelector('.videoWrap');
+    const video = document.getElementById('player');
+    const showVideo = ()=>{ if(video) video.style.display=''; const ex=document.getElementById('ytBox'); if(ex) ex.remove(); };
+
+    if (cat === 'music'){
+      try{
+        const { data: idx } = await fetchJSONWithFallback(
+          `./data/music/music-index.json?${cacheBust()}`,
+          `./data/music/music-index.json?${cacheBust()}`,
+          'music-index'
+        );
+        const pickYtId = (v)=>{
+          if(!v) return '';
+          const s=String(v);
+          if(/^[\w-]{8,}$/.test(s)) return s;
+          try{ const u=new URL(s); return u.searchParams.get('v') || u.pathname.split('/').pop(); }catch{ return ''; }
+        };
+        const meta = Array.isArray(idx) ? idx.find(x => (x.slug||'').trim() === primarySlug) : null;
+        const ytId = meta && pickYtId(meta.yt || meta.youtube);
+        if (ytId && wrap){
+          if(video) video.style.display = 'none';
+          const box = document.createElement('div');
+          box.id = 'ytBox';
+          box.style.cssText = 'position:absolute;inset:0;width:100%;height:100%';
+          box.innerHTML = `<iframe title="YouTube" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen style="border:0;width:100%;height:100%" src="https://www.youtube-nocookie.com/embed/${ytId}?playsinline=1&rel=0&modestbranding=1&cc_load_policy=1"></iframe>`;
+          wrap.appendChild(box);
+          return;
+        }
+      }catch(e){}
+      showVideo();
+      if (video){
+        const try1 = `./videos/music/${primarySlug}.mp4`;
+        const try2 = `./videos/${primarySlug}.mp4`;
+        video.src = try1;
+        video.onerror = () => { video.src = try2; video.onerror = null; };
+      }
+      return;
+    }
+
+    showVideo();
+    if (video){
+      const a = `./videos/${cat}/${primarySlug}.mp4`;
+      const b = `./videos/${primarySlug}.mp4`;
+      const c = `./videos/mid-autumn.mp4`;
+      video.src = a;
+      video.onerror = () => { video.src = b; video.onerror = () => { video.src = c; video.onerror = null; }; };
+    }
+  }
+
+  async function BW_loadCues_V001(){
+    const body = document.getElementById('cuesBody') || document.querySelector('#pane-sub tbody');
+    const status = document.getElementById('cuesStatus') || document.getElementById('cuesMeta');
+    if(status) status.textContent = '（字幕載入中…）';
+    const pri = `${DATA_PRIMARY}cues-${primarySlug}.json?${cacheBust()}`;
+    const fbk = `${DATA_FALLBACK}cues-${primarySlug}.json?${cacheBust()}`;
+    const { data, used } = await fetchJSONWithFallback(pri, fbk, 'cues');
+    if(!data){ if(status) status.textContent='⚠️ 字幕讀取失敗'; return; }
+    const rows = Array.isArray(data) ? data : (data.items || data.lines || []);
+    const toSec = (t)=>{ if(typeof t==='number') return t; const m=String(t||'').match(/(\\d+):(\\d+)(?::(\\d+))?/); if(!m)return 0; return (+m[1])*3600+(+m[2])*60+(+m[3]||0); };
+    const esc = (s)=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+    const fmt = (sec)=>{ sec=Math.max(0,sec|0); const mm=(sec/60|0), ss=(sec%60); return `${String(mm).padStart(2,'0')}:${String(ss).padStart(2,'0')}`; };
+    if (body){
+      body.innerHTML = rows.map((r,i)=>{
+        const t = toSec(r.t ?? r.time ?? r.start ?? r.begin ?? i);
+        const en = r.en ?? r.text ?? r.english ?? r.sentence ?? '';
+        const zh = r.zh ?? r.cn ?? r.tw ?? r.chinese ?? '';
+        return `<tr data-i="${i}"><td class="muted" style="width:80px">${t?fmt(t):''}</td><td>${esc(en)}</td><td style="width:40%">${esc(zh)}</td></tr>`;
+      }).join('');
+      body.querySelectorAll('tr').forEach(tr=>{
+        tr.addEventListener('click',()=>{
+          const i = +tr.getAttribute('data-i');
+          const video = document.getElementById('player');
+          const t = rows[i] ? toSec(rows[i].t ?? rows[i].time ?? rows[i].start ?? rows[i].begin ?? i) : 0;
+          if(video){ video.currentTime = Math.max(0, t); video.play(); }
+        });
+      });
+    }
+    if(status) status.textContent = used==='fallback' ? `已載入字幕（story 回退）` : `已載入字幕（${primarySlug}）`;
+  }
+
+  async function BW_loadQuiz_V001(){
+    const meta = document.getElementById('quizMeta');
+    const list = document.getElementById('quizList');
+    if (meta) meta.textContent = '（測驗載入中…）';
+    const pri = `${DATA_PRIMARY}quiz-${primarySlug}.json?${cacheBust()}`;
+    const fbk = `${DATA_FALLBACK}quiz-${primarySlug}.json?${cacheBust()}`;
+    const { data, used } = await fetchJSONWithFallback(pri, fbk, 'quiz');
+    if(!data){ if(meta) meta.textContent='⚠️ 題庫讀取失敗'; return; }
+    const qs = Array.isArray(data) ? data : (data.questions || []);
+    if (meta) meta.textContent = used==='fallback' ? `已載入（story 回退），共 ${qs.length} 題` : `已載入（${primarySlug}），共 ${qs.length} 題`;
+    if (!list) return;
+    const esc = (s)=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+    list.innerHTML = qs.map((q,i)=>{
+      const idx=i+1, type=(String(q.type||'MCQ').toUpperCase()==='SA')?'SA':'MCQ';
+      if(type==='MCQ'){
+        const opts=(q.options||q.choices||[]).map(opt=>`<label style="display:block;margin:4px 0"><input type="radio" name="q${idx}" value="${esc(opt)}"> ${esc(opt)}</label>`).join('');
+        return `<li data-type="MCQ" data-ans="${esc(q.answer??q.ans??'')}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question||q.q||'')}</div><div>${opts}</div><div class="msg" style="margin-top:4px"></div></li>`;
+      }else{
+        return `<li data-type="SA" data-ans="${esc(q.answer??'')}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question||q.q||'')}</div><input type="text" placeholder="輸入答案…" style="padding:6px 8px;border:1px solid #334155;border-radius:6px;background:#0f223b;color:#dbe7ff"><button class="btn btn-check" style="margin-left:6px">檢查</button><div class="msg" style="margin-top:4px"></div></li>`;
+      }
+    }).join('');
+  }
+
+  async function BW_loadVocab_V001(){
+    const meta = document.getElementById('vocabStatus');
+    const box  = document.getElementById('vocabBox');
+    if (meta) meta.textContent = '( 單字載入中… )';
+    const pri = `${DATA_PRIMARY}vocab-${primarySlug}.json?${cacheBust()}`;
+    const fbk = `${DATA_FALLBACK}vocab-${primarySlug}.json?${cacheBust()}`;
+    const { data, used } = await fetchJSONWithFallback(pri, fbk, 'vocab');
+    if(!data || !data.length){ if(meta) meta.textContent='⚠️ 查無單字資料'; if(box) box.innerHTML=''; return; }
+    if (meta) meta.textContent = used==='fallback' ? `已載入單字（story 回退）` : `已載入單字（${primarySlug}）`;
+    if (!box) return;
+    const esc = (s)=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+    box.innerHTML = data.map(v=>`<div class="voc">
+      <div class="voc-h"><div class="voc-word">${esc(v.word||'')}</div><div class="voc-pos">${esc(v.pos||'')}</div></div>
+      ${v.zh?`<div class="voc-zh">${esc(v.zh)}</div>`:''}
+      ${v.en?`<div class="voc-en">${esc(v.en)}</div>`:''}
+      <div class="voc-actions">
+        ${v.time?`<button class="btn" data-act="jump" data-time="${esc(v.time)}">跳到片段</button>`:''}
+        <button class="btn" data-act="speak" data-text="${esc(v.word||v.en||'')}">🔊 朗讀</button>
+      </div>
+    </div>`).join('');
+  }
+
+  function boot(){
+    BW_loadVideo_V001();
+    BW_loadCues_V001();
+    BW_loadQuiz_V001();
+    BW_loadVocab_V001();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once:true });
+  else boot();
+})();
+</script>
+
+
+<!-- ==== BookWide 標準結構 V001a ：僅補 JS，保留原結構/樣式/類名 ==== -->
+<script>
+(function(){
+  if (window.__BOOKWIDE_V001A__) return;
+  window.__BOOKWIDE_V001A__ = true;
+
+  /* 1) 參數 ＆ 路徑（不動結構） */
+  const params = new URLSearchParams(location.search);
+  const cat  = (params.get('cat') || 'story').trim().toLowerCase();
+  const primarySlug = (params.get('slug') || 'mid-autumn').trim();
+  const DATA_PRIMARY  = `./data/${cat}/`;
+  const DATA_FALLBACK = `./data/story/`;
+  const bust = () => `v=${Date.now()}`;
+
+  async function fetchJSONWithFallback(p, f, kind){
+    try{ const r = await fetch(p, {cache:'no-store'}); if(!r.ok) throw 0; return {data: await r.json(), used:'primary'}; }
+    catch(_){ try{ const r2 = await fetch(f, {cache:'no-store'}); if(!r2.ok) throw 0; console.warn(`[fallback:${kind}]`, f); return {data: await r2.json(), used:'fallback'}; }
+    catch(e){ console.error(`[error:${kind}]`, e); return {data:null, used:'error'}; } }
+  }
+
+  /* 2) 字幕 */
+  (async function(){
+    const pane = document.getElementById('tabSubtitles');
+    if(!pane) return;
+    const meta = pane.querySelector('#cuesMeta, .cues-meta') || pane;
+    const tbody = pane.querySelector('tbody');
+    if (meta) meta.textContent = '（字幕載入中…）';
+    const {data, used} = await fetchJSONWithFallback(`${DATA_PRIMARY}cues-${primarySlug}.json?${bust()}`, `${DATA_FALLBACK}cues-${primarySlug}.json?${bust()}`, 'cues');
+    if(!data){ if(meta) meta.textContent='⚠️ 字幕讀取失敗'; return; }
+    const rows = Array.isArray(data)?data:(data.items||data.lines||[]);
+    const toSec = (t)=>{ if(typeof t==='number') return t; const m=String(t||'').match(/(\\d+):(\\d+)(?::(\\d+))?/); if(!m)return 0; return (+m[1])*3600+(+m[2])*60+(+m[3]||0); };
+    const fmt = (s)=>{ s=Math.max(0,s|0); const m=(s/60|0), ss=(s%60); return `${String(m).padStart(2,'0')}:${String(ss).padStart(2,'0')}`; };
+    const esc = (x)=>String(x??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+    if (tbody){
+      tbody.innerHTML = rows.map((r,i)=>{
+        const t = toSec(r.t??r.time??r.start??r.begin??i);
+        const en = r.en??r.text??r.english??r.sentence??'';
+        const zh = r.zh??r.cn??r.tw??r.chinese??'';
+        return `<tr data-i="${i}"><td style="width:80px" class="muted">${t?fmt(t):''}</td><td>${esc(en)}</td><td style="width:40%">${esc(zh)}</td></tr>`;
+      }).join('');
+      tbody.querySelectorAll('tr').forEach(tr=>tr.addEventListener('click',()=>{
+        const i = +tr.getAttribute('data-i');
+        const rows2 = rows;
+        const t = toSec(rows2[i]?.t??rows2[i]?.time??rows2[i]?.start??rows2[i]?.begin??i);
+        const v = document.getElementById('player'); if(v){ v.currentTime=Math.max(0,t); v.play(); }
+      }));
+    }
+    if(meta) meta.textContent = used==='fallback' ? '已載入字幕（ mid-autumn 回退 ）' : `已載入字幕（ ${primarySlug} ）`;
+  })();
+
+  /* 3) 測驗 */
+  (async function(){
+    const pane = document.getElementById('tabQuiz');
+    if(!pane) return;
+    const meta = pane.querySelector('#quizMeta, .quiz-meta') || pane;
+    const box  = pane.querySelector('#quizList, .quiz-list') || pane;
+    if (meta) meta.textContent = '（測驗載入中…）';
+    const {data, used} = await fetchJSONWithFallback(`${DATA_PRIMARY}quiz-${primarySlug}.json?${bust()}`, `${DATA_FALLBACK}quiz-${primarySlug}.json?${bust()}`, 'quiz');
+    if(!data){ if(meta) meta.textContent = '⚠️ 題庫讀取失敗'; return; }
+    const qs = Array.isArray(data)?data:(data.questions||[]);
+    if (meta) meta.textContent = used==='fallback' ? `已載入（ ${primarySlug} / story 回退 ），共 ${qs.length} 題` : `已載入（ ${primarySlug} ），共 ${qs.length} 題`;
+    const esc=(s)=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+    box.innerHTML = `<ol class="quiz-list">${qs.map((q,i)=>{
+      const idx=i+1, type=String(q.type||'MCQ').toUpperCase();
+      if(type==='SA') {
+        return `<li><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.q||q.question||'')}</div><input type="text" style="padding:6px 8px;border:1px solid #334155;border-radius:6px;background:#0f223b;color:#dbe7ff"><div class="msg" style="margin-top:4px"></div></li>`;
+      }
+      const opts=(q.options||q.choices||[]).map(op=>`<label style="display:block;margin:4px 0"><input type="radio" name="q${idx}"> ${esc(op)}</label>`).join('');
+      return `<li><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.q||q.question||'')}</div>${opts}</li>`;
+    }).join('')}</ol>`;
+  })();
+
+  /* 4) 單字 */
+  (async function(){
+    const pane = document.getElementById('tabVocab');
+    if(!pane) return;
+    const meta = pane.querySelector('#vocabMeta, #vocabStatus, .vocab-meta') || pane;
+    const box  = pane.querySelector('#vocabBox, .vocab-box') || pane;
+    if (meta) meta.textContent = '（單字載入中…）';
+    const {data, used} = await fetchJSONWithFallback(`${DATA_PRIMARY}vocab-${primarySlug}.json?${bust()}`, `${DATA_FALLBACK}vocab-${primarySlug}.json?${bust()}`, 'vocab');
+    if(!data || !data.length){ if(meta) meta.textContent='⚠️ 查無單字資料'; if(box) box.innerHTML=''; return; }
+    if (meta) meta.textContent = used==='fallback' ? `已載入單字（ story 回退 ）` : `已載入單字（ ${primarySlug} ）`;
+    const esc=(s)=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+    box.innerHTML = data.map(w=>{
+      return `<div class="voc">
+        <div class="voc-h"><div class="voc-word">${esc(w.word||w.en||'')}</div><div class="voc-pos">${esc(w.pos||'')}</div></div>
+        ${w.zh?`<div class="voc-zh">${esc(w.zh)}</div>`:''}
+        ${w.en?`<div class="voc-en">${esc(w.en)}</div>`:''}
+      </div>`;
+    }).join('');
+  })();
+
+  /* 5) AI 互動（讀 ai-<slug>.json；若無就顯示提示） */
+  ;(async function(){
+    const pane = document.getElementById('tabAI');
+    if(!pane) return;
+    const meta = pane.querySelector('#aiMeta, .ai-meta') || pane;
+    const box  = pane.querySelector('#aiBox, .ai-box') || pane;
+    if (meta) meta.textContent = '（AI 區載入中…）';
+    const {data} = await fetchJSONWithFallback(`${DATA_PRIMARY}ai-${primarySlug}.json?${bust()}`, `${DATA_FALLBACK}ai-${primarySlug}.json?${bust()}`, 'ai');
+    if(!data){ if(meta) meta.textContent = '（本單元暫無 AI 資料）'; return; }
+    const esc=(s)=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+    const items = Array.isArray(data)?data:(data.items||[]);
+    if (box){
+      box.innerHTML = items.map((it,i)=>`<div class="ai-item" data-i="${i}" style="margin:8px 0;padding:10px;border:1px solid #223047;border-radius:10px;background:#0f172a">
+        <div class="muted" style="font-size:12px">${esc(it.tag||'AI 提示')}</div>
+        <div style="margin-top:6px">${esc(it.prompt||it.q||it.text||'')}</div>
+      </div>`).join('');
+    }
+    if (meta) meta.textContent = `已載入 AI（ ${items.length} 筆 ）`;
+  })();
+
+  /* 6) 影片（保持你原本的結構：若已有更舊補丁就略過） */
+  if (!window.__BOOKWIDE_V001_PATCHED__ && !window.__BW_LOADED_VIDEO__) {
+    window.__BW_LOADED_VIDEO__ = true;
+    (async function loadVideo(){
+      const wrap  = document.getElementById('videoWrap') || document.querySelector('.videoWrap');
+      const video = document.getElementById('player');
+      const showVideo = ()=>{ if(video) video.style.display=''; const ex=document.getElementById('ytBox'); if(ex) ex.remove(); };
+
+      if (cat === 'music'){
+        try{
+          const { data: idx } = await fetchJSONWithFallback(`./data/music/music-index.json?${bust()}`, `./data/music/music-index.json?${bust()}`, 'music-index');
+          const pickYtId = (v)=>{ if(!v) return ''; const s=String(v); if(/^[\\w-]{8,}$/.test(s)) return s; try{ const u=new URL(s); return u.searchParams.get('v') || u.pathname.split('/').pop(); }catch{return '';} };
+          const meta = Array.isArray(idx) ? idx.find(x => (x.slug||'').trim() === primarySlug) : null;
+          const ytId = meta && pickYtId(meta.yt || meta.youtube);
+          if (ytId && wrap){
+            if(video) video.style.display = 'none';
+            const box = document.createElement('div');
+            box.id = 'ytBox'; box.style.cssText='position:absolute;inset:0;width:100%;height:100%';
+            box.innerHTML = `<iframe title="YouTube" style="border:0;width:100%;height:100%" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen src="https://www.youtube-nocookie.com/embed/${ytId}?playsinline=1&rel=0&modestbranding=1&cc_load_policy=1"></iframe>`;
+            wrap.appendChild(box);
+            return;
+          }
+        }catch(e){}
+        showVideo();
+        if (video){
+          const try1 = `./videos/music/${primarySlug}.mp4`;
+          const try2 = `./videos/${primarySlug}.mp4`;
+          video.src = try1; video.onerror = ()=>{ video.src = try2; video.onerror=null; };
+        }
+        return;
+      }
+      showVideo();
+      if (video){
+        const a = `./videos/${cat}/${primarySlug}.mp4`;
+        const b = `./videos/${primarySlug}.mp4`;
+        const c = `./videos/mid-autumn.mp4`;
+        video.src = a; video.onerror = ()=>{ video.src=b; video.onerror=()=>{ video.src=c; video.onerror=null; }; };
+      }
+    })();
+  }
+})();
+</script>
+
 </body>
 
 </html>
