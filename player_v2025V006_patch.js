@@ -48,9 +48,12 @@
         if (yt) {
           // 有 YouTube → 用 iframe（先移除舊 video）
           if (v) try { v.remove(); } catch (_) {}
-          host.innerHTML = '<iframe id="yt" width="100%" height="360" ' +
-            'src="https://www.youtube.com/embed/' + yt + '?autoplay=0&rel=0" ' +
-            'frameborder="0" allow="autoplay; encrypted-media" allowfullscreen></iframe>';
+          host.innerHTML =
+  '<iframe id="yt" width="100%" height="360" ' +
+  'src="https://www.youtube.com/embed/' + yt + '?autoplay=0&rel=0" ' +
+  'frameborder="0" ' +
+  'allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; fullscreen" ' +
+  'allowfullscreen></iframe>';
           console.log('[V006] use YouTube:', yt);
         } else {
           // 無 YouTube → 播本地 mp4
@@ -72,3 +75,4 @@
     console.error('[V006] fatal:', e);
   }
 })();
+
