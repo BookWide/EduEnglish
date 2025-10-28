@@ -568,9 +568,96 @@
   });
 })();
 </script>
+<script>
+// ---- 自動封面生成工具 ----
+
+// 判斷封面要用什麼
+async function ensureCover(item){
+  // 若 JSON 已有 cover，就直接用它
+  if (item.cover && item.cover.trim()) return item.cover;
+
+  // 若有 YouTube ID，就自動用 YouTube 封面
+  if (item.youtubeId && item.youtubeId.trim()){
+    return `https://img.youtube.com/vi/${item.youtubeId}/hqdefault.jpg`;
+  }
+
+  // 若有 mp4，就嘗試擷取第一秒作封面
+  if (item.mp4 && item.mp4.trim()){
+    try {
+      return await grabMp4Frame(item.mp4, 1.0);
+    } catch (e) {
+      console.warn('[cover] 無法從 mp4 擷取封面：', e);
+    }
+  }
+
+  // 都沒有就空白
+  return "";
+}
+
+// 擷取影片第 1 秒畫面當封面
+function grabMp4Frame(src, t=1.0){
+  return new Promise(async (resolve, reject)=>{
+    try {
+      const response = await fetch(src, {cache:'force-cache'});
+      if (!response.ok) throw new Error('fetch 失敗：' + response.status);
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+
+      const video = document.createElement('video');
+      video.muted = true;
+      video.crossOrigin = 'anonymous';
+      video.src = url;
+      video.preload = 'auto';
+      video.playsInline = true;
+
+      video.addEventListener('loadedmetadata', ()=>{
+        const target = Math.min(Math.max(0.1, t), video.duration - 0.1);
+        video.currentTime = target;
+      }, {once:true});
+
+      video.addEventListener('seeked', ()=>{
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth || 640;
+          canvas.height = video.videoHeight || 360;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          const coverDataURL = canvas.toDataURL('image/jpeg', 0.75);
+          URL.revokeObjectURL(url);
+          resolve(coverDataURL);
+        } catch (err){
+          reject(err);
+        }
+      }, {once:true});
+
+      video.addEventListener('error', ()=>reject(new Error('影片讀取錯誤')), {once:true});
+    } catch (e){
+      reject(e);
+    }
+  });
+}
+
+// 套用封面生成到所有類別
+async function decorateItemsWithCovers(items){
+  for (const item of items){
+    try { item.cover = await ensureCover(item); } catch (_) {}
+  }
+  return items;
+}
+
+// ---- 在載入 JSON 後統一執行 ----
+// 例如：
+async function loadCategory(cat){
+  const res = await fetch(`data/${cat}/${cat}-index.json`);
+  const json = await res.json();
+  const items = await decorateItemsWithCovers(json.items || []);
+  renderCards(items);  // ← 你原本的渲染函式
+}
+</script>
 
 </body>
 </html>
+
 
 
 
