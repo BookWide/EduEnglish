@@ -448,102 +448,141 @@
     })();
   })();
 </script>
+
+
+<!-- BookWide index auto-cover + admin inject v2025V007 -->
 <script>
 (function(){
-  // 依規則決定封面來源：cover > yt > mp4首幀 > placeholder
-  function decideCoverURL(img){
-    const cov = img.dataset.cover?.trim();
-    const yt  = img.dataset.youtubeId?.trim();
-    const mp4 = img.dataset.mp4?.trim();
+  // --- Admin-only entries (appear only when BW_PROFILE.is_admin === true) ---
+  async function injectAdminEntries(){
+    try{
+      var isAdmin = !!(window.BW_PROFILE && window.BW_PROFILE.is_admin === true);
+      if(!isAdmin) return;
+      var menu = document.querySelector('#account-menu, #service-menu, [data-role="account-menu"], nav ul[role="menu"], ul[role="menu"]');
+      if(!menu) return;
+      function addItem(text, href){
+        var li = document.createElement('li');
+        var a = document.createElement('a');
+        a.href = href; a.textContent = text;
+        li.appendChild(a);
+        li.classList.add('admin-only');
+        menu.appendChild(li);
+      }
+      // avoid duplicates
+      if (!menu.querySelector('a[href$="check-data.html"]')) addItem('影片健檢（Admin）', 'check-data.html');
+      if (!menu.querySelector('a[href$="grant-admin.html"]')) addItem('Admin 授權 / 暫停', 'grant-admin.html');
+    }catch(e){ console.warn('[admin inject]', e); }
+  }
 
+  // --- Decide cover: cover > youtubeId thumb > mp4 frame > placeholder ---
+  function decideCoverURL(img){
+    var cov = (img.dataset.cover||'').trim();
+    var yt  = (img.dataset.youtubeId||'').trim();
+    var mp4 = (img.dataset.mp4||'').trim();
     if (cov) return cov;
-    if (yt)  return `https://img.youtube.com/vi/${yt}/hqdefault.jpg`;
-    if (mp4) return "__USE_MP4_FRAME__"; // 交給後面的擷取程式
+    if (yt)  return "https://img.youtube.com/vi/"+yt+"/hqdefault.jpg";
+    if (mp4) return "__USE_MP4_FRAME__";
     return "img/placeholder.jpg";
   }
 
-  // 從 mp4 擷取第1秒畫面，產生 dataURL 並指給 <img>
   async function useMp4Frame(img, mp4){
     try{
-      const v = document.createElement('video');
-      v.crossOrigin = "anonymous";        // 若放 GitHub Pages，通常同源 OK；異源需允許 CORS
+      var v = document.createElement('video');
+      v.crossOrigin = "anonymous";
       v.preload = "auto";
       v.src = mp4;
-
-      // 等能播放再跳到 1 秒
-      await v.play().catch(()=>{});       // 某些瀏覽器需要呼叫 play() 才會解碼幀
-      v.pause();
-
-      const seekTo = 1.0;                 // 取第 1 秒
+      // ensure metadata
       await new Promise((res, rej)=>{
-        let done = false;
-        const onSeeked = ()=>{ if(done) return; done = true; v.removeEventListener('seeked', onSeeked); res(); };
-        v.addEventListener('seeked', onSeeked);
-        try{ v.currentTime = seekTo; }catch(e){ rej(e); }
-        // 安全閥：有些瀏覽器不觸發 seeked
-        setTimeout(()=>{ if(!done){ done=true; res(); } }, 1200);
+        const onMeta = ()=>{ v.removeEventListener('loadedmetadata', onMeta); res(); };
+        v.addEventListener('loadedmetadata', onMeta);
+        setTimeout(()=>res(), 600); // safety
       });
-
-      const w = v.videoWidth  || 640;
-      const h = v.videoHeight || 360;
-      const scale = 0.5;                   // 生成較小圖，載入快
-      const cw = Math.max(1, Math.round(w*scale));
-      const ch = Math.max(1, Math.round(h*scale));
-
-      const c = document.createElement('canvas');
+      v.pause();
+      var seekTo = 1.0;
+      await new Promise((res)=>{
+        const onSeek = ()=>{ v.removeEventListener('seeked', onSeek); res(); };
+        v.addEventListener('seeked', onSeek);
+        try { v.currentTime = seekTo; } catch(e){ res(); }
+        setTimeout(()=>res(), 1000);
+      });
+      var w = v.videoWidth || 640, h = v.videoHeight || 360;
+      var scale = 0.5;
+      var cw = Math.max(1, Math.round(w*scale)), ch = Math.max(1, Math.round(h*scale));
+      var c = document.createElement('canvas');
       c.width = cw; c.height = ch;
-      const ctx = c.getContext('2d');
+      var ctx = c.getContext('2d');
       ctx.drawImage(v, 0, 0, cw, ch);
-
-      const dataUrl = c.toDataURL('image/jpeg', 0.8);
-      img.src = dataUrl;
+      img.src = c.toDataURL('image/jpeg', 0.8);
     }catch(e){
-      console.warn('[cover from mp4] fail:', e);
+      console.warn('[cover from mp4] fail', e);
       img.src = "img/placeholder.jpg";
     }
   }
 
-  function applyCovers(root=document){
-    const imgs = root.querySelectorAll('img.cover');
-    imgs.forEach(img=>{
-      // 避免重複處理
+  function applyCovers(root){
+    var imgs = (root || document).querySelectorAll('img.cover, .card img, .item img, .thumb img, img[data-slug], img[data-mp4], img[data-youtube-id]');
+    imgs.forEach(function(img){
       if (img.dataset.coverReady === '1') return;
       img.dataset.coverReady = '1';
+      // If img lacks data-* try to infer from anchor link inside the same card
+      if (!img.dataset.mp4 || !img.dataset.youtubeId) {
+        try{
+          var card = img.closest('.card, .item, li, article, .col');
+          var a = card ? card.querySelector('a[href*="player"]') : null;
+          if (a) {
+            var u = new URL(a.href, location.origin);
+            var cat = (u.searchParams.get('cat')||'').trim();
+            var slug= (u.searchParams.get('slug')||'').trim();
+            if (slug) {
+              if (!img.dataset.mp4) img.dataset.mp4 = "videos/"+(cat? (cat + "/") : "")+slug+".mp4";
+              // if the link carries data-yt on anchor, take it
+              if (!img.dataset.youtubeId && a.dataset.yt) img.dataset.youtubeId = a.dataset.yt;
+            }
+          }
+        }catch(e){}
+      }
 
-      const decided = decideCoverURL(img);
+      var decided = decideCoverURL(img);
       if (decided === "__USE_MP4_FRAME__"){
-        // 先給暫時圖，再嘗試擷取 mp4 首幀
         img.src = "img/placeholder.jpg";
-        const mp4 = img.dataset.mp4?.trim();
+        var mp4 = (img.dataset.mp4||'').trim();
         if (mp4) useMp4Frame(img, mp4);
-      }else{
+      } else {
         img.src = decided;
-        // 失敗 fallback
         img.onerror = function(){
-          // 如果原本是 yt 圖片失敗、但有 mp4，就退回擷取首幀；否則用 placeholder
-          const yt  = img.dataset.youtubeId?.trim();
-          const mp4 = img.dataset.mp4?.trim();
-          if (yt && mp4) return useMp4Frame(img, mp4);
+          var mp4 = (img.dataset.mp4||'').trim();
+          if (mp4) return useMp4Frame(img, mp4);
           img.src = "img/placeholder.jpg";
         };
       }
     });
   }
 
-  // 初始掛載
-  if (document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', ()=>applyCovers(), {once:true});
-  }else{
-    applyCovers();
-  }
+  function ready(fn){ if (document.readyState!=='loading') fn(); else document.addEventListener('DOMContentLoaded', fn, {once:true}); }
 
-  // 若你的清單是動態載入（例如渲染後 append），載入後再呼叫一次 applyCovers(container)
-  window.BW_applyCovers = applyCovers;
+  ready(function(){
+    injectAdminEntries();
+    applyCovers(document);
+    // expose for dynamic lists
+    window.BW_applyCovers = applyCovers;
+  });
 })();
 </script>
 
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
