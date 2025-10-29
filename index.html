@@ -541,153 +541,111 @@
   window.BW_applyCovers = applyCovers;
 })();
 </script>
-<!-- Admin gate (is_admin) for index.html -->
+
+
+<!-- Admin visibility injection (non-intrusive) -->
 <script type="module">
-/**
- * BookWide - Admin Gate v20251029
- * - 不改你原本版面與登入流程
- * - 會盡量沿用現有的 Supabase client（window.supa / window.supabase）
- * - 登入後查 profiles.is_admin，決定是否顯示 Admin 導覽連結
- * - 連結目標：
- *    /EduEnglish/admin/console.html   （Admin 主控台）
- *    /EduEnglish/admin/grant-admin.html（授權 / 暫停管理員）
- */
 (async () => {
-  // 0) 工具：插入樣式（兩個按鈕預設隱藏，具 is-admin 時顯示）
-  const css = `
-  .bw-admin-links{display:none; gap:8px; align-items:center;}
-  .bw-admin-links.show{display:flex;}
-  .bw-admin-btn{
-    padding:6px 10px;border-radius:10px;font-size:13px;line-height:1;
-    background:#0ea5e9;color:#fff;text-decoration:none;white-space:nowrap
-  }
-  .bw-admin-btn.secondary{background:#475569}
-  `;
-  const style = document.createElement('style');
-  style.textContent = css;
-  document.head.appendChild(style);
-
-  // 1) 找或建立「兩個 Admin 連結」容器
-  function buildAdminLinks() {
-    const wrap = document.createElement('div');
-    wrap.className = 'bw-admin-links';
-    wrap.innerHTML = `
-      <a class="bw-admin-btn" href="/EduEnglish/admin/console.html">Admin 主控台</a>
-      <a class="bw-admin-btn secondary" href="/EduEnglish/admin/grant-admin.html">授權 / 暫停管理員</a>
-    `;
-    return wrap;
-  }
-
-  // 2) 嘗試把 admin 連結插到「登入下拉選單」；找不到就掛到右上工具列
-  function mountAdminLinks(adminEl){
-    // 常見三種選單容器（依你既有版面嘗試）
-    const menu =
-      document.querySelector('#account-menu, [data-role="account-menu"], .account-menu, [data-menu="account"]');
-
-    if (menu) {
-      // 放在選單尾端
-      const li = document.createElement('div');
-      li.style.marginTop = '8px';
-      li.appendChild(adminEl);
-      menu.appendChild(li);
-      return;
+  const findByText = (root, selector, text) => {
+    const nodes = root.querySelectorAll(selector);
+    text = (text||'').trim();
+    for (const n of nodes) {
+      if ((n.textContent||'').trim() === text) return n;
     }
-    // 找不到選單就放右上角（登入區域）旁
-    const rightBar = document.querySelector('.topbar-right, [data-role="topbar-right"], header .actions, .site-header .actions');
-    if (rightBar) {
-      rightBar.appendChild(adminEl);
-      return;
+    return null;
+  };
+  const findAccountMenu = () => {
+    const logoutNode = findByText(document, 'a,button,div,span', '登出');
+    if (!logoutNode) return null;
+    let p = logoutNode.parentElement;
+    while (p && p !== document.body) {
+      const items = p.querySelectorAll('li, .acct-item');
+      if (items && items.length >= 3) return { container: p, logoutNode };
+      p = p.parentElement;
     }
-    // 再不行就掛 body 右上角（絕對定位，盡量不擋）
-    adminEl.style.position = 'fixed';
-    adminEl.style.top = '14px';
-    adminEl.style.right = '14px';
-    adminEl.style.zIndex = 3000;
-    document.body.appendChild(adminEl);
-  }
+    return null;
+  };
+  const ensureAdminLinksIn = ({container, logoutNode}) => {
+    const insertBeforeTarget = logoutNode.parentElement || logoutNode;
+    const makeItem = (href, text) => {
+      const li = document.createElement('li');
+      li.className = 'acct-item';
+      li.dataset.adminOnly = '1';
+      li.style.display = 'none';
+      const a = document.createElement('a');
+      a.href = href;
+      a.textContent = text;
+      li.appendChild(a);
+      container.insertBefore(li, insertBeforeTarget);
+      return li;
+    };
+    if (!container.querySelector('[data-admin-only] a[href*="grant-admin"]')) {
+      makeItem('grant-admin.html', 'Admin 授權/暫停');
+    }
+    if (!container.querySelector('[data-admin-only] a[href*="admin/console"]')) {
+      makeItem('admin/console.html', '管理儀表板');
+    }
+  };
 
-  const adminLinks = buildAdminLinks();
-  mountAdminLinks(adminLinks);
-
-  // 3) 取得（或建立）Supabase client：盡量沿用既有全域
-  async function getClient() {
-    // 先用現有（你站上通常有 window.supa）
-    const guess = (w)=> w && typeof w==='object' && w.auth && typeof w.auth.getUser === 'function';
-    if (guess(window.supa))        return window.supa;
-    if (guess(window.supabase))    return window.supabase;
-
-    // 沒有現成就動態載入 + 嘗試用你專案（不會覆蓋你站上既有的）
-    const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
-
-    // 🚨 若你站上已有全域設定，這兩個值會被忽略；只有在沒有 client 時才會用到
-    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-    const SUPABASE_ANON_KEY = (window.__SUPABASE_ANON_KEY__) || 'YOUR_PUBLIC_ANON_KEY';
-
-    return createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  }
-
-  const supa = await getClient();
-
-  // 4) 等使用者登入狀態
-  async function getUser() {
+  let supa = window.supa || window.supabase;
+  if (!supa) {
     try {
-      const { data: { user } } = await supa.auth.getUser();
-      return user || null;
-    } catch (e) {
-      console.warn('[AdminGate] getUser failed:', e);
-      return null;
-    }
-  }
-
-  async function fetchIsAdmin(userId){
-    try{
-      // 只讀取 is_admin 與顯示名（不會改資料）
-      const { data, error } = await supa
-        .from('profiles')
-        .select('is_admin, full_name')
-        .eq('id', userId)
-        .maybeSingle();
-
-      if (error) {
-        console.warn('[AdminGate] profiles select error:', error);
-        return { is_admin:false, full_name:'' };
+      const mod = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+      if (window.SUPABASE_URL && window.SUPABASE_ANON_KEY) {
+        supa = mod.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY);
       }
-      return { is_admin: !!(data && data.is_admin), full_name: (data && data.full_name) || '' };
-    }catch(err){
-      console.warn('[AdminGate] fetchIsAdmin failed:', err);
-      return { is_admin:false, full_name:'' };
-    }
+    } catch (e) {}
   }
-
-  // 5) 啟動：登入才檢查；未登入就維持隱藏
-  const user = await getUser();
-  if (!user) {
-    // 未登入 → 保持隱藏
-    adminLinks.classList.remove('show');
+  if (!supa || !supa.auth) {
+    console.warn('[admin-check] Supabase client not found; admin links will stay hidden.');
     return;
   }
-  const { is_admin } = await fetchIsAdmin(user.id);
-  if (is_admin) {
-    adminLinks.classList.add('show');
-  } else {
-    adminLinks.classList.remove('show');
-  }
 
-  // 6) 監聽登入/登出變化（若你頁面會切帳，能即時更新）
-  try{
-    // v2：onAuthStateChange 在 v2 還在，型別為 callback
-    supa.auth.onAuthStateChange(async (_evt, session) => {
-      const u = session?.user || null;
-      if (!u) { adminLinks.classList.remove('show'); return; }
-      const { is_admin } = await fetchIsAdmin(u.id);
-      if (is_admin) adminLinks.classList.add('show'); else adminLinks.classList.remove('show');
+  try {
+    const menu = findAccountMenu();
+    if (menu) ensureAdminLinksIn(menu);
+
+    const { data: { user } } = await supa.auth.getUser();
+    if (!user) return;
+    let isAdmin = false;
+    try {
+      const { data, error } = await supa.from('profiles').select('is_admin').eq('id', user.id).single();
+      if (!error && data) isAdmin = !!data.is_admin;
+    } catch (e) {}
+
+    document.querySelectorAll('[data-admin-only]').forEach(el => {
+      el.style.display = isAdmin ? '' : 'none';
     });
-  }catch(_){/* 忽略 */}
+
+    if (isAdmin) {
+      const addBadge = (anchor) => {
+        const badge = document.createElement('span');
+        badge.textContent = 'Admin';
+        badge.style.cssText = 'margin-left:8px;padding:2px 6px;border-radius:8px;background:#ef4444;color:#fff;font-size:12px;';
+        anchor.appendChild(badge);
+      };
+      const headerCand = document.querySelector('.acct-header,.acct-name,.acct-email,[data-role="account-header"]');
+      if (headerCand && !headerCand.querySelector('span[style*="Admin"]')) addBadge(headerCand);
+    }
+  } catch (err) {
+    console.error('[admin-check] fatal:', err);
+  }
 })();
 </script>
-
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
