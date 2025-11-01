@@ -122,13 +122,13 @@ tr.active{background:#173a6e}
         </div>
 
         <div class="pane" id="pane-quiz" style="display:none">
-          <div class="quiz-shell">
+          <div class="quiz-shell"><div style="display:flex;gap:8px;align-items:center;padding:8px 12px 4px"><div id="quizFilters" class="filters"><button class="btn btn-sec" data-sec="all">單字</button><button class="btn btn-sec" data-sec="Grammar">文法</button><button class="btn btn-sec" data-sec="Reading">閱讀</button><button class="btn btn-sec" data-sec="Mixed">綜合</button></div><div id="quizHeader" class="muted" style="margin-left:8px"></div></div>
             <div class="muted" id="quizMeta" style="padding:8px 12px">（測驗載入中…）</div>
             <ol id="quizList" style="line-height:1.6;padding:0 12px"></ol>
             <div class="q-actions" style="margin:14px 12px 6px; display:flex; gap:8px; align-items:center;">
               <button class="btn" id="btnSubmitQuiz">交卷</button>
-              <button class="btn" id="btnShowAnswer" style="display:none">顯示答案</button>
-              <button class="btn" id="btnPrint" style="display:none">列印成績單</button>
+              <button class="btn" id="btnShowAnswer" >顯示答案</button>
+              <button class="btn" id="btnPrint" >列印成績單</button>
               <span id="quizScore" style="margin-left:8px"></span>
             </div>
           </div>
@@ -241,48 +241,92 @@ function seekTo(idx,play=true){ if(!cues[idx])return; video.currentTime=Math.max
 function sentenceRange(i){ if(!cues[i])return[0,0]; const s=cues[i].t,e=(i+1<cues.length?cues[i+1].t:s+3); return[s,e]; }
 
 /* ---------- quiz ---------- */
+
 async function loadQuiz(){
   const listEl=$('#quizList',paneQuiz), metaEl=$('#quizMeta',paneQuiz);
+  const headerEl = $('#quizHeader');
+  const filtersEl = $('#quizFilters');
+  const btnSubmit = $('#btnSubmitQuiz');
+  const btnShowAnswer = $('#btnShowAnswer');
+  const btnPrint = $('#btnPrint');
+
   const {data,used}=await fetchJSONMulti([
     `${BASE}/data/${cat}/quiz-${primarySlug}.json?v=${Date.now()}`,
     `${BASE}/data/quiz-${primarySlug}.json?v=${Date.now()}`,
     `${BASE}/data/story/quiz-mid-autumn.json?v=${Date.now()}`
   ], 'quiz');
-  if(!data){ metaEl.textContent='⚠️ 題庫讀取失敗'; return; }
 
+  if(!data){ metaEl.textContent='⚠️ 題庫讀取失敗'; listEl.innerHTML=''; headerEl.textContent=''; return; }
+
+  // normalize to questions with section tags
   let questions=[];
-  if(Array.isArray(data)){
-    questions=data.map(q=>({section:(q.section||'Mixed'),type:(String(q.type||'MCQ').toUpperCase()==='SA')?'SA':'MCQ',
-      question:q.question||q.q||'',options:q.options||q.choices||[],answer:q.answer??q.ans??''}));
-  }else if(data.sections){
-    const push=(sec,arr=[])=>arr?.forEach(q=>questions.push({section:sec,type:(String(q.type||'MCQ').toUpperCase()==='SA')?'SA':'MCQ',
-      question:q.question||'',options:q.options||[],answer:q.answer??''}));
-    push('Vocabulary',data.sections.vocab); push('Grammar',data.sections.grammar);
-    push('Reading',data.sections.reading); push('Mixed',data.sections.mixed);
+  const pushQ=(sec,arr=[])=>arr?.forEach(q=>questions.push({
+      section: sec || (q.section||'Mixed'),
+      type: (String(q.type||'MCQ').toUpperCase()==='SA')?'SA':'MCQ',
+      question: q.question||q.q||'',
+      options: q.options||q.choices||[],
+      answer: q.answer??q.ans??''
+  }));
+  if (Array.isArray(data)){
+    data.forEach(q=>pushQ(q.section||'Mixed',[q]));
+  } else if (data.items){ data.items.forEach(q=>pushQ(q.section||'Mixed',[q])); }
+  else if (data.questions){ data.questions.forEach(q=>pushQ(q.section||'Mixed',[q])); }
+  else if (data.sections){
+    pushQ('Vocabulary', data.sections.vocab);
+    pushQ('Grammar', data.sections.grammar);
+    pushQ('Reading', data.sections.reading);
+    pushQ('Mixed', data.sections.mixed);
   }
-  metaEl.textContent=`已載入：${String(used).replace(location.origin,'')}`;
 
-  listEl.innerHTML=questions.map((q,i)=>{
-    const idx=i+1;
-    if(q.type==='MCQ'){
-      const opts=q.options.map(opt=>`<label style="display:block;margin:4px 0"><input type="radio" name="q${idx}" value="${String(opt)}"> ${String(opt)}</label>`).join('');
-      return `<li data-type="MCQ" data-ans="${String(q.answer)}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question)}</div><div>${opts}</div><div class="msg" style="margin-top:4px"></div><div class="exp" style="margin-top:4px;color:#9fb3ff"></div></li>`;
-    }else{
-      return `<li data-type="SA" data-ans="${String(q.answer)}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question)}</div><input type="text" placeholder="輸入答案…" style="padding:6px 8px;border:1px solid #334155;border-radius:6px;background:#0f223b;color:#dbe7ff"><button class="btn btn-check" style="margin-left:6px">檢查</button><div class="msg" style="margin-top:4px"></div><div class="exp" style="margin-top:4px;color:#9fb3ff"></div></li>`;
-    }
-  }).join('');
+  // header like: 已載入（ mid-autumn ），共 80 題
+  headerEl.textContent = `已載入（ ${slug} ），共 ${questions.length} 題`;
+  metaEl.textContent = String(used).replace(location.origin,'');
 
-  $('#btnSubmitQuiz').onclick=()=>{
-    const items=[...$('#quizList').querySelectorAll('li')]; if(!items.length)return;
+  // rendering function with filter
+  let currentSec = 'all';
+  function render(){
+    const items = questions.filter(q=> currentSec==='all' ? ['Vocabulary','Grammar','Reading','Mixed','單字','文法','閱讀','綜合'].includes(q.section||'Mixed') : (q.section===currentSec));
+    listEl.innerHTML = items.map((q,i)=>{
+      const idx=i+1;
+      if(q.type==='MCQ'){
+        const opts=q.options.map(opt=>`<label style="display:block;margin:4px 0"><input type="radio" name="q${idx}" value="${String(opt)}"> ${String(opt)}</label>`).join('');
+        return `<li data-type="MCQ" data-ans="${String(q.answer)}" data-sec="${q.section||'Mixed'}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question)}</div><div>${opts}</div><div class="msg" style="margin-top:4px"></div><div class="exp" style="margin-top:4px;color:#9fb3ff"></div></li>`;
+      }else{
+        return `<li data-type="SA" data-ans="${String(q.answer)}" data-sec="${q.section||'Mixed'}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question)}</div><input type="text" placeholder="輸入答案…" style="padding:6px 8px;border:1px solid #334155;border-radius:6px;background:#0f223b;color:#dbe7ff"><button class="btn btn-check" style="margin-left:6px">檢查</button><div class="msg" style="margin-top:4px"></div><div class="exp" style="margin-top:4px;color:#9fb3ff"></div></li>`;
+      }
+    }).join('');
+  }
+  render();
+
+  // filter buttons
+  filtersEl.addEventListener('click', e=>{
+    const sec = e.target?.dataset?.sec;
+    if(!sec) return;
+    // map Chinese labels
+    const map = { '單字':'Vocabulary', '文法':'Grammar', '閱讀':'Reading', '綜合':'Mixed', 'all':'all' };
+    currentSec = map[sec] || sec;
+    render();
+    $('#quizScore').textContent='本分區分數：0 / 100';
+  });
+
+  // scoring
+  btnSubmit.onclick=()=>{
+    const items=[...$('#quizList').querySelectorAll('li')];
+    if(!items.length) return;
     let got=0,total=items.length;
     items.forEach(li=>{
       const ans=String(li.dataset.ans||'').trim();
       if(li.dataset.type==='MCQ'){
-        const sel=li.querySelector('input[type="radio"]:checked'); const user=sel?sel.value:''; const ok=user===ans;
-        if(ok)got++; const msg=li.querySelector('.msg'),exp=li.querySelector('.exp');
+        const sel=li.querySelector('input[type="radio"]:checked'); 
+        const user=sel?String(sel.value).trim():''; 
+        const ok=user===ans;
+        if(ok)got++;
+        const msg=li.querySelector('.msg'),exp=li.querySelector('.exp');
         msg.textContent=ok?'✅ 正確':'❌ 錯誤'; msg.style.color=ok?'#5bd3c7':'#ff6b6b'; if(!ok)exp.textContent=`正解：${ans}`;
       }else{
-        const ipt=li.querySelector('input'); const ok=(ipt.value||'').trim().toLowerCase()===ans.toLowerCase(); if(ok)got++;
+        const ipt=li.querySelector('input'); 
+        const ok=(ipt.value||'').trim().toLowerCase()===ans.toLowerCase(); 
+        if(ok)got++;
         const msg=li.querySelector('.msg'),exp=li.querySelector('.exp');
         msg.textContent=ok?'✅ 正確':'❌ 錯誤'; msg.style.color=ok?'#5bd3c7':'#ff6b6b'; if(!ok)exp.textContent=`正解：${ans}`;
       }
@@ -291,6 +335,22 @@ async function loadQuiz(){
     $('#quizScore').textContent=`本分區分數：${score} / ${full}`;
   };
 
+  // show answers toggle
+  btnShowAnswer.onclick=()=>{
+    const items=[...$('#quizList').querySelectorAll('li')];
+    items.forEach(li=>{
+      const exp=li.querySelector('.exp'); 
+      const ans=String(li.dataset.ans||''); 
+      exp.textContent=`正解：${ans}`;
+    });
+  };
+
+  // print simple
+  btnPrint.onclick=()=>{
+    window.print();
+  };
+
+  // SA inline check
   $('#quizList').addEventListener('click',e=>{
     if(!e.target.classList.contains('btn-check'))return;
     const li=e.target.closest('li'); const ipt=li.querySelector('input');
@@ -298,9 +358,12 @@ async function loadQuiz(){
     const msg=li.querySelector('.msg'); const exp=li.querySelector('.exp');
     msg.textContent=ok?'✅ 正確':'❌ 錯誤'; msg.style.color=ok?'#5bd3c7':'#ff6b6b'; exp.textContent=ok?'':`正解：${li.dataset.ans}`;
   });
-}
 
+  // initialize score display
+  $('#quizScore').textContent='本分區分數：0 / 100';
+}
 /* ---------- vocab ---------- */
+
 async function loadVocab(){
   const vStatus=$('#vocabStatus'), vBox=$('#vocabBox');
   const {data,used}=await fetchJSONMulti([
@@ -364,7 +427,7 @@ $$('.tabs .tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab
 (async function init(){
   const saved=localStorage.getItem(`offset:${slug}`); if(saved!=null) setOffset(parseFloat(saved)); else setOffset(0);
   const r=Number(speedRange.value)||1; videoEl.playbackRate=r; speedVal.textContent=`${r.toFixed(2)}x`;
-  await loadVideo(); await loadCues(); await loadQuiz(); await loadVocab();
+  await loadVideo(); await loadCues(); await loadQuiz(); await loadVocab(); await loadAI();
   showTab('sub');
 })();
 </script>
@@ -389,6 +452,7 @@ if (!authData?.user) {
 </script>
 </body>
 </html>
+
 
 
 
