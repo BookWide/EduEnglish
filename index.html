@@ -907,8 +907,169 @@ document.addEventListener('click', async (e)=>{
       }catch(e){}
     })();
     </script>
+
+<!-- === BookWide · Admin 主控台（整合版，含「到期日 / 在線」） === -->
+<style>
+#bw-admin-mask{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;z-index:9998}
+#bw-admin-modal{position:fixed;inset:6% 4%;background:#0b1324;color:#eaf1ff;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.35);display:none;z-index:9999;overflow:auto;border:1px solid rgba(255,255,255,.12)}
+#bw-admin-modal .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.12)}
+#bw-admin-modal .hdr h3{margin:0;font-size:18px}
+#bw-admin-close{border:0;background:#1f2937;color:#eaf1ff;border-radius:10px;padding:6px 10px;cursor:pointer}
+#bw-admin-tabs{display:flex;gap:8px;padding:10px 16px;border-bottom:1px solid rgba(255,255,255,.12)}
+#bw-admin-tabs button{border:1px solid rgba(255,255,255,.16);background:#111827;color:#eaf1ff;border-radius:8px;padding:6px 10px;cursor:pointer}
+#bw-admin-tabs button.active{background:#2563eb}
+#bw-admin-views{padding:12px 16px}
+.bw-card{border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;background:#0b1324}
+#bw-admin-filter{width:260px;max-width:60vw;padding:8px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#0b1324;color:#eaf1ff}
+#bw-admin-refresh{padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.16);background:#111827;color:#eaf1ff;cursor:pointer}
+#bw-admin-table{width:100%;border-collapse:collapse}
+#bw-admin-table th,#bw-admin-table td{border-bottom:1px solid rgba(255,255,255,.12);padding:8px;text-align:left;white-space:nowrap;font-size:14px}
+#bw-toast{position:fixed;right:16px;bottom:16px;background:#111827;color:#fff;padding:8px 12px;border-radius:8px;display:none;z-index:10000}
+@media (max-width: 768px){
+  #bw-admin-modal{inset:4% 2%}
+  #bw-admin-filter{max-width:80vw}
+}
+</style>
+<div id="bw-admin-mask" aria-hidden="true"></div>
+<div id="bw-admin-modal" role="dialog" aria-modal="true" aria-labelledby="bw-admin-title">
+  <div class="hdr">
+    <h3 id="bw-admin-title">Admin 主控台 — 使用者清單（Email / 顯示名稱 / 管理員 / 最後登入 / 到期日・在線）。時間以台灣時區（Asia/Taipei）顯示。</h3>
+    <button id="bw-admin-close">關閉</button>
+  </div>
+  <div id="bw-admin-tabs">
+    <button data-tab="list" class="active">👀 使用者清單</button>
+  </div>
+  <div id="bw-admin-views">
+    <section id="bw-view-list" class="bw-card">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <input id="bw-admin-filter" placeholder="搜尋 Email / 顯示名稱…">
+        <button id="bw-admin-refresh">重新整理</button>
+      </div>
+      <div style="overflow:auto">
+        <table id="bw-admin-table">
+          <thead><tr>
+            <th>Email</th><th>顯示名稱</th><th>管理員</th><th>最後登入</th><th>到期日 / 在線</th>
+          </tr></thead>
+          <tbody id="bw-admin-rows"><tr><td colspan="5">讀取中…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</div>
+<div id="bw-toast"></div>
+
+<script type="module">
+// Minimal Supabase client (reuse existing global if present)
+const supa = (window.supa || window.supabase || null);
+const $=(s,r=document)=>r.querySelector(s); const $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
+function toast(t,ms=2200){const n=$('#bw-toast');n.textContent=t;n.style.display='block';setTimeout(()=>n.style.display='none',ms);}
+function openModal(){ $('#bw-admin-mask').style.display='block'; $('#bw-admin-modal').style.display='block'; }
+function closeModal(){ $('#bw-admin-mask').style.display='none'; $('#bw-admin-modal').style.display='none'; }
+$('#bw-admin-close')?.addEventListener('click', closeModal); $('#bw-admin-mask')?.addEventListener('click', closeModal);
+
+// Append menu entries right after "學習控制台"
+(function(){
+  const nodes=$$('a,button'); const anchor=nodes.find(n=>(n.textContent||'').includes('學習控制台'));
+  if(!anchor) return;
+  const cls=anchor.className||'';
+  const a=document.createElement('a'); a.href='#'; a.textContent='Admin 主控台'; a.id='acct-admin-console'; a.className=cls; a.style.cursor='pointer';
+  anchor.parentNode.insertBefore(a, anchor.nextSibling);
+})();
+
+async function isAdminUser(){
+  if(!supa){ toast('無 Supabase 連線'); return false; }
+  const { data:{ user } } = await supa.auth.getUser();
+  if(!user){ toast('請先登入'); return false; }
+  try{
+    let { data, error } = await supa.from('profiles').select('is_admin').eq('id', user.id).maybeSingle();
+    if(error || !data){
+      const r = await supa.from('profiles').select('is_admin').eq('email', user.email).maybeSingle();
+      return !!(r.data && r.data.is_admin);
+    }
+    return !!data.is_admin;
+  }catch(e){ return false; }
+}
+
+// Online helpers (10 分鐘心跳視為在線)
+const ONLINE_MS = 10 * 60 * 1000;
+function fmtTz(v){
+  if(!v) return '—';
+  const d=new Date(v);
+  if(isNaN(d)) return String(v);
+  // to Taiwan time
+  return new Intl.DateTimeFormat('zh-TW', { timeZone:'Asia/Taipei', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' }).format(d);
+}
+function isOnlineByLastSeen(last_seen){
+  const t = last_seen ? new Date(last_seen).getTime() : 0;
+  return t && (Date.now() - t) <= ONLINE_MS;
+}
+function onlineBadge(last_seen){
+  const on = isOnlineByLastSeen(last_seen);
+  const dot = `<span style="display:inline-flex;align-items:center;gap:.4rem;margin-left:.4rem">
+    <span style="width:10px;height:10px;background:${on?'#22c55e':'#cbd5e1'};border-radius:9999px;display:inline-block"></span>
+    <span style="font-size:12px;color:#9fb0c9">${on?'在線':'離線'}</span></span>`;
+  return dot;
+}
+
+let cache=[];
+async function loadList(){
+  const body=$('#bw-admin-rows'); body.innerHTML='<tr><td colspan="5">讀取中…</td></tr>';
+  try{
+    // 抓取 email / display_name / is_admin / last_sign_in_at / expires_at / last_seen（或 updated_at）
+    const sel='email, display_name, nickname, is_admin, last_sign_in_at, expires_at, last_seen, updated_at';
+    const { data, error } = await supa.from('profiles').select(sel).order('updated_at', { ascending:false }).limit(1000);
+    if(error) throw error; cache=(data||[]).map(r=>({...r, last_seen: r.last_seen || r.updated_at || r.last_sign_in_at}));
+    render(cache);
+  }catch(e){ body.innerHTML='<tr><td colspan="5">讀取失敗：'+(e?.message||e)+'</td></tr>'; }
+}
+function render(list){
+  const body=$('#bw-admin-rows');
+  body.innerHTML = (list||[]).map(r=>{
+    const name=r.display_name||r.nickname||'';
+    const exp  = r.expires_at ? fmtTz(r.expires_at) : '—';
+    const last = r.last_sign_in_at ? fmtTz(r.last_sign_in_at) : '—';
+    const online = onlineBadge(r.last_seen);
+    return `<tr><td>${r.email||''}</td><td>${name}</td><td>${r.is_admin?'✔':''}</td><td>${last}</td><td>${exp}${online}</td></tr>`;
+  }).join('') || '<tr><td colspan="5">無資料</td></tr>';
+}
+$('#bw-admin-filter')?.addEventListener('input',()=>{
+  const q=($('#bw-admin-filter').value||'').toLowerCase().trim();
+  if(!q) return render(cache);
+  render(cache.filter(r=>(r.email||'').toLowerCase().includes(q) || (r.display_name||r.nickname||'').toLowerCase().includes(q)));
+});
+$('#bw-admin-refresh')?.addEventListener('click', loadList);
+
+// Heartbeat：登入時每 10 分鐘更新 updated_at（讓 last_seen 有值）
+async function heartbeat(){
+  try{
+    const { data:{ user } } = await supa.auth.getUser();
+    if(!user) return;
+    const nowIso = new Date().toISOString();
+    await supa.from('profiles').update({ updated_at: nowIso }).eq('id', user.id);
+  }catch{}
+}
+let hb=null;
+supa?.auth.onAuthStateChange(async (evt, session)=>{
+  if(evt==='SIGNED_IN'){ heartbeat(); hb&&clearInterval(hb); hb=setInterval(heartbeat, ONLINE_MS); }
+  else if(evt==='SIGNED_OUT'){ hb&&clearInterval(hb); hb=null; }
+});
+// 初次如果已登入就啟動
+(async()=>{ try{ const { data:{ user } } = await supa.auth.getUser(); if(user){ heartbeat(); hb=setInterval(heartbeat, ONLINE_MS); } }catch(e){} })();
+
+// 點選選單開啟
+document.addEventListener('click', async (e)=>{
+  const id=e.target.id;
+  if(id==='acct-admin-console'){
+    const ok=await isAdminUser(); if(!ok) return toast('你不是管理員');
+    openModal(); loadList();
+  }
+});
+</script>
+<!-- === /Admin 主控台 === -->
+
 </body>
 </html>
+
 
 
 
