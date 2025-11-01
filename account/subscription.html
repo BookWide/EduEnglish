@@ -91,8 +91,11 @@
     if (!user){ document.querySelector('#ordersBody').innerHTML = '<tr><td colspan="5" class="empty">請先登入查看訂閱與訂單</td></tr>'; return; }
 
     const currency = (cents)=> 'NT$' + Math.round(cents/100);
+const fmtDate = (d)=>{ try{ if(!d) return '—'; const x=new Date(d); if(isNaN(+x)) return '—'; return x.toLocaleDateString(); }catch(e){ return '—'; } };
+const daysLeft = (d)=>{ try{ if(!d) return null; const x=new Date(d).getTime(); const n=Date.now(); return Math.ceil((x-n)/86400000); }catch(e){ return null; } };
 
     async function loadOrders(){
+      const { data: myProfile } = await supabase.from('profiles').select('last_sign_in_at').eq('id', user.id).single();
       const { data, error } = await supabase
         .from('orders')
         .select('id, items, period, subtotal_cents, discount_cents, commission_cents, status, paid_at, expire_at')
@@ -135,12 +138,29 @@
       return { list: data, active };
     }
 
-    function renderActive(active){
+    async function renderActive(active){
       const box = document.getElementById('activeContent');
       const renew = document.getElementById('renewArea');
       if (!active){
-        box.innerHTML = '<div class="empty" style="grid-column:1/-1">目前沒有有效的訂閱。</div>';
-        renew.style.display = 'none';
+        // Fallback: read profiles.expires_at / plan
+        const { data: prof } = await supabase.from('profiles')
+          .select('expires_at, plan, plan_name, tier, last_sign_in_at')
+          .eq('id', user.id)
+          .single();
+        const exp = prof?.expires_at || null;
+        const plan = prof?.plan || prof?.plan_name || prof?.tier || '—';
+        const dl = daysLeft(exp);
+        const status = (exp && new Date(exp) > new Date()) ? '<span class="status-ok">使用中</span>' : '<span class="status-exp">已到期 / 未訂閱</span>';
+        const lastLogin = fmtDate(prof?.last_sign_in_at);
+        box.innerHTML = `
+          <div class="kvs">
+            <div class="key">方案</div><div><span class="pill">${plan}</span></div>
+            <div class="key">到期日</div><div><b>${fmtDate(exp)}</b>${(dl!=null)?`　<small class="muted">${dl>=0?`剩餘 ${dl} 天`:`${Math.abs(dl)} 天前到期`}</small>`:''}</div>
+            <div class="key">狀態</div><div>${status}</div>
+            <div class="key">最後登入</div><div>${lastLogin}</div>
+          </div>`;
+        renew.style.display = '';
+        document.getElementById('btnRenew').onclick = ()=>{ location.href = '../pricing.html'; };
         return;
       }
       const items = Array.isArray(active.items) ? active.items.join('、') : active.items;
@@ -153,9 +173,10 @@
           <div class="key">方案</div><div><span class="pill">${items}</span></div>
           <div class="key">週期</div><div>${active.period||'—'}</div>
           <div class="key">付款日期</div><div>${paid}</div>
-          <div class="key">到期日</div><div><b>${expire}</b></div>
+          <div class="key">到期日</div><div><b>${expire}</b>　<small class="muted">${(daysLeft(active.expire_at)!=null)?(daysLeft(active.expire_at)>=0?`剩餘 ${daysLeft(active.expire_at)} 天`:`${Math.abs(daysLeft(active.expire_at))} 天前到期`):''}</small></div>
           <div class="key">金額</div><div><b>${currency(total)}</b></div>
           <div class="key">狀態</div><div><span class="status-ok">使用中</span></div>
+          <div class="key">最後登入</div><div>${fmtDate(myProfile?.last_sign_in_at)}</div>
         </div>
       `;
       renew.style.display = '';
@@ -174,3 +195,4 @@
   </script>
 </body>
 </html>
+
