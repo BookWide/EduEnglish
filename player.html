@@ -423,6 +423,159 @@ $$('.tabs .tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab
   refresh();
 })();
 
+
+/* ---------- AI pane loader (reads /data/{cat}/ai-<slug>.json) ---------- */
+async function loadAI(){
+  const pane = document.getElementById('pane-ai');
+  if(!pane) return;
+
+  const BASE = '/EduEnglish';
+  const sel = document.getElementById('aiTopic');
+  const promptBox = document.getElementById('aiPrompt');
+  const hintEl = document.getElementById('aiHint');
+  const replyEl = document.getElementById('aiReply');
+  const prog = document.getElementById('aiProgress');
+  const autoNext = document.getElementById('aiAutoNext');
+  const btnPrev = document.getElementById('btnPrevTopic');
+  const btnNext = document.getElementById('btnNextTopic');
+  const btnTts  = document.getElementById('btnTts');
+  const btnDemo = document.getElementById('aiDemo');
+  const btnDemoTts = document.getElementById('aiDemoTts');
+  const btnRec  = document.getElementById('btnRec');
+  const btnStop = document.getElementById('btnStop');
+
+  function tts(text){ try{ const u=new SpeechSynthesisUtterance(text||''); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch{} }
+
+  async function fetchJSON(paths){
+    for (const p of paths){
+      try{ const r = await fetch(p,{cache:'no-store'}); if(r.ok){ return {data: await r.json(), used: p}; } }catch(e){}
+    }
+    return {data:null, used:'error'};
+  }
+
+  const pathList = [
+    `${BASE}/data/${cat}/ai-${primarySlug}.json?v=${Date.now()}`,
+    `${BASE}/data/ai-${primarySlug}.json?v=${Date.now()}`,
+    `${BASE}/data/story/ai-mid-autumn.json?v=${Date.now()}`
+  ];
+  const {data} = await fetchJSON(pathList);
+  let items = [];
+
+  // normalize formats
+  if (Array.isArray(data)) {
+    items = data;
+  } else if (data && (data.items || data.questions)) {
+    items = data.items || data.questions || [];
+  } else if (data && data.sections) {
+    const sections = Object.values(data.sections).flat().filter(Boolean);
+    items = sections;
+  } else if (data && Array.isArray(data.topics)) { // support {topics:[]}
+    items = data.topics.map(t=>({
+      topic: t.title || 'Topic',
+      question: t.prompt || t.question || '',
+      hint: t.hint || '',
+      sample: t.sample || '',
+      answer: t.answer || ''
+    }));
+  }
+
+  // map to common shape
+  items = (items||[]).map(x=>({
+    topic: x.topic || x.section || x.title || 'Default',
+    question: x.question || x.q || x.prompt || '',
+    hint: x.hint || x.keywords || '',
+    sample: x.sample || x.example || x.demo || '',
+    answer: x.answer || x.ans || ''
+  })).filter(x=>x.question);
+
+  // group by topic
+  const groups = {};
+  for(const it of items){
+    if(!groups[it.topic]) groups[it.topic] = [];
+    groups[it.topic].push(it);
+  }
+  const topics = Object.keys(groups);
+  if(!topics.length){
+    prog.textContent = '第 0/0 題';
+    sel.innerHTML = `<option value="">No AI dataset</option>`;
+    btnPrev.disabled = btnNext.disabled = true;
+    return;
+  }
+  sel.innerHTML = topics.map((t,i)=>`<option value="${encodeURIComponent(t)}"${i===0?' selected':''}>${t}</option>`).join('');
+
+  let topic = topics[0];
+  let idx = 0;
+  function currentList(){ return groups[topic]||[]; }
+  function show(){
+    const list = currentList();
+    const total = list.length;
+    if(!total){
+      promptBox.value = '';
+      hintEl.textContent = '—';
+      prog.textContent = '第 0/0 題';
+      return;
+    }
+    const it = list[idx];
+    promptBox.value = it.question || '';
+    hintEl.textContent = it.hint || '—';
+    replyEl.textContent = it.sample || '';
+    prog.textContent = `第 ${idx+1}/${total} 題`;
+  }
+
+  sel.addEventListener('change',()=>{
+    topic = decodeURIComponent(sel.value||topics[0]);
+    idx = 0;
+    show();
+  });
+  btnPrev.addEventListener('click',()=>{
+    const total = currentList().length;
+    if(!total) return;
+    idx = (idx - 1 + total) % total;
+    show();
+  });
+  btnNext.addEventListener('click',()=>{
+    const total = currentList().length;
+    if(!total) return;
+    idx = (idx + 1) % total;
+    show();
+  });
+
+  btnTts.addEventListener('click',()=>tts(promptBox.value||''));
+  btnDemo?.addEventListener('click',()=>{
+    const it = (currentList()[idx]||{});
+    replyEl.textContent = it.sample || it.answer || replyEl.textContent || '';
+  });
+  btnDemoTts?.addEventListener('click',()=>tts(replyEl.textContent||''));
+
+  // speech recognition (if available)
+  let rec=null;
+  try{
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(SR){
+      rec = new SR();
+      rec.lang = 'en-US';
+      rec.interimResults = false;
+      rec.continuous = false;
+      rec.onresult = (ev)=>{
+        const text = Array.from(ev.results).map(r=>r[0].transcript).join(' ');
+        replyEl.textContent = text;
+        if(autoNext.checked){
+          btnNext.click();
+        }
+      };
+      rec.onend = ()=>{ btnRec.disabled=false; btnStop.disabled=true; };
+      btnRec.addEventListener('click',()=>{ try{ btnRec.disabled=true; btnStop.disabled=false; rec.start(); }catch{} });
+      btnStop.addEventListener('click',()=>{ try{ rec.stop(); }catch{} });
+    }else{
+      btnRec.disabled = btnStop.disabled = true;
+    }
+  }catch(e){
+    btnRec.disabled = btnStop.disabled = true;
+  }
+
+  show();
+}
+
 /* ---------- init ---------- */
 (async function init(){
   const saved=localStorage.getItem(`offset:${slug}`); if(saved!=null) setOffset(parseFloat(saved)); else setOffset(0);
@@ -452,6 +605,7 @@ if (!authData?.user) {
 </script>
 </body>
 </html>
+
 
 
 
