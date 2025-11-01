@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>BookWide · 英語學習入口</title>
   <meta name="description" content="BookWide：用故事、音樂、電影、新聞與專業主題，快速學英文。支援逐句播放、雙語字幕、測驗、單字卡。"/>
+
   <style>
     :root{--nav-bg:#0b1324;--nav-ink:#eaf1ff;--nav-muted:#a8b6d3;--nav-badge:#1a2a4a;--bg:#ffffff;--ink:#0a0f1a;--muted:#5b667a;--panel:#f4f7fb;--border:#e4e9f2;--accent:#275cf5;--chip:#eef2fb;}
     *{box-sizing:border-box} html,body{height:100%;margin:0;font-family:ui-sans-serif,system-ui,"Noto Sans TC",Arial}
@@ -144,7 +145,9 @@
           <a class="acct-item" href="./account/profile.html">個人資料</a>
           <a class="acct-item" href="./account/subscription.html" role="menuitem">我的訂閱</a>
           <a class="acct-item" href="./account/learning-dashboard.html" role="menuitem">學習控制台</a>
-          <a class="acct-item" href="./account/referral.html" role="menuitem">推廣分潤</a>
+          <!-- Admin 選項（預設隱藏，僅 admin 顯示） -->
+          <a class="acct-item" id="acct-admin-console" data-admin-only style="display:none" href="#" role="menuitem">Admin 主控台</a>
+          <a class="acct-item" id="acct-admin-grant" data-admin-only style="display:none" href="#" role="menuitem">授權 / 暫停管理員</a>
           <div class="acct-divider"></div>
           <a class="acct-item acct-logout" href="#" role="menuitem">登出</a>
         </div>
@@ -229,14 +232,17 @@
     })();
   </script>
 
-  <!-- Supabase Auth / Account UI -->
+  <!-- Supabase Init（保險：若外部尚未建立 window.supa，這裡建一個共用客戶端） -->
   <script type="module">
     import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
     const SUPABASE_URL='https://jeajrwpmrgczimmrflxo.supabase.co';
     const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-    if(!window.supa) window.supa=createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
-    const supa=window.supa;
+    if(!window.supa) window.supa = createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+  </script>
 
+  <!-- 帳號選單與 Admin 顯示邏輯 -->
+  <script>
+    const supa = window.supa;
     const btnLogin=document.getElementById('btnLogin');
     const btnLogout=document.getElementById('btnLogout');
     const acctWrap=document.getElementById('accountWrap');
@@ -289,7 +295,7 @@
     if(btnLogout) btnLogout.addEventListener('click', async()=>{ await supa.auth.signOut(); location.reload(); });
     btnToggle.addEventListener('click',()=>openModal(mode==='signin'?'signup':'signin'));
     btnCancel.addEventListener('click',closeModal);
-    document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
+    document.addEventListener('keydown',(e)=>{ if(e.key==='Escape') closeModal(); });
     modal.addEventListener('click',e=>{ if(e.target===modal) closeModal(); });
 
     btnSubmit.addEventListener('click', async ()=>{
@@ -310,11 +316,52 @@
       }catch(e){ errBox.style.color=''; errBox.textContent=e?.message||'寄送失敗'; }
     });
 
-    try{ const {data}=await supa.auth.getSession(); paintUser(data?.session?.user||null); }catch{}
+    (async()=>{
+      try{ const {data}=await supa.auth.getSession(); paintUser(data?.session?.user||null); }catch{}
+    })();
     supa.auth.onAuthStateChange((_e,session)=>{ paintUser(session?.user||null); });
 
     // 年份
     document.getElementById('y').textContent=(new Date).getFullYear();
+
+    // ---------- Admin 顯示控制：只有管理員才顯示兩個 Admin 連結 ----------
+    async function isAdminUser(){
+      try{
+        const { data:{ user } } = await supa.auth.getUser();
+        if(!user) return false;
+        // 先以 id 查
+        let { data:row } = await supa.from('profiles').select('is_admin').eq('id',user.id).maybeSingle();
+        if(!row && user.email){
+          // 回退以 email 查（避免舊資料尚未對應 id）
+          const r2 = await supa.from('profiles').select('is_admin').eq('email', user.email).maybeSingle();
+          row = r2.data || row;
+        }
+        return !!(row && row.is_admin === true);
+      }catch(e){ return false; }
+    }
+    async function refreshAdminLinks(){
+      const ok = await isAdminUser();
+      document.querySelectorAll('[data-admin-only]').forEach(el=>{
+        el.style.display = ok ? '' : 'none';
+      });
+    }
+    document.addEventListener('DOMContentLoaded', refreshAdminLinks);
+    supa.auth.onAuthStateChange(refreshAdminLinks);
+
+    // 點擊 Admin 連結（開啟內建 Modal 分頁）
+    document.getElementById('acct-admin-console')?.addEventListener('click', (e)=>{
+      e.preventDefault();
+      const dlg = document.getElementById('bw-admin-modal');
+      if(dlg){ document.getElementById('bw-admin-mask').style.display='block'; dlg.style.display='block'; }
+    });
+    document.getElementById('acct-admin-grant')?.addEventListener('click', (e)=>{
+      e.preventDefault();
+      const dlg = document.getElementById('bw-admin-modal');
+      if(dlg){
+        document.getElementById('bw-admin-mask').style.display='block'; dlg.style.display='block';
+        document.querySelector('#bw-admin-tabs button[data-tab=\"grant\"]')?.click();
+      }
+    });
   </script>
 
   <!-- 推薦碼保存 -->
@@ -326,34 +373,19 @@
     })();
   </script>
 
-  <!-- 登入意圖（沿用 supa_unified.js） -->
-  <script type="module">
-    import { supabase } from './supa_unified.js';
+  <!-- 登入意圖（不依賴 supa_unified.js） -->
+  <script>
     (function initLoginIntent(){
+      const supabase = window.supa;
       const p = new URLSearchParams(location.search);
       if (p.get('login') === '1') {
         const next = p.get('next');
         document.getElementById('btnLogin')?.click();
-        supabase.auth.onAuthStateChange((_ev, session) => {
+        supabase?.auth?.onAuthStateChange((_ev, session) => {
           if (session?.user && next) location.href = next;
         });
       }
     })();
-  </script>
-
-  <!-- LINE 客服浮動按鈕 -->
-  <style>
-    #line-btn{position:fixed;bottom:20px;right:20px;width:64px;height:64px;border-radius:50%;background-color:#00B900;box-shadow:0 3px 10px rgba(0,0,0,0.3);display:flex;justify-content:center;align-items:center;cursor:pointer;z-index:9999;transition:transform .2s ease,box-shadow .2s ease}
-    #line-btn:hover{transform:scale(1.1);box-shadow:0 6px 15px rgba(0,0,0,0.4)}
-    #line-btn img{width:38px;height:38px}
-  </style>
-  <div id="line-btn" title="聯絡我們（LINE 客服）">
-    <img src="https://scdn.line-apps.com/n/line_regis/d/p/line_icon.png" alt="LINE"/>
-  </div>
-  <script>
-    document.getElementById("line-btn").addEventListener("click", function() {
-      window.open("https://line.me/R/ti/p/@531xoidn", "_blank");
-    });
   </script>
 
   <!-- 五類索引一次載入（story/music/movie/news/pro） -->
@@ -448,101 +480,8 @@
     })();
   })();
 </script>
-<script>
-(function(){
-  // 依規則決定封面來源：cover > yt > mp4首幀 > placeholder
-  function decideCoverURL(img){
-    const cov = img.dataset.cover?.trim();
-    const yt  = img.dataset.youtubeId?.trim();
-    const mp4 = img.dataset.mp4?.trim();
 
-    if (cov) return cov;
-    if (yt)  return `https://img.youtube.com/vi/${yt}/hqdefault.jpg`;
-    if (mp4) return "__USE_MP4_FRAME__"; // 交給後面的擷取程式
-    return "img/placeholder.jpg";
-  }
-
-  // 從 mp4 擷取第1秒畫面，產生 dataURL 並指給 <img>
-  async function useMp4Frame(img, mp4){
-    try{
-      const v = document.createElement('video');
-      v.crossOrigin = "anonymous";        // 若放 GitHub Pages，通常同源 OK；異源需允許 CORS
-      v.preload = "auto";
-      v.src = mp4;
-
-      // 等能播放再跳到 1 秒
-      await v.play().catch(()=>{});       // 某些瀏覽器需要呼叫 play() 才會解碼幀
-      v.pause();
-
-      const seekTo = 1.0;                 // 取第 1 秒
-      await new Promise((res, rej)=>{
-        let done = false;
-        const onSeeked = ()=>{ if(done) return; done = true; v.removeEventListener('seeked', onSeeked); res(); };
-        v.addEventListener('seeked', onSeeked);
-        try{ v.currentTime = seekTo; }catch(e){ rej(e); }
-        // 安全閥：有些瀏覽器不觸發 seeked
-        setTimeout(()=>{ if(!done){ done=true; res(); } }, 1200);
-      });
-
-      const w = v.videoWidth  || 640;
-      const h = v.videoHeight || 360;
-      const scale = 0.5;                   // 生成較小圖，載入快
-      const cw = Math.max(1, Math.round(w*scale));
-      const ch = Math.max(1, Math.round(h*scale));
-
-      const c = document.createElement('canvas');
-      c.width = cw; c.height = ch;
-      const ctx = c.getContext('2d');
-      ctx.drawImage(v, 0, 0, cw, ch);
-
-      const dataUrl = c.toDataURL('image/jpeg', 0.8);
-      img.src = dataUrl;
-    }catch(e){
-      console.warn('[cover from mp4] fail:', e);
-      img.src = "img/placeholder.jpg";
-    }
-  }
-
-  function applyCovers(root=document){
-    const imgs = root.querySelectorAll('img.cover');
-    imgs.forEach(img=>{
-      // 避免重複處理
-      if (img.dataset.coverReady === '1') return;
-      img.dataset.coverReady = '1';
-
-      const decided = decideCoverURL(img);
-      if (decided === "__USE_MP4_FRAME__"){
-        // 先給暫時圖，再嘗試擷取 mp4 首幀
-        img.src = "img/placeholder.jpg";
-        const mp4 = img.dataset.mp4?.trim();
-        if (mp4) useMp4Frame(img, mp4);
-      }else{
-        img.src = decided;
-        // 失敗 fallback
-        img.onerror = function(){
-          // 如果原本是 yt 圖片失敗、但有 mp4，就退回擷取首幀；否則用 placeholder
-          const yt  = img.dataset.youtubeId?.trim();
-          const mp4 = img.dataset.mp4?.trim();
-          if (yt && mp4) return useMp4Frame(img, mp4);
-          img.src = "img/placeholder.jpg";
-        };
-      }
-    });
-  }
-
-  // 初始掛載
-  if (document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', ()=>applyCovers(), {once:true});
-  }else{
-    applyCovers();
-  }
-
-  // 若你的清單是動態載入（例如渲染後 append），載入後再呼叫一次 applyCovers(container)
-  window.BW_applyCovers = applyCovers;
-})();
-</script>
-
-<!-- ADMIN-INTEGRATED V2025V009 START -->
+<!-- ADMIN-INTEGRATED: Modal 與列表（保留你原有結構，如無可忽略） -->
 <style>
 #bw-admin-mask{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;z-index:9998}
 #bw-admin-modal{position:fixed;inset:6% 4%;background:#fff;color:#111;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.25);display:none;z-index:9999;overflow:auto}
@@ -612,8 +551,7 @@
 </div>
 <div id="bw-toast"></div>
 
-<script type="module">
-const supa = (window.supa || window.supabase || null);
+<script>
 const $=(s,r=document)=>r.querySelector(s); const $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
 function toast(t,ms=2200){const n=$('#bw-toast');n.textContent=t;n.style.display='block';setTimeout(()=>n.style.display='none',ms);}
 function openModal(){ $('#bw-admin-mask').style.display='block'; $('#bw-admin-modal').style.display='block'; }
@@ -625,65 +563,41 @@ $('#bw-admin-tabs')?.addEventListener('click', (e)=>{ const b=e.target.closest('
   $('#bw-view-grant').style.display= b.dataset.tab==='grant'? 'block' : 'none';
 });
 
-// Append menu entries right after "學習控制台"
-(function(){
-  const nodes=$$('a,button'); const anchor=nodes.find(n=>(n.textContent||'').includes('學習控制台'));
-  if(!anchor) return;
-  const cls=anchor.className||'';
-  const mk=(txt,id)=>{const a=document.createElement('a');a.href='#';a.textContent=txt;a.id=id;a.className=cls;a.style.cursor='pointer';return a;}
-  const a1=mk('Admin 主控台','acct-admin-console'); const a2=mk('授權 / 暫停管理員','acct-admin-grant');
-  anchor.parentNode.insertBefore(a1, anchor.nextSibling); a1.parentNode.insertBefore(a2, a1.nextSibling);
-})();
-
-async function isAdminUser(){
-  if(!supa){ toast('無 Supabase 連線'); return false; }
-  const { data:{ user } } = await supa.auth.getUser();
-  if(!user){ toast('請先登入'); return false; }
-  try{
-    let { data, error } = await supa.from('profiles').select('is_admin').eq('id', user.id).maybeSingle();
-    if(error || !data){
-      const r = await supa.from('profiles').select('is_admin').eq('email', user.email).maybeSingle();
-      return !!(r.data && r.data.is_admin);
-    }
-    return !!data.is_admin;
-  }catch(e){ return false; }
-}
-
-let cache=[];
 async function loadList(){
   const body=$('#bw-admin-rows'); body.innerHTML='<tr><td colspan="6">讀取中…</td></tr>';
   try{
     const sel='email, display_name, nickname, is_admin, is_paused, last_sign_in_at, expires_at, updated_at';
     const { data, error } = await supa.from('profiles').select(sel).order('updated_at', { ascending:false }).limit(500);
-    if(error) throw error; cache=data||[]; render(cache);
+    if(error) throw error;
+    const list = data||[];
+    body.innerHTML = list.map(r=>{
+      const name=r.display_name||r.nickname||''; const adm=r.is_admin?'✔':''; const ban=r.is_paused?'⏸':'';
+      return `<tr><td>${r.email||''}</td><td>${name}</td><td>${adm}</td><td>${ban}</td><td>${r.last_sign_in_at||''}</td><td>${r.expires_at||''}</td></tr>`;
+    }).join('') || '<tr><td colspan="6">無資料</td></tr>';
   }catch(e){ body.innerHTML='<tr><td colspan="6">讀取失敗：'+(e?.message||e)+'</td></tr>'; }
 }
-function render(list){
-  const body=$('#bw-admin-rows');
-  body.innerHTML = (list||[]).map(r=>{
-    const name=r.display_name||r.nickname||''; const adm=r.is_admin?'✔':''; const ban=r.is_paused?'⏸':'';
-    return `<tr><td>${r.email||''}</td><td>${name}</td><td>${adm}</td><td>${ban}</td><td>${r.last_sign_in_at||''}</td><td>${r.expires_at||''}</td></tr>`;
-  }).join('') || '<tr><td colspan="6">無資料</td></tr>';
-}
+$('#bw-admin-refresh')?.addEventListener('click', loadList);
 $('#bw-admin-filter')?.addEventListener('input',()=>{
   const q=($('#bw-admin-filter').value||'').toLowerCase().trim();
-  if(!q) return render(cache);
-  render(cache.filter(r=>(r.email||'').toLowerCase().includes(q) || (r.display_name||r.nickname||'').toLowerCase().includes(q)));
+  const rows=$$('#bw-admin-rows tr');
+  rows.forEach(tr=>{
+    const text=tr.textContent.toLowerCase();
+    tr.style.display = text.includes(q) ? '' : 'none';
+  });
 });
-$('#bw-admin-refresh')?.addEventListener('click', loadList);
 
-async function updateByEmail(payload){
-  const email=($('#bw-grant-email').value||'').trim().toLowerCase(); if(!email) return toast('請輸入 Email');
-  const exp=$('#bw-grant-exp')?.value; if(exp) payload.admin_expires_at=new Date(exp).toISOString();
-  const { error } = await supa.from('profiles').update(payload).eq('email', email);
-  if(error) return toast('失敗：'+error.message);
-  toast('成功'); loadList();
+async function isAdminUser(){
+  try{
+    const { data:{ user } } = await supa.auth.getUser();
+    if(!user) return false;
+    let { data:row } = await supa.from('profiles').select('is_admin').eq('id',user.id).maybeSingle();
+    if(!row && user.email){
+      const r2 = await supa.from('profiles').select('is_admin').eq('email', user.email).maybeSingle();
+      row = r2.data || row;
+    }
+    return !!(row && row.is_admin === true);
+  }catch(e){ return false; }
 }
-$('#bw-btn-grant')?.addEventListener('click', ()=>updateByEmail({is_admin:true}));
-$('#bw-btn-revoke')?.addEventListener('click',()=>updateByEmail({is_admin:false}));
-$('#bw-btn-pause')?.addEventListener('click', ()=>updateByEmail({is_paused:true}));
-$('#bw-btn-unpause')?.addEventListener('click',()=>updateByEmail({is_paused:false}));
-
 document.addEventListener('click', async (e)=>{
   const id=e.target.id;
   if(id==='acct-admin-console' || id==='acct-admin-grant'){
@@ -693,9 +607,9 @@ document.addEventListener('click', async (e)=>{
   }
 });
 </script>
-<!-- ADMIN-INTEGRATED V2025V009 END -->
 </body>
 </html>
+
 
 
 
