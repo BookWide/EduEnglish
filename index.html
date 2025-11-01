@@ -908,167 +908,686 @@ document.addEventListener('click', async (e)=>{
     })();
     </script>
 
-<!-- === BookWide · Admin 主控台（整合版，含「到期日 / 在線」） === -->
-<style>
-#bw-admin-mask{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;z-index:9998}
-#bw-admin-modal{position:fixed;inset:6% 4%;background:#0b1324;color:#eaf1ff;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.35);display:none;z-index:9999;overflow:auto;border:1px solid rgba(255,255,255,.12)}
-#bw-admin-modal .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.12)}
-#bw-admin-modal .hdr h3{margin:0;font-size:18px}
-#bw-admin-close{border:0;background:#1f2937;color:#eaf1ff;border-radius:10px;padding:6px 10px;cursor:pointer}
-#bw-admin-tabs{display:flex;gap:8px;padding:10px 16px;border-bottom:1px solid rgba(255,255,255,.12)}
-#bw-admin-tabs button{border:1px solid rgba(255,255,255,.16);background:#111827;color:#eaf1ff;border-radius:8px;padding:6px 10px;cursor:pointer}
-#bw-admin-tabs button.active{background:#2563eb}
-#bw-admin-views{padding:12px 16px}
-.bw-card{border:1px solid rgba(255,255,255,.12);border-radius:12px;padding:12px;background:#0b1324}
-#bw-admin-filter{width:260px;max-width:60vw;padding:8px;border:1px solid rgba(255,255,255,.16);border-radius:8px;background:#0b1324;color:#eaf1ff}
-#bw-admin-refresh{padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.16);background:#111827;color:#eaf1ff;cursor:pointer}
-#bw-admin-table{width:100%;border-collapse:collapse}
-#bw-admin-table th,#bw-admin-table td{border-bottom:1px solid rgba(255,255,255,.12);padding:8px;text-align:left;white-space:nowrap;font-size:14px}
-#bw-toast{position:fixed;right:16px;bottom:16px;background:#111827;color:#fff;padding:8px 12px;border-radius:8px;display:none;z-index:10000}
-@media (max-width: 768px){
-  #bw-admin-modal{inset:4% 2%}
-  #bw-admin-filter{max-width:80vw}
-}
-</style>
-<div id="bw-admin-mask" aria-hidden="true"></div>
-<div id="bw-admin-modal" role="dialog" aria-modal="true" aria-labelledby="bw-admin-title">
-  <div class="hdr">
-    <h3 id="bw-admin-title">Admin 主控台 — 使用者清單（Email / 顯示名稱 / 管理員 / 最後登入 / 到期日・在線）。時間以台灣時區（Asia/Taipei）顯示。</h3>
-    <button id="bw-admin-close">關閉</button>
-  </div>
-  <div id="bw-admin-tabs">
-    <button data-tab="list" class="active">👀 使用者清單</button>
-  </div>
-  <div id="bw-admin-views">
-    <section id="bw-view-list" class="bw-card">
-      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
-        <input id="bw-admin-filter" placeholder="搜尋 Email / 顯示名稱…">
-        <button id="bw-admin-refresh">重新整理</button>
-      </div>
-      <div style="overflow:auto">
-        <table id="bw-admin-table">
-          <thead><tr>
-            <th>Email</th><th>顯示名稱</th><th>管理員</th><th>最後登入</th><th>到期日 / 在線</th>
-          </tr></thead>
-          <tbody id="bw-admin-rows"><tr><td colspan="5">讀取中…</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-  </div>
-</div>
-<div id="bw-toast"></div>
-
+<!-- ===== BookWide Admin Console (compact) ===== -->
 <script type="module">
-// Minimal Supabase client (reuse existing global if present)
-const supa = (window.supa || window.supabase || null);
-const $=(s,r=document)=>r.querySelector(s); const $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
-function toast(t,ms=2200){const n=$('#bw-toast');n.textContent=t;n.style.display='block';setTimeout(()=>n.style.display='none',ms);}
-function openModal(){ $('#bw-admin-mask').style.display='block'; $('#bw-admin-modal').style.display='block'; }
-function closeModal(){ $('#bw-admin-mask').style.display='none'; $('#bw-admin-modal').style.display='none'; }
-$('#bw-admin-close')?.addEventListener('click', closeModal); $('#bw-admin-mask')?.addEventListener('click', closeModal);
+import { supabase } from './supa.js';
 
-// Append menu entries right after "學習控制台"
-(function(){
-  const nodes=$$('a,button'); const anchor=nodes.find(n=>(n.textContent||'').includes('學習控制台'));
-  if(!anchor) return;
-  const cls=anchor.className||'';
-  const a=document.createElement('a'); a.href='#'; a.textContent='Admin 主控台'; a.id='acct-admin-console'; a.className=cls; a.style.cursor='pointer';
-  anchor.parentNode.insertBefore(a, anchor.nextSibling);
-})();
+/* ---------- 常數 / 工具 ---------- */
+const ONLINE_WINDOW_MIN = 10; // 幾分鐘內算在線
+const MENU_ID = 'bw-admin-menu';
+const ADMIN_FLAG = 'data-bw-admin';      // 標記我們注入的 DOM
+const TZ = 'Asia/Taipei';
 
-async function isAdminUser(){
-  if(!supa){ toast('無 Supabase 連線'); return false; }
-  const { data:{ user } } = await supa.auth.getUser();
-  if(!user){ toast('請先登入'); return false; }
-  try{
-    let { data, error } = await supa.from('profiles').select('is_admin').eq('id', user.id).maybeSingle();
-    if(error || !data){
-      const r = await supa.from('profiles').select('is_admin').eq('email', user.email).maybeSingle();
-      return !!(r.data && r.data.is_admin);
-    }
-    return !!data.is_admin;
-  }catch(e){ return false; }
-}
+const fmtTW = (isoOrDate) => {
+  if (!isoOrDate) return '—';
+  const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
+  return new Intl.DateTimeFormat('zh-TW', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: true
+  }).format(d);
+};
 
-// Online helpers (10 分鐘心跳視為在線)
-const ONLINE_MS = 10 * 60 * 1000;
-function fmtTz(v){
-  if(!v) return '—';
-  const d=new Date(v);
-  if(isNaN(d)) return String(v);
-  // to Taiwan time
-  return new Intl.DateTimeFormat('zh-TW', { timeZone:'Asia/Taipei', year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit' }).format(d);
-}
-function isOnlineByLastSeen(last_seen){
-  const t = last_seen ? new Date(last_seen).getTime() : 0;
-  return t && (Date.now() - t) <= ONLINE_MS;
-}
-function onlineBadge(last_seen){
-  const on = isOnlineByLastSeen(last_seen);
-  const dot = `<span style="display:inline-flex;align-items:center;gap:.4rem;margin-left:.4rem">
-    <span style="width:10px;height:10px;background:${on?'#22c55e':'#cbd5e1'};border-radius:9999px;display:inline-block"></span>
-    <span style="font-size:12px;color:#9fb0c9">${on?'在線':'離線'}</span></span>`;
-  return dot;
-}
+const isOnline = (lastSeenISO, now = new Date()) => {
+  if (!lastSeenISO) return false;
+  const diffMin = (now - new Date(lastSeenISO)) / 60000;
+  return diffMin <= ONLINE_WINDOW_MIN;
+};
 
-let cache=[];
-async function loadList(){
-  const body=$('#bw-admin-rows'); body.innerHTML='<tr><td colspan="5">讀取中…</td></tr>';
-  try{
-    // 抓取 email / display_name / is_admin / last_sign_in_at / expires_at / last_seen（或 updated_at）
-    const sel='email, display_name, nickname, is_admin, last_sign_in_at, expires_at, last_seen, updated_at';
-    const { data, error } = await supa.from('profiles').select(sel).order('updated_at', { ascending:false }).limit(1000);
-    if(error) throw error; cache=(data||[]).map(r=>({...r, last_seen: r.last_seen || r.updated_at || r.last_sign_in_at}));
-    render(cache);
-  }catch(e){ body.innerHTML='<tr><td colspan="5">讀取失敗：'+(e?.message||e)+'</td></tr>'; }
-}
-function render(list){
-  const body=$('#bw-admin-rows');
-  body.innerHTML = (list||[]).map(r=>{
-    const name=r.display_name||r.nickname||'';
-    const exp  = r.expires_at ? fmtTz(r.expires_at) : '—';
-    const last = r.last_sign_in_at ? fmtTz(r.last_sign_in_at) : '—';
-    const online = onlineBadge(r.last_seen);
-    return `<tr><td>${r.email||''}</td><td>${name}</td><td>${r.is_admin?'✔':''}</td><td>${last}</td><td>${exp}${online}</td></tr>`;
-  }).join('') || '<tr><td colspan="5">無資料</td></tr>';
-}
-$('#bw-admin-filter')?.addEventListener('input',()=>{
-  const q=($('#bw-admin-filter').value||'').toLowerCase().trim();
-  if(!q) return render(cache);
-  render(cache.filter(r=>(r.email||'').toLowerCase().includes(q) || (r.display_name||r.nickname||'').toLowerCase().includes(q)));
-});
-$('#bw-admin-refresh')?.addEventListener('click', loadList);
+const debounce = (fn, ms = 300) => {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+};
 
-// Heartbeat：登入時每 10 分鐘更新 updated_at（讓 last_seen 有值）
-async function heartbeat(){
-  try{
-    const { data:{ user } } = await supa.auth.getUser();
-    if(!user) return;
-    const nowIso = new Date().toISOString();
-    await supa.from('profiles').update({ updated_at: nowIso }).eq('id', user.id);
-  }catch{}
-}
-let hb=null;
-supa?.auth.onAuthStateChange(async (evt, session)=>{
-  if(evt==='SIGNED_IN'){ heartbeat(); hb&&clearInterval(hb); hb=setInterval(heartbeat, ONLINE_MS); }
-  else if(evt==='SIGNED_OUT'){ hb&&clearInterval(hb); hb=null; }
-});
-// 初次如果已登入就啟動
-(async()=>{ try{ const { data:{ user } } = await supa.auth.getUser(); if(user){ heartbeat(); hb=setInterval(heartbeat, ONLINE_MS); } }catch(e){} })();
-
-// 點選選單開啟
-document.addEventListener('click', async (e)=>{
-  const id=e.target.id;
-  if(id==='acct-admin-console'){
-    const ok=await isAdminUser(); if(!ok) return toast('你不是管理員');
-    openModal(); loadList();
+/* ---------- 選單防重注入 ---------- */
+function ensureAdminMenu() {
+  // 嘗試找你的服務選單容器；找不到就退回 body
+  const menuRoot = document.querySelector('.dropdown-menu, [data-menu-root], #service-menu, .service-menu, .menu') || document.body;
+  let link = document.getElementById(MENU_ID);
+  if (!link) {
+    link = document.createElement('a');
+    link.id = MENU_ID;
+    link.setAttribute(ADMIN_FLAG, '1');
+    link.className = 'dropdown-item';
+    link.href = '#admin-console';
+    link.textContent = 'Admin 主控台';
+    menuRoot.appendChild(link);
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      BookWideAdmin.init();
+      document.querySelector('#admin-console-root')?.scrollIntoView({ behavior: 'smooth' });
+    });
   }
-});
-</script>
-<!-- === /Admin 主控台 === -->
+}
 
+/* ---------- DOM 準備（只建一次） ---------- */
+function ensureAdminRoot() {
+  let root = document.querySelector('#admin-console-root');
+  if (!root) {
+    root = document.createElement('section');
+    root.id = 'admin-console-root';
+    root.setAttribute(ADMIN_FLAG, '1');
+    root.innerHTML = `
+      <div class="container" ${ADMIN_FLAG}="1" style="margin-top:1.25rem">
+        <h2 class="text-xl font-semibold" ${ADMIN_FLAG}="1">
+          Admin 主控台
+          <small class="opacity-70" ${ADMIN_FLAG}="1">
+            ．時間以台灣時間（Asia/Taipei）顯示
+          </small>
+        </h2>
+
+        <div class="flex gap-3 items-center mt-3" ${ADMIN_FLAG}="1">
+          <button id="bw-admin-refresh" class="btn btn-primary" ${ADMIN_FLAG}="1">重新整理</button>
+          <input id="bw-admin-search" class="input input-bordered" placeholder="搜尋 Email / 名稱…" ${ADMIN_FLAG}="1" />
+        </div>
+
+        <div class="table-wrapper mt-4" ${ADMIN_FLAG}="1">
+          <table class="table w-full" ${ADMIN_FLAG}="1">
+            <thead ${ADMIN_FLAG}="1">
+              <tr ${ADMIN_FLAG}="1">
+                <th>Email</th>
+                <th>顯示名稱</th>
+                <th>管理員</th>
+                <th>最後登入</th>
+                <th>到期日 / 在線</th>
+              </tr>
+            </thead>
+            <tbody id="bw-admin-tbody" ${ADMIN_FLAG}="1">
+              <tr ${ADMIN_FLAG}="1"><td colspan="5">讀取中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    const anchor = document.querySelector('#content,#app,.main-content,.container,main') || document.body;
+    anchor.prepend(root);
+  }
+  return root;
+}
+
+/* ---------- 讀資料 & 渲染 ---------- */
+async function fetchProfiles(keyword = '') {
+  let q = supabase.from('profiles_admin')
+    .select('id,email,display_name,is_admin,last_sign_in_at,last_seen,expires_at')
+    .order('last_seen', { ascending: false });
+
+  if (keyword) {
+    q = q.ilike('email', `%${keyword}%`)
+         .or(`display_name.ilike.%${keyword}%`);
+  }
+
+  const { data, error } = await q;
+  if (error) throw error;
+  return data || [];
+}
+
+function renderRows(rows) {
+  const tb = document.getElementById('bw-admin-tbody');
+  if (!tb) return;
+  tb.innerHTML = '';
+
+  const now = new Date();
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.setAttribute(ADMIN_FLAG, '1');
+
+    const online = isOnline(r.last_seen, now);
+    const statusDot = online ? '🟢 在線' : '⚪ 離線';
+
+    const expires = r.expires_at ? new Date(r.expires_at).toISOString().slice(0,10) : '—';
+    const expireOnlineCell = `${expires}　•　${statusDot}`;
+
+    tr.innerHTML = `
+      <td>${r.email || '—'}</td>
+      <td>${r.display_name || '—'}</td>
+      <td>${r.is_admin ? '✔' : ''}</td>
+      <td>${fmtTW(r.last_sign_in_at)}</td>
+      <td>${expireOnlineCell}</td>
+    `;
+    tb.appendChild(tr);
+  });
+
+  if (rows.length === 0) {
+    const tr = document.createElement('tr');
+    tr.setAttribute(ADMIN_FLAG, '1');
+    tr.innerHTML = `<td colspan="5">沒有資料</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+/* ---------- 心跳（更新 last_seen） ---------- */
+async function heartbeat() {
+  const { data: user } = await supabase.auth.getUser();
+  const uid = user?.user?.id;
+  if (!uid) return;
+  await supabase.from('profiles')
+    .update({ last_seen: new Date().toISOString() })
+    .eq('id', uid);
+}
+
+/* ---------- 模組入口 ---------- */
+export const BookWideAdmin = {
+  _booted: false,
+  async init() {
+    ensureAdminMenu();
+    ensureAdminRoot();
+
+    if (!this._booted) {
+      const doLoad = async (kw = '') => {
+        const rows = await fetchProfiles(kw.trim());
+        renderRows(rows);
+      };
+
+      document.getElementById('bw-admin-refresh')
+        .addEventListener('click', () => doLoad(document.getElementById('bw-admin-search').value));
+
+      document.getElementById('bw-admin-search')
+        .addEventListener('input', debounce(e => doLoad(e.target.value), 300));
+
+      await heartbeat();
+      setInterval(heartbeat, 60_000);
+
+      this._booted = true;
+      doLoad('');
+    }
+  }
+};
+
+document.addEventListener('DOMContentLoaded', ensureAdminMenu);
+</script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
