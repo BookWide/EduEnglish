@@ -89,6 +89,17 @@
     @media (max-width:1000px){ .features{grid-template-columns:repeat(2,1fr)} .grid{grid-template-columns:repeat(2,1fr)} }
     @media (max-width:640px){ .grid{grid-template-columns:1fr} .h1{font-size:22px} }
   </style>
+
+<style>
+  /* admin-table styles */
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; }
+  #user-cols + thead th:nth-last-child(-n+2),
+  #user-tb td:nth-last-child(-n+2) { text-align:center; }
+  #user-tb td:nth-child(1), #user-tb td:nth-child(3) { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chip { padding:6px 12px; border-radius:999px; border:1px solid var(--line,#2f374a); background:#12161f; color:#e5e7eb; }
+  .chip--active { background:#111827; border-color:#4b5563; font-weight:600; }
+</style>
+
 </head>
 <body>
   <nav class="nav">
@@ -247,7 +258,935 @@
 </script>
 
   <!-- Supabase Auth / Account UI -->
-  
+  <script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm';
+    const SUPABASE_URL='https://jeajrwpmrgczimmrflxo.supabase.co';
+    const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+    if(!window.supa) window.supa=createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+    const supa=window.supa;
+
+    const btnLogin=document.getElementById('btnLogin');
+    const btnLogout=document.getElementById('btnLogout');
+    const acctWrap=document.getElementById('accountWrap');
+    const nameBadge=document.getElementById('userNameBadge');
+    const btnAccount=document.getElementById('btnAccount');
+
+    const paintUser=async(u)=>{
+      if(u){
+        let display=u.user_metadata?.name||(u.email?u.email.split('@')[0]:'使用者');
+        let email=u.email||''; let avatar=u.user_metadata?.avatar_url||'';
+        try{ const {data:prof}=await supa.from('profiles').select('nickname, avatar_url').eq('user_id',u.id).maybeSingle();
+             if(prof){ if(prof.nickname) display=prof.nickname; if(prof.avatar_url) avatar=prof.avatar_url; } }catch{}
+        nameBadge.textContent=email||display||'已登入';
+        const img=document.getElementById('acctAvatar');
+        const fb=document.getElementById('acctFallback');
+        const disp=document.getElementById('acctDisplay');
+        const mail=document.getElementById('acctEmail');
+        disp.textContent=display||'—'; mail.textContent=email||'—';
+        if(avatar){ img.src=avatar; img.style.display='block'; fb.style.display='none'; }
+        else { img.removeAttribute('src'); img.style.display='none'; fb.style.display='grid'; fb.textContent=(email||display||'U').slice(0,2).toUpperCase(); }
+        btnLogin.style.display='none'; if(btnLogout) btnLogout.style.display='none'; acctWrap.style.display='inline-block';
+        document.querySelector('.acct-item.acct-plan')?.style.setProperty('display','block');
+        const logoutLink=document.querySelector('.acct-item.acct-logout');
+        if(logoutLink){ logoutLink.onclick=async(e)=>{ e.preventDefault(); await supa.auth.signOut(); location.reload(); }; }
+      }else{
+        nameBadge.textContent=''; acctWrap.style.display='none';
+        document.querySelector('.acct-item.acct-plan')?.style.setProperty('display','none'); acctWrap.classList.remove('open'); btnLogin.style.display=''; if(btnLogout) btnLogout.style.display='none';
+      }
+    };
+
+    const toggleMenu=()=>{ const open=!acctWrap.classList.contains('open'); acctWrap.classList.toggle('open',open); btnAccount?.setAttribute('aria-expanded',String(open)); };
+    btnAccount?.addEventListener('click',(e)=>{ e.stopPropagation(); toggleMenu(); });
+    document.addEventListener('click',()=>{ acctWrap.classList.remove('open'); btnAccount?.setAttribute('aria-expanded','false'); });
+    document.addEventListener('keydown',(e)=>{ if(e.key==='Escape'){ acctWrap.classList.remove('open'); btnAccount?.setAttribute('aria-expanded','false'); } });
+
+    const modal=document.getElementById('authModal');
+    const title=document.getElementById('authTitle');
+    const iptEmail=document.getElementById('authEmail');
+    const iptPwd=document.getElementById('authPassword');
+    const btnToggle=document.getElementById('authToggle');
+    const btnCancel=document.getElementById('authCancel');
+    const btnSubmit=document.getElementById('authSubmit');
+    const linkForgot=document.getElementById('linkForgot');
+    const errBox=document.getElementById('authErr');
+    let mode='signin';
+
+    function openModal(m='signin'){ mode=m; title.textContent=(mode==='signin')?'登入':'註冊'; btnToggle.textContent=(mode==='signin')?'沒有帳號？改為註冊':'已有帳號？改為登入'; errBox.textContent=''; iptPwd.value=''; modal.classList.add('open'); iptEmail.focus(); }
+    function closeModal(){ modal.classList.remove('open'); }
+    btnLogin.addEventListener('click',()=>openModal('signin'));
+    if(btnLogout) btnLogout.addEventListener('click', async()=>{ await supa.auth.signOut(); location.reload(); });
+    btnToggle.addEventListener('click',()=>openModal(mode==='signin'?'signup':'signin'));
+    btnCancel.addEventListener('click',closeModal);
+    document.addEventListener('keydown',e=>{ if(e.key==='Escape') closeModal(); });
+    modal.addEventListener('click',e=>{ if(e.target===modal) closeModal(); });
+
+    btnSubmit.addEventListener('click', async ()=>{
+      errBox.textContent=''; const email=(iptEmail.value||'').trim(), pwd=iptPwd.value||'';
+      if(!email||!pwd){ errBox.textContent='請輸入 Email 與密碼'; return; }
+      try{
+        if(mode==='signin'){ const {error}=await supa.auth.signInWithPassword({email,password:pwd,options:{shouldCreateUser:false}}); if(error) throw error; closeModal(); }
+        else{ const {error}=await supa.auth.signUp({email,password:pwd}); if(error) throw error; errBox.style.color='#9fe0a8'; errBox.textContent='註冊成功，請至信箱完成驗證（或已自動登入）。'; setTimeout(closeModal,900); }
+      }catch(e){ errBox.style.color=''; errBox.textContent=e?.message||'操作失敗'; }
+    });
+
+    linkForgot.addEventListener('click', async ()=>{
+      errBox.textContent=''; const email=(iptEmail.value||'').trim();
+      if(!email){ errBox.textContent='請先輸入 Email'; return; }
+      try{ const redirectTo=new URL('./account/reset.html',location.href).href;
+        const {error}=await supa.auth.resetPasswordForEmail(email,{redirectTo}); if(error) throw error;
+        errBox.style.color='#9fe0a8'; errBox.textContent='已寄送重設密碼連結，請至信箱查看。';
+      }catch(e){ errBox.style.color=''; errBox.textContent=e?.message||'寄送失敗'; }
+    });
+
+    try{ const {data}=await supa.auth.getSession(); paintUser(data?.session?.user||null); }catch{}
+    supa.auth.onAuthStateChange((_e,session)=>{ paintUser(session?.user||null); });
+
+    // 年份
+    document.getElementById('y').textContent=(new Date).getFullYear();
+  </script>
+
+  <!-- 推薦碼保存 -->
+  <script>
+    (() => {
+      const url = new URL(location.href);
+      const ref = url.searchParams.get('ref');
+      if (ref) localStorage.setItem('ref_code', ref);
+    })();
+  </script>
+
+  <!-- 登入意圖（沿用 supa_unified.js） -->
+  <script type="module">
+    import { supabase } from './supa_unified.js';
+    (function initLoginIntent(){
+      const p = new URLSearchParams(location.search);
+      if (p.get('login') === '1') {
+        const next = p.get('next');
+        document.getElementById('btnLogin')?.click();
+        supabase.auth.onAuthStateChange((_ev, session) => {
+          if (session?.user && next) location.href = next;
+        });
+      }
+    })();
+  </script>
+
+  <!-- LINE 客服浮動按鈕 -->
+  <style>
+    #line-btn{position:fixed;bottom:20px;right:20px;width:64px;height:64px;border-radius:50%;background-color:#00B900;box-shadow:0 3px 10px rgba(0,0,0,0.3);display:flex;justify-content:center;align-items:center;cursor:pointer;z-index:9999;transition:transform .2s ease,box-shadow .2s ease}
+    #line-btn:hover{transform:scale(1.1);box-shadow:0 6px 15px rgba(0,0,0,0.4)}
+    #line-btn img{width:38px;height:38px}
+  </style>
+  <div id="line-btn" title="聯絡我們（LINE 客服）">
+    <img src="https://scdn.line-apps.com/n/line_regis/d/p/line_icon.png" alt="LINE"/>
+  </div>
+  <script>
+    document.getElementById("line-btn").addEventListener("click", function() {
+      window.open("https://line.me/R/ti/p/@531xoidn", "_blank");
+    });
+  </script>
+
+  <!-- 五類索引一次載入（story/music/movie/news/pro） -->
+<script>
+  (function () {
+    const $ = (s, e=document) => e.querySelector(s);
+    const grid    = $('#catalog');
+    const tabsEl  = $('#tabBar');
+    const kwInput = $('#kw');
+    const btnSearch = $('#btnSearch');
+
+    const BASE = '/EduEnglish';
+    const PATHS = {
+      story: `${BASE}/data/story/story-index.json`,
+      music: `${BASE}/data/music/music-index.json`,
+      movie: `${BASE}/data/movie/movie-index.json`,
+      news:  `${BASE}/data/news/news-index.json`,
+      pro:   `${BASE}/data/pro/pro-index.json`,
+    };
+
+    const tagName = (cat) => ({story:'故事', music:'音樂', movie:'電影', news:'新聞', pro:'專業行業'})[cat] || '教材';
+
+    function cardHTML(it){
+      const href  = `${BASE}/player.html?cat=${encodeURIComponent(it.cat)}&slug=${encodeURIComponent(it.slug)}`;
+      const cover = it.cover && it.cover.trim()
+        ? it.cover
+        : (it.youtubeId ? `https://img.youtube.com/vi/${it.youtubeId}/hqdefault.jpg` : `${BASE}/img/placeholder.jpg`);
+      return `<a class="card" href="${href}">
+        <div class="thumb-wrap">
+          <div class="thumb"><img src="${cover}" alt="${it.title||it.slug}" onerror="this.style.opacity=.6"></div>
+          <div class="pill">${tagName(it.cat)}</div>
+        </div>
+        <div class="pad">
+          <div class="title">${it.title || it.slug}</div>
+          <div class="meta"><span>時長 ${it.mins||'–'} 分</span><span>程度 ${it.level||'–'}</span></div>
+        </div>
+      </a>`;
+    }
+
+    function render(list){ grid.innerHTML = list.map(cardHTML).join(''); }
+
+    let CATALOG = [];
+
+    // 確保預設 tab = 全部（第一次進頁時可能尚未有 .on）
+    function ensureDefaultTab(){
+      const on = tabsEl?.querySelector('.tab.on');
+      if (!on) tabsEl?.querySelector('[data-cat="all"]')?.classList.add('on');
+    }
+
+    function filterAndRender(){
+      ensureDefaultTab();
+      const active = tabsEl?.querySelector('.tab.on')?.dataset.cat || 'all';
+      const q = (kwInput?.value || '').trim().toLowerCase();
+
+      let pool = (active === 'all') ? CATALOG : CATALOG.filter(x => x.cat === active);
+      if (q) {
+        pool = pool.filter(x =>
+          (x.title + ' ' + (x.topic||'') + ' ' + (x.slug||'') + ' ' + (x.tags||[]).join(' '))
+            .toLowerCase()
+            .includes(q)
+        );
+      }
+      render(pool);
+    }
+
+    tabsEl?.addEventListener('click', (e)=>{
+      const tab = e.target.closest('.tab'); if(!tab) return;
+      tabsEl.querySelectorAll('.tab').forEach(t => t.classList.remove('on'));
+      tab.classList.add('on');
+      filterAndRender();
+    });
+    btnSearch?.addEventListener('click', filterAndRender);
+    kwInput?.addEventListener('keydown', e => { if (e.key === 'Enter') filterAndRender(); });
+
+    // 可靠的載入器（容錯：支援 data 或 data.items 形狀）
+    async function loadIndex(url, cat) {
+      try {
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) return [];
+        const raw = await res.json();
+        const arr = Array.isArray(raw) ? raw : (Array.isArray(raw.items) ? raw.items : []);
+        if (!Array.isArray(arr)) return [];
+        return arr.map(x => ({ ...x, cat }));
+      } catch { return []; }
+    }
+
+    (async () => {
+      const lists = await Promise.all(Object.entries(PATHS).map(([cat, url]) => loadIndex(url, cat)));
+      CATALOG = lists.flat();
+      filterAndRender();            // 第一次渲染
+      setTimeout(filterAndRender,0); // 保險再渲一次，避免初始 tab 狀態競態
+    })();
+  })();
+</script>
+<script>
+(function(){
+  // 依規則決定封面來源：cover > yt > mp4首幀 > placeholder
+  function decideCoverURL(img){
+    const cov = img.dataset.cover?.trim();
+    const yt  = img.dataset.youtubeId?.trim();
+    const mp4 = img.dataset.mp4?.trim();
+
+    if (cov) return cov;
+    if (yt)  return `https://img.youtube.com/vi/${yt}/hqdefault.jpg`;
+    if (mp4) return "__USE_MP4_FRAME__"; // 交給後面的擷取程式
+    return "img/placeholder.jpg";
+  }
+
+  // 從 mp4 擷取第1秒畫面，產生 dataURL 並指給 <img>
+  async function useMp4Frame(img, mp4){
+    try{
+      const v = document.createElement('video');
+      v.crossOrigin = "anonymous";        // 若放 GitHub Pages，通常同源 OK；異源需允許 CORS
+      v.preload = "auto";
+      v.src = mp4;
+
+      // 等能播放再跳到 1 秒
+      await v.play().catch(()=>{});       // 某些瀏覽器需要呼叫 play() 才會解碼幀
+      v.pause();
+
+      const seekTo = 1.0;                 // 取第 1 秒
+      await new Promise((res, rej)=>{
+        let done = false;
+        const onSeeked = ()=>{ if(done) return; done = true; v.removeEventListener('seeked', onSeeked); res(); };
+        try{ v.currentTime = seekTo; }catch(e){ rej(e); }
+        // 安全閥：有些瀏覽器不觸發 seeked
+        setTimeout(()=>{ if(!done){ done=true; res(); } }, 1200);
+      });
+
+      const w = v.videoWidth  || 640;
+      const h = v.videoHeight || 360;
+      const scale = 0.5;                   // 生成較小圖，載入快
+      const cw = Math.max(1, Math.round(w*scale));
+      const ch = Math.max(1, Math.round(h*scale));
+
+      const c = document.createElement('canvas');
+      c.width = cw; c.height = ch;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(v, 0, 0, cw, ch);
+
+      const dataUrl = c.toDataURL('image/jpeg', 0.8);
+      img.src = dataUrl;
+    }catch(e){
+      console.warn('[cover from mp4] fail:', e);
+      img.src = "img/placeholder.jpg";
+    }
+  }
+
+  function applyCovers(root=document){
+    const imgs = root.querySelectorAll('img.cover');
+    imgs.forEach(img=>{
+      // 避免重複處理
+      if (img.dataset.coverReady === '1') return;
+      img.dataset.coverReady = '1';
+
+      const decided = decideCoverURL(img);
+      if (decided === "__USE_MP4_FRAME__"){
+        // 先給暫時圖，再嘗試擷取 mp4 首幀
+        img.src = "img/placeholder.jpg";
+        const mp4 = img.dataset.mp4?.trim();
+        if (mp4) useMp4Frame(img, mp4);
+      }else{
+        img.src = decided;
+        // 失敗 fallback
+        img.onerror = function(){
+          // 如果原本是 yt 圖片失敗、但有 mp4，就退回擷取首幀；否則用 placeholder
+          const yt  = img.dataset.youtubeId?.trim();
+          const mp4 = img.dataset.mp4?.trim();
+          if (yt && mp4) return useMp4Frame(img, mp4);
+          img.src = "img/placeholder.jpg";
+        };
+      }
+    });
+  }
+
+  // 初始掛載
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', ()=>applyCovers(), {once:true});
+  }else{
+    applyCovers();
+  }
+
+  // 若你的清單是動態載入（例如渲染後 append），載入後再呼叫一次 applyCovers(container)
+  window.BW_applyCovers = applyCovers;
+})();
+</script>
+
+<!-- ADMIN-INTEGRATED V2025V009 START -->
+<style>
+#bw-admin-mask{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;z-index:9998}
+#bw-admin-modal{position:fixed;inset:6% 4%;background:#fff;color:#111;border-radius:14px;box-shadow:0 10px 40px rgba(0,0,0,.25);display:none;z-index:9999;overflow:auto}
+#bw-admin-modal .hdr{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid #eee}
+#bw-admin-modal .hdr h3{margin:0;font-size:18px}
+#bw-admin-close{border:0;background:#f2f4f7;color:#111;border-radius:10px;padding:6px 10px;cursor:pointer}
+#bw-admin-tabs{display:flex;gap:8px;padding:10px 16px;border-bottom:1px solid #eee}
+#bw-admin-tabs button{border:1px solid #e5e7eb;background:#f8fafc;color:#111;border-radius:8px;padding:6px 10px;cursor:pointer}
+#bw-admin-tabs button.active{background:#111;color:#fff;border-color:#111}
+#bw-admin-views{padding:12px 16px}
+.bw-card{border:1px solid #e5e7eb;border-radius:12px;padding:12px;background:#fff}
+#bw-admin-filter{width:260px;max-width:60vw;padding:8px;border:1px solid #e5e7eb;border-radius:8px}
+#bw-admin-refresh{padding:8px 10px;border-radius:8px;border:1px solid #e5e7eb;background:#f8fafc;cursor:pointer}
+#bw-admin-table{width:100%;border-collapse:collapse}
+#bw-admin-table th,#bw-admin-table td{border-bottom:1px solid #f1f5f9;padding:8px;text-align:left;white-space:nowrap;font-size:14px}
+#bw-admin-form input{padding:8px;border:1px solid #e5e7eb;border-radius:8px}
+#bw-admin-actions button{padding:8px 10px;border-radius:8px;border:1px solid #e5e7eb;background:#111;color:#fff;cursor:pointer}
+#bw-admin-actions button.secondary{background:#6b7280}
+#bw-admin-actions button.warn{background:#c2410c}
+#bw-admin-actions button.mute{background:#374151}
+#bw-toast{position:fixed;right:16px;bottom:16px;background:#111;color:#fff;padding:8px 12px;border-radius:8px;display:none;z-index:10000}
+@media (max-width: 768px){
+  #bw-admin-modal{inset:4% 2%}
+  #bw-admin-filter{max-width:80vw}
+}
+</style>
+<div id="bw-admin-mask" aria-hidden="true"></div>
+<div id="bw-admin-modal" role="dialog" aria-modal="true" aria-labelledby="bw-admin-title">
+  <div class="hdr">
+    <h3 id="bw-admin-title">Admin 管理（清單）</h3>
+    <button id="bw-admin-close">關閉</button>
+  </div>
+  <div id="bw-admin-tabs">
+    <button data-tab="list" class="active">👀 使用者清單</button>
+    </div>
+  <div id="bw-admin-views">
+
+<!-- ===== BEGIN: BW · 所有用戶帳號清單（整合在 Admin 主控台內） ===== -->
+<section id="bw-admin-simple" class="bw-card" style="margin-top:16px;">
+  <div style="display:flex;align-items:center;gap:8px;justify-content:space-between;margin-bottom:8px">
+    <div style="font-weight:700">所有用戶帳號（Email）<small id="bw-admin-simple-count" style="margin-left:6px;color:#6b7280"></small></div>
+    <input id="bw-admin-simple-q" placeholder="搜尋 Email / 名稱…" style="width:240px;max-width:60vw;padding:8px;border:1px solid #e5e7eb;border-radius:8px"/>
+  </div>
+  <div style="overflow:auto">
+    <table style="table-layout:fixed;width:100%" style="width:100%;border-collapse:collapse;font-size:14px">
+      <colgroup id="user-cols">
+  <col style="width:28%">
+  <col style="width:18%">
+  <col style="width:20%">
+  <col style="width:22%">
+  <col style="width:6%">
+  <col style="width:6%">
+</colgroup>
+<thead>
+        <tr>
+          <th style="text-align:left;border-bottom:1px solid #f1f5f9;padding:8px">Email</th>
+          <th style="text-align:left;border-bottom:1px solid #f1f5f9;padding:8px">顯示名稱</th>
+          <th style="text-align:left;border-bottom:1px solid #f1f5f9;padding:8px">最後登入</th>
+          <th style="text-align:left;border-bottom:1px solid #f1f5f9;padding:8px">到期日 / 在線</th>
+          <th style="text-align:left;border-bottom:1px solid #f1f5f9;padding:8px">管理員</th>
+          <th style="text-align:left;border-bottom:1px solid #f1f5f9;padding:8px">當前在線</th>
+        </tr>
+      </thead>
+      <tbody id="bw-admin-simple-rows"><tr></tr></tbody>
+    </table>
+  </div>
+</section>
+<script>
+(function(){
+  const supa = window.supa || window.supabase;
+  if(!supa){ console.warn('[BW] 未找到 Supabase 客戶端'); return; }
+  const rows  = document.getElementById('bw-admin-simple-rows');
+  const badge = document.getElementById('bw-admin-simple-count');
+  const q     = document.getElementById('bw-admin-simple-q');
+  let CACHE = [];
+  const ONLINE_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+  function fmt(v){
+    if(!v) return '—';
+    const d=new Date(v);
+    return isNaN(d) ? String(v) : d.toISOString().replace('T',' ').slice(0,19) + '+00:00';
+  }
+  function isOnline(r){
+    const t = r.last_sign_in_at ? new Date(r.last_sign_in_at).getTime() : 0;
+    if(!t) return false;
+    return (Date.now() - t) <= ONLINE_WINDOW_MS;
+  }
+  function onlineBadge(r){
+    return isOnline(r) ? '🟢 在線' : '⚪ 離線';
+  }
+  function paint(list){
+    if(badge) badge.textContent = '（共 ' + list.length + ' 位）';
+    rows.innerHTML = list.map(r => (
+      '<tr>' +
+      '<td style="padding:8px;border-bottom:1px solid #f1f5f9">'+(r.email||'—')+'</td>' +
+      '<td style="padding:8px;border-bottom:1px solid #f1f5f9">'+(r.display_name||r.nickname||'—')+'</td>' +
+      '<td style="padding:8px;border-bottom:1px solid #f1f5f9">'+fmt(r.last_sign_in_at)+'</td>' +
+      '<td style="padding:8px;border-bottom:1px solid #f1f5f9">'+fmt(r.expires_at)+'</td>' +
+      '<td style="padding:8px;border-bottom:1px solid #f1f5f9">'+(r.is_admin?'✔':'—')+'</td>' +
+      '<td style="padding:8px;border-bottom:1px solid #f1f5f9">'+onlineBadge(r)+'</td>' +
+      '</tr>'
+    )).join('') || '<tr><td colspan="6" style="padding:8px">無資料</td></tr>';
+  }
+  async function load(){
+    rows.innerHTML = '<tr></tr>';
+    try{
+      const { data, error } = await supa
+        .from('profiles')
+        .select('email, display_name, nickname, is_admin, last_sign_in_at, expires_at')
+        .order('last_sign_in_at', { ascending:false, nullsFirst:false })
+        .limit(2000);
+      if(error) throw error;
+      CACHE = data||[];
+      paint(CACHE);
+    }catch(e){
+      rows.innerHTML = '<tr><td colspan="6" style="padding:8px">讀取失敗：'+(e.message||e)+'</td></tr>';
+    }
+  }
+  q && q.addEventListener('input', function(){
+    const kw = (q.value||'').toLowerCase().trim();
+    if(!kw) return paint(CACHE);
+    const hit = CACHE.filter(r => ((r.email||'')+' '+(r.display_name||'')+' '+(r.nickname||'')).toLowerCase().includes(kw));
+    paint(hit);
+  });
+  // 自動載入 + 對外刷新
+  load();
+  window.BW_ADMIN_SIMPLE_REFRESH = load;
+})();
+</script>
+<!-- ===== END: BW · 所有用戶帳號清單 ===== -->
+
+
+    <section id="bw-view-list" class="bw-card">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+        <input id="bw-admin-filter" placeholder="搜尋 Email / 顯示名稱…">
+        <button id="bw-admin-refresh">重新整理</button>
+      </div>
+      <div style="overflow:auto">
+        <table id="bw-admin-table">
+          <thead></thead>
+          <tbody id="bw-admin-rows"><tr></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</div>
+<div id="bw-toast"></div>
+
+<script type="module">
+const supa = (window.supa || window.supabase || null);
+const $=(s,r=document)=>r.querySelector(s); const $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
+function toast(t,ms=2200){const n=$('#bw-toast');n.textContent=t;n.style.display='block';setTimeout(()=>n.style.display='none',ms);}
+function openModal(){ $('#bw-admin-mask').style.display='block'; $('#bw-admin-modal').style.display='block'; }
+function closeModal(){ $('#bw-admin-mask').style.display='none'; $('#bw-admin-modal').style.display='none'; }
+$('#bw-admin-close')?.addEventListener('click', closeModal); $('#bw-admin-mask')?.addEventListener('click', closeModal);
+$('#bw-admin-tabs')?.addEventListener('click', (e)=>{ const b=e.target.closest('button'); if(!b)return;
+  $$('#bw-admin-tabs button').forEach(x=>x.classList.toggle('active', x===b));
+  $('#bw-view-list').style.display = b.dataset.tab==='list' ? 'block' : 'none';
+  // 已移除授權/暫停頁
+  $('#bw-view-grant') && ($('#bw-view-grant').style.display='none');
+});
+
+// Append menu entries right after "學習控制台"
+(function(){ const nodes=$$('a,button'); const anchor=nodes.find(n=>(n.textContent||'').includes('學習控制台')); if(!anchor) return; const cls=anchor.className||''; const a=document.createElement('a'); a.href='#'; a.textContent='Admin 主控台'; a.id='acct-admin-console'; a.className=cls; a.style.cursor='pointer'; anchor.parentNode.insertBefore(a, anchor.nextSibling); })();
+
+async function isAdminUser(){
+  if(!supa){ toast('無 Supabase 連線'); return false; }
+  const { data:{ user } } = await supa.auth.getUser();
+  if(!user){ toast('請先登入'); return false; }
+  try{
+    let { data, error } = await supa.from('profiles').select('is_admin').eq('id', user.id).maybeSingle();
+    if(error || !data){
+      const r = await supa.from('profiles').select('is_admin').eq('email', user.email).maybeSingle();
+      return !!(r.data && r.data.is_admin);
+    }
+    return !!data.is_admin;
+  }catch(e){ return false; }
+}
+
+let cache=[];
+async function loadList(){
+  const body=$('#bw-admin-rows'); body.innerHTML='<tr></tr>';
+  try{
+    const sel='email, display_name, nickname, is_admin, is_paused, last_sign_in_at, expires_at, updated_at';
+    const { data, error } = await supa.from('profiles').select(sel).order('updated_at', { ascending:false }).limit(500);
+    if(error) throw error; cache=data||[]; render(cache);
+  }catch(e){ body.innerHTML='<tr><td colspan="6">讀取失敗：'+(e?.message||e)+'</td></tr>'; }
+}
+function render(list){
+  const body=$('#bw-admin-rows');
+  body.innerHTML = (list||[]).map(r=>{
+    const name=r.display_name||r.nickname||''; const adm=r.is_admin?'✔':''; const ban=r.is_paused?'⏸':'';
+    return `<tr><td>${r.email||''}</td><td>${name}</td><td>${adm}</td><td>${ban}</td><td>${r.last_sign_in_at||''}</td><td>${r.expires_at||''}</td></tr>`;
+  }).join('') || '<tr><td colspan="6">無資料</td></tr>';
+}
+$('#bw-admin-filter')?.addEventListener('input',()=>{
+  const q=($('#bw-admin-filter').value||'').toLowerCase().trim();
+  if(!q) return render(cache);
+  render(cache.filter(r=>(r.email||'').toLowerCase().includes(q) || (r.display_name||r.nickname||'').toLowerCase().includes(q)));
+});
+$('#bw-admin-refresh')?.addEventListener('click', loadList);
+
+async function updateByEmail(payload){
+  const email=($('#bw-grant-email').value||'').trim().toLowerCase(); if(!email) return toast('請輸入 Email');
+  const exp=$('#bw-grant-exp')?.value; if(exp) payload.admin_expires_at=new Date(exp).toISOString();
+  const { error } = await supa.from('profiles').update(payload).eq('email', email);
+  if(error) return toast('失敗：'+error.message);
+  toast('成功'); loadList();
+}
+$('#bw-btn-grant')?.addEventListener('click', ()=>updateByEmail({is_admin:true}));
+$('#bw-btn-revoke')?.addEventListener('click',()=>updateByEmail({is_admin:false}));
+$('#bw-btn-pause')?.addEventListener('click', ()=>updateByEmail({is_paused:true}));
+$('#bw-btn-unpause')?.addEventListener('click',()=>updateByEmail({is_paused:false}));
+
+document.addEventListener('click', async (e)=>{
+  const id=e.target.id;
+  if(id==='acct-admin-console'){
+    const ok=await isAdminUser(); if(!ok) return toast('你不是管理員');
+    openModal(); if(id==='acct-admin-console') $('#bw-admin-tabs button[data-tab="list"]').click(); else $('#bw-admin-tabs button[data-tab="grant"]').click();
+    loadList();
+  }
+});
+</script>
+<!-- ADMIN-INTEGRATED V2025V009 END -->
+
+<!-- 🔄 Auto Heartbeat to Supabase (every 10 minutes) -->
+<script type="module">
+  import { supabase } from './supa.js';
+
+  const HEARTBEAT_MINUTES = 10;
+  const HEARTBEAT_MS = HEARTBEAT_MINUTES * 60 * 1000;
+  let heartbeatTimer = null;
+
+  async function getCurrentUser() {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      return user || null;
+    } catch (e) {
+      console.error('[Heartbeat] getUser error:', e);
+      return null;
+    }
+  }
+
+  async function doHeartbeat(reason='interval') {
+    const user = await getCurrentUser();
+    if (!user) return;
+
+    try {
+      const nowIso = new Date().toISOString();
+      // 使用 updated_at 做為線上心跳依據（public.profiles 已存在此欄位）
+      const { error } = await supabase
+        .from('profiles')
+        .update({ updated_at: nowIso })
+        .eq('id', user.id);
+      if (error) {
+        console.error('[Heartbeat] update failed:', error);
+      } else {
+        console.debug('[Heartbeat] OK', reason, new Date().toLocaleString());
+      }
+    } catch (e) {
+      console.error('[Heartbeat] exception:', e);
+    }
+  }
+
+  function startHeartbeat() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    // 立即打一包
+    doHeartbeat('start');
+    // 每 10 分鐘打一次
+    heartbeatTimer = setInterval(() => doHeartbeat('interval'), HEARTBEAT_MS);
+  }
+
+  function stopHeartbeat() {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+
+  // 當頁面可見時嘗試補打一包；隱藏時只停止計時器（避免背景頁面多餘更新）
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      startHeartbeat();
+    } else {
+      stopHeartbeat();
+    }
+  });
+
+  // 登入／登出狀態變更時處理
+  supabase.auth.onAuthStateChange(async (event, session) => {
+    if (event === 'SIGNED_IN') {
+      startHeartbeat();
+    } else if (event === 'SIGNED_OUT') {
+      stopHeartbeat();
+    }
+  });
+
+  // 首次載入時，如果已登入，也要啟動
+  (async () => {
+    const user = await getCurrentUser();
+    if (user) startHeartbeat();
+  })();
+</script>
+
+<script type="module" src="./admin_online_patch.js"></script>
+<script>
+    // --- BookWide Admin: merge expiry & online after render ---
+    (function(){
+      try{
+        const table = document.querySelector('[data-admin-users-table], table'); // best-effort
+        if(!table) return;
+        const rows = table.querySelectorAll('tbody tr');
+        rows.forEach(tr => {
+          const cells = tr.querySelectorAll('td');
+          if(!cells.length) return;
+          // try to locate expires cell by header text
+          const thead = table.querySelector('thead');
+          let expiresIdx = cells.length-1;
+          if(thead){
+            const ths = Array.from(thead.querySelectorAll('th')).map(th=>th.textContent.trim());
+            const i = ths.findIndex(t=>t.includes('到期日'));
+            if(i>=0) expiresIdx = i;
+          }
+          const emailIdx = 0;
+          const email = cells[emailIdx]?.textContent?.trim();
+          const expCell = cells[expiresIdx];
+          const rowData = expCell?.dataset || {};
+          const lastSeen = rowData.last_seen || tr.getAttribute('data-last-seen') || '';
+          if(expCell){
+            const badge = __bw_onlineBadge(__bw_isOnline(lastSeen));
+            if(!/在線|離線/.test(expCell.innerHTML)) expCell.innerHTML = expCell.innerHTML + badge;
+          }
+        })
+      }catch(e){}
+    })();
+    </script>
+
+<!-- ===== BookWide Admin Console (compact) ===== -->
+<script type="module">
+import { supabase } from './supa.js';
+
+/* ---------- 常數 / 工具 ---------- */
+const ONLINE_WINDOW_MIN = 10; // 幾分鐘內算在線
+const MENU_ID = 'bw-admin-menu';
+const ADMIN_FLAG = 'data-bw-admin';      // 標記我們注入的 DOM
+const TZ = 'Asia/Taipei';
+
+const fmtTW = (isoOrDate) => {
+  if (!isoOrDate) return '—';
+  const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
+  return new Intl.DateTimeFormat('zh-TW', {
+    timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: true
+  }).format(d);
+};
+
+const isOnline = (lastSeenISO, now = new Date()) => {
+  if (!lastSeenISO) return false;
+  const diffMin = (now - new Date(lastSeenISO)) / 60000;
+  return diffMin <= ONLINE_WINDOW_MIN;
+};
+
+const debounce = (fn, ms = 300) => {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), ms);
+  };
+};
+
+/* ---------- 選單防重注入 ---------- */
+function ensureAdminMenu() {
+  // 嘗試找你的服務選單容器；找不到就退回 body
+  const menuRoot = document.querySelector('.dropdown-menu, [data-menu-root], #service-menu, .service-menu, .menu') || document.body;
+  let link = document.getElementById(MENU_ID);
+  if (!link) {
+    link = document.createElement('a');
+    link.id = MENU_ID;
+    link.setAttribute(ADMIN_FLAG, '1');
+    link.className = 'dropdown-item';
+    link.href = '#admin-console';
+    link.textContent = 'Admin 主控台';
+    menuRoot.appendChild(link);
+    link.addEventListener('click', (e) => {
+      e.preventDefault();
+      BookWideAdmin.init();
+      document.querySelector('#admin-console-root')?.scrollIntoView({ behavior: 'smooth' });
+    });
+  }
+}
+
+/* ---------- DOM 準備（只建一次） ---------- */
+function ensureAdminRoot() {
+  let root = document.querySelector('#admin-console-root');
+  if (!root) {
+    root = document.createElement('section');
+    root.id = 'admin-console-root';
+    root.setAttribute(ADMIN_FLAG, '1');
+    root.innerHTML = `
+      <div class="container" ${ADMIN_FLAG}="1" style="margin-top:1.25rem">
+        <h2 class="text-xl font-semibold" ${ADMIN_FLAG}="1">
+          Admin 主控台
+          <small class="opacity-70" ${ADMIN_FLAG}="1">
+            ．時間以台灣時間（Asia/Taipei）顯示
+          </small>
+        </h2>
+
+        <div class="flex gap-3 items-center mt-3" ${ADMIN_FLAG}="1">
+          <button id="bw-admin-refresh" class="btn btn-primary" ${ADMIN_FLAG}="1">重新整理</button>
+          <input id="bw-admin-search" class="input input-bordered" placeholder="搜尋 Email / 名稱…" ${ADMIN_FLAG}="1" />
+        </div>
+
+        <div class="table-wrapper mt-4" ${ADMIN_FLAG}="1">
+          <table class="table w-full" ${ADMIN_FLAG}="1">
+            <thead ${ADMIN_FLAG}="1">
+              
+            </thead>
+            <tbody id="bw-admin-tbody" ${ADMIN_FLAG}="1">
+              <tr ${ADMIN_FLAG}="1"></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    const anchor = document.querySelector('#content,#app,.main-content,.container,main') || document.body;
+    anchor.prepend(root);
+  }
+  return root;
+}
+
+/* ---------- 讀資料 & 渲染 ---------- */
+async function fetchProfiles(keyword = '') {
+  let q = supabase.from('profiles_admin')
+    .select('id,email,display_name,is_admin,last_sign_in_at,last_seen,expires_at')
+    .order('last_seen', { ascending: false });
+
+  if (keyword) {
+    q = q.ilike('email', `%${keyword}%`)
+         .or(`display_name.ilike.%${keyword}%`);
+  }
+
+  const { data, error } = await q;
+  if (error) throw error;
+  return data || [];
+}
+
+function renderRows(rows) {
+  const tb = document.getElementById('bw-admin-tbody');
+  if (!tb) return;
+  tb.innerHTML = '';
+
+  const now = new Date();
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    tr.setAttribute(ADMIN_FLAG, '1');
+
+    const online = isOnline(r.last_seen, now);
+    const statusDot = online ? '🟢 在線' : '⚪ 離線';
+
+    const expires = r.expires_at ? new Date(r.expires_at).toISOString().slice(0,10) : '—';
+    const expireOnlineCell = `${expires}　•　${statusDot}`;
+
+    tr.innerHTML = `
+      <td>${r.email || '—'}</td>
+      <td>${r.display_name || '—'}</td>
+      <td>${r.is_admin ? '✔' : ''}</td>
+      <td>${fmtTW(r.last_sign_in_at)}</td>
+      <td>${expireOnlineCell}</td>
+    `;
+    tb.appendChild(tr);
+  });
+
+  if (rows.length === 0) {
+    const tr = document.createElement('tr');
+    tr.setAttribute(ADMIN_FLAG, '1');
+    tr.innerHTML = `<td colspan="5">沒有資料</td>`;
+    tb.appendChild(tr);
+  }
+}
+
+/* ---------- 心跳（更新 last_seen） ---------- */
+async function heartbeat() {
+  const { data: user } = await supabase.auth.getUser();
+  const uid = user?.user?.id;
+  if (!uid) return;
+  await supabase.from('profiles')
+    .update({ last_seen: new Date().toISOString() })
+    .eq('id', uid);
+}
+
+/* ---------- 模組入口 ---------- */
+export const BookWideAdmin = {
+  _booted: false,
+  async init() {
+    ensureAdminMenu();
+    ensureAdminRoot();
+
+    if (!this._booted) {
+      const doLoad = async (kw = '') => {
+        const rows = await fetchProfiles(kw.trim());
+        renderRows(rows);
+      };
+
+      document.getElementById('bw-admin-refresh')
+        .addEventListener('click', () => doLoad(document.getElementById('bw-admin-search').value));
+
+      document.getElementById('bw-admin-search')
+        .addEventListener('input', debounce(e => doLoad(e.target.value), 300));
+
+      await heartbeat();
+      setInterval(heartbeat, 60_000);
+
+      this._booted = true;
+      doLoad('');
+    }
+  }
+};
+
+document.addEventListener('DOMContentLoaded', ensureAdminMenu);
+</script>
+
+<script type="module">
+  import { supabase as supa } from "./supa.js";
+  const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>r.querySelectorAll(s);
+  const TZ="Asia/Taipei", ONLINE_MIN=10;
+  const fmtTW = iso => iso ? new Intl.DateTimeFormat("zh-TW",{timeZone:"Asia/Taipei",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hour12:false}).format(new Date(iso)) : "—";
+  const isOnline = iso => iso && (Date.now()-new Date(iso))/60000 <= ONLINE_MIN;
+
+  /* 1) 帳號選單（固定順序；移除「授權／暫停管理員」） */
+  function rmLegacyGrant(){
+    const list=$("#account-list"); if(!list) return;
+    list.querySelectorAll("li,a,button,span").forEach(n=>{
+      const t=(n.textContent||"").trim(), href=(n.getAttribute&&n.getAttribute("href"))||"";
+      if(/授權|暫停管理員/i.test(t) || /grant-admin\.html$/i.test(href)) (n.closest("li")||n).remove();
+    });
+  }
+  function ensureItem(ul,{id,label,href,click,show=true}){
+    if(!show||document.getElementById(id)) return;
+    const li=document.createElement("li"); let el;
+    if(href){ el=document.createElement("a"); el.href=href; } else { el=document.createElement("button"); if(click) el.addEventListener("click",click); }
+    el.id=id; el.textContent=label; li.appendChild(el); ul.appendChild(li);
+  }
+  async function buildMenu(){
+    const menu=$("#account-menu"), btn=$("#btn-account"), email=$("#acc-email"), list=$("#account-list");
+    if(!menu||!btn||!email||!list) return;
+    if(!btn._wired){
+      btn._wired=true;
+      btn.addEventListener("click",()=>{ const ex=menu.getAttribute("aria-expanded")==="true"; menu.setAttribute("aria-expanded",String(!ex)); btn.setAttribute("aria-expanded",String(!ex)); });
+      addEventListener("click",e=>{ if(!menu.contains(e.target)){ menu.setAttribute("aria-expanded","false"); btn.setAttribute("aria-expanded","false"); }});
+    }
+    const { data:{ user } } = await supa.auth.getUser();
+    email.textContent = user ? (user.email||"已登入") : "未登入";
+
+    rmLegacyGrant();
+    let isAdmin=false;
+    if(user){ const { data:row } = await supa.from("profiles").select("is_admin").eq("id",user.id).maybeSingle(); isAdmin=!!row?.is_admin; }
+
+    ensureItem(list,{ id:"itm-pricing",   label:"方案價格",     href:"./pricing.html" });
+    ensureItem(list,{ id:"itm-profile",   label:"個人資料",     href:"./account/profile.html" });
+    ensureItem(list,{ id:"itm-billing",   label:"我的訂閱",     href:"./account/billing.html" });
+    ensureItem(list,{ id:"itm-dashboard", label:"學習控制台",   href:"./account/dashboard.html" });
+    ensureItem(list,{ id:"itm-admin",     label:"Admin 主控台", href:"./admin/index.html", show:isAdmin });
+    ensureItem(list,{ id:"itm-referral",  label:"推廣分潤",     href:"./referral.html" });
+    if(!document.getElementById("itm-sep")){ const li=document.createElement("li"); li.id="itm-sep"; li.style.borderTop="1px solid var(--line,#2f374a)"; li.style.margin="6px 0"; list.appendChild(li); }
+    ensureItem(list,{ id:"itm-signout",   label:"登出", click:async()=>{ await supa.auth.signOut(); location.reload(); } });
+  }
+
+  /* 2) Admin 清單（只有 is_admin 才看到按鈕/面板） */
+  async function guardAdmin(){
+    const b=$("#btn-admin"); if(!b) return;
+    const { data:{ user } } = await supa.auth.getUser(); if(!user){ b.style.display="none"; return; }
+    const { data:row } = await supa.from("profiles").select("is_admin").eq("id",user.id).maybeSingle();
+    const isAdmin=!!row?.is_admin; b.style.display = isAdmin? "inline-flex":"none";
+    if(isAdmin && !b._wired){
+      b._wired=true;
+      b.addEventListener("click",()=>{ const panel=$("#admin"); if(!panel) return; const vis=panel.style.display!=="none"; panel.style.display=vis?"none":"block"; panel.setAttribute("aria-hidden", String(vis)); });
+    }
+  }
+  async function loadUsers(){
+    const tb=$("#user-tb"); if(!tb) return;
+    const { data, error } = await supa.from("profiles").select("email,display_name,is_admin,is_disabled,last_sign_in_at,last_seen,expire_on").order("email");
+    if(error){ tb.innerHTML = `<tr><td colspan="6" class="muted">讀取失敗：${error.message}</td></tr>`; return; }
+    const kw = ($("#user-q")?.value||"").toLowerCase();
+    const rows = (data||[]).filter(r => !kw || r.email?.toLowerCase().includes(kw) || r.display_name?.toLowerCase().includes(kw));
+    $("#sum") && ($("#sum").textContent = `顯示 ${rows.length} / 共 ${data?.length||0}`);
+    tb.innerHTML = rows.map(r=>{
+      const online = isOnline(r.last_seen) ? "🟢 在線" : "—";
+      return `<tr>
+        <td class="mono">${r.email||""}</td>
+        <td>${r.display_name||""}</td>
+        <td style="text-align:center">${r.is_admin?"✓":""}</td>
+        <td style="text-align:center">${r.is_disabled?"停用":""}</td>
+        <td class="mono">${fmtTW(r.last_sign_in_at)}</td>
+        <td class="mono">${r.expire_on||""} / ${online}</td>
+      </tr>`;
+    }).join("");
+  }
+  $("#btn-refresh")?.addEventListener("click", loadUsers);
+  $("#user-q")?.addEventListener("input", loadUsers);
+
+  /* 3) 心跳：每 5 分鐘寫 last_seen */
+  async function heartbeat(){
+    const { data:{ user } } = await supa.auth.getUser();
+    if(!user) return;
+    await supa.from("profiles").update({ last_seen: new Date().toISOString() }).eq("id", user.id);
+  }
+  setInterval(heartbeat, 5*60*1000); heartbeat();
+
+  /* 4) 台灣時間 */
+  function tick(){ const el=$("#nowTW"); if(el) el.textContent = new Date().toLocaleString("zh-TW",{timeZone:TZ}); }
+  setInterval(tick,1000); tick();
+
+  /* 啟動 */
+  await buildMenu();
+  await guardAdmin();
+  await loadUsers();
+  supa.auth.onAuthStateChange(async ()=>{ await buildMenu(); await guardAdmin(); await loadUsers(); });
+</script>
+
+
 <script type="module">
   import { supabase as supa } from "./supa.js";
   const $=(s,r=document)=>r.querySelector(s);
@@ -258,169 +1197,1033 @@
   }).format(new Date(iso)) : "—";
   const isOnline = iso => iso && (Date.now()-new Date(iso))/60000 <= 10;
 
-  // ----- Tabs -----
-  const btnUsers  = $("#tab-users");
-  const btnGrant  = $("#tab-grant");
-  const btnUpload = $("#tab-upload");
-  const pUsers  = $("#panel-users");
-  const pGrant  = $("#panel-grant");
-  const pUpload = $("#panel-upload");
-  function setActive(btn,on){ btn?.classList.toggle("chip--active",!!on); btn?.setAttribute("aria-pressed", on?'true':'false'); }
-  function show(el,on){ if(el) el.style.display = on ? "block" : "none"; }
-  function switchTab(which){
-    const isU = which==='users', isG = which==='grant', isUp = which==='upload';
-    setActive(btnUsers,isU); setActive(btnGrant,isG); setActive(btnUpload,isUp);
-    show(pUsers,isU); show(pGrant,isG); show(pUpload,isUp);
-    if(isU) loadUsers();
+  // Tabs state
+  let currentTab = 'all'; // 'all' | 'exp' | 'dis'
+  const btnAll = $("#tab-all"), btnExp=$("#tab-exp"), btnDis=$("#tab-dis");
+  function setTab(tab){
+    currentTab = tab;
+    [btnAll,btnExp,btnDis].forEach(b=>{ if(!b) return; const on = b===({all:btnAll,exp:btnExp,dis:btnDis}[tab]); b?.classList.toggle("chip--active", on); b?.setAttribute("aria-pressed", on?'true':'false'); });
+    loadUsers(); // re-render
   }
-  btnUsers?.addEventListener("click", ()=>switchTab("users"));
-  btnGrant?.addEventListener("click", ()=>switchTab("grant"));
-  btnUpload?.addEventListener("click", ()=>switchTab("upload"));
-  if(location.hash==="#admin-upload") switchTab("upload"); else switchTab("users");
+  btnAll?.addEventListener("click", ()=>setTab('all'));
+  btnExp?.addEventListener("click", ()=>setTab('exp'));
+  btnDis?.addEventListener("click", ()=>setTab('dis'));
 
-  // ----- Users list render (TW time) -----
   async function loadUsers(){
-    const tb = $("#user-tb"); if(!tb) return;
+    const tb=$("#user-tb"); if(!tb) return;
     const { data, error } = await supa.from("profiles")
       .select("email,display_name,is_admin,is_disabled,last_sign_in_at,last_seen,expire_on")
       .order("email");
     if(error){ tb.innerHTML = `<tr><td colspan="6" class="mono">讀取失敗：${error.message}</td></tr>`; return; }
     const kw = ($("#user-q")?.value||"").toLowerCase();
-    const rows = (data||[]).filter(r => !kw || r.email?.toLowerCase().includes(kw) || r.display_name?.toLowerCase().includes(kw));
+
+    // filter by tab
+    const now = new Date();
+    const expSoon = (d)=>{ if(!d) return false; const dt = new Date(d + 'T23:59:59'); const days = (dt - now) / (1000*3600*24); return days <= 30; };
+    let rows = (data||[]).filter(r => !kw || r.email?.toLowerCase().includes(kw) || r.display_name?.toLowerCase().includes(kw));
+    if(currentTab==='exp') rows = rows.filter(r => expSoon(r.expire_on));
+    if(currentTab==='dis') rows = rows.filter(r => r.is_disabled);
+
     $("#sum") && ($("#sum").textContent = `顯示 ${rows.length} / 共 ${data?.length||0}`);
     tb.innerHTML = rows.map(r=>{
       const online = isOnline(r.last_seen) ? "🟢 在線" : "—";
       return `<tr>
         <td class="mono">${r.email||""}</td>
         <td>${r.display_name||""}</td>
-        <td class="mono">${fmtTW(r.last_sign_in_at)}</td>
-        <td class="mono">${r.expire_on||""}</td>
         <td style="text-align:center">${r.is_admin?"✓":""}</td>
-        <td class="mono">${online}</td>
+        <td style="text-align:center">${r.is_disabled?"停用":""}</td>
+        <td class="mono">${fmtTW(r.last_sign_in_at)}</td>
+        <td class="mono">${r.expire_on||""} / ${online}</td>
       </tr>`;
     }).join("");
   }
   $("#btn-refresh")?.addEventListener("click", loadUsers);
   $("#user-q")?.addEventListener("input", loadUsers);
 
-  // ----- Grant panel -----
-  $("#grant-load")?.addEventListener("click", async ()=>{
-    const email = $("#grant-email")?.value?.trim();
-    const msg=$("#grant-msg");
-    msg.textContent='查詢中…';
-    const { data, error } = await supa.from('profiles').select('email,is_admin,is_disabled').eq('email', email).maybeSingle();
-    if(error){ msg.textContent='查詢失敗：'+error.message; return; }
-    if(!data){ msg.textContent='找不到帳號'; return; }
-    $("#grant-admin").checked   = !!data.is_admin;
-    $("#grant-disabled").checked= !!data.is_disabled;
-    msg.textContent='已載入';
-  });
-  $("#grant-save")?.addEventListener("click", async ()=>{
-    const email = $("#grant-email")?.value?.trim();
-    const is_admin   = $("#grant-admin").checked;
-    const is_disabled= $("#grant-disabled").checked;
-    const msg=$("#grant-msg");
-    if(!email){ msg.textContent='請先輸入 Email'; return; }
-    msg.textContent='儲存中…';
-    const { error } = await supa.from('profiles').update({ is_admin, is_disabled }).eq('email', email);
-    msg.textContent = error ? ('儲存失敗：'+error.message) : '已儲存';
-  });
-
-  // ----- Upload MP4 (optional JSONs) -----
-  async function uploadTo(bucket, path, file){
-    if(!file) return null;
-    const { error } = await supa.storage.from(bucket).upload(path, file, { upsert:true, cacheControl:"3600" });
-    if(error) throw error;
-    const { data } = supa.storage.from(bucket).getPublicUrl(path);
-    return data.publicUrl;
-  }
-  $("#btn-upload")?.addEventListener("click", async ()=>{
-    const msg = $("#up-msg");
-    try{
-      msg.textContent = "處理中…";
-      const category = $("#up-category").value;
-      const slug = $("#up-slug").value.trim();
-      if(!slug) throw new Error("請輸入 slug");
-
-      const fmp4   = $("#up-mp4").files[0];
-      const fcover = $("#up-cover").files[0];
-      const fcues  = $("#up-cues").files[0];
-      const fvocab = $("#up-vocab").files[0];
-      const fquiz  = $("#up-quiz").files[0];
-      const fai    = $("#up-ai").files[0];
-
-      const videoPath = `videos/${category}/${slug}.mp4`;
-      const coverPath = `data/${category}/${slug}/cover.jpg`;
-      const cuesPath  = `data/${category}/${slug}/cues-${slug}.json`;
-      const vocabPath = `data/${category}/${slug}/vocab-${slug}.json`;
-      const quizPath  = `data/${category}/${slug}/quiz-${slug}.json`;
-      const aiPath    = `data/${category}/${slug}/ai-${slug}.json`;
-
-      const mp4_url   = await uploadTo('videos', videoPath, fmp4);
-      const cover_url = await uploadTo('data',   coverPath, fcover);
-      const cues_url  = await uploadTo('data',   cuesPath,  fcues);
-      const vocab_url = await uploadTo('data',   vocabPath, fvocab);
-      const quiz_url  = await uploadTo('data',   quizPath,  fquiz);
-      const ai_url    = await uploadTo('data',   aiPath,    fai);
-
-      const row = { category, slug, title: slug, mp4_url, cover_url, cues_url, vocab_url, quiz_url, ai_url };
-      const { error } = await supa.from("assets").upsert(row, { onConflict: "category,slug" });
-      if(error) throw error;
-
-      msg.textContent = "完成！播放器可用 slug 載入：" + slug;
-    }catch(err){
-      msg.textContent = "錯誤：" + (err?.message || err);
-    }
-  });
-
-  // ----- Ensure heartbeat still works if you had it elsewhere (optional) -----
-  try {
-    const { data:{ user } } = await supa.auth.getUser();
-    if(user){
-      // update last_seen once on open; keep your own interval if already present
-      await supa.from("profiles").update({ last_seen: new Date().toISOString() }).eq("id", user.id);
-    }
-  } catch {}
-</script>
-
-
-<script>
-// Minimal login-modal handler (no Supabase dependency)
-(function(){
-  var btn = document.getElementById('btnLogin');
-  var modal = document.getElementById('authModal');
-  if (!btn || !modal) return;
-  function openModal(e){
-    if(e) e.preventDefault();
-    modal.style.display = 'block';
-    modal.removeAttribute('hidden');
-    modal.setAttribute('aria-hidden','false');
-    modal.classList.add('open');
-  }
-  function closeModal(){
-    modal.style.display = 'none';
-    modal.setAttribute('hidden','');
-    modal.setAttribute('aria-hidden','true');
-    modal.classList.remove('open');
-  }
-  btn.addEventListener('click', openModal);
-  // close buttons must mark data-close-auth
-  document.querySelectorAll('[data-close-auth]').forEach(function(el){
-    el.addEventListener('click', closeModal);
-  });
-  // click outside
-  modal.addEventListener('click', function(e){
-    if(e.target === modal) closeModal();
-  });
-  // esc
-  document.addEventListener('keydown', function(e){
-    if(e.key === 'Escape') closeModal();
-  });
-})();
+  // First render
+  setTab('all');
 </script>
 
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
