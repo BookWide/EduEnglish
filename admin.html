@@ -40,16 +40,19 @@
     .foot{margin-top:20px;color:var(--muted);font-size:12px}
     .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     @media (max-width:920px){.grid2{grid-template-columns:1fr}}
-  
-    .back-home{color:#9fb0c3;text-decoration:none;border:1px solid var(--line);padding:6px 10px;border-radius:8px;background:var(--panel)}
-    .back-home:hover{color:#e6edf6;background:#1a2540}
-    
   </style>
 </head>
 <body>
-  <header>
+
+<!-- BW Supabase global initializer -->
+<script type="module" id="bw-supa-init">
+  import { supabase } from './supa.js';
+  window.supa = window.supa ?? supabase;
+  window.supabase = window.supa;
+  window.dispatchEvent(new Event('bw:supa-ready'));
+</script>
+<header>
     <div class="bar">
-      <a href="./index.html" class="back-home">← 回首頁</a>
       <div class="logo">BookWide Admin 主控台</div>
       <span class="chip">單檔版 · 不動 index.html</span>
       <div class="tabs right">
@@ -59,6 +62,17 @@
       </div>
     </div>
   </header>
+
+<script type="module" id="bw-guard-admin">
+  import { supabase } from './supa.js';
+  (async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) { alert('請先登入'); location.href='./index.html'; return; }
+    const { data: p } = await supabase.from('profiles').select('is_admin').eq('id', user.id).single();
+    if (!p?.is_admin) { alert('您沒有管理員權限'); location.href='./index.html'; }
+  })();
+</script>
+
 
   <main>
     <!-- 使用者清單 -->
@@ -79,7 +93,7 @@
             <th>最後登入（台灣）</th>
             <th>到期日 / 在線</th>
             <th>管理員</th>
-            
+            <th>暫停</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -212,148 +226,188 @@
       return online ? '<span class="badge ok">在線</span>' : '<span class="badge">離線</span>';
     }
     async function loadUsers(){
-      $tbody.innerHTML = '<tr><td class="muted" colspan="6">載入中…</td></tr>';
-      // 依你的 schema：profiles 有 email, display_name, last_seen, is_admin, suspended, expire_at
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('email, full_name, nickname, is_admin, last_sign_in_at, expires_at')
-        .order('email', { ascending: true });
-      .order('email', { ascending: true });
-      if(error){ $tbody.innerHTML = '<tr><td class="bad" colspan="6">讀取失敗 '+error.message+'</td></tr>'; return; }
+  $tbody.innerHTML = '<tr><td class="muted" colspan="6">載入中…</td></tr>';
 
-      const kw = ($q.value || '').trim().toLowerCase();
-      const rows = (data||[]).filter(r=> { const nm=(r.full_name||r.nickname||'').toLowerCase(); return !kw || (r.email?.toLowerCase().includes(kw) || nm.includes(kw)); });
-      if(!rows.length){ $tbody.innerHTML = '<tr><td class="muted" colspan="6">沒有資料</td></tr>'; return; }
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('email, full_name, nickname, is_admin, last_sign_in_at, expires_at')
+    .order('email', { ascending: true });
 
-      
-      $tbody.innerHTML = rows.map(r=>{
-        const displayName = r.full_name || r.nickname || '';
-        const last = r.last_sign_in_at ? toTzTaipei(r.last_sign_in_at) : '';
-        const exp  = r.expires_at ? new Date(r.expires_at).toISOString().slice(0,10) : '';
-        return `<tr>
-          <td class="mono">\${r.email||''}</td>
-          <td>\${displayName}</td>
-          <td class="mono">\${last}</td>
-          <td class="mono">\${exp} &nbsp; \${onlineBadge(r.last_sign_in_at)}</td>
-          <td>\${r.is_admin ? '<span class="badge ok">Admin</span>' : '<span class="badge">—</span>'}</td>
-        </tr>`
-      }).join('');
-    
-    }
-    $btnReload.addEventListener('click', loadUsers);
-    $q.addEventListener('input', () => { loadUsers() });
+  if (error) {
+    $tbody.innerHTML = '<tr><td class="bad" colspan="6">讀取失敗 ' + (error.message||error) + '</td></tr>';
+    return;
+  }
 
-    // ===== 授權／暫停 =====
-    const $gEmail = document.getElementById('gEmail');
-    const $gExpire = document.getElementById('gExpire');
-    const $grantMsg = document.getElementById('grantMsg');
+  const kw = ($q.value || '').trim().toLowerCase();
+  const rows = (data || []).filter(r => {
+    const name = (r.full_name || r.nickname || '').toLowerCase();
+    return !kw || (r.email?.toLowerCase().includes(kw) || name.includes(kw));
+  });
 
-    async function setAdmin(flag){
-      const email = $gEmail.value.trim();
-      if(!email){ $grantMsg.textContent = 'Email 必填'; return; }
-      const payload = { is_admin: !!flag };
-      if($gExpire.value) payload.expires_at = $gExpire.value;
-      const { error } = await supabase.from('profiles').update(payload).eq('email', email);
-      $grantMsg.textContent = error ? ('失敗：'+error.message) : '成功';
-      loadUsers();
-    }
-    async function setSuspend(flag){
-      const email = $gEmail.value.trim();
-      if(!email){ $grantMsg.textContent = 'Email 必填'; return; }
-      const { error } = await supabase.from('profiles').update({ suspended: !!flag }).eq('email', email);
-      $grantMsg.textContent = error ? ('失敗：'+error.message) : '成功';
-      loadUsers();
-    }
-    document.getElementById('btnGrant').addEventListener('click', ()=>setAdmin(true));
-    document.getElementById('btnRevoke').addEventListener('click', ()=>setAdmin(false));
-    document.getElementById('btnSuspend').addEventListener('click', ()=>setSuspend(true));
-    document.getElementById('btnUnsuspend').addEventListener('click', ()=>setSuspend(false));
+  if (!rows.length) {
+    $tbody.innerHTML = '<tr><td class="muted" colspan="6">沒有資料</td></tr>';
+    return;
+  }
 
-    // 暫停功能暫不支援（你的資料表無 suspended 欄位）
-    document.getElementById('btnSuspend')?.setAttribute('disabled','true');
-    document.getElementById('btnUnsuspend')?.setAttribute('disabled','true');
+  function toTzTaipei(iso){
+    if(!iso) return '';
+    try{
+      const d = new Date(iso);
+      const t = new Intl.DateTimeFormat('zh-TW', { timeZone: 'Asia/Taipei', dateStyle:'short', timeStyle:'medium' }).format(d);
+      return t.replace(/\//g,'-');
+    }catch(_){ return iso; }
+  }
+  function onlineByLastLogin(iso){
+    if(!iso) return false;
+    return (Date.now() - new Date(iso).getTime()) <= 10*60*1000; // 10 分鐘內
+  }
+
+  $tbody.innerHTML = rows.map(r => {
+    const name = r.full_name || r.nickname || '—';
+    const lastLogin = toTzTaipei(r.last_sign_in_at);
+    const exp = r.expires_at ? new Date(r.expires_at).toISOString().slice(0,10) : '';
+    const online = onlineByLastLogin(r.last_sign_in_at)
+      ? '<span class="badge ok">在線</span>'
+      : '<span class="badge">離線</span>';
+    return `<tr>
+      <td class="mono">${r.email || ''}</td>
+      <td>${name}</td>
+      <td class="mono">${lastLogin || ''}</td>
+      <td class="mono">${exp} &nbsp; ${online}</td>
+      <td>${r.is_admin ? '<span class="badge ok">Admin</span>' : '<span class="badge">—</span>'}</td>
+      <td><span class="badge">—</span></td>
+    </tr>`;
+  }).join('');
+}
+  // 檔案選擇後先顯示檔名；若要自動上傳，可解開底下示範
+  const fileInput = document.getElementById('mp4File');
+  if (fileInput) {
+    fileInput.addEventListener('change', async () => {
+      const f = fileInput.files?.[0];
+      if (!f) return;
+      alert('已選擇 MP4：' + f.name + '\n(目前已恢復按鈕與檔案選擇；若要直傳 Storage，告訴我要用的 bucket/path)');
+      // 範例：直傳到 Supabase Storage 的 'videos' bucket
+      // import { supabase } from './supa.js';
+      // const user = (await supabase.auth.getUser())?.data?.user;
+      // if (!user) { alert('請先登入'); return; }
+      // const path = `mp4/${Date.now()}-${f.name}`;
+      // const { error } = await supabase.storage.from('videos').upload(path, f, { upsert:false, contentType: 'video/mp4' });
+      // if (error) alert('上傳失敗: ' + error.message); else alert('上傳完成: ' + path);
+    });
+  }
+</script>
 
 
-    // ===== MP4 上傳 =====
-    const $mCat = document.getElementById('mCat');
-    const $mSlug = document.getElementById('mSlug');
-    const $mTitle = document.getElementById('mTitle');
-    const $mMp4 = document.getElementById('mMp4');
-    const $mCover = document.getElementById('mCover');
-    const $mKw = document.getElementById('mKw');
-    const $upState = document.getElementById('upState');
-    const $upLog = document.getElementById('upLog');
+<script type="module">
+  import { supabase } from './supa.js';
+  const $ = (s)=>document.querySelector(s);
+  const el = {
+    mCat: $('#mCat'), mSlug: $('#mSlug'), mTitle: $('#mTitle'),
+    mMp4: $('#mMp4'), mCover: $('#mCover'), mKw: $('#mKw'),
+    btnUpload: $('#btnUpload'), btnReset: $('#btnReset'),
+    upState: $('#upState'), upLog: $('#upLog')
+  };
+  function log(msg){ el.upLog.textContent += (msg + '\n'); el.upLog.scrollTop = el.upLog.scrollHeight; }
+  function setState(s){ el.upState.textContent = s; }
 
-    function logln(s){ $upLog.textContent += (s + "\n"); }
-    function resetForm(){
-      $mSlug.value=''; $mTitle.value=''; $mMp4.value=''; $mCover.value=''; $mKw.value=''; $upState.textContent=''; $upLog.textContent='';
-    }
-    document.getElementById('btnReset').addEventListener('click', resetForm);
+  function assertSlug(s){
+    return /^[a-z0-9-]+$/.test(s || '');
+  }
 
-    async function uploadTo(bucket, path, file, opts={ upsert: true, cacheControl: '3600' }){
-      const { data, error } = await supabase.storage.from(bucket).upload(path, file, opts);
-      if(error) throw error;
-      const { data:pub } = await supabase.storage.from(bucket).getPublicUrl(path);
-      return pub.publicUrl;
-    }
+  async function uploadTo(bucket, path, file, contentType){
+    const { data, error } = await supabase.storage.from(bucket).upload(path, file, { upsert: true, contentType });
+    if (error) throw new Error(`[${bucket}] ${error.message}`);
+    return data;
+  }
 
-    async function upsertAsset(rec){
-      const { error } = await supabase.from('assets').upsert(rec, { onConflict: 'category,slug' });
-      if(error) throw error;
-      return true;
-    }
+  // 直接綁定「開始上傳」
+  if (el.btnUpload) {
+    el.btnUpload.addEventListener('click', async () => {
+      try {
+        el.upLog.textContent = '';
+        setState('準備中…');
 
-    document.getElementById('btnUpload').addEventListener('click', async () => {
-      try{
-        $upState.textContent='上傳中…'; $upLog.textContent='';
-        const cat = $mCat.value.trim();
-        const slug = $mSlug.value.trim();
-        const title = $mTitle.value.trim();
-        if(!cat || !slug || !title){ $upState.textContent='請填分類/slug/標題'; return; }
-        if(!$mMp4.files[0]){ $upState.textContent='請選擇 MP4 檔案'; return; }
+        // 1) 驗證登入
+        const userRes = await supabase.auth.getUser();
+        const user = userRes?.data?.user;
+        if (!user) { alert('請先登入'); return; }
 
+        // 2) 讀取表單
+        const cat = el.mCat.value || 'story';
+        const slug = (el.mSlug.value || '').trim();
+        const title = (el.mTitle.value || '').trim();
+        const mp4 = el.mMp4.files?.[0];
+        const cover = el.mCover.files?.[0];
+        const keywords = (el.mKw.value || '').trim();
+
+        if (!assertSlug(slug)) { alert('Slug 只能用小寫英數與連字號'); return; }
+        if (!mp4) { alert('請選擇 MP4 檔案'); return; }
+
+        log('✔ 讀取表單完成');
+        setState('上傳中…（MP4）');
+
+        // 3) 上傳 MP4 到 videos bucket
         const mp4Path = `videos/${cat}/${slug}.mp4`;
-        logln('上傳 MP4 → ' + mp4Path);
-        const mp4Url = await uploadTo('videos', mp4Path, $mMp4.files[0]);
-        logln('OK ' + mp4Url);
+        await uploadTo('videos', mp4Path, mp4, 'video/mp4');
+        log('✔ MP4 已上傳：' + mp4Path);
 
-        let coverUrl='';
-        if($mCover.files[0]){
+        // 4) 上傳封面（可選）
+        if (cover) {
+          setState('上傳中…（封面）');
           const coverPath = `data/${cat}/${slug}/cover.jpg`;
-          logln('上傳封面 → ' + coverPath);
-          coverUrl = await uploadTo('data', coverPath, $mCover.files[0]);
-          logln('OK ' + coverUrl);
+          await uploadTo('data', coverPath, cover, cover.type || 'image/jpeg');
+          log('✔ 封面已上傳：' + coverPath);
         }
 
-        // 預留 cues/vocab/quiz/ai json（可先放空檔案或之後補）
-        const base = `data/${cat}/${slug}`;
-        const cuesUrl  = `${location.origin}${location.pathname.replace(/\/[^/]*$/,'/')}${base}/cues-${slug}.json`;
-        const vocabUrl = `${location.origin}${location.pathname.replace(/\/[^/]*$/,'/')}${base}/vocab-${slug}.json`;
-        const quizUrl  = `${location.origin}${location.pathname.replace(/\/[^/]*$/,'/')}${base}/quiz-${slug}.json`;
-        const aiUrl    = `${location.origin}${location.pathname.replace(/\/[^/]*$/,'/')}${base}/ai-${slug}.json`;
+        // 5) 建立（或覆蓋）空的 cues json（方便你後續填入）
+        setState('建立基礎檔…（cues）');
+        const cuesPath = `data/${cat}/${slug}/cues-${slug}.json`;
+        const emptyCues = new Blob([JSON.stringify({ cues: [] }, null, 2)], { type: 'application/json' });
+        await uploadTo('data', cuesPath, emptyCues, 'application/json');
+        log('✔ cues json 已建立：' + cuesPath);
 
-        // upsert assets
-        const rec = {
-          category: cat, slug, title,
-          mp4_url: mp4Url, cover_url: coverUrl || null,
-          cues_url: cuesUrl, vocab_url: vocabUrl, quiz_url: quizUrl, ai_url: aiUrl,
-          keywords: $mKw.value || null, updated_at: new Date().toISOString()
-        };
-        logln('寫入 assets …');
-        await upsertAsset(rec);
-        logln('完成');
-        $upState.textContent='✅ 完成';
-      }catch(err){
+        // 6) （可選）寫入 assets 表（若欄位不同可告訴我）：
+        try {
+          const payload = {
+            category: cat, slug, title,
+            mp4_path: mp4Path,
+            cover_path: cover ? `data/${cat}/${slug}/cover.jpg` : null,
+            keywords
+          };
+            const { error: dbErr } = await supabase.from('assets').upsert(payload, { onConflict: 'category,slug' });
+            if (dbErr) { log('（提醒）assets upsert 失敗：' + dbErr.message); }
+            else { log('✔ 已寫入 assets 表'); }
+        } catch (e) {
+          log('（提醒）assets upsert 跳過或錯誤：' + e.message);
+        }
+
+        setState('完成 ✅');
+        log('🎉 完成！');
+      } catch (err) {
         console.error(err);
-        $upState.textContent='❌ 失敗';
-        logln('ERROR: ' + err.message);
+        setState('失敗 ❌');
+        log('❌ ' + (err.message || err));
+        alert('上傳失敗：' + (err.message || err));
       }
     });
+  }
 
-    // 首次載入
-    loadUsers();
-  </script>
+  if (el.btnReset) {
+    el.btnReset.addEventListener('click', () => {
+      el.mSlug.value = '';
+      el.mTitle.value = '';
+      el.mMp4.value = '';
+      el.mCover.value = '';
+      el.mKw.value = '';
+      el.upLog.textContent = '';
+      setState('');
+    });
+  }
+</script>
+
 </body>
 </html>
+
+
 
 
