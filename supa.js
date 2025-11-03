@@ -1,142 +1,104 @@
-// supa.js  — 單檔共用
+<!-- 你不用在 HTML 內貼；這段是要放進 supa.js 的 JS 程式碼 -->
+<script type="module">
+// ====== BookWide Supabase helper ======
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-// ★★ 換成你自己的專案參數 ★★
-export const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+const SUPABASE_URL = '<https://jeajrwpmrgczimmrflxo.supabase.co>';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-// 1) 建立 client（保留你原本設定）
-export const supa = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: {
-    persistSession: true,
-    autoRefreshToken: true,
-    detectSessionInUrl: true,
-  },
+const supa = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
 });
+const BW = (window.BW ??= {});
 
-/* ==============================
-   2) 停權檢查（登入/刷新 Token 都會觸發）
-   ============================== */
-async function enforceNotPaused() {
-  const { data: { user } } = await supa.auth.getUser();
-  if (!user) return;
+BW.supa = supa;
 
-  const { data: profile, error } = await supa
-    .from('profiles')
-    .select('is_paused')
-    .eq('id', user.id)
-    .maybeSingle();
+/** 取得目前登入使用者（沒有就回 null） */
+BW.getUser = async () => {
+  const { data, error } = await supa.auth.getUser();
+  if (error) return null;
+  return data?.user ?? null;
+};
 
-  if (error) {
-    console.warn('[pause-check] profiles 讀取失敗：', error);
+/** 進 admin 前必檢查：已登入且 profiles.is_admin = true，否則導回 index.html */
+BW.requireAdmin = async () => {
+  const user = await BW.getUser();
+  if (!user) {
+    // 未登入
+    location.href = './index.html?denied=signin';
     return;
   }
-
-  if (profile?.is_paused) {
-    await supa.auth.signOut();
-    alert('此帳號已被暫停登入，請聯絡管理員。');
-    location.href = './index.html';
-    throw new Error('ACCOUNT_PAUSED');
-  }
-}
-
-// 登入/刷新 token 時自動檢查
-supa.auth.onAuthStateChange(async (evt) => {
-  if (evt === 'SIGNED_IN' || evt === 'TOKEN_REFRESHED') {
-    await enforceNotPaused();
-  }
-});
-
-// 初次載入也檢查一次（頁面載入後立即）
-enforceNotPaused();
-
-/* ==============================
-   3) 常用工具
-   ============================== */
-export async function requireAuth() {
-  const { data: { user } } = await supa.auth.getUser();
-  if (!user) {
-    alert('請先登入');
-    location.href = './index.html';
-    throw new Error('NOT_SIGNED_IN');
-  }
-  await enforceNotPaused();
-  return user;
-}
-
-export async function requireAdmin() {
-  const user = await requireAuth();
-  const { data: prof, error } = await supa
-    .from('profiles')
-    .select('is_admin, is_paused')
+  // 檢查 profiles.is_admin
+  const { data, error } = await supa.from('profiles')
+    .select('id,is_admin,is_paused')
     .eq('id', user.id)
     .maybeSingle();
 
-  if (error) throw error;
-  if (!prof?.is_admin) {
-    alert('需要管理員身分才能進入。');
-    location.href = './index.html';
-    throw new Error('NOT_ADMIN');
+  if (error || !data) {
+    location.href = './index.html?denied=profile';
+    return;
   }
-  if (prof?.is_paused) {
-    await supa.auth.signOut();
-    alert('此帳號已被暫停登入，請聯絡管理員。');
-    location.href = './index.html';
-    throw new Error('ACCOUNT_PAUSED');
+  if (!data.is_admin) {
+    location.href = './index.html?denied=notadmin';
+    return;
   }
-  return user;
-}
+  if (data.is_paused) {
+    location.href = './index.html?denied=paused';
+    return;
+  }
+  // OK
+  return true;
+};
 
-// （可選）上線心跳：每 N 分鐘更新 last_seen_at
-let __hb;
-export function startHeartbeat(minutes = 2) {
-  stopHeartbeat();
-  __hb = setInterval(async () => {
-    const { data: { user } } = await supa.auth.getUser();
-    if (!user) return;
+/** 啟動「心跳」：每 N 分鐘更新自己 profiles.last_seen_at（台灣沒有 DST，+8 夠用） */
+BW.startHeartbeat = (minutes = 2) => {
+  let ticking = false;
+  const beat = async () => {
+    if (ticking) return;
+    ticking = true;
     try {
+      const user = await BW.getUser();
+      if (!user) return;
       await supa.from('profiles')
         .update({ last_seen_at: new Date().toISOString() })
         .eq('id', user.id);
-    } catch (_) {}
-  }, minutes * 60 * 1000);
-}
-export function stopHeartbeat() { if (__hb) clearInterval(__hb); }
-
-/* ==============================
-   4) Admin 動作（授權/移除/暫停/解除）
-   ============================== */
-async function adminPatch(email, patch) {
-  const { error } = await supa.from('profiles').update(patch).eq('email', email);
-  if (error) throw error;
-}
-export async function adminGrant(email)  { await adminPatch(email, { is_admin: true  }); }
-export async function adminRevoke(email) { await adminPatch(email, { is_admin: false }); }
-export async function adminPause(email)  { await adminPatch(email, { is_paused: true  }); }
-export async function adminUnpause(email){ await adminPatch(email, { is_paused: false }); }
-
-export async function getProfileByEmail(email) {
-  const { data, error } = await supa
-    .from('profiles')
-    .select('id,email,display_name,is_admin,is_paused,last_sign_in_at,last_seen_at,expires_at')
-    .eq('email', email)
-    .maybeSingle();
-  if (error) throw error;
-  return data;
-}
-
-/* ==============================
-   5) 兼容舊頁面：掛到 window
-   ============================== */
-window.supa = supa;
-window.BW = {
-  requireAuth,
-  requireAdmin,
-  startHeartbeat,
-  stopHeartbeat,
-  adminGrant,
-  adminRevoke,
-  adminPause,
-  adminUnpause,
-  getProfileByEmail,
+    } finally {
+      ticking = false;
+    }
+  };
+  // 立刻打一發，之後每 N 分鐘
+  beat();
+  const ms = Math.max(1, minutes) * 60 * 1000;
+  return setInterval(beat, ms);
 };
+
+/** 小工具：把 ISO 轉台灣時間字串 */
+BW.fmtTW = (iso) => {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return new Intl.DateTimeFormat('zh-TW', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit'
+  }).format(d);
+};
+
+/** 小工具：是否在 N 分鐘內在線（用 last_seen_at 判斷） */
+BW.isOnlineWithin = (iso, minutes = 10) => {
+  if (!iso) return false;
+  const last = Date.parse(iso);               // ISO → UTC ms
+  const now = Date.now();                     // 也是 UTC ms
+  return (now - last) <= minutes * 60 * 1000; // 不用理時區
+};
+
+/** 載 profiles 並回傳資料（給 admin 列表用） */
+BW.fetchProfiles = async () => {
+  const cols = 'id,email,display_name,is_admin,last_sign_in_at,last_seen_at,expires_at';
+  const { data, error } = await supa.from('profiles').select(cols).order('email', { ascending: true });
+  if (error) throw error;
+  return data ?? [];
+};
+
+window.BW = BW;
+</script>
+
