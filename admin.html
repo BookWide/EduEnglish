@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>BookWide Admin · 白底三分頁 + Videos Insert · v20251104</title>
 
+  <!-- 只載入一次：共用 Supabase / 守門 / 心跳 / 小工具 -->
   <script type="module" src="./supa.js"></script>
 
   <style>
@@ -115,178 +116,150 @@
 
   <footer>BookWide Admin · 內嵌 Supabase 版 · v20251104</footer>
 
+  <!-- 單一模組腳本：守門 + 心跳 + 列表 + 授權/暫停 + MP4 上傳 -->
   <script type="module">
-    import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-    const SUPA_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-    const SUPA_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-    const supa = createClient(SUPA_URL, SUPA_ANON); window.supa = supa;
+    // 1) 守門 + 啟心跳
+    await BW.requireAdmin();
+    BW.startHeartbeat(2);
 
-    const $ = (q,root=document)=>root.querySelector(q);
-    const $$ = (q,root=document)=>[...root.querySelectorAll(q)];
-    const fmtTW = (ts)=>!ts?'':new Date(ts).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false});
-    const onlinePill = (t)=>!t?'<span class="pill">離線</span>':(Date.now()-new Date(t).getTime()<=600000?'<span class="pill ok">在線</span>':'<span class="pill">離線</span>');
+    // Supabase client 與工具
+    const supa = BW.supa;
+    const $  = (q, root=document)=>root.querySelector(q);
+    const $$ = (q, root=document)=>[...root.querySelectorAll(q)];
+    const fmtTW = BW.fmtTW;
+    const isOnline = (iso)=> BW.isOnlineWithin(iso, 10);
+    const pill = (txt, cls='') => `<span class="pill ${cls}">${txt}</span>`;
 
-    $$('.tab-btn').forEach(b=>b.addEventListener('click',()=>{
-      $$('.tab-btn').forEach(x=>x.classList.remove('active')); b.classList.add('active');
-      const t=b.dataset.tab; $('#panel-users').style.display=t==='users'?'':'none';
-      $('#panel-roles').style.display=t==='roles'?'':'none'; $('#panel-mp4').style.display=t==='mp4'?'':'none';
+    // 分頁切換
+    $$('.tab-btn').forEach(b => b.addEventListener('click', () => {
+      $$('.tab-btn').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      const t = b.dataset.tab;
+      $('#panel-users').style.display = (t === 'users') ? '' : 'none';
+      $('#panel-roles').style.display = (t === 'roles') ? '' : 'none';
+      $('#panel-mp4').style.display   = (t === 'mp4')   ? '' : 'none';
     }));
 
-    async function loadProfiles(){
-      const tbody = $('#usersTable tbody'); tbody.innerHTML='<tr><td class="muted" colspan="7">載入中…</td></tr>';
-      const cols='email, display_name, is_admin, is_suspended, is_paused, last_sign_in_at, last_seen_at, expires_at';
-      const r=await supa.from('profiles').select(cols).order('email',{ascending:true});
-      if(r.error){ tbody.innerHTML='<tr><td class="muted" colspan="7">讀取失敗：'+r.error.message+'</td></tr>'; return; }
-      const q = ($('#q').value||'').trim().toLowerCase();
-      const rows=(r.data||[]).filter(x=>!q||(x.email||'').toLowerCase().includes(q)||(x.display_name||'').toLowerCase().includes(q));
-      if(!rows.length){ tbody.innerHTML='<tr><td class="muted" colspan="7">沒有符合的資料</td></tr>'; return; }
-      tbody.innerHTML=rows.map(x=>`<tr>
-        <td>${x.email||''}</td>
-        <td>${x.display_name||''}</td>
-        <td>${fmtTW(x.last_sign_in_at)||''}</td>
-        <td>${fmtTW(x.last_seen_at)||''} &nbsp; ${onlinePill(x.last_seen_at)}</td>
-        <td>${x.is_admin?'<span class="pill ok">是</span>':'<span class="pill">否</span>'}</td>
-        <td>${x.is_suspended?'<span class="pill warn">停權</span>':(x.is_paused?'<span class="pill warn">暫停</span>':'<span class="pill ok">正常</span>')}</td>
-        <td>${x.expires_at||''}</td>
-      </tr>`).join('');
+    // 載入並渲染 profiles
+    async function renderProfiles() {
+      const tbody = $('#usersTable tbody');
+      tbody.innerHTML = '<tr><td class="muted" colspan="7">載入中…</td></tr>';
+      const data = await BW.fetchProfiles();
+      const q = ($('#q').value || '').trim().toLowerCase();
+      const rows = (data || []).filter(x =>
+        !q ||
+        (x.email || '').toLowerCase().includes(q) ||
+        (x.display_name || '').toLowerCase().includes(q)
+      );
+      if (!rows.length) {
+        tbody.innerHTML = '<tr><td class="muted" colspan="7">沒有符合的資料</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(x => {
+        const online = isOnline(x.last_seen_at);
+        return `<tr>
+          <td>${x.email || ''}</td>
+          <td>${x.display_name || ''}</td>
+          <td>${fmtTW(x.last_sign_in_at) || ''}</td>
+          <td>${fmtTW(x.last_seen_at) || ''} &nbsp; ${pill(online ? '在線' : '離線', online ? 'ok' : '')}</td>
+          <td>${x.is_admin ? pill('是','ok') : pill('否')}</td>
+          <td>${
+            x.is_suspended ? pill('停權','warn') :
+            (x.is_paused ? pill('暫停','warn') : pill('正常','ok'))
+          }</td>
+          <td>${x.expires_at ? x.expires_at.slice(0,10) : '—'}</td>
+        </tr>`;
+      }).join('');
     }
-    $('#btnRefresh').addEventListener('click',loadProfiles); $('#q').addEventListener('input',loadProfiles);
 
-    $('#btnApplyRole').addEventListener('click',async()=>{
-      const email=$('#roleEmail').value.trim(); const act=$('#roleAction').value; const msg=$('#roleMsg');
-      if(!email){ msg.textContent='請輸入 Email'; return; }
-      const q=await supa.from('profiles').select('id,is_admin,is_paused').eq('email',email).maybeSingle();
-      if(q.error){ msg.textContent='查詢失敗：'+q.error.message; return; } if(!q.data){ msg.textContent='找不到該使用者'; return; }
-      let payload={},info=''; if(act==='grant-admin'){payload={is_admin:true};info='已授予管理員';}
-      if(act==='revoke-admin'){payload={is_admin:false};info='已移除管理員';}
-      if(act==='pause'){payload={is_paused:true};info='已暫停登入';}
-      if(act==='unpause'){payload={is_paused:false};info='已解除暫停';}
-      const u=await supa.from('profiles').update(payload).eq('id',q.data.id);
-      if(u.error){ msg.textContent='更新失敗：'+u.error.message; return; }
-      msg.textContent=`${email} ${info}`; loadProfiles();
+    // 重新整理 / 搜尋
+    $('#btnRefresh').addEventListener('click', renderProfiles);
+    $('#q').addEventListener('input', renderProfiles);
+
+    // 授權 / 暫停
+    $('#btnApplyRole').addEventListener('click', async () => {
+      const email = $('#roleEmail').value.trim();
+      const act   = $('#roleAction').value;
+      const msg   = $('#roleMsg');
+      if (!email) { msg.textContent = '請輸入 Email'; return; }
+
+      const q = await supa.from('profiles').select('id,is_admin,is_paused').eq('email', email).maybeSingle();
+      if (q.error) { msg.textContent = '查詢失敗：' + q.error.message; return; }
+      if (!q.data) { msg.textContent = '找不到該使用者'; return; }
+
+      let payload = {}, info = '';
+      if (act === 'grant-admin')  { payload = { is_admin: true  }; info = '已授予管理員'; }
+      if (act === 'revoke-admin') { payload = { is_admin: false }; info = '已移除管理員'; }
+      if (act === 'pause')        { payload = { is_paused: true }; info = '已暫停登入'; }
+      if (act === 'unpause')      { payload = { is_paused: false}; info = '已解除暫停'; }
+
+      const u = await supa.from('profiles').update(payload).eq('id', q.data.id);
+      if (u.error) { msg.textContent = '更新失敗：' + u.error.message; return; }
+      msg.textContent = `${email} ${info}`;
+      renderProfiles();
     });
 
+    // MP4 自動化上傳
     async function getVideoDuration(file){
       return new Promise((resolve)=>{
-        const v=document.createElement('video'); v.preload='metadata';
-        v.onloadedmetadata=()=>{ resolve(Math.round(v.duration||0)); URL.revokeObjectURL(v.src); };
-        v.onerror=()=>resolve(0); v.src=URL.createObjectURL(file);
+        const v = document.createElement('video'); v.preload = 'metadata';
+        v.onloadedmetadata = ()=>{ resolve(Math.round(v.duration || 0)); URL.revokeObjectURL(v.src); };
+        v.onerror = ()=> resolve(0);
+        v.src = URL.createObjectURL(file);
       });
     }
-
     async function ensureFolder(bucket, pathLike){
-      return supa.storage.from(bucket).list(pathLike).then(()=>true).catch(()=>true);
+      try { await BW.supa.storage.from(bucket).list(pathLike); return true; } catch { return true; }
     }
+    $('#btnUpload').addEventListener('click', async () => {
+      const cat = $('#cat').value.trim();
+      const slug = $('#slug').value.trim();
+      const title = $('#title').value.trim();
+      const mp4 = $('#mp4File').files[0];
+      const cov = $('#coverFile').files[0];
+      const isPublic = $('#isPublic').value === 'true';
+      const msg = $('#upMsg');
 
-    $('#btnUpload').addEventListener('click', async ()=>{
-      const cat=$('#cat').value.trim(); const slug=$('#slug').value.trim();
-      const title=$('#title').value.trim(); const mp4=$('#mp4File').files[0]; const cov=$('#coverFile').files[0];
-      const isPublic=$('#isPublic').value==='true'; const msg=$('#upMsg');
-      if(!cat||!slug||!mp4){ msg.textContent='請選擇分類、輸入 slug 並選擇 MP4 檔'; return; }
-      $('#btnUpload').disabled=true; msg.textContent='開始上傳…';
-      try{
-        const mp4Rel=`${cat}/${slug}.mp4`; const mp4Full=`videos/${mp4Rel}`;
-        await ensureFolder('videos',cat);
-        const up1=await supa.storage.from('videos').upload(mp4Rel,mp4,{upsert:true,contentType:'video/mp4'});
-        if(up1.error) throw up1.error;
+      if (!cat || !slug || !mp4) { msg.textContent = '請選擇分類、輸入 slug 並選擇 MP4 檔'; return; }
+      $('#btnUpload').disabled = true; msg.textContent = '開始上傳…';
 
-        let coverFull=null; if(cov){
-          const rel=`${cat}/${slug}/cover.jpg`; coverFull=`assets/${rel}`;
-          await ensureFolder('assets',`${cat}/${slug}`);
-          const up2=await supa.storage.from('assets').upload(rel,cov,{upsert:true});
-          if(up2.error) throw up2.error;
+      try {
+        const mp4Rel = `${cat}/${slug}.mp4`;
+        await ensureFolder('videos', cat);
+        const up1 = await BW.supa.storage.from('videos').upload(mp4Rel, mp4, { upsert:true, contentType:'video/mp4' });
+        if (up1.error) throw up1.error;
+
+        let coverFull = null;
+        if (cov) {
+          const rel = `${cat}/${slug}/cover.jpg`;
+          await ensureFolder('assets', `${cat}/${slug}`);
+          const up2 = await BW.supa.storage.from('assets').upload(rel, cov, { upsert:true });
+          if (up2.error) throw up2.error;
+          coverFull = `assets/${rel}`;
         }
 
-        const duration=await getVideoDuration(mp4);
-        const user=(await supa.auth.getUser()).data?.user||null;
+        const duration = await getVideoDuration(mp4);
+        const user = (await BW.supa.auth.getUser()).data?.user || null;
+        const rec = {
+          category: cat, slug, title: title || null,
+          storage_path: `videos/${mp4Rel}`, cover_path: coverFull,
+          size_bytes: mp4.size ?? null, duration_sec: duration ?? null, is_public: isPublic,
+          created_by: user?.id ?? null, updated_at: new Date().toISOString()
+        };
+        const ins = await BW.supa.from('videos').upsert(rec, { onConflict:'category,slug' }).select('id').maybeSingle();
+        if (ins.error) throw ins.error;
 
-        const rec={category:cat,slug,title:title||null,storage_path:mp4Full,cover_path:coverFull,
-                   size_bytes:mp4.size??null,duration_sec:duration??null,is_public:isPublic,
-                   created_by:user?.id??null,updated_at:new Date().toISOString()};
-
-        const ins=await supa.from('videos').upsert(rec,{onConflict:'category,slug'}).select('id').maybeSingle();
-        if(ins.error) throw ins.error;
-
-        msg.innerHTML=`✅ 完成！已上傳並寫入資料表<br>影片：<code>${mp4Full}</code>${coverFull?`；封面：<code>${coverFull}</code>`:''}<br>長度：${duration||0} 秒，大小：${(mp4.size/1024/1024).toFixed(2)} MB`;
-      }catch(err){ console.error(err); msg.textContent='上傳/寫入失敗：'+(err?.message||err); }
-      finally{ $('#btnUpload').disabled=false; }
+        msg.innerHTML = `✅ 完成！已上傳並寫入資料表<br>影片：<code>videos/${mp4Rel}</code>${coverFull ? `；封面：<code>${coverFull}</code>` : ''}<br>長度：${duration||0} 秒，大小：${(mp4.size/1024/1024).toFixed(2)} MB`;
+      } catch (err) {
+        console.error(err);
+        msg.textContent = '上傳/寫入失敗：' + (err?.message || err);
+      } finally {
+        $('#btnUpload').disabled = false;
+      }
     });
 
-    loadProfiles();
+    // 首次載入
+    renderProfiles();
   </script>
-  <script type="module">
-  // 1) 進頁先守門：未登入 / 非 admin / 暫停 => 轉回 index.html
-  await BW.requireAdmin();
-
-  // 2) 啟動心跳：每 2 分鐘更新自己的 last_seen_at
-  BW.startHeartbeat(2);
-
-  // 3) 載入 profiles 並把「最近在線」用 last_seen_at 判斷 10 分鐘內在線
-  const data = await BW.fetchProfiles();
-
-  // === 以下是把資料塞進你現有的表格 ===
-  const tbody = document.querySelector('table tbody') || document.querySelector('#usersTable tbody');
-  if (tbody) tbody.innerHTML = '';
-
-  for (const r of data) {
-    const tr = document.createElement('tr');
-
-    // Email
-    const tdEmail = document.createElement('td');
-    tdEmail.textContent = r.email || '—';
-    tr.appendChild(tdEmail);
-
-    // 顯示名稱
-    const tdName = document.createElement('td');
-    tdName.textContent = r.display_name || '—';
-    tr.appendChild(tdName);
-
-    // 最後登入（台灣）
-    const tdSignIn = document.createElement('td');
-    tdSignIn.textContent = BW.fmtTW(r.last_sign_in_at);
-    tr.appendChild(tdSignIn);
-
-    // 最近在線（台灣）+ 狀態徽章
-    const tdSeen = document.createElement('td');
-    tdSeen.textContent = BW.fmtTW(r.last_seen_at);
-    tr.appendChild(tdSeen);
-
-    // 管理員
-    const tdAdmin = document.createElement('td');
-    tdAdmin.textContent = r.is_admin ? '是' : '否';
-    tr.appendChild(tdAdmin);
-
-    // 狀態（在線 / 離線）
-    const tdStatus = document.createElement('td');
-    const online = BW.isOnlineWithin(r.last_seen_at, 10); // 10 分鐘內算在線
-    tdStatus.innerHTML = online
-      ? '<span class="chip ok">在線</span>'
-      : '<span class="chip">離線</span>';
-    tr.appendChild(tdStatus);
-
-    // 到期日
-    const tdExp = document.createElement('td');
-    tdExp.textContent = r.expires_at ? r.expires_at.slice(0, 10) : '—';
-    tr.appendChild(tdExp);
-
-    (tbody || document.querySelector('table')).appendChild(tr);
-  }
-</script>
-
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
