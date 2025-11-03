@@ -88,3 +88,12 @@ BW.fetchProfiles = async () => {
 };
 
 export { BW };
+
+// ====== 自動心跳（所有登入頁都會啟動） ======
+(async () => {
+  const user = await BW.getUser();
+  if (user) {
+    console.log(`[BookWide] 自動啟動心跳 for ${user.email}`);
+    BW.startHeartbeat(2); // 每 2 分鐘更新 last_seen_at
+  }
+})();
