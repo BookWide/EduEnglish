@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>BookWide Admin · 上傳自動化＋守門＋使用者清單 · v20251104-zip</title>
+  <title>BookWide Admin · 上傳自動化＋對齊字幕＋使用者清單 · v20251104-align</title>
 
-  <!-- Supabase helper (你已經有 supa.js；此檔會呼叫 BW.*) -->
+  <!-- Supabase helper（呼叫 BW.*，保持你原有結構） -->
   <script type="module" src="./supa.js"></script>
-  <!-- JSZip 用來把 JSON 打包成 ZIP -->
+  <!-- JSZip -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
   <style>
@@ -94,7 +94,7 @@
       </div>
     </section>
 
-    <!-- MP4 上傳 + 自動 ZIP -->
+    <!-- MP4 上傳 + 自動 ZIP + 自動對齊 -->
     <section id="panel-mp4" style="display:none">
       <div class="card">
         <h3 style="margin:6px 0 14px">MP4 上傳自動化（完成即送 JSON ZIP）</h3>
@@ -131,10 +131,22 @@
         <div class="row grid-3" style="margin-top:12px">
           <div style="display:flex;align-items:flex-end;gap:10px">
             <button id="btnUpload" class="btn">上傳並寫入資料表</button>
+            <label class="hint" style="display:flex;align-items:center;gap:6px">
+              <input id="autoAlign" type="checkbox" checked> 自動對齊字幕（吸附靜音）
+            </label>
             <a id="zipLink" class="btn outline" href="#" download style="display:none">下載 JSON ZIP</a>
           </div>
           <div style="display:flex;align-items:flex-end">
             <span class="hint">影片路徑：<code>videos/{category}/{slug}.mp4</code>；封面（若選）：<code>assets/{category}/{slug}/cover.jpg</code></span>
+          </div>
+        </div>
+
+        <div class="row grid-3" style="margin-top:12px">
+          <div class="hint">對齊參數：門檻 <code id="p-th">0.008</code> · 靜音≧ <code id="p-sil">0.25s</code> · 吸附窗口 ±<code id="p-win">1.5s</code></div>
+          <div style="display:flex;gap:8px;align-items:center">
+            <label class="muted">RMS 門檻</label><input id="th" class="input" type="number" step="0.0001" value="0.008" style="width:110px">
+            <label class="muted">最短靜音</label><input id="sil" class="input" type="number" step="0.05" value="0.25" style="width:110px">
+            <label class="muted">窗口(±s)</label><input id="win" class="input" type="number" step="0.1" value="1.5" style="width:110px">
           </div>
         </div>
 
@@ -143,7 +155,7 @@
     </section>
   </main>
 
-  <footer>BookWide Admin · 內嵌 Supabase 版 · v20251104-zip</footer>
+  <footer>BookWide Admin · 內嵌 Supabase 版 · v20251104-align</footer>
 
   <script type="module">
     const ready = () => new Promise(r => { if (window.BW?.supa) return r(); const t = setInterval(()=>{ if(window.BW?.supa){clearInterval(t); r();}},50); });
@@ -235,21 +247,152 @@
     async function ensureFolder(bucket, pathLike){
       try{ await supa.storage.from(bucket).list(pathLike); return true; }catch(e){ return true; }
     }
-    async function makeZipJson({category, slug, title, publicVideoUrl, publicCoverUrl}){
+
+    /* ====== 自動教材產生器（與對齊引擎） ====== */
+    function pad2(n){ return n.toString().padStart(2,'0'); }
+    function pick(arr, n){ const a=[...arr]; const out=[]; while(out.length<n && a.length){ out.push(a.splice(Math.floor(Math.random()*a.length),1)[0]); } return out; }
+    const BANK = {
+      commonVocab: [
+        {word:"festival", pos:"n.", zh:"節日", en:"a special day of celebration", example:"This festival brings families together."},
+        {word:"moon", pos:"n.", zh:"月亮", en:"Earth's natural satellite", example:"We admire the full moon."},
+        {word:"gather", pos:"v.", zh:"聚集", en:"come together", example:"Families gather for dinner."},
+        {word:"mooncake", pos:"n.", zh:"月餅", en:"round pastry for Mid-Autumn", example:"They share mooncakes."},
+        {word:"lantern", pos:"n.", zh:"燈籠", en:"a light in a cover", example:"Kids carry lanterns."},
+        {word:"legend", pos:"n.", zh:"傳說", en:"traditional story", example:"There is a legend about the moon."},
+        {word:"archer", pos:"n.", zh:"弓箭手", en:"a person skilled with a bow", example:"He was a brave archer."},
+        {word:"elixir", pos:"n.", zh:"仙丹", en:"magical drink", example:"The elixir grants immortality."},
+        {word:"immortal", pos:"adj.", zh:"不死的", en:"living forever", example:"She became immortal."},
+        {word:"reunion", pos:"n.", zh:"團圓", en:"coming together again", example:"The festival is for reunion."},
+        {word:"admire", pos:"v.", zh:"欣賞", en:"look at with pleasure", example:"They admire the bright moon."},
+        {word:"harvest", pos:"n.", zh:"收穫", en:"gathering crops", example:"People thank for the harvest."},
+        {word:"tradition", pos:"n.", zh:"傳統", en:"custom passed down", example:"Sharing mooncakes is a tradition."},
+        {word:"celebrate", pos:"v.", zh:"慶祝", en:"do something special", example:"People celebrate together."},
+        {word:"rabbit", pos:"n.", zh:"兔子", en:"small animal", example:"A rabbit appears in the legend."},
+        {word:"blessing", pos:"n.", zh:"祝福", en:"good wishes", example:"They ask for blessings."},
+        {word:"tea", pos:"n.", zh:"茶", en:"a popular drink", example:"People drink tea at night."},
+        {word:"poem", pos:"n.", zh:"詩", en:"a piece of writing", example:"They read poems about the moon."},
+        {word:"clear", pos:"adj.", zh:"晴朗的", en:"without clouds", example:"We hope for a clear sky."},
+        {word:"family", pos:"n.", zh:"家庭", en:"parents and children", example:"Family time matters."}
+      ],
+      mcDistractors:["sun","star","cloud","tree","river","noodles","cheese","pepper","books","games","rainy","windy"]
+    };
+    function buildCues(durationSec){
+      const total = 20; const span = Math.max(2, Math.floor((durationSec||120)/total));
+      const cues=[]; let t=0;
+      for(let i=0;i<total;i++){ const s=t, e=s+span; cues.push({ s, e, t:`第 ${pad2(i+1)} 句（請編輯）` }); t=e; }
+      return cues;
+    }
+    function buildVocab(){ const words=[...BANK.commonVocab]; return pick(words,20).map(x=>({ ...x, sample: x.example||x.en })); }
+    function makeMCQ(q, correct, wrongs){ const ch=pick(wrongs,3); ch.push(correct); for(let i=ch.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [ch[i],ch[j]]=[ch[j],ch[i]]; } return {type:"mc", q, choices:ch, answer: ch.indexOf(correct)}; }
+    function buildQuizFromVocab(vocab, title){
+      const wrongs=BANK.mcDistractors, quiz=[];
+      for(let i=0;i<20;i++){ const v=vocab[i%vocab.length]; quiz.push(makeMCQ(`What is the meaning of "${v.word}"?`, v.zh, wrongs)); }
+      const grammar=[
+        makeMCQ("Lanterns ____ by children at night.","are carried",["carry","are carrying","carried"]),
+        makeMCQ("People ____ mooncakes every year.","eat",["ate","are eaten","is eating"]),
+        makeMCQ("This is the night ____ families meet.","when",["who","which","where"]),
+        makeMCQ("He suggested that we ____ tea.","drink",["drank","to drink","drinking"]),
+        makeMCQ("People enjoy ____ poems.","reading",["read","to read","reads"]),
+      ]; while(grammar.length<20){ grammar.push(makeMCQ("The moon is very ____ tonight.","bright",["broken","tiny","thin"])); }
+      quiz.push(...grammar.slice(0,20));
+      const reading=[
+        makeMCQ(`Why do families meet in "${title||'the story'}"?`,"For reunion",["For business","For exercise","For study"]),
+        makeMCQ("They choose a park with a clear view. What do they want to see?","The full moon",["Sunrise","Fireworks","TV show"]),
+        makeMCQ("Kids carry lanterns and guess riddles. What does this show?","They enjoy traditions",["They are bored","They hate the dark","They are studying"]),
+      ]; while(reading.length<20){ reading.push(makeMCQ("People share tea and fruit. The mood is ____.","warm",["cold","tense","lonely"])); }
+      quiz.push(...reading.slice(0,20));
+      const mixed=[
+        makeMCQ("Which is NOT related to Mid-Autumn?","Christmas tree",["Mooncakes","Lanterns","Jade Rabbit"]),
+        makeMCQ("Choose the collocation: admire the ____ moon.","full",["thin","broken","small"]),
+        makeMCQ("The festival follows the ____ calendar.","lunar",["solar","school","work"]),
+      ]; while(mixed.length<20){ mixed.push(makeMCQ("A polite gift is a box of ____.","mooncakes",["books","spoons","noodles"])); }
+      quiz.push(...mixed.slice(0,20)); return quiz;
+    }
+    // === 對齊引擎（靜音吸附） ===
+    async function fetchAudioBuffer(url){
+      const ctx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:44100});
+      const r = await fetch(url, {mode:'cors'}); const b = await r.arrayBuffer();
+      return await ctx.decodeAudioData(b);
+    }
+    function energyEnvelope(buf, frameSize=1024, hop=256){
+      const ch = buf.getChannelData(0);
+      const frames = Math.max(0, Math.floor((ch.length - frameSize) / hop));
+      const env = new Float32Array(frames);
+      for(let i=0;i<frames;i++){
+        let sum=0; for(let j=0;j<frameSize;j++){ const v = ch[i*hop+j]; sum += v*v; }
+        env[i]=Math.sqrt(sum/frameSize);
+      } return {env, tStep: hop / buf.sampleRate};
+    }
+    function detectSilences(env, tStep, thresh=0.008, minSil=0.25){
+      const minFrames = Math.max(1, Math.floor(minSil / tStep)); const segs=[]; let run=-1;
+      for(let i=0;i<env.length;i++){ if(env[i]<thresh){ if(run<0) run=i; } else if(run>=0){ const len=i-run; if(len>=minFrames) segs.push({s:run*tStep,e:i*tStep}); run=-1; } }
+      if(run>=0){ const i=env.length; const len=i-run; if(len>=minFrames) segs.push({s:run*tStep,e:i*tStep}); }
+      return segs;
+    }
+    function snapToSilence(cues, silences, win=1.5){
+      function nearStart(t){ let best=null,d=Infinity; for(const s of silences){ const dd=Math.abs(t-s.s); if(dd<d && dd<=win){ d=dd; best=s; } } return best; }
+      function nearEnd(t){ let best=null,d=Infinity; for(const s of silences){ const dd=Math.abs(t-s.e); if(dd<d && dd<=win){ d=dd; best=s; } } return best; }
+      const out=cues.map(c=>({...c}));
+      for(const c of out){ const sSil=nearEnd(c.s); const eSil=nearStart(c.e); if(sSil) c.s=Math.max(0,sSil.e); if(eSil) c.e=Math.max(c.s+0.05,eSil.s); }
+      for(let i=1;i<out.length;i++){ if(out[i].s<out[i-1].e) out[i].s=out[i-1].e; if(out[i].e<=out[i].s) out[i].e=out[i].s+0.05; }
+      return out;
+    }
+
+    async function makeZipJson({category, slug, title, publicVideoUrl, publicCoverUrl, durationSec}){
       const indexJson = { title: title || slug, category, slug, video: publicVideoUrl, cover: publicCoverUrl || null,
-        cues: { zh: "./cues-zh.json" }, vocab: "./vocab.json", quiz: "./quiz.json", is_public: true };
-      const cuesZh = [ { "s": 0, "e": 2.5, "t": "第一句對話或歌詞" }, { "s": 2.5, "e": 5.0, "t": "第二句對話或歌詞" } ];
-      const vocab = [ { "word": "love", "pos": "n.", "zh": "愛", "sample": "Love makes life beautiful." } ];
-      const quiz = [ { "type": "mc", "q": "What is the meaning of 'love'?", "choices": ["hate", "affection", "anger", "pain"], "answer": 1 } ];
+        cues: { zh: "./cues-zh.json" }, vocab: "./vocab.json", quiz: "./quiz.json", ai: "./ai.json", is_public: true };
+
+      let cuesZh = buildCues(durationSec||0);
+      if($('#autoAlign').checked){
+        try{
+          const th = parseFloat($('#th').value||'0.008');
+          const sil = parseFloat($('#sil').value||'0.25');
+          const win = parseFloat($('#win').value||'1.5');
+          const buf = await fetchAudioBuffer(publicVideoUrl);
+          const {env,tStep} = energyEnvelope(buf);
+          const sils = detectSilences(env, tStep, th, sil);
+          cuesZh = snapToSilence(cuesZh, sils, win);
+        }catch(e){
+          console.warn('自動對齊失敗，改用平均切段', e);
+        }
+      }
+
+      const vocab = buildVocab(category, slug, title);
+      const quiz = buildQuizFromVocab(vocab, title);
+      const ai = { title: title||"Lesson", discussion_prompts: [
+        {title:"Festival Overview", prompt:`What is ${title||'this lesson'} and when is it celebrated?`, hint:"full moon / lunar calendar / family"},
+        {title:"Family Reunion", prompt:"Describe how your family might celebrate it.", hint:"gather / dinner / share stories"},
+        {title:"Mooncakes", prompt:"What mooncake flavors do you like? Why?", hint:"lotus / red bean / egg yolk"},
+        {title:"Lanterns", prompt:"Describe a lantern you like. What shape and color is it?", hint:"shape / color / pattern"},
+        {title:"Legend", prompt:"Summarize the legend in 3–4 sentences.", hint:"immortal / moon / archer"},
+        {title:"Compare Festivals", prompt:"Compare this festival with another one.", hint:"similarities / differences / activities"},
+        {title:"Night Scene", prompt:"Describe the night sky during the festival.", hint:"bright / full moon / clear sky"},
+        {title:"Personal Plan", prompt:"What will you do this year?", hint:"plan / invite / location"},
+        {title:"Idioms & Feelings", prompt:"Share a phrase about the moon and your feelings.", hint:"reunion / homesick / blessing"},
+        {title:"Tradition & Food", prompt:"Besides mooncakes, what foods are popular?", hint:"pomelo / tea / fruit"},
+        {title:"Community", prompt:"How can communities celebrate together?", hint:"events / safety / inclusive"},
+        {title:"Sustainability", prompt:"Eco-friendly ways to celebrate?", hint:"reuse lanterns / less waste"},
+        {title:"Vocabulary Use", prompt:"Use 5 new words in a short paragraph."},
+        {title:"Listening", prompt:"After watching, list three facts you remember."},
+        {title:"Reflection", prompt:"What value did you learn from this story?"}
+      ], generated_at: new Date().toISOString() };
+
       const zip = new JSZip();
       const dir = zip.folder(`data/${category}/${slug}`);
       dir.file("index.json", JSON.stringify(indexJson, null, 2));
       dir.file("cues-zh.json", JSON.stringify(cuesZh, null, 2));
       dir.file("vocab.json", JSON.stringify(vocab, null, 2));
       dir.file("quiz.json", JSON.stringify(quiz, null, 2));
+      dir.file("ai.json", JSON.stringify(ai, null, 2));
+
       const blob = await zip.generateAsync({type:"blob"});
       return URL.createObjectURL(blob);
     }
+
+    $('#th').addEventListener('input', e=>$('#p-th').textContent = e.target.value);
+    $('#sil').addEventListener('input', e=>$('#p-sil').textContent = e.target.value+'s');
+    $('#win').addEventListener('input', e=>$('#p-win').textContent = e.target.value+'s');
+
     $('#btnUpload').addEventListener('click', async ()=>{
       const cat=$('#cat').value.trim(); const slug=$('#slug').value.trim();
       const title=$('#title').value.trim(); const mp4=mp4Input.files?.[0]; const cov=$('#coverFile').files[0];
@@ -281,7 +424,8 @@
         setBar(85);
         const publicVideoUrl = `${supa.storage.url}/object/public/${mp4Full}`;
         const publicCoverUrl = coverFull ? `${supa.storage.url}/object/public/${coverFull}` : null;
-        const url = await makeZipJson({category:cat, slug, title, publicVideoUrl, publicCoverUrl});
+        upMsg.textContent='產生 ZIP（含自動對齊）…';
+        const url = await makeZipJson({category:cat, slug, title, publicVideoUrl, publicCoverUrl, durationSec: duration});
         zipLink.href = url; zipLink.download = `${cat}-${slug}-templates.zip`; zipLink.style.display='inline-block';
         setBar(100);
         upMsg.innerHTML=`✅ 完成！已上傳並寫入資料表<br>
@@ -293,6 +437,7 @@
   </script>
 </body>
 </html>
+
 
 
 
