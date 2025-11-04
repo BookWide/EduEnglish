@@ -100,10 +100,162 @@
   .chip--active { background:#111827; border-color:#4b5563; font-weight:600; }
 </style>
 
+
+<script type="module">
+// === BookWide Account Menu Patch (inline) ===
+// Uses existing supabase client from ./supa.js and adds a robust account menu
+// without changing the page layout.
+
+let BW, supabase;
+try {
+  const mod = await import('./supa.js');
+  // BW is helper we attached previously; fallback if not present
+  BW = (mod && (mod.BW || mod.default && mod.default.BW)) || (window.BW);
+  supabase = (mod && (mod.supabase || mod.default && mod.default.supabase)) || (window.supabase);
+} catch (e) {
+  console.warn('[BW] Failed to import supa.js, fallback to window.BW/supabase', e);
+  BW = window.BW;
+  supabase = window.supabase;
+}
+
+if (!supabase) {
+  console.error('[BW] supabase not available. Menu will not be interactive.');
+}
+
+// ---------- small CSS (scoped) ----------
+const style = document.createElement('style');
+style.textContent = `
+  .bw-account-wrap { position: relative; display: inline-block; }
+  .bw-account-chip{ display:inline-flex; align-items:center; gap:.5rem;
+    padding:.45rem .75rem; border-radius:999px; background:#0f172a; color:#fff;
+    font-size:.9rem; cursor:pointer; user-select:none; }
+  .bw-account-chip:hover{opacity:.95}
+  .bw-dd{ position:absolute; right:0; top:calc(100% + 8px); min-width:220px;
+    background:#fff; color:#0f172a; border:1px solid #e5e7eb; border-radius:.75rem;
+    box-shadow:0 8px 24px rgba(0,0,0,.12); padding:.4rem; display:none; z-index:9999; }
+  .bw-dd[aria-hidden="false"]{ display:block; }
+  .bw-dd a, .bw-dd button{ all:unset; display:flex; align-items:center; gap:.5rem;
+    padding:.6rem .7rem; border-radius:.55rem; cursor:pointer; color:#0f172a; }
+  .bw-dd a:hover, .bw-dd button:hover{ background:#f3f4f6; }
+  .bw-dd hr{ border:0; border-top:1px solid #eef2f7; margin:.35rem 0; }
+  @media (max-width:640px){ .bw-account-chip{font-size:.85rem} }
+`;
+document.head.appendChild(style);
+
+// ---------- container detection ----------
+function ensureRightHost() {
+  // Try common containers in your header
+  const candidates = [
+    '.actions', '.navbar .actions', '.nav .actions', '.topbar .actions',
+    '.header .actions', 'header .actions', '.header-right', '.right',
+    '.site-actions', '.site-right'
+  ];
+  for (const sel of candidates) {
+    const el = document.querySelector(sel);
+    if (el) return el;
+  }
+  // fallback: create a small host in body-top-right without breaking layout
+  let host = document.getElementById('bw-account-host');
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'bw-account-host';
+    Object.assign(host.style, {
+      position:'fixed', right:'1rem', top:'1rem', zIndex:'9990'
+    });
+    document.body.appendChild(host);
+  }
+  return host;
+}
+
+const host = ensureRightHost();
+
+// ---------- build UI ----------
+function renderLoggedOut() {
+  const wrap = document.createElement('div');
+  wrap.className = 'bw-account-wrap';
+  const btn = document.createElement('button');
+  btn.className = 'bw-account-chip';
+  btn.setAttribute('aria-label','Sign in');
+  btn.textContent = '登入';
+  btn.addEventListener('click', async () => {
+    if (!supabase) return;
+    const redirectTo = new URL('./member_callback.html', location.href).href;
+    await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: { redirectTo }
+    });
+  });
+  wrap.appendChild(btn);
+  host.replaceChildren(wrap);
+}
+
+function renderLoggedIn(user) {
+  const wrap = document.createElement('div');
+  wrap.className = 'bw-account-wrap';
+  wrap.innerHTML = `
+    <button class="bw-account-chip" id="bw-account-chip" aria-expanded="false" aria-haspopup="menu">
+      <span style="width:8px;height:8px;background:#22c55e;border-radius:9999px;display:inline-block"></span>
+      <span>${user.email ?? '已登入'}</span>
+    </button>
+    <div class="bw-dd" id="bw-dd" role="menu" aria-hidden="true">
+      <a href="./pricing.html" role="menuitem">方案價格</a>
+      <a href="./profile.html" role="menuitem">個人資料</a>
+      <a href="./billing.html" role="menuitem">我的訂閱</a>
+      <a href="./dashboard.html" role="menuitem">學習控制台</a>
+      <a href="./referral.html" role="menuitem">推廣分潤</a>
+      <hr />
+      <button id="bw-signout" role="menuitem">登出</button>
+    </div>
+  `;
+  host.replaceChildren(wrap);
+
+  const chip = wrap.querySelector('#bw-account-chip');
+  const dd   = wrap.querySelector('#bw-dd');
+  const signout = wrap.querySelector('#bw-signout');
+
+  function close() {
+    dd.setAttribute('aria-hidden','true');
+    chip.setAttribute('aria-expanded','false');
+  }
+  function open() {
+    dd.setAttribute('aria-hidden','false');
+    chip.setAttribute('aria-expanded','true');
+  }
+  chip.addEventListener('click', (e) => {
+    const openNow = dd.getAttribute('aria-hidden') === 'true';
+    openNow ? open() : close();
+    e.stopPropagation();
+  });
+  document.addEventListener('click', (e) => {
+    if (!wrap.contains(e.target)) close();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') close();
+  });
+  signout.addEventListener('click', async () => {
+    try { await supabase?.auth?.signOut(); } finally { location.reload(); }
+  });
+}
+
+// ---------- state management ----------
+async function boot() {
+  // 1) one-shot
+  const { data } = await supabase?.auth?.getUser() ?? { data:{ user:null } };
+  if (data && data.user) renderLoggedIn(data.user);
+  else renderLoggedOut();
+
+  // 2) subscribe to changes
+  supabase?.auth?.onAuthStateChange((_evt, session) => {
+    if (session?.user) renderLoggedIn(session.user);
+    else renderLoggedOut();
+  });
+}
+
+boot();
+</script>
+
 </head>
 <body>
-<script type="module" src="./supa.js"></script>
-
   <nav class="nav">
     <div class="bar">
       <div class="brand"><span>BookWide</span><span class="badge">Beta</span></div>
@@ -1360,66 +1512,521 @@ document.addEventListener('DOMContentLoaded', ensureAdminMenu);
   <script type="module" src="./supa.js"></script>
 </body>
 </html>
-
-<!-- BookWide · Supabase Loader Hotfix · v20251105 -->
-<script>
-(function(){
-  function readyBW(){return new Promise(function(res){
-    if (window.BW && window.BW.supa) return res();
-    var t = setInterval(function(){ if(window.BW && window.BW.supa){ clearInterval(t); res(); } }, 50);
-  });}
-
-  async function hotfixLoadFromSupabase(){
-    await readyBW();
-    const supa = BW.supa;
-    const sel = 'category, slug, title, cover_path, storage_path, duration_sec, is_public, updated_at';
-    try{
-      const q = await supa.from('videos').select(sel).order('updated_at', {ascending:false}).limit(500);
-      if (q.error) throw q.error;
-
-      const rows = (q.data || []).filter(r => {
-        const v = r.is_public;
-        // true/"true"/1/"t" 視為公開；舊資料 null 也保留
-        return (v === true || v === "true" || v === 1 || v === "t" || v === null);
-      });
-
-      const urlOf = (rel) => rel ? `${supa.storage.url}/object/public/${rel}` : '';
-      const items = rows.map(r => ({
-        cat: r.category,
-        slug: r.slug,
-        title: r.title || r.slug,
-        cover: urlOf(r.cover_path),
-        video: urlOf(r.storage_path),
-        mins: r.duration_sec ? Math.max(1, Math.round(r.duration_sec/60)) : 1,
-        level: 'Intermediate'
-      }));
-
-      const grouped = items.reduce((acc, it)=>{
-        (acc[it.cat] ||= []).push(it);
-        return acc;
-      }, {});
-
-      if (window.CATALOG && typeof window.CATALOG === 'object'){
-        for (const [k,v] of Object.entries(grouped)){ window.CATALOG[k] = v; }
-      }
-      return grouped;
-    }catch(err){
-      console.warn('[BW hotfix] loadFromSupabase failed:', err);
-      return {};
-    }
-  }
-
-  if (typeof window.loadFromSupabase === 'function'){
-    window.loadFromSupabase = hotfixLoadFromSupabase;
-    console.log('[BW hotfix] loadFromSupabase overridden.');
-  }else{
-    window.loadFromSupabase = hotfixLoadFromSupabase;
-    console.log('[BW hotfix] loadFromSupabase installed.');
-  }
-})();
-</script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
