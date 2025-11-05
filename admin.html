@@ -115,7 +115,7 @@
               <div class="progress" style="margin-top:8px"><div id="bar" class="bar"></div></div>
             </div>
           </div>
-          <div><label class="muted">封面（可選）</label><input id="coverFile" type="file" accept="image/*" class="input"></div>
+          <div><label class="muted">封面（可選）</label><input id="coverFile" type="file" accept="image/*" class="input"></div><div><label class="muted">字幕檔（可選）</label><input id="captionFile" type="file" accept=".srt,.vtt,.json" class="input"></div>
           <div><label class="muted">公開狀態</label>
             <select id="isPublic" class="input"><option value="true">公開</option><option value="false">非公開</option></select>
           </div>
@@ -127,7 +127,7 @@
             <label class="hint" style="display:flex;align-items:center;gap:6px">
               <input id="autoAlign" type="checkbox" checked> 自動對齊字幕（吸附靜音）
             </label>
-            <a id="zipLink" class="btn outline" href="#" download style="display:none">下載 JSON ZIP</a>
+            <a id="zipLink" class="btn outline" href="#" download style="display:none">下載 JSON ZIP</a> <button id="btnPreviewJson" class="btn outline" type="button">預覽 JSON（5 件）</button> <button id="btnUploadGitHub" class="btn outline" type="button">上傳到 GitHub</button>
           </div>
           <div style="display:flex;align-items:flex-end">
             <span class="hint">影片路徑：<code>videos/{category}/{slug}.mp4</code>；封面（若選）：<code>assets/{category}/{slug}/cover.jpg</code></span>
@@ -144,7 +144,33 @@
         </div>
 
         <div class="hr"></div><div id="upMsg" class="muted">就緒。</div>
+<div id="previewPanel" class="card" style="display:none;margin-top:12px">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <div style="font-weight:600">JSON 預覽</div>
+    <button id="btnClosePreview" class="btn outline" type="button">關閉</button>
+  </div>
+  <div id="previewBody" style="margin-top:10px;max-height:380px;overflow:auto;font-family:ui-monospace,Consolas,Menlo,monospace;font-size:13px;white-space:pre"></div>
+</div>
+
       </div>
+    
+<div class="row grid-3" style="margin-top:12px">
+  <div class="card" style="grid-column:1 / -1">
+    <div style="font-weight:600;margin-bottom:8px">GitHub 上傳設定（僅本機暫存，不會保存）</div>
+    <div class="row grid-3">
+      <div><label class="muted">Owner（帳號或組織）</label><input id="ghOwner" class="input" placeholder="bookwide"></div>
+      <div><label class="muted">Repo</label><input id="ghRepo" class="input" placeholder="EduEnglish"></div>
+      <div><label class="muted">Branch</label><input id="ghBranch" class="input" placeholder="main"></div>
+    </div>
+    <div class="row grid-3" style="margin-top:10px">
+      <div><label class="muted">Base Path（可留空）</label><input id="ghBasePath" class="input" placeholder="（例如 data/ 或 留空）"></div>
+      <div><label class="muted">Commit 訊息</label><input id="ghMessage" class="input" placeholder="Add JSON templates"></div>
+      <div><label class="muted">GitHub Token</label><input id="ghToken" class="input" type="password" placeholder="ghp_xxx（Fine-grained 建議）"></div>
+    </div>
+    <div style="margin-top:8px" class="hint">說明：此功能使用 GitHub Contents API 直接建立/更新檔案。Token 僅用於這次操作，不會保存。</div>
+  </div>
+</div>
+
     </section>
   </main>
 
@@ -395,7 +421,46 @@
       return URL.createObjectURL(blob);
     }
 
-    btnUpload.addEventListener('click', async function(){
+    
+// --- Captions state & parsers ---
+let captionsCues = null;
+function mmssFromMillis(ms){ ms=Math.max(0,Math.round(ms/1000)); const m=String(Math.floor(ms/60)).padStart(2,'0'); const s=String(ms%60).padStart(2,'0'); return `${m}:${s}`; }
+function parseSRT(text){ const lines=text.replace(/\r/g,'').split('\n'); const cues=[]; let i=0;
+  while(i<lines.length){ while(i<lines.length && !lines[i].trim()) i++; if(i<lines.length && /^\d+$/.test(lines[i].trim())) i++;
+    if(i>=lines.length) break; const tl=lines[i++]?.trim()||'';
+    const m=tl.match(/(\d\d:\d\d:\d\d),(\d{3})\s*-->\s*(\d\d:\d\d:\d\d),(\d{3})/); if(!m){ continue; }
+    const a=m[1].split(':'), ms=parseInt(m[2],10); const sMs=((+a[0])*3600+(+a[1])*60+(+a[2]))*1000+ms;
+    const t=[]; while(i<lines.length && lines[i].trim()) t.push(lines[i++]); const text=t.join(' ').replace(/\s+/g,' ').trim();
+    cues.push({ time:mmssFromMillis(sMs), en:text, ja:"", zh:"" }); while(i<lines.length && !lines[i].trim()) i++; }
+  return cues; }
+function parseVTT(text){ const lines=text.replace(/\r/g,'').split('\n'); const cues=[]; let i=0; if(lines[i]&&lines[i].toUpperCase().includes('WEBVTT')) i++;
+  while(i<lines.length){ while(i<lines.length && !lines[i].trim()) i++; if(i<lines.length && lines[i] && !lines[i].includes('-->')) i++; if(i>=lines.length) break;
+    const tl=lines[i++]?.trim()||''; const m=tl.match(/(\d\d:\d\d:\d\d)\.(\d{3})\s*-->\s*(\d\d:\d\d:\d\d)\.(\d{3})/); if(!m){ continue; }
+    const a=m[1].split(':'), ms=parseInt(m[2],10); const sMs=((+a[0])*3600+(+a[1])*60+(+a[2]))*1000+ms;
+    const t=[]; while(i<lines.length && lines[i].trim()) t.push(lines[i++]); const text=t.join(' ').replace(/\s+/g,' ').trim();
+    cues.push({ time:mmssFromMillis(sMs), en:text, ja:"", zh:"" }); while(i<lines.length && !lines[i].trim()) i++; }
+  return cues; }
+async function parseHouyiJson(file){ try{ const txt=await file.text(); const arr=JSON.parse(txt);
+  return arr.map(x=>({ time:x.time||"00:00", en:String(x.en||""), ja:String(x.ja||""), zh:String(x.zh||"") })); }catch(e){ console.warn('parse json subtitle failed',e); return null; } }
+
+
+const capInput = document.getElementById('captionFile');
+if(capInput){
+  capInput.addEventListener('change', async function(){
+    captionsCues = null;
+    const f = capInput.files && capInput.files[0];
+    if(!f){ upMsg.textContent='字幕未選擇'; return; }
+    const n = (f.name||'').toLowerCase();
+    try{
+      if(n.endsWith('.srt')){ const txt = await f.text(); captionsCues = parseSRT(txt); }
+      else if(n.endsWith('.vtt')){ const txt = await f.text(); captionsCues = parseVTT(txt); }
+      else if(n.endsWith('.json')){ captionsCues = await parseHouyiJson(f); }
+      upMsg.textContent = (captionsCues && captionsCues.length)? ('已載入字幕：'+captionsCues.length+' 句') : '字幕解析失敗或為空，將改用均分段/自動對齊';
+    }catch(e){ console.error(e); upMsg.textContent='字幕解析錯誤，改用均分段/自動對齊'; }
+  });
+}
+
+btnUpload.addEventListener('click', async function(){
       const cat=$('#cat').value.trim();
       const slug=$('#slug').value.trim();
       const title=$('#title').value.trim();
@@ -431,7 +496,7 @@
         const publicVideoUrl = supa.storage.url + '/object/public/' + mp4Full;
         const publicCoverUrl = coverFull ? (supa.storage.url + '/object/public/' + coverFull) : null;
         upMsg.textContent='產生 ZIP（含自動對齊）…';
-        const url = await window.makeZipJson({"category":cat, "slug":slug, "title":title, "publicVideoUrl":publicVideoUrl, "publicCoverUrl":publicCoverUrl, "durationSec": duration});
+        const url = await makeZipJson({"category":cat, "slug":slug, "title":title, "publicVideoUrl":publicVideoUrl, "publicCoverUrl":publicCoverUrl, "durationSec": duration});
         zipLink.href = url; zipLink.download = cat+'-'+slug+'-templates.zip'; zipLink.style.display='inline-block';
         setBar(100);
         upMsg.innerHTML='✅ 完成！已上傳並寫入資料表<br>影片：<code>'+mp4Full+'</code>'+(coverFull?('；封面：<code>'+coverFull+'</code>'):'')+'<br>長度：'+(duration||0)+' 秒，大小：'+(mp4.size/1024/1024).toFixed(2)+' MB · <b>請點「下載 JSON ZIP」</b>';
@@ -473,7 +538,7 @@ function buildSegments(durationSec){
   return segs;
 }
 function segmentsToHouyiCues(segs){
-  return segs.map(c => ({ time: secToMMSS(c.s), en: "", ja: "", zh: c.t }));
+  return segs.map(c => ({ time: secToMMSS(c.s), en: "", zh: c.t }));
 }
 
 function buildVocabHouyi(){
@@ -551,7 +616,7 @@ function buildAIHouyi(title){
 async function makeZipJson(opts){
   const {category, slug, title, publicVideoUrl, publicCoverUrl, durationSec} = opts;
 
-  let segs = buildSegments(durationSec||0);
+  let segs = (Array.isArray(captionsCues) && captionsCues.length) ? null : buildSegments(durationSec||0);
   try{
     const auto = document.getElementById('autoAlign');
     if (auto && auto.checked && typeof fetchAudioBuffer === 'function'){
@@ -564,7 +629,7 @@ async function makeZipJson(opts){
       segs      = snapToSilence(segs, sils, win);
     }
   }catch(e){ console.warn('Auto align failed, fallback to uniform segments', e); }
-  const cuesHouyi = segmentsToHouyiCues(segs);
+  const cuesHouyi = (segs===null) ? captionsCues.map(c=>({time:c.time,en:c.en||'',ja:c.ja||'',zh:c.zh||''})) : segmentsToHouyiCues(segs);
   const vocabHouyi = buildVocabHouyi();
   const quizHouyi  = buildQuizHouyiFromVocab(vocabHouyi, title);
   const aiHouyi    = buildAIHouyi(title);
@@ -574,7 +639,7 @@ async function makeZipJson(opts){
     category, slug,
     video: publicVideoUrl,
     cover: publicCoverUrl || null,
-    cues: { zh: `./cues-${slug}.json`, ja: `./cues-${slug}.json` },
+    cues: { zh: `./cues-${slug}.json` },
     vocab: `./vocab-${slug}.json`,
     quiz:  `./quiz-${slug}.json`,
     ai:    `./ai-${slug}.json`,
@@ -598,8 +663,110 @@ window.makeZipJson = makeZipJson;
 </script>
 
 <!-- END: BookWide ZIP generator -->
+<script>
+// --- Preview & GitHub Upload ---
+async function showPreview(){
+  const p = document.getElementById('previewPanel'); const body = document.getElementById('previewBody');
+  if(!window.__lastJsons){ upMsg.textContent='尚未產生 JSON；請先完成上傳並等待「下載 JSON ZIP」出現'; return; }
+  const J = window.__lastJsons;
+  const sections = [
+    ['index', J.indexName, J.indexJson],
+    ['cues', J.cuesName, J.cuesHouyi],
+    ['vocab', J.vocabName, J.vocab],
+    ['quiz', J.quizName, J.quiz],
+    ['ai', J.aiName, J.ai]
+  ];
+  let out = 'DIR: '+J.dir+'\n\n';
+  for(const [label,name,obj] of sections){
+    out += '=== '+label+' — '+name+' ===\n'+JSON.stringify(obj, null, 2)+'\n\n';
+  }
+  body.textContent = out;
+  p.style.display='block';
+}
+function hidePreview(){ const p = document.getElementById('previewPanel'); if(p) p.style.display='none'; }
+
+async function ghGetSha(owner, repo, path, token, branch){
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}?ref=${encodeURIComponent(branch)}`;
+  const r = await fetch(url, { headers: { 'Authorization': token ? `Bearer ${token}` : undefined, 'Accept': 'application/vnd.github+json' } });
+  if(r.status===200){ const j=await r.json(); return j.sha; }
+  return null;
+}
+async function ghPutFile(owner, repo, branch, path, contentStr, token, message){
+  const url = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(path)}`;
+  const sha = await ghGetSha(owner, repo, path, token, branch);
+  const b64 = btoa(unescape(encodeURIComponent(contentStr)));
+  const payload = { message: message || `Add ${path}`, branch, content: b64 };
+  if(sha) payload.sha = sha;
+  const r = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Authorization': token ? `Bearer ${token}` : undefined,
+      'Accept': 'application/vnd.github+json'
+    },
+    body: JSON.stringify(payload)
+  });
+  if(!r.ok){ throw new Error(`GitHub 上傳失敗 ${r.status}`); }
+  return await r.json();
+}
+async function uploadAllToGitHub(){
+  if(!window.__lastJsons){ upMsg.textContent='尚未產生 JSON；請先完成上傳並等待「下載 JSON ZIP」出現'; return; }
+  const owner = document.getElementById('ghOwner').value.trim();
+  const repo  = document.getElementById('ghRepo').value.trim();
+  const branch= document.getElementById('ghBranch').value.trim() || 'main';
+  const base  = (document.getElementById('ghBasePath').value||'').trim();
+  const token = document.getElementById('ghToken').value.trim();
+  const msg   = document.getElementById('ghMessage').value.trim() || 'Add JSON templates';
+  if(!owner||!repo){ upMsg.textContent='請輸入 GitHub owner 與 repo'; return; }
+  const baseDir = (base ? (base.endsWith('/')?base:base+'/') : '') + window.__lastJsons.dir;
+  const J = window.__lastJsons;
+  const entries = [
+    [J.indexName, JSON.stringify(J.indexJson, null, 2)],
+    [J.cuesName,  JSON.stringify(J.cuesHouyi, null, 2)],
+    [J.vocabName, JSON.stringify(J.vocab, null, 2)],
+    [J.quizName,  JSON.stringify(J.quiz, null, 2)],
+    [J.aiName,    JSON.stringify(J.ai, null, 2)]
+  ];
+  upMsg.textContent='上傳到 GitHub 中…';
+  for(const [name,content] of entries){
+    const fullPath = baseDir + name;
+    await ghPutFile(owner, repo, branch, fullPath, content, token, msg);
+  }
+  upMsg.innerHTML = '✅ 已上傳至 GitHub：<code>'+baseDir+'</code>';
+}
+
+document.getElementById('btnPreviewJson')?.addEventListener('click', showPreview);
+document.getElementById('btnClosePreview')?.addEventListener('click', hidePreview);
+document.getElementById('btnUploadGitHub')?.addEventListener('click', uploadAllToGitHub);
+</script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
