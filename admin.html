@@ -542,6 +542,97 @@
 })();
 </script>
 
+  <script>
+/** 你的 function 端點 */
+const EDGE_URL = "https://jeajrwpmrgczimmrflxo.functions.supabase.co/functions/v1/mt-translate";
+
+/** 呼叫 Edge Function：輸入英文陣列 → 回傳 { zh:[], ja:[] } */
+async function translateViaEdge(enLines) {
+  const res = await fetch(EDGE_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ lines: enLines })
+  });
+  const json = await res.json();
+  if (!json.ok) throw new Error(json.error || "Edge translation failed");
+  return { zh: json.zh || [], ja: json.ja || [] };
+}
+
+/** 示範：把 zh/ja 併回你現有的 cues 結構（依你既有格式調整） */
+function applyEdgeTranslationToCues(enLines, zh, ja) {
+  // 假設你原本 cues 每一行會做出：{ en: "....", zh: "", ja: "", ... }
+  // 這裡只示範資料合併，時間軸/其他欄位維持你原流程的生成規則。
+  return enLines.map((en, i) => ({
+    en: en || "",
+    zh: zh[i] || "",
+    ja: ja[i] || ""
+    // 其他欄位（例如 start, end, idx...）請沿用你既有的流程去補齊
+  }));
+}
+
+/** （可選）在你點「預覽 JSON（5 件）」之前，若「機翻」有勾選，就先翻完再進入你原本的產生流程 */
+(function hookPreviewIfEdgeMode() {
+  const previewBtn = Array.from(document.querySelectorAll('button, a'))
+    .find(el => (el.textContent || '').trim().startsWith('預覽 JSON'));
+  if (!previewBtn) return;
+
+  if (previewBtn.__bwBound) return;
+  previewBtn.__bwBound = true;
+
+  previewBtn.addEventListener('click', async (ev) => {
+    try {
+      // 判斷是否為「機翻（透過 Edge Function）」模式
+      const edgeMode = Array.from(document.querySelectorAll('input[type="radio"]'))
+        .find(r => (r.nextElementSibling?.textContent || '').includes('機翻'))?.checked;
+
+      if (!edgeMode) return; // 若不是機翻模式，照你原來流程
+
+      // 取得你目前已經讀入的英文字幕行（這一段請依你程式實際取值）
+      // 以下提供兩種範例取法，你擇一替換成你實際變數：
+      // 1) 若你把英文行放在全域變數 window.enLines：
+      let enLines = (window.enLines && Array.isArray(window.enLines)) ? window.enLines : null;
+
+      // 2) 或者你有把字幕純文字放在某個 textarea / preview DIV：
+      if (!enLines) {
+        const txt = document.querySelector('#subtitlePreview, textarea[name="raw_subs"]')?.value
+          || document.querySelector('#subtitlePreview')?.textContent || '';
+        if (txt) enLines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      }
+
+      if (!enLines || enLines.length === 0) {
+        // 無英文內容 → 讓原流程處理（或提醒）
+        return;
+      }
+
+      // 呼叫 Edge 機翻
+      previewBtn.disabled = true;
+      const original = previewBtn.textContent;
+      previewBtn.textContent = '機翻中…';
+
+      const { zh, ja } = await translateViaEdge(enLines);
+
+      // 合併成你 cues 需要的結構（時間軸/索引照原流程）
+      const cuesWithTris = applyEdgeTranslationToCues(enLines, zh, ja);
+
+      // 將結果暫存，交還你原本的「預覽 JSON 生成」程式使用
+      window.__edge_tris_cues = cuesWithTris;
+      // 你原本生成 cues 的地方，優先讀用 window.__edge_tris_cues（若存在）
+
+      // 恢復按鈕
+      previewBtn.textContent = original;
+      previewBtn.disabled = false;
+
+      // 讓原本 click 繼續（如果你的程式用 click 觸發產生器，這裡直接 return 交回流程即可）
+      // 若你的程式會中斷預設行為，請把上面 ev.preventDefault() 拿掉
+    } catch (err) {
+      previewBtn.disabled = false;
+      alert('機翻失敗：' + err);
+      console.error(err);
+    }
+  }, true);
+})();
+</script>
+
 </body>
 </html>
 
