@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>BookWide Admin · 三分頁 · v20251106-three-tabs-v3</title>
   <script type="module" src="./supa.js"></script>
+  <!-- 修正 UMD 連結空白 -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
   <style>
     :root{ --bg:#fff; --fg:#111; --muted:#6b7280; --line:#e5e7eb; --brand:#2563eb; --ok:#16a34a; --warn:#f59e0b; --card:#fafafa;}
@@ -207,7 +208,7 @@
 
   <footer style="padding:22px 20px;border-top:1px solid var(--line);text-align:center;color:#6b7280">BookWide Admin · v20251106-three-tabs-v3</footer>
 
-  <!-- Logic -->
+  <!-- 主邏輯（已改：測試 payload、預覽用批次機翻、移除 translateBatch） -->
   <script type="module">
     const ready = () => new Promise(r=>{ if (window.BW && window.BW.supa) return r(); const t=setInterval(()=>{ if(window.BW && window.BW.supa){clearInterval(t); r();}},50)});
     await ready();
@@ -255,21 +256,20 @@
     $('#btnRefresh').addEventListener('click',loadProfiles);
     $('#q').addEventListener('input',loadProfiles);
     loadProfiles();
-  </script>
 
-  <script>
-  (function(){
+    // ========== MP4 分頁輔助 ==========
+
     const qs=(s,r)=> (r||document).querySelector(s);
-    const $$=(s,r)=> Array.from((r||document).querySelectorAll(s));
+    const qsa=(s,r)=> Array.from((r||document).querySelectorAll(s));
     const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
     const b64=(s)=>btoa(unescape(encodeURIComponent(s)));
 
-    // Accordion behavior
-    $$('.acc .hd').forEach(hd=>{
+    // Accordion
+    qsa('.acc .hd').forEach(hd=>{
       hd.addEventListener('click',()=> hd.parentElement.classList.toggle('collapsed'));
     });
-    qs('#btnCollapseAll')?.addEventListener('click',()=> $$('.acc').forEach(a=>a.classList.add('collapsed')));
-    qs('#btnExpandAll')?.addEventListener('click',()=> $$('.acc').forEach(a=>a.classList.remove('collapsed')));
+    qs('#btnCollapseAll')?.addEventListener('click',()=> qsa('.acc').forEach(a=>a.classList.add('collapsed')));
+    qs('#btnExpandAll')?.addEventListener('click',()=> qsa('.acc').forEach(a=>a.classList.remove('collapsed')));
 
     // Functions base
     function computeFnBase(){
@@ -347,24 +347,17 @@
       return out;
     }
 
-    async function translateBatch(fn, texts, to){
-      const out=[];
-      for(const t of texts){
-        try{ const j=await callEdge(fn,{text:t,from:'en',to}); out.push(j?.text||''); }catch(e){ out.push(''); }
-        await sleep(120);
-      }
-      return out;
-    }
-
+    // 「測試」按鈕：改用 {lines:[...]}
     qs('#btnTestFn')?.addEventListener('click', async ()=>{
       const msg=qs('#fnMsg'); msg.textContent='測試中…';
       try{
         const fn=(qs('#edgeFn').value||'mt-translate').trim();
-        const j=await callEdge(fn,{text:'Hello',from:'en',to:'zh'});
-        msg.textContent = j?.text ? ('OK：'+j.text) : 'OK';
+        const j=await callEdge(fn,{ lines: ['Hello world'] });
+        msg.textContent = j?.ok ? ('OK：'+(j.result || 'Edge 連線成功')) : '失敗';
       }catch(e){ msg.textContent='失敗：'+(e.message||e); }
     });
 
+    // 預覽 JSON：改一次送陣列到 Edge 取得 zh/ja
     qs('#btnPreview')?.addEventListener('click', async ()=>{
       const cat=qs('#cat').value.trim(), slug=qs('#slug').value.trim(), title=qs('#title').value.trim();
       setSlugLabels(slug);
@@ -373,22 +366,20 @@
       let zhArr=[], jaArr=[];
 
       if(qs('#modeMT').checked && cuesEN.length){
-        const fn=(qs('#edgeFn').value||'mt-translate').trim();
         const enArr=cuesEN.map(x=>x.en);
-        try{ zhArr=await translateBatch(fn,enArr,'zh'); jaArr=await translateBatch(fn,enArr,'ja'); }
-        catch(e){ qs('#fnMsg').textContent='機翻失敗：'+(e.message||e); }
+        try{
+          // 利用末段 helper：translateViaEdge（一次回 zh/ja）
+          const { zh, ja } = await translateViaEdge(enArr);
+          zhArr = zh; jaArr = ja;
+        }catch(e){ qs('#fnMsg').textContent='機翻失敗：'+(e.message||e); }
       }
 
-      // build vocab 20
-      const vocab20 = buildVocabFromCues(cuesEN).map(v=>{
-        const zh = ''; const ja='';
-        return {...v, zh, ja};
-      });
+      // 20 詞彙
+      const vocab20 = buildVocabFromCues(cuesEN).map(v=>({ ...v, zh:'', ja:'' }));
 
       const index = { slug, title, video:`videos/${cat}/${slug}.mp4`, cover:`assets/${cat}/${slug}/cover.jpg`, category:cat, updatedAt:new Date().toISOString() };
       const topics = Array.from({length:20},(_,i)=>({title:`Topic ${i+1}`,prompt:"",hint:"",sample:""}));
       const quiz = { title:"Lesson", topics };
-      // fill cues with MT
       const cues = cuesEN.map((x,i)=>({...x, zh: zhArr[i]||x.zh||'', ja: jaArr[i]||x.ja||'' }));
       const ai = { tasks: Array.from({length:15},(_,i)=>({q:`Question ${i+1}`,a:""})) };
 
@@ -469,172 +460,28 @@
         st.textContent+='完成。';
       }catch(e){ st.textContent+=`[失敗] ${e.message||e}`; ghBar.style.width='0%'; ghPct.textContent='0%'; }
     });
-  })();
   </script>
 
-<script>
-(() => {
-  // 尋找「測試」按鈕（不要用 :contains）
-  function findTestButton() {
-    const candidates = Array.from(document.querySelectorAll('button, input[type="button"], input[type="submit"], a'));
-    return candidates.find(el => (el.textContent || el.value || '').trim() === '測試');
-  }
-
-  // 找 Edge Function 名稱輸入框（優先抓到值為 mt-translate 的那一格）
-  function findFuncInput() {
-    const inputs = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'));
-    return (
-      inputs.find(i => (i.value || '').trim() === 'mt-translate') ||
-      inputs.find(i => (i.placeholder || '').includes('mt-translate')) ||
-      inputs[0]
-    );
-  }
-
-  function attach() {
-    const btn = findTestButton();
-    const input = findFuncInput();
-    if (!btn || !input) return; // 等 DOM 再成熟一點再試
-
-    // 防止重複綁定
-    if (btn.__bwBound) return;
-    btn.__bwBound = true;
-
-    btn.addEventListener('click', async (ev) => {
-      ev.preventDefault();
-      const name = (input.value || 'mt-translate').trim() || 'mt-translate';
-      const url = `https://jeajrwpmrgczimmrflxo.functions.supabase.co/functions/v1/${encodeURIComponent(name)}`;
-
-      const original = btn.textContent || btn.value || '';
-      btn.disabled = true;
-      if ('textContent' in btn) btn.textContent = '測試中…'; else btn.value = '測試中…';
-
-      try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: 'Hello world' })
-        });
-        const json = await res.json().catch(() => ({}));
-        alert('✅ Edge Function 回傳：\n' + JSON.stringify(json, null, 2));
-        console.log('[BookWide][mt-translate] response:', json);
-      } catch (err) {
-        alert('❌ 連線失敗：' + err);
-        console.error('[BookWide][mt-translate] error:', err);
-      } finally {
-        btn.disabled = false;
-        if ('textContent' in btn) btn.textContent = original; else btn.value = original;
-      }
-    });
-  }
-
-  // 等 DOM 準備好後綁定，並且再嘗試幾次以避免延遲載入
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', attach);
-  } else {
-    attach();
-  }
-  // 再保險：稍後重試幾次（有些 UI 會晚一點才出現）
-  let tries = 0;
-  const timer = setInterval(() => {
-    attach();
-    if (++tries >= 6) clearInterval(timer);
-  }, 500);
-})();
-</script>
-
+  <!-- 批次機翻 Helper（保留；被預覽流程呼叫） -->
   <script>
-/** 你的 function 端點 */
-const EDGE_URL = "https://jeajrwpmrgczimmrflxo.functions.supabase.co/functions/v1/mt-translate";
+    /** 你的 function 端點（維持你專案的實際 URL） */
+    const EDGE_URL = "https://jeajrwpmrgczimmrflxo.functions.supabase.co/functions/v1/mt-translate";
 
-/** 呼叫 Edge Function：輸入英文陣列 → 回傳 { zh:[], ja:[] } */
-async function translateViaEdge(enLines) {
-  const res = await fetch(EDGE_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ lines: enLines })
-  });
-  const json = await res.json();
-  if (!json.ok) throw new Error(json.error || "Edge translation failed");
-  return { zh: json.zh || [], ja: json.ja || [] };
-}
-
-/** 示範：把 zh/ja 併回你現有的 cues 結構（依你既有格式調整） */
-function applyEdgeTranslationToCues(enLines, zh, ja) {
-  // 假設你原本 cues 每一行會做出：{ en: "....", zh: "", ja: "", ... }
-  // 這裡只示範資料合併，時間軸/其他欄位維持你原流程的生成規則。
-  return enLines.map((en, i) => ({
-    en: en || "",
-    zh: zh[i] || "",
-    ja: ja[i] || ""
-    // 其他欄位（例如 start, end, idx...）請沿用你既有的流程去補齊
-  }));
-}
-
-/** （可選）在你點「預覽 JSON（5 件）」之前，若「機翻」有勾選，就先翻完再進入你原本的產生流程 */
-(function hookPreviewIfEdgeMode() {
-  const previewBtn = Array.from(document.querySelectorAll('button, a'))
-    .find(el => (el.textContent || '').trim().startsWith('預覽 JSON'));
-  if (!previewBtn) return;
-
-  if (previewBtn.__bwBound) return;
-  previewBtn.__bwBound = true;
-
-  previewBtn.addEventListener('click', async (ev) => {
-    try {
-      // 判斷是否為「機翻（透過 Edge Function）」模式
-      const edgeMode = Array.from(document.querySelectorAll('input[type="radio"]'))
-        .find(r => (r.nextElementSibling?.textContent || '').includes('機翻'))?.checked;
-
-      if (!edgeMode) return; // 若不是機翻模式，照你原來流程
-
-      // 取得你目前已經讀入的英文字幕行（這一段請依你程式實際取值）
-      // 以下提供兩種範例取法，你擇一替換成你實際變數：
-      // 1) 若你把英文行放在全域變數 window.enLines：
-      let enLines = (window.enLines && Array.isArray(window.enLines)) ? window.enLines : null;
-
-      // 2) 或者你有把字幕純文字放在某個 textarea / preview DIV：
-      if (!enLines) {
-        const txt = document.querySelector('#subtitlePreview, textarea[name="raw_subs"]')?.value
-          || document.querySelector('#subtitlePreview')?.textContent || '';
-        if (txt) enLines = txt.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-      }
-
-      if (!enLines || enLines.length === 0) {
-        // 無英文內容 → 讓原流程處理（或提醒）
-        return;
-      }
-
-      // 呼叫 Edge 機翻
-      previewBtn.disabled = true;
-      const original = previewBtn.textContent;
-      previewBtn.textContent = '機翻中…';
-
-      const { zh, ja } = await translateViaEdge(enLines);
-
-      // 合併成你 cues 需要的結構（時間軸/索引照原流程）
-      const cuesWithTris = applyEdgeTranslationToCues(enLines, zh, ja);
-
-      // 將結果暫存，交還你原本的「預覽 JSON 生成」程式使用
-      window.__edge_tris_cues = cuesWithTris;
-      // 你原本生成 cues 的地方，優先讀用 window.__edge_tris_cues（若存在）
-
-      // 恢復按鈕
-      previewBtn.textContent = original;
-      previewBtn.disabled = false;
-
-      // 讓原本 click 繼續（如果你的程式用 click 觸發產生器，這裡直接 return 交回流程即可）
-      // 若你的程式會中斷預設行為，請把上面 ev.preventDefault() 拿掉
-    } catch (err) {
-      previewBtn.disabled = false;
-      alert('機翻失敗：' + err);
-      console.error(err);
+    /** 呼叫 Edge Function：輸入英文陣列 → 回傳 { zh:[], ja:[] } */
+    async function translateViaEdge(enLines) {
+      const res = await fetch(EDGE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lines: enLines })
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || "Edge translation failed");
+      return { zh: json.zh || [], ja: json.ja || [] };
     }
-  }, true);
-})();
-</script>
-
+  </script>
 </body>
 </html>
+
 
 
 
