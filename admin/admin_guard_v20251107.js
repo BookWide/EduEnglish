@@ -1,88 +1,82 @@
-// admin_guard_v20251107.js
-(function(){
-  function log(){ /* console.debug('[admin-guard]', ...arguments); */ }
-  function findAdminNode() {
-    // Prefer element with id="itm-admin"
-    var byId = document.getElementById("itm-admin");
-    if (byId) return byId;
 
-    // Otherwise, look for a menu item containing "Admin 主控台" (or "Admin")
-    var anchors = Array.from(document.querySelectorAll("a"));
-    for (var a of anchors) {
-      var txt = (a.textContent || "").trim();
-      if (txt.includes("Admin 主控台") || (/^Admin$/i).test(txt) || txt.includes("Admin")) {
-        // return the <li> if exists, otherwise the <a>
-        return a.closest("li") || a;
-      }
+/*! BookWide Admin Guard v2025-11-07b (id OR email) */
+(async () => {
+  const REDIRECT_LOGIN = '/EduEnglish/index.html?login=1&next=' + encodeURIComponent(location.pathname + location.search);
+  function show(blockHtml){
+    document.body.innerHTML = blockHtml;
+    document.documentElement.style.background = '#0f172a';
+  }
+  try{
+    // 1) Supabase client
+    let supa = window.supa || window.supabase;
+    if (!supa) {
+      const { createClient } = await import('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+      const SUPABASE_URL='https://jeajrwpmrgczimmrflxo.supabase.co';
+      const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+      supa = window.supa = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     }
-    return null;
-  }
 
-  function hide(node){
-    if (!node) return;
-    // remember previous style to allow restore
-    if (!node.__admin_guard_prev) node.__admin_guard_prev = node.style.display || "";
-    node.style.display = "none";
-  }
-  function show(node){
-    if (!node) return;
-    node.style.display = node.__admin_guard_prev || "";
-  }
+    // 2) session
+    const { data:{ session } } = await supa.auth.getSession();
+    const user = session?.user || null;
+    if (!user) {
+      location.replace(REDIRECT_LOGIN);
+      return;
+    }
 
-  async function check(){
+    const email = (user.email || '').trim();
+    const emailLower = email.toLowerCase();
+    const emailTypo = emailLower.replace('@gmail.com', '@gamil.com'); // 容錯：常見拼字
+
+    // 3) check by id
+    let isAdmin = false;
     try{
-      var node = findAdminNode();
-      if (!node) return; // nothing to manage
-
-      // Hide by default
-      hide(node);
-
-      // Get supabase client (support either global supa or supabase)
-      var client = (window.supa || window.supabase || null);
-      if (!client || !client.auth || !client.from) {
-        log('no supabase client -> keep hidden');
-        return;
+      const r1 = await supa.from('profiles')
+        .select('is_admin,email')
+        .eq('id', user.id)
+        .maybeSingle();
+      if (!r1.error && r1.data && (r1.data.is_admin === true)) {
+        isAdmin = true;
       }
-
-      // get current user
-      var auth = client.auth;
-      var userRes = await auth.getUser();
-      var user = (userRes && (userRes.user || userRes.data && userRes.data.user)) ? (userRes.user || userRes.data.user) : null;
-      if (!user) {
-        log('no user -> keep hidden');
-        return;
+      // 4) fallback by email (case-insensitive) if not admin yet
+      if (!isAdmin) {
+        const r2 = await supa
+          .from('profiles')
+          .select('is_admin')
+          .ilike('email', emailLower)
+          .maybeSingle();
+        if (!r2.error && r2.data && (r2.data.is_admin === true)) {
+          isAdmin = true;
+        }
       }
-
-      // query profiles.is_admin
-      var q = client.from("profiles").select("is_admin").eq("id", user.id);
-      // try maybeSingle/single compatibility
-      var rowRes;
-      if (typeof q.maybeSingle === "function") {
-        rowRes = await q.maybeSingle();
-      } else if (typeof q.single === "function") {
-        rowRes = await q.single();
-      } else {
-        // fallback: take first
-        var tmp = await q.limit(1);
-        rowRes = { data: (tmp && tmp.data && tmp.data[0]) || null, error: tmp && tmp.error };
+      // 5) extra fallback: gamil.com typo
+      if (!isAdmin && emailTypo !== emailLower) {
+        const r3 = await supa
+          .from('profiles')
+          .select('is_admin')
+          .eq('email', emailTypo)
+          .maybeSingle();
+        if (!r3.error && r3.data && (r3.data.is_admin === true)) {
+          isAdmin = true;
+        }
       }
+    }catch(e){ /* ignore, will show non-admin */ }
 
-      var row = (rowRes && (rowRes.data || rowRes.user)) ? rowRes.data : null;
-      if (row && (row.is_admin === true || row.is_admin === 'true' || row.is_admin === 1)) {
-        show(node);
-      } else {
-        hide(node);
-      }
-    } catch(e){
-      // keep hidden on any error
-      // console.warn('[admin-guard] error', e);
+    if (!isAdmin) {
+      show(`
+      <main style="max-width:900px;margin:48px auto;padding:24px;border-radius:14px;background:#0b1324;color:#eaf1ff;border:1px solid rgba(255,255,255,.12);font-family:system-ui, -apple-system, Segoe UI, Roboto, 'Noto Sans TC', Arial">
+        <h1 style="margin:0 0 12px">非管理員</h1>
+        <p style="opacity:.85">此頁僅限管理員瀏覽。若這是錯誤，請聯絡站長，或重新登入後再試。</p>
+        <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">
+          <a href="/EduEnglish/index.html" style="padding:10px 14px;border:1px solid #30415e;border-radius:10px;color:#eaf1ff;text-decoration:none">回首頁</a>
+          <a href="/EduEnglish/index.html?login=1" style="padding:10px 14px;border:1px solid #30415e;border-radius:10px;color:#eaf1ff;text-decoration:none">重新登入</a>
+          <a href="/EduEnglish/admin/index.html" style="padding:10px 14px;border:1px solid #30415e;border-radius:10px;color:#eaf1ff;text-decoration:none">Admin 首頁</a>
+        </div>
+      </main>`);
+      return;
     }
-  }
-
-  // run after DOM ready
-  if (document.readyState === 'loading'){
-    document.addEventListener('DOMContentLoaded', check);
-  } else {
-    check();
+    // admin OK → let original page render
+  }catch(e){
+    console.error('[AdminGuard] error:', e);
   }
 })();
