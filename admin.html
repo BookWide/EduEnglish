@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-Hant">
-<meta name="bw-fn-base" content="https://bookwide.functions.supabase.co/functions/v1">
+<meta name="bw-fn-base" content="https://jeajrwpmrgczimmrflxo.functions.supabase.co/functions/v1">
 
 
 <head>
@@ -289,6 +289,9 @@
     async function callEdge(fn, payload){
       const base = computeFnBase();
       if(!base){ throw new Error('未偵測到 Supabase Functions 端點'); }
+
+    // 讓補丁可使用全域 callEdge
+    window.callEdge = callEdge;
       const url = `${base}/${fn}`;
       const headers={'Content-Type':'application/json'};
       try{
@@ -372,7 +375,13 @@
         const enArr=cuesEN.map(x=>x.en);
         try{
           // 利用末段 helper：translateViaEdge（一次回 zh/ja）
-          const { zh, ja } = await translateViaEdge(enArr);
+          let zhArr = [], jaArr = [];
+          try {
+            const j = await (window.BW_EDGE && window.BW_EDGE.translate ? window.BW_EDGE.translate(enArr, ['zh','ja']) : Promise.resolve({}));
+            zhArr = (j && j.results ? (j.results.find(r=>r.lang==='zh')?.lines||[]) : (j.zh||[]));
+            jaArr = (j && j.results ? (j.results.find(r=>r.lang==='ja')?.lines||[]) : (j.ja||[]));
+          } catch(_e) { /* 靜默：可於右上測試鈕檢查 */ }
+
           zhArr = zh; jaArr = ja;
         }catch(e){ qs('#fnMsg').textContent='機翻失敗：'+(e.message||e); }
       }
@@ -412,14 +421,32 @@
       const st=qs('#supaStatus'); st.textContent='';
       const cat=qs('#cat').value.trim(), slug=qs('#slug').value.trim();
       const mp4=qs('#mp4File').files[0], cover=qs('#coverFile').files[0];
-      if(!mp4){ st.textContent='[錯誤] 請先選擇 MP4 檔。'; return; }
+      if(!mp4 && !cover){ st.textContent='[錯誤] 請至少選擇「影片或封面」其一。'; return; }
       const c=getClient(); if(!c){ st.textContent='[錯誤] 找不到 Supabase 連線（BW.supa 或手動 URL/KEY）。'; return; }
       const vBucket=qs('#bucketVideo').value.trim()||'videos', aBucket=qs('#bucketAsset').value.trim()||'assets';
       try{
-        setProgress(supaBar,supaPct,10); st.textContent+='[1/2] 上傳影片中...\n';
-        const vUrl=await supaUpload(vBucket, `${cat}/${slug}.mp4`, mp4, c);
-        st.textContent+=`    影片 URL → ${vUrl}\n`; setProgress(supaBar,supaPct,70);
-        let cUrl=''; if(cover){ st.textContent+='[2/2] 上傳封面中...\n'; cUrl=await supaUpload(aBucket, `${cat}/${slug}/cover.jpg`, cover, c); st.textContent+=`    封面 URL → ${cUrl}\n`; } else { st.textContent+='[2/2] 未選封面，略過。\n'; }
+        let steps = (mp4?1:0) + (cover?1:0);
+        let done = 0;
+        let vUrl = '', cUrl = '';
+        if(mp4){
+          setProgress(supaBar,supaPct,Math.max(10, Math.round(done/steps*100)));
+          st.textContent += `[${done+1}/${steps}] 上傳影片中...\n`;
+          vUrl = await supaUpload(vBucket, `${cat}/${slug}.mp4`, mp4, c);
+          st.textContent += `    影片 URL → ${vUrl}\n`;
+          done++;
+          setProgress(supaBar,supaPct,Math.min(90, Math.round(done/steps*100)));
+        } else {
+          st.textContent += `[略過] 未選影片，跳過影片上傳。\n`;
+        }
+        if(cover){
+          setProgress(supaBar,supaPct,Math.max(10, Math.round(done/steps*100)));
+          st.textContent += `[${done+1}/${steps}] 上傳封面中...\n`;
+          cUrl = await supaUpload(aBucket, `${cat}/${slug}/cover.jpg`, cover, c);
+          st.textContent += `    封面 URL → ${cUrl}\n`;
+          done++;
+        } else {
+          st.textContent += `[略過] 未選封面，跳過封面上傳。\n`;
+        }
         setProgress(supaBar,supaPct,100);
         if(qs('#boxIndex').value){ try{ const idx=JSON.parse(qs('#boxIndex').value); if(vUrl) idx.video=vUrl; if(cUrl) idx.cover=cUrl; qs('#boxIndex').value=JSON.stringify(idx,null,2);}catch(e){} }
         st.textContent+='完成。';
@@ -465,36 +492,6 @@
     });
   </script>
 
-  <!-- 批次機翻 Helper（保留；被預覽流程呼叫） -->
-  <script>
-    
-  /** 你的 function 端點（維持你專案的實際 URL） */
-  const EDGE_URL = "https://jeajrwpmrgczimmrflxo.functions.supabase.co/functions/v1/mt-translate";
-
-  /** 呼叫 Edge Function：輸入英文陣列 -> 回傳 { zh:[], ja:[] } */
-  async function translateViaEdge(enLines) {
-    const res = await fetch(EDGE_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Accept": "application/json"            // ←① 新增這行
-      },
-      body: JSON.stringify({
-        lines: enLines,
-        to: ["zh", "ja"]                         // ←② 新增這行（一定要有）
-      })
-    });
-    const json = await res.json();
-    if (!json.ok) throw new Error(json.error || "Edge translation failed");
-    // 你的 Edge 目前回傳 results 陣列；這裡轉成 { zh:[], ja:[] } 方便後面使用
-    const zh = (json.results?.find(r => r.lang === "zh")?.lines) || [];
-    const ja = (json.results?.find(r => r.lang === "ja")?.lines) || [];
-    return { zh, ja };
-  }
-</script>
-
-  </script>
-
 <!-- BW Single-Edge Final v20251108: force single mt-translate -->
 <script>
 (function(){
@@ -527,7 +524,7 @@
           }
         } catch(e){}
       }
-      if (!base) throw new Error('未偵測到 Functions 端點，請在 <head> 放入 <meta name="bw-fn-base" content="https://.../functions/v1">');
+      if (!base) throw new Error('未偵測到 Functions 端點，請在 <head> 放入 <meta name="bw-fn-base" content="https://jeajrwpmrgczimmrflxo.functions.supabase.co/functions/v1">');
       const url = base.replace(/\/+$/,'') + '/' + window.MT_FN;
       const res = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ lines: Array.isArray(lines)?lines:[], to: to||['zh','ja'] }) });
       const j = await res.json().catch(()=>({}));
@@ -542,6 +539,532 @@
 
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
