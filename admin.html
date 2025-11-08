@@ -480,6 +480,158 @@
     }
   </script>
 
+  <script>
+/* -------------------- BookWide Admin: Single Edge Fix (v20251108) -------------------- *
+ * 目標：
+ * 1) 只留一組 Edge 機翻：固定 function 名稱為 'mt-translate' 並鎖定為唯讀
+ * 2) 正確組出 endpoint：{base}/mt-translate   （base 來自你畫面上「Functions 連線：」那串）
+ * 3) 修正回傳解析：兼容 {results:[...]} 或 {data:{results:[...]}}
+ * 4) 將結果回填 zh/ja（呼叫既有的寫入程式；若無就回傳給既有流程）
+ * ------------------------------------------------------------------------------------- */
+
+(function () {
+  // 讓「Edge Function 名稱」只剩一組且固定為 mt-translate
+  const efInput =
+    document.querySelector('#edge-fn-name') ||
+    document.querySelector('input[name="edge-fn-name"]') ||
+    // 後備：找標籤文字「Edge Function 名稱」附近的 input
+    Array.from(document.querySelectorAll('label,div,span')).reduce((found, el) => {
+      if (found) return found;
+      const t = (el.textContent || '').trim();
+      if (/^Edge Function 名稱/.test(t)) {
+        const inp = el.parentElement && el.parentElement.querySelector('input');
+        return inp || null;
+      }
+      return null;
+    }, null);
+
+  if (efInput) {
+    efInput.value = 'mt-translate';
+    efInput.readOnly = true;
+    efInput.setAttribute('aria-readonly', 'true');
+    efInput.title = '固定使用 mt-translate（已鎖定）';
+  }
+
+  // 解析畫面上的「Functions 連線： https://xxxx.functions.supabase.co」
+  function detectFunctionsBase() {
+    // 1) 先找明確的 data- 屬性
+    const el = document.querySelector('[data-fn-base]');
+    if (el && (el.value || el.textContent)) {
+      return String(el.value || el.textContent).trim();
+    }
+    // 2) 找所有文字/連結裡第一個 *.functions.supabase.co
+    const nodes = Array.from(document.querySelectorAll('a, code, pre, input, textarea, div, span'));
+    for (const n of nodes) {
+      const raw = (n.value ?? n.textContent ?? '').trim();
+      const m = raw.match(/https:\/\/[a-z0-9\-\.]+functions\.supabase\.co/);
+      if (m) return m[0];
+    }
+    return '';
+  }
+
+  function buildEndpoint() {
+    const base = (detectFunctionsBase() || '').replace(/\/+$/, '');
+    const name = 'mt-translate';
+    return base ? `${base}/${name}` : '';
+  }
+
+  // 單一機翻呼叫：只打到 {base}/mt-translate
+  async function callEdgeTranslateSingle(lines, to) {
+    const url = buildEndpoint();
+    if (!url) throw new Error('找不到 Functions 連線 base（*.functions.supabase.co）。');
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ lines, to })
+    });
+
+    // 允許 200 / 非 200 都嘗試讀 JSON，回傳錯誤訊息更友善
+    let data = null;
+    try { data = await res.json(); } catch (e) {
+      throw new Error(`Edge 回應非 JSON（HTTP ${res.status}）`);
+    }
+    if (!res.ok) {
+      const msg = data?.error?.message || data?.message || JSON.stringify(data);
+      throw new Error(`Edge 失敗（HTTP ${res.status}）：${msg}`);
+    }
+
+    // ★★ 關鍵修正：兼容兩種回傳格式
+    const results = data?.results || data?.data?.results || [];
+    if (!Array.isArray(results)) {
+      throw new Error('Edge 回傳結構無 results 陣列。');
+    }
+    return { ok: true, input: data?.input ?? lines, results, usage: data?.usage, price: data?.price, totalUSD: data?.totalUSD, totalTWD: data?.totalTWD };
+  }
+
+  // 對外只暴露這個單一呼叫（覆蓋舊的多組/測試用呼叫）
+  window.BookWide = window.BookWide || {};
+  window.BookWide.callEdgeTranslate = callEdgeTranslateSingle;
+
+  // 若頁面上有「Edge 翻譯測試」按鈕（文字搜尋），掛上單一呼叫流程
+  const testBtn = Array.from(document.querySelectorAll('button, a'))
+    .find(b => /Edge\s*翻譯測試/.test((b.textContent || '').trim()));
+
+  if (testBtn && !testBtn.dataset.singleEdgeBound) {
+    testBtn.dataset.singleEdgeBound = '1';
+    testBtn.addEventListener('click', async (e) => {
+      try {
+        // 你的頁面本來就會先把字幕檔轉成 English 行陣列
+        // 這裡盡量沿用舊邏輯：若全域有 lines 就直接用，否則讓既有程式處理
+        const lines = window.subtitleLines || window.lines || [];
+        if (!Array.isArray(lines) || !lines.length) {
+          // 交還給既有流程（如果你原本綁定了 handler）
+          if (typeof window.handleEdgeTest === 'function') return window.handleEdgeTest(e);
+          alert('找不到要翻譯的英文行（請先選字幕檔）。');
+          return;
+        }
+
+        // 只打一個 Edge，語言固定 zh/ja
+        const { results } = await callEdgeTranslateSingle(lines, ['zh', 'ja']);
+
+        // 嘗試回填（若你原本有回填函式就沿用）
+        if (typeof window.fillZhJaIntoPreview === 'function') {
+          window.fillZhJaIntoPreview(results);
+        } else {
+          // 通用：把 zh/ja 寫回一個暫存變數，供後續「預覽 JSON」使用
+          window._bw_edge_results = results;
+        }
+
+        // UI 提示
+        const box = document.querySelector('#edge-log') || document.querySelector('.edge-log');
+        if (box) {
+          const zhCount = results.find(r => r.lang === 'zh')?.lines?.length ?? 0;
+          const jaCount = results.find(r => r.lang === 'ja')?.lines?.length ?? 0;
+          box.textContent = `✓ Edge 成功\n— 原始行數：${lines.length}\n— zh 前 ${Math.min(2, zhCount)} 行\n— ja 前 ${Math.min(2, jaCount)} 行`;
+        } else {
+          console.log('[BookWide] Edge 成功：', results);
+        }
+      } catch (err) {
+        alert(`[Edge] ${err.message || err}`);
+        console.error(err);
+      }
+    });
+  }
+
+  // 若你的「預覽 JSON」按鈕會組 cues/vocab/quiz，且可讀到 window._bw_edge_results，
+  // 就能把 zh/ja 一併塞進去（不改你原本組裝，只補齊 zh/ja）。
+  window.BookWide.mergeEdgeResultIntoCues = function (cues) {
+    const results = window._bw_edge_results;
+    if (!Array.isArray(cues) || !Array.isArray(results)) return cues;
+
+    const zh = results.find(r => r.lang === 'zh')?.lines || [];
+    const ja = results.find(r => r.lang === 'ja')?.lines || [];
+
+    for (let i = 0; i < cues.length; i++) {
+      if (typeof cues[i] !== 'object') continue;
+      cues[i].zh = cues[i].zh ?? (zh[i] ?? '');
+      cues[i].ja = cues[i].ja ?? (ja[i] ?? '');
+    }
+    return cues;
+  };
+})();
+</script>
+
 </body>
 </html>
 
