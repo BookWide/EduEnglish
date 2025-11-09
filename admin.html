@@ -609,6 +609,258 @@ async function ghPut({owner,repo,branch,token,path,content,message}){
 })();
 </script>
 
+  <script type="module">
+/* ---------------------------------------------------------
+ * BookWide Admin – 自動產生五份 JSON（含 OpenAI 機翻）
+ * 版本：v2025-11-10-mt-final
+ * 只依賴你的 Edge Function: /functions/v1/mt-translate
+ * --------------------------------------------------------- */
+
+const MT_URL = "https://jeajrwpmrgczimmrflxo.functions.supabase.co/functions/v1/mt-translate";
+/* 你可以保留上面這行或改成從輸入框讀取 */
+
+const ui = {
+  // 你現有的 textarea / 輸出容器，若 id 不同可自行改名
+  cues:   document.querySelector('#out-cues')    || document.querySelector('[data-name="cues"]'),
+  vocab:  document.querySelector('#out-vocab')   || document.querySelector('[data-name="vocab"]'),
+  quiz:   document.querySelector('#out-quiz')    || document.querySelector('[data-name="quiz"]'),
+  ai:     document.querySelector('#out-ai')      || document.querySelector('[data-name="ai"]'),
+  index:  document.querySelector('#out-index')   || document.querySelector('[data-name="index"]'),
+  log:    document.querySelector('#out-log')     || document.querySelector('[data-name="log"]')
+};
+
+function logln(msg) {
+  if (!ui.log) return;
+  const t = typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2);
+  ui.log.value = (ui.log.value || '') + t + '\n';
+}
+
+async function translateLines(enLines, to = ['zh','ja']) {
+  const resp = await fetch(MT_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lines: enLines, to })
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok || !data.ok) {
+    throw new Error(data?.error?.message || `HTTP ${resp.status}`);
+  }
+  // 最簡對接：直接拿 data.zh / data.ja
+  return { zh: data.zh || [], ja: data.ja || [], input: data.input || enLines };
+}
+
+/* -------------------- 工具：時間字串 -------------------- */
+function secToClock(s) {
+  s = Math.max(0, Math.round(Number(s) || 0));
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
+/* -------------------- 產生 cues（三語字幕） -------------------- */
+/** @param {Array<{time:string,en:string}>} enCues */
+async function buildCues(enCues) {
+  const enLines = enCues.map(x => x.en || "");
+  const { zh, ja } = await translateLines(enLines);
+  const cues = enCues.map((row, i) => ({
+    time: row.time,
+    en: row.en || "",
+    zh: zh[i] || row.en || "",
+    ja: ja[i] || row.en || ""
+  }));
+  return cues;
+}
+
+/* -------------------- 產生 vocab（20詞） -------------------- */
+/** 從字幕挑 20 個常見詞（很簡單的示意規則，你可換自己的抽詞邏輯） */
+function pickTopWords(enCues, n = 20) {
+  const txt = enCues.map(x => x.en).join(' ').toLowerCase();
+  const bag = Object.create(null);
+  txt.replace(/[a-zA-Z']+/g, w => {
+    if (w.length < 2) return '';
+    bag[w] = (bag[w] || 0) + 1;
+    return '';
+  });
+  const stop = new Set(['the','a','an','to','and','is','are','am','of','in','on','at','for','it','this','that','you','i','we','they','he','she','be','with']);
+  return Object.entries(bag)
+    .filter(([w]) => !stop.has(w))
+    .sort((a,b) => b[1]-a[1])
+    .slice(0, n)
+    .map(([w]) => w);
+}
+
+async function buildVocab(enCues, wordsEn) {
+  // 例句：就用「第一個含該詞的字幕行」當 example_en
+  const examplesEn = wordsEn.map(w => (enCues.find(x => new RegExp(`\\b${w}\\b`, 'i').test(x.en))?.en) || '');
+  const trWords   = await translateLines(wordsEn);
+  const trExs     = await translateLines(examplesEn);
+
+  const vocab = {
+    words: wordsEn.map((en, i) => ({
+      en,
+      zh: trWords.zh[i] || en,
+      ja: trWords.ja[i] || en,
+      def_en: "",                    // 若要英文字典可在這裡再做
+      example_en: examplesEn[i] || "",
+      example_zh: trExs.zh[i] || (examplesEn[i] || ""),
+      example_ja: trExs.ja[i] || (examplesEn[i] || "")
+    }))
+  };
+  return vocab;
+}
+
+/* -------------------- 產生 quiz（固定 20×4 類 = 80 題） -------------------- */
+function buildQuiz(enCues, vocab) {
+  // 範例：四種題型示意（你可替換為你既有規則）
+  const pick = (arr, n) => arr.slice(0, n);
+  const words = vocab.words.map(w => w.en);
+
+  const Q = [];
+
+  // 1) 單字中譯（20）
+  pick(vocab.words, 20).forEach((w,i) => {
+    Q.push({
+      type: "word_zh",
+      q: `「${w.en}」的中文是？`,
+      a: w.zh, choices: shuffleUnique([w.zh, ...randFrom(vocab.words, 3).map(x=>x.zh)]),
+      ref: w.example_en || ""
+    });
+  });
+  // 2) 單字日譯（20）
+  pick(vocab.words, 20).forEach((w,i) => {
+    Q.push({
+      type: "word_ja",
+      q: `「${w.en}」的日文是？`,
+      a: w.ja, choices: shuffleUnique([w.ja, ...randFrom(vocab.words, 3).map(x=>x.ja)]),
+      ref: w.example_en || ""
+    });
+  });
+  // 3) 句子中譯（20）
+  pick(enCues, 20).forEach(row => {
+    Q.push({
+      type: "sent_zh",
+      q: `下列英文的中文：\n${row.en}`,
+      a: row.zh || "",
+      choices: shuffleUnique([row.zh, ...randFrom(enCues, 3).map(x=>x.zh || "")])
+    });
+  });
+  // 4) 句子日譯（20）
+  pick(enCues, 20).forEach(row => {
+    Q.push({
+      type: "sent_ja",
+      q: `下列英文的日文：\n${row.en}`,
+      a: row.ja || "",
+      choices: shuffleUnique([row.ja, ...randFrom(enCues, 3).map(x=>x.ja || "")])
+    });
+  });
+
+  return { questions: Q };
+
+  function shuffleUnique(list){
+    const a = [...new Set(list.filter(Boolean))];
+    for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; }
+    return a.slice(0,4);
+  }
+  function randFrom(arr, n){
+    const idx = Array.from({length: arr.length}, (_,i)=>i);
+    for(let i=idx.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [idx[i],idx[j]]=[idx[j],idx[i]]; }
+    return idx.slice(0,n).map(i=>arr[i]);
+  }
+}
+
+/* -------------------- 產生 AI（固定 15 題模板） -------------------- */
+function buildAI(enCues, vocab) {
+  // 單純給出 15 個練習任務；你可以換成你的既有題庫格式
+  const tasks = [];
+  const take = (arr, n) => arr.slice(0, n);
+
+  take(vocab.words, 5).forEach(w => {
+    tasks.push({
+      kind: "word_explain",
+      prompt: `請用中文解釋英文字「${w.en}」，並各舉 1 個中/日例句。`
+    });
+  });
+  take(enCues, 5).forEach(s => {
+    tasks.push({
+      kind: "sentence_rewrite",
+      prompt: `請將這句英文改寫成 2 種更自然的說法，並各附中/日對譯：\n${s.en}`
+    });
+  });
+  tasks.push({ kind: "role_speaking", prompt: "請扮演英語會話老師，設計 3 段含本課單字的對話（含中/日對照）。" });
+  tasks.push({ kind: "listening_tips", prompt: "請提出 5 個針對本課音檔的聽力技巧與注意事項（中/日皆可讀）。" });
+  tasks.push({ kind: "quiz_mix", prompt: "請用本課單字與句子，產出 5 題混合選擇題（附中/日翻譯與解析）。" });
+
+  // 補足到 15
+  while (tasks.length < 15) {
+    tasks.push({ kind: "free_talk", prompt: "請就本課主題出 3 個開放口說題，附中/日提示。" });
+  }
+  return { tasks };
+}
+
+/* -------------------- 產生 index.json -------------------- */
+/** @param {{category:string, slug:string, title:string, cover:string, video:string}} meta */
+function buildIndex(meta) {
+  return {
+    category: meta.category, // story/music/movie/news/pro
+    slug:     meta.slug,     // e.g., applesong
+    title:    meta.title,
+    cover:    meta.cover,    // Supabase Storage public URL
+    video:    meta.video,    // Supabase Storage public URL
+    updatedAt: new Date().toISOString()
+  };
+}
+
+/* -------------------- 綁定「一鍵產生」 -------------------- */
+/* 你原本應已有「預覽/上傳」按鈕；這裡僅示意綁一個總流程函式 */
+window.generateAllJSON = async function generateAllJSON(enCues, meta) {
+  /**
+   * enCues 形如：
+   * [ { time:"00:00", en:"..." }, { time:"00:04", en:"..." }, ... ]
+   * meta 形如：
+   * { category:"music", slug:"applesong", title:"Apple Song", cover:"...", video:"..." }
+   */
+  try {
+    logln("== 開始產生 JSON ==");
+    // 1) 三語字幕
+    const cues = await buildCues(enCues);
+    // 2) vocab 20詞
+    const top20 = pickTopWords(cues.map(x => ({ en: x.en })));
+    const vocab = await buildVocab(cues, top20);
+    // 3) quiz 80 題
+    const quiz = buildQuiz(cues, vocab);
+    // 4) AI 15 題模板
+    const ai = buildAI(cues, vocab);
+    // 5) index
+    const index = buildIndex(meta);
+
+    // 寫到輸出區域
+    if (ui.cues)  ui.cues.value  = JSON.stringify(cues,  null, 2);
+    if (ui.vocab) ui.vocab.value = JSON.stringify(vocab, null, 2);
+    if (ui.quiz)  ui.quiz.value  = JSON.stringify(quiz,  null, 2);
+    if (ui.ai)    ui.ai.value    = JSON.stringify(ai,    null, 2);
+    if (ui.index) ui.index.value = JSON.stringify(index, null, 2);
+
+    logln("== 全部完成 ✅ ==");
+    return { cues, vocab, quiz, ai, index };
+  } catch (e) {
+    console.error(e);
+    logln(`❌ 產生失敗：${e.message || e}`);
+    alert(`產生失敗：${e.message || e}`);
+    throw e;
+  }
+};
+
+/* 範例：如果你要從「純英文逐行 + 每4秒一行」快速做 enCues，可用： */
+window.buildCuesFromLines = function(lines, stepSec = 4){
+  const out = [];
+  for (let i=0;i<lines.length;i++){
+    out.push({ time: secToClock(i*stepSec), en: (lines[i]||"").trim() });
+  }
+  return out;
+};
+
+</script>
+
 </body>
 </html>
 
