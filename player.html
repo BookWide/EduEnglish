@@ -180,11 +180,11 @@ tr.active{background:#173a6e}
         <div class="pane" id="pane-ai" style="display:none">
           <div class="pane-ai" style="padding:10px">
             <div class="ai-row" style="margin:6px 0 10px">
-              <span class="muted">允許麥克風後可進行口說練習（建議 Chrome / Edge）。網址帶 <code>?</code></span>
+              <span class="muted">允許麥克風後可進行口說練習（建議 Chrome / Edge）。網址帶 <code></code></span>
             </div>
             <div class="ai-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <select id="aiTopic" class="btn" style="min-width:200px"></select>
-              <button id="btnPrevTopic" class="btn">◀ 上一題</button> <button id="aiLangToggle" class="btn">顯示：英文</button> <button id="aiSpeakEN" class="btn" onclick="speakAIText('en-US')">🔊 英朗讀</button> <button id="aiSpeakJA" class="btn" onclick="speakAIText('ja-JP')">🔊 日朗讀</button> <button id="aiSpeakZH" class="btn" onclick="speakAIText('zh-TW')">🔊 中朗讀</button>
+              <button id="btnPrevTopic" class="btn">◀ 上一題</button>
               <button id="btnNextTopic" class="btn">下一題 ▶</button>
               <button id="btnTts" class="btn">🔈 朗讀</button>
               <button id="btnRec" class="btn">🎙️ 開始說</button>
@@ -222,7 +222,48 @@ const esc=s=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replac
 
 const BASE='/EduEnglish';
 const params=new URLSearchParams(location.search);
-const <trySources.length-1){ i++; setSrc(i); } },{passive:true});
+const cat=(params.get('cat')||'story').toLowerCase();
+const primarySlug=params.get('slug')||'mid-autumn';
+let slug=primarySlug;
+// --- Supabase public Storage bases ---
+const SUPA_PUBLIC_BASE = 'https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public';
+const SUPA_VIDEOS_BASE = SUPA_PUBLIC_BASE + '/videos';
+const SUPA_ASSETS_BASE = SUPA_PUBLIC_BASE + '/assets';
+
+
+const video=$('#player'); const cuesBody=$('#cuesBody'); const cuesStatus=$('#cuesStatus');
+const btnPrev=$('#btnPrev'),btnPlay=$('#btnPlay'),btnNext=$('#btnNext'),btnReplay=$('#btnReplay');
+const btnOffsetMinus=$('#btnOffsetMinus'),btnOffsetPlus=$('#btnOffsetPlus'),offsetVal=$('#offsetVal');
+const chkFollow=$('#chkFollow'); const speedRange=$('#speedRange'),speedVal=$('#speedVal');
+const btnPrint=$('#btnPrint'); const paneSub=$('#pane-sub'),paneQuiz=$('#pane-quiz'),paneVocab=$('#pane-vocab');
+
+let cues=[]; let offset=0; let loopSentence=false;
+function setOffset(v){offset=Number(v)||0; offsetVal.textContent=`${offset.toFixed(1)}s`; localStorage.setItem(`offset:${slug}`,String(offset));}
+window.player={ setOffset, clearRepeat:()=>{ loopSentence=false; btnReplay?.classList.remove('blue'); } };
+
+/* ---------- smart fetcher: try cat folder -> legacy root -> story fallback ---------- */
+async function fetchJSONMulti(paths, kind){
+  for(const p of paths){
+    try{ const r=await fetch(p,{cache:'no-store'}); if(r.ok){ return {data:await r.json(), used:p}; } }catch{}
+  }
+  console.error(`[fatal] ${kind} 讀取失敗`, paths);
+  return {data:null, used:'error'};
+}
+
+/* ---------- video ---------- */
+async function loadVideo(){
+  const trySources=[
+    // 1) Supabase Storage (preferred)
+    `${SUPA_VIDEOS_BASE}/${cat}/${primarySlug}.mp4`,
+    // 2) GitHub fallbacks
+    `${BASE}/videos/${cat}/${primarySlug}.mp4`,
+    `${BASE}/videos/${primarySlug}.mp4`,
+    `${BASE}/videos/story/mid-autumn.mp4`
+  ];
+  let i=0;
+  function setSrc(idx){ video.src=trySources[idx]; }
+  setSrc(0);
+  video.addEventListener('error',()=>{ if(i<trySources.length-1){ i++; setSrc(i); } },{passive:true});
 }
 
 
@@ -391,64 +432,6 @@ function renderQuiz(list){
   });
   document.getElementById('btnPrint')?.addEventListener('click',()=>window.print());
 }
-
-/* ---------- ai (JA toggle) ---------- */
-async function loadAI(){
-  const aiMeta = document.getElementById('aiMeta');
-  if(aiMeta) aiMeta.textContent='（AI 載入中…）';
-  const url = `${BASE}/data/${cat}/${primarySlug}/ai-${primarySlug}.json?v=${Date.now()}`;
-  let data=null;
-  try{
-    const r=await fetch(url,{cache:'no-store'});
-    if(r.ok){ data=await r.json(); }
-  }catch{}
-  if(!data){ if(aiMeta) aiMeta.textContent='❌ AI 題庫讀取失敗'; return; }
-  if(aiMeta) aiMeta.textContent=`已載入：${url}`;
-
-  const topics = Array.isArray(data.topics) ? data.topics : data; // 支援 [ {title,prompt,...} ] 或 {topics:[...]}
-  const sel = document.getElementById('aiTopic');
-  sel.innerHTML = topics.map((t,i)=>`<option value="${i}">${esc(t.title||('Topic '+(i+1)))}</option>`).join('');
-
-  // 語言切換
-  const langBtn = document.getElementById('aiLangToggle');
-  let useJA = false;
-  langBtn?.addEventListener('click', ()=>{
-    useJA = !useJA;
-    langBtn.textContent = useJA ? '顯示：日文' : '顯示：英文';
-    render(+sel.value);
-  });
-
-  function render(idx){
-    const t = topics[idx]||{};
-    const prompt = useJA && t.ja && t.ja.prompt ? t.ja.prompt : (t.prompt||'');
-    const hint   = useJA && t.ja && t.ja.hint   ? t.ja.hint   : (t.hint||'');
-    const sample = useJA && t.ja && t.ja.sample ? t.ja.sample : (t.sample||'');
-    document.getElementById('aiPrompt').value = prompt;
-    document.getElementById('aiHint').textContent = hint ? `提示：${hint}` : '';
-    document.getElementById('aiSample').textContent = sample || '';
-  }
-
-  sel.addEventListener('change', ()=>render(+sel.value));
-  render(0);
-}
-
-/* ---------- ai: speech synth ---------- */
-function speakAIText(lang){
-  try{
-    const txt = (document.getElementById('aiPrompt')?.value || '').trim();
-    if(!txt){ return; }
-    const u = new SpeechSynthesisUtterance(txt);
-    u.lang = lang || 'en-US';
-    // Prefer a Japanese voice when ja-JP requested (best-effort)
-    if(lang==='ja-JP'){
-      const vs = speechSynthesis.getVoices();
-      const pick = vs.find(v=>/ja-JP/i.test(v.lang)) || vs.find(v=>/ja/i.test(v.lang));
-      if(pick) u.voice = pick;
-    }
-    speechSynthesis.cancel();
-    speechSynthesis.speak(u);
-  }catch(e){ console.warn('[AI speak] failed', e); }
-}
 /* ---------- controls ---------- */
 const videoEl = document.getElementById('player');
 speedRange.addEventListener('input',()=>{ const r=Number(speedRange.value)||1; videoEl.playbackRate=r; speedVal.textContent=`${r.toFixed(2)}x`; });
@@ -587,73 +570,30 @@ async function loadAI(){
   let idx = 0;
   function currentList(){ return groups[topic]||[]; }
   function show(){
-    const list = currentList();
-    const total = list.length;
-    if(!total){
-      promptBox.value = '';
-      hintEl.textContent = '—';
-      prog.textContent = '第 0/0 題';
-      return;
-    }
-    const it = list[idx];
-    promptBox.value = it.question || '';
-    hintEl.textContent = it.hint || '—';
-    replyEl.textContent = it.sample || '';
-    prog.textContent = `第 ${idx+1}/${total} 題`;
+  const list = currentList();
+  const total = list.length;
+  if(!total){
+    promptBox.value = '';
+    hintEl.textContent = '—';
+    replyEl.textContent = '';
+    prog.textContent = '第 0/0 題';
+    return;
   }
+  const it = list[idx] || {};
+  const enQ = it.question || it.prompt || '';
+  const enHint = it.hint || '—';
+  const enSample = it.sample || '';
 
-  sel.addEventListener('change',()=>{
-    topic = decodeURIComponent(sel.value||topics[0]);
-    idx = 0;
-    show();
-  });
-  btnPrev.addEventListener('click',()=>{
-    const total = currentList().length;
-    if(!total) return;
-    idx = (idx - 1 + total) % total;
-    show();
-  });
-  btnNext.addEventListener('click',()=>{
-    const total = currentList().length;
-    if(!total) return;
-    idx = (idx + 1) % total;
-    show();
-  });
+  const jp = it.ja || {};
+  const jaQ = jp.prompt ? `\n【日】${jp.prompt}` : '';
+  const jaHint = jp.hint ? `（日：${jp.hint}）` : '';
+  const jaSample = jp.sample ? `\n【日】${jp.sample}` : '';
 
-  btnTts.addEventListener('click',()=>tts(promptBox.value||''));
-  btnDemo?.addEventListener('click',()=>{
-    const it = (currentList()[idx]||{});
-    replyEl.textContent = it.sample || it.answer || replyEl.textContent || '';
-  });
-  btnDemoTts?.addEventListener('click',()=>tts(replyEl.textContent||''));
+  promptBox.value = enQ + jaQ;
+  hintEl.textContent = enHint + jaHint;
+  replyEl.textContent = enSample + jaSample;
 
-  // speech recognition (if available)
-  let rec=null;
-  try{
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if(SR){
-      rec = new SR();
-      rec.lang = 'en-US';
-      rec.interimResults = false;
-      rec.continuous = false;
-      rec.onresult = (ev)=>{
-        const text = Array.from(ev.results).map(r=>r[0].transcript).join(' ');
-        replyEl.textContent = text;
-        if(autoNext.checked){
-          btnNext.click();
-        }
-      };
-      rec.onend = ()=>{ btnRec.disabled=false; btnStop.disabled=true; };
-      btnRec.addEventListener('click',()=>{ try{ btnRec.disabled=true; btnStop.disabled=false; rec.start(); }catch{} });
-      btnStop.addEventListener('click',()=>{ try{ rec.stop(); }catch{} });
-    }else{
-      btnRec.disabled = btnStop.disabled = true;
-    }
-  }catch(e){
-    btnRec.disabled = btnStop.disabled = true;
-  }
-
-  show();
+  prog.textContent = `第 ${idx+1}/${total} 題`;
 }
 
 /* ---------- init ---------- */
@@ -685,6 +625,313 @@ if (!authData?.user) {
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
