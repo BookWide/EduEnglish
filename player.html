@@ -101,7 +101,6 @@ tr.active{background:#173a6e}
   @page{ margin:10mm 10mm 12mm 10mm; }
 }
 
-.ja-line{margin-top:6px;opacity:.9}
 </style>
 </head>
 <body>
@@ -266,167 +265,82 @@ async function loadVideo(){
   video.addEventListener('error',()=>{ if(i<trySources.length-1){ i++; setSrc(i); } },{passive:true});
 }
 
-
 /* ---------- cues ---------- */
 async function loadCues(){
   cuesStatus.textContent='（字幕載入中…）';
   const {data,used}=await fetchJSONMulti([
-    // GitHub first
+    // ✅ Supabase with slug folder
+    `${SUPA_ASSETS_BASE}/data/${cat}/${primarySlug}/cues-${primarySlug}.json`,
+    // ✅ GitHub with slug folder
     `${BASE}/data/${cat}/${primarySlug}/cues-${primarySlug}.json?v=${Date.now()}`,
+
+    // 既有路徑（保留，確保相容）
+    `${SUPA_ASSETS_BASE}/data/${cat}/cues-${primarySlug}.json`,
     `${BASE}/data/${cat}/cues-${primarySlug}.json?v=${Date.now()}`,
     `${BASE}/data/cues-${primarySlug}.json?v=${Date.now()}`,
-    // Supabase fallbacks
-    `${SUPA_ASSETS_BASE}/data/${cat}/${primarySlug}/cues-${primarySlug}.json`,
-    `${SUPA_ASSETS_BASE}/data/${cat}/cues-${primarySlug}.json`,
-    // last resort
     `${BASE}/data/story/cues-mid-autumn.json?v=${Date.now()}`
   ], 'cues');
   if(!data){ cuesStatus.textContent='⚠️ 字幕讀取失敗'; return; }
   if(String(used).includes('mid-autumn')) slug='mid-autumn';
-  cues=data.map(x=>({t:toSec(x.time),en:x.en||'',zh:x.zh||'',ja:x.ja||''}));
-  cuesBody.innerHTML=cues.map((c,i)=>`<tr data-i="${i}">
-      <td class="cue-time">${c.t?fmt(c.t):''}</td>
-      <td class="cue-en">
-        ${esc(c.en)}
-        ${c.zh?`<div class="zh-line">${esc(c.zh)}</div>`:''}
-        ${c.ja?`<div class="ja-line">${esc(c.ja)}</div>`:''}
-      </td>
-      <td class="cue-zh">${esc(c.zh)}</td>
-    </tr>`).join('');
+  cues=data.map(x=>({t:toSec(x.time),en:x.en||'',zh:x.zh||''}));
+  cuesBody.innerHTML=cues.map((c,i)=>`<tr data-i="${i}"><td class="cue-time">${c.t?fmt(c.t):''}</td><td class="cue-en">${esc(c.en)}${c.zh?`<div class="zh-line">${esc(c.zh)}</div>`:''}</td><td class="cue-zh">${esc(c.zh)}</td></tr>`).join('');
   $$('#cuesBody tr').forEach(tr=>tr.addEventListener('click',()=>{const i=+tr.dataset.i; seekTo(i,true);}));
   cuesStatus.textContent = `已載入：${String(used)}`;
 }
-/* ---------- quiz ---------- */
+function currentIndex(){ const t=video.currentTime+offset; let i=0; while(i+1<cues.length&&cues[i+1].t<=t+0.0001)i++; return i; }
 
-async function loadQuiz(){
-  const listEl=$('#quizList',paneQuiz), metaEl=$('#quizMeta',paneQuiz);
-  const headerEl = $('#quizHeader');
-  const filtersEl = $('#quizFilters');
-  const btnSubmit = $('#btnSubmitQuiz');
-  const btnShowAnswer = $('#btnShowAnswer');
-  const btnPrint = $('#btnPrint');
-
-  const {data,used}=await fetchJSONMulti([
-    // ✅ Supabase with slug folder
-    `${SUPA_ASSETS_BASE}/data/${cat}/${primarySlug}/quiz-${primarySlug}.json`,
-    // ✅ Supabase with slug folder
-    `${SUPA_ASSETS_BASE}/data/${cat}/${primarySlug}/quiz-${primarySlug}.json`,
-
-    // 既有路徑（保留，確保相容）
-    `${SUPA_ASSETS_BASE}/data/${cat}/quiz-${primarySlug}.json`,
-    `${SUPA_ASSETS_BASE}/data/${cat}/quiz-${primarySlug}.json`,
-    `${BASE}/data/quiz-${primarySlug}.json?v=${Date.now()}`,
-    `${BASE}/data/story/quiz-mid-autumn.json?v=${Date.now()}`
-  ], 'quiz');
-
-  if(!data){ metaEl.textContent='⚠️ 題庫讀取失敗'; listEl.innerHTML=''; headerEl.textContent=''; return; }
-
-  // normalize to questions with section tags
-  let questions=[];
-  const pushQ=(sec,arr=[])=>arr?.forEach(q=>questions.push({
-      section: sec || (q.section||'Mixed'),
-      type: (String(q.type||'MCQ').toUpperCase()==='SA')?'SA':'MCQ',
-      question: q.question||q.q||'',
-      options: q.options||q.choices||[],
-      answer: q.answer??q.ans??''
-  }));
-  if (Array.isArray(data)){
-    data.forEach(q=>pushQ(q.section||'Mixed',[q]));
-  } else if (data.items){ data.items.forEach(q=>pushQ(q.section||'Mixed',[q])); }
-  else if (data.questions){ data.questions.forEach(q=>pushQ(q.section||'Mixed',[q])); }
-  else if (data.sections){
-    pushQ('Vocabulary', data.sections.vocab);
-    pushQ('Grammar', data.sections.grammar);
-    pushQ('Reading', data.sections.reading);
-    pushQ('Mixed', data.sections.mixed);
+function highlightRow(idx){
+  const trs = $$('#cuesBody tr');
+  trs.forEach(tr => tr.classList.remove('active'));
+  const tr = trs[idx]; if (!tr) return;
+  tr.classList.add('active');
+  if (chkFollow.checked){
+    const container = document.getElementById('pane-sub');
+    if (container){
+      const targetTop = tr.offsetTop - container.clientHeight/2 + tr.offsetHeight/2;
+      container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+    }
   }
-
-  // header like: 已載入（ mid-autumn ），共 80 題
-  headerEl.textContent = `已載入（ ${slug} ），共 ${questions.length} 題`;
-  metaEl.textContent = String(used);
-
-  // rendering function with filter
-  let currentSec = 'all';
-  function render(){
-    listEl.innerHTML='';
-    const items = questions.filter(q=> currentSec==='all' ? ['Vocabulary','Grammar','Reading','Mixed','單字','文法','閱讀','綜合'].includes(q.section||'Mixed') : (q.section===currentSec));
-    listEl.innerHTML = items.map((q,i)=>{
-      const idx=i+1;
-      if(q.type==='MCQ'){
-        const opts=q.options.map(opt=>`<label style="display:block;margin:4px 0"><input type="radio" name="q${idx}" value="${String(opt)}"> ${String(opt)}</label>`).join('');
-        return `<li data-type="MCQ" data-ans="${String(q.answer)}" data-sec="${q.section||'Mixed'}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question)}</div><div>${opts}</div><div class="msg" style="margin-top:4px"></div><div class="exp" style="margin-top:4px;color:#9fb3ff"></div></li>`;
-      }else{
-        return `<li data-type="SA" data-ans="${String(q.answer)}" data-sec="${q.section||'Mixed'}"><div style="font-weight:700;margin:4px 0">${idx}. ${esc(q.question)}</div><input type="text" placeholder="輸入答案…" style="padding:6px 8px;border:1px solid #334155;border-radius:6px;background:#0f223b;color:#dbe7ff"><button class="btn btn-check" style="margin-left:6px">檢查</button><div class="msg" style="margin-top:4px"></div><div class="exp" style="margin-top:4px;color:#9fb3ff"></div></li>`;
-      }
-    }).join('');
-  }
-  render();
-
-  // filter buttons
-  filtersEl.addEventListener('click', e=>{
-    const sec = e.target?.dataset?.sec;
-    if(!sec) return;
-    // map Chinese labels
-    const map = { '全部':'all', '單字':'Vocabulary', '文法':'Grammar', '閱讀':'Reading', '綜合':'Mixed', 'all':'all', 'Vocabulary':'Vocabulary' };
-    currentSec = map[sec] || sec;
-    render();
-    $('#quizScore').textContent='本分區分數：0 / 100';
-  });
-
-  // scoring
-  btnSubmit.onclick=()=>{
-    const items=[...$('#quizList').querySelectorAll('li')];
-    if(!items.length) return;
-    let got=0,total=items.length;
-    items.forEach(li=>{
-      const ans=String(li.dataset.ans||'').trim();
-      if(li.dataset.type==='MCQ'){
-        const sel=li.querySelector('input[type="radio"]:checked'); 
-        const user=sel?String(sel.value).trim():''; 
-        const ok=user===ans;
-        if(ok)got++;
-        const msg=li.querySelector('.msg'),exp=li.querySelector('.exp');
-        msg.textContent=ok?'✅ 正確':'❌ 錯誤'; msg.style.color=ok?'#5bd3c7':'#ff6b6b'; if(!ok)exp.textContent=`正解：${ans}`;
-      }else{
-        const ipt=li.querySelector('input'); 
-        const ok=(ipt.value||'').trim().toLowerCase()===ans.toLowerCase(); 
-        if(ok)got++;
-        const msg=li.querySelector('.msg'),exp=li.querySelector('.exp');
-        msg.textContent=ok?'✅ 正確':'❌ 錯誤'; msg.style.color=ok?'#5bd3c7':'#ff6b6b'; if(!ok)exp.textContent=`正解：${ans}`;
-      }
-    });
-    const score=got*5, full=total*5;
-    $('#quizScore').textContent=`本分區分數：${score} / ${full}`;
-  };
-
-  // show answers toggle
-  btnShowAnswer.onclick=()=>{
-    const items=[...$('#quizList').querySelectorAll('li')];
-    items.forEach(li=>{
-      const exp=li.querySelector('.exp'); 
-      const ans=String(li.dataset.ans||''); 
-      exp.textContent=`正解：${ans}`;
-    });
-  };
-
-  // print simple
-  btnPrint.onclick=()=>{ try{ showTab('quiz'); }catch(e){} setTimeout(()=>{
-    window.print(); }, 60);
-  };
-
-  // SA inline check
-  $('#quizList').addEventListener('click',e=>{
-    if(!e.target.classList.contains('btn-check'))return;
-    const li=e.target.closest('li'); const ipt=li.querySelector('input');
-    const ok=(ipt.value||'').trim().toLowerCase()===String(li.dataset.ans||'').trim().toLowerCase();
-    const msg=li.querySelector('.msg'); const exp=li.querySelector('.exp');
-    msg.textContent=ok?'✅ 正確':'❌ 錯誤'; msg.style.color=ok?'#5bd3c7':'#ff6b6b'; exp.textContent=ok?'':`正解：${li.dataset.ans}`;
-  });
-
-  // initialize score display
-  $('#quizScore').textContent='本分區分數：0 / 100';
 }
-/* ---------- vocab ---------- */
+
+function seekTo(idx,play=true){ if(!cues[idx])return; video.currentTime=Math.max(0,cues[idx].t-offset+0.0001); highlightRow(idx); if(play) video.play(); }
+function sentenceRange(i){ if(!cues[i])return[0,0]; const s=cues[i].t,e=(i+1<cues.length?cues[i+1].t:s+3); return[s,e]; }
+
+/* ---------- quiz ---------- */
+async function loadQuiz(){
+  const qStatus = document.getElementById('quizStatus') || $('#quizStatus');
+  const qBox    = document.getElementById('quizBox')    || $('#quizBox');
+  if(qStatus) qStatus.textContent='（題庫載入中…）';
+
+  const list = [
+    `${BASE}/data/${cat}/${primarySlug}/quiz-${primarySlug}.json?v=${Date.now()}`, // GH slug
+    `${BASE}/data/${cat}/quiz-${primarySlug}.json?v=${Date.now()}`,                // GH cat
+    `${BASE}/data/quiz-${primarySlug}.json?v=${Date.now()}`,                       // GH root
+    `${SUPA_ASSETS_BASE}/data/${cat}/${primarySlug}/quiz-${primarySlug}.json`,     // SUPA slug
+    `${SUPA_ASSETS_BASE}/data/${cat}/quiz-${primarySlug}.json`                     // SUPA cat
+  ];
+
+  let data=null, used='';
+  for(const url of list){
+    try{
+      const r = await fetch(url, {cache:'no-store'});
+      if(r.ok){
+        data = await r.json();
+        used = url;
+        break;
+      }
+    }catch(_){}
+  }
+
+  if(!data){
+    if(qStatus) qStatus.textContent='❌ 題庫讀取失敗（未找到任何路徑）';
+    console.error('[fatal] quiz 讀取失敗', list);
+    return;
+  }
+
+  if(qStatus) qStatus.textContent=`已載入：${used}`;
+  renderQuiz(data);
+}/* ---------- vocab ---------- */
 
 async function loadVocab(){
   const vStatus=$('#vocabStatus'), vBox=$('#vocabBox');
@@ -444,50 +358,12 @@ async function loadVocab(){
   ], 'vocab');
   if(!data||!data.length){ vStatus.textContent='⚠️ 查無單字資料'; vBox.innerHTML=''; return; }
   vStatus.textContent=`已載入：${String(used)}`;
-
-  // Render each vocab item with EN/ZH/JA lines when present
   const go=t=>{ const p=toSec(t); video.currentTime=Math.max(0,p); video.play(); };
-  vBox.innerHTML=data.map(v=>{
-    const word = esc(v.word||'');
-    const pos  = esc(v.pos||'');
-    const zh   = v.zh ? `<div class="voc-zh">【中】${esc(v.zh)}</div>` : '';
-    const en   = v.en ? `<div class="voc-en">【英】${esc(v.en)}</div>` : '';
-    const enEx = v.en_example ? `<div class="voc-enex muted" style="margin-top:4px">e.g. ${esc(v.en_example)}</div>` : '';
-
-    const ja   = v.ja ? `<div class="voc-ja">【日】${esc(v.ja)}</div>` : '';
-    const jaDef= v.ja_def ? `<div class="voc-jadef muted">${esc(v.ja_def)}</div>` : '';
-    const jaEx = v.ja_example ? `<div class="voc-jaex muted" style="margin-top:4px">例：${esc(v.ja_example)}</div>` : '';
-
-    const jumpBtn = v.time ? `<button class="btn" data-act="jump" data-time="${esc(v.time)}">跳到片段</button>` : '';
-
-    // Prepare TTS buttons (English / Japanese when available)
-    const speakEn = `<button class="btn" data-act="speak" data-lang="en" data-text="${esc(v.word||v.en||'')}">🔊 英文朗讀</button>`;
-    const speakJa = v.ja ? `<button class="btn" data-act="speak" data-lang="ja" data-text="${esc(v.ja)}">🔊 日文朗讀</button>` : '';
-
-    return `<div class="voc" style="border:1px solid #223048;border-radius:10px;padding:10px;margin:10px 0">
-      <div class="voc-h" style="display:flex;gap:8px;align-items:center">
-        <div class="voc-word" style="font-weight:800;font-size:18px">${word}</div>
-        <div class="voc-pos" style="opacity:.85">${pos}</div>
-      </div>
-      ${zh}${en}${enEx}${ja}${jaDef}${jaEx}
-      <div class="voc-actions" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-        ${jumpBtn}${speakEn}${speakJa}
-      </div>
-    </div>`;
-  }).join('');
-
+  vBox.innerHTML=data.map(v=>`<div class="voc"><div class="voc-h"><div class="voc-word">${esc(v.word||'')}</div><div class="voc-pos">${esc(v.pos||'')}</div></div>${v.zh?`<div class="voc-zh">${esc(v.zh)}</div>`:''}${v.en?`<div class="voc-en">${esc(v.en)}</div>`:''}<div class="voc-actions">${v.time?`<button class="btn" data-act="jump" data-time="${esc(v.time)}">跳到片段</button>`:''}<button class="btn" data-act="speak" data-text="${esc(v.word||v.en||'')}">🔊 朗讀</button></div></div>`).join('');
   vBox.addEventListener('click',e=>{
     const act=e.target?.dataset?.act; if(!act)return;
-    if(act==='jump'){ go(e.target.dataset.time||0); return; }
-    if(act==='speak'){
-      try{
-        const lang = (e.target.dataset.lang||'en').toLowerCase()==='ja' ? 'ja-JP' : 'en-US';
-        const text = e.target.dataset.text||'';
-        const u=new SpeechSynthesisUtterance(text);
-        u.lang = lang;
-        speechSynthesis.cancel(); speechSynthesis.speak(u);
-      }catch{}
-    }
+    if(act==='jump')go(e.target.dataset.time||0);
+    if(act==='speak'){ try{ const u=new SpeechSynthesisUtterance(e.target.dataset.text||''); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch{} }
   });
 }
 
@@ -576,12 +452,18 @@ async function loadAI(){
     return {data:null, used:'error'};
   }
 
-  const pathList = [`${BASE}/data/${cat}/${primarySlug}/ai-${primarySlug}.json?v=${Date.now()}`,
+  const pathList = [
+  // ✅ Supabase with slug folder
+  `${SUPA_ASSETS_BASE}/data/${cat}/${primarySlug}/ai-${primarySlug}.json`,
+  // ✅ GitHub with slug folder
+  `${BASE}/data/${cat}/${primarySlug}/ai-${primarySlug}.json?v=${Date.now()}`,
+
+  // 既有路徑（保留）
+  `${SUPA_ASSETS_BASE}/data/${cat}/ai-${primarySlug}.json`,
   `${BASE}/data/${cat}/ai-${primarySlug}.json?v=${Date.now()}`,
   `${BASE}/data/ai-${primarySlug}.json?v=${Date.now()}`,
-  `${SUPA_ASSETS_BASE}/data/${cat}/${primarySlug}/ai-${primarySlug}.json`,
-  `${SUPA_ASSETS_BASE}/data/${cat}/ai-${primarySlug}.json`,
-  `${BASE}/data/story/ai-mid-autumn.json?v=${Date.now()}`];
+  `${BASE}/data/story/ai-mid-autumn.json?v=${Date.now()}`
+];
   const {data} = await fetchJSON(pathList);
   let items = [];
 
@@ -729,6 +611,27 @@ if (!authData?.user) {
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
