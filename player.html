@@ -490,7 +490,8 @@ $$('.tabs .tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab
 
 
 
-/* ---------- AI pane loader (EN/JA switchable) ---------- */
+
+/* ---------- AI pane loader (EN/JA/ZH switchable) ---------- */
 async function loadAI(){
   const pane = document.getElementById('pane-ai');
   if(!pane) return;
@@ -510,7 +511,7 @@ async function loadAI(){
   const btnRec  = document.getElementById('btnRec');
   const btnStop = document.getElementById('btnStop');
 
-  // Create a simple language toggle (EN / JA) next to topic select, if not present
+  // Language bar (EN / JA / ZH)
   let langBar = document.getElementById('aiLangBar');
   if(!langBar){
     langBar = document.createElement('div');
@@ -526,8 +527,10 @@ async function loadAI(){
       b.style.cursor='pointer';
       return b;
     };
-    const bEN=makeBtn('aiLangEn','EN'); const bJA=makeBtn('aiLangJa','JA');
-    langBar.appendChild(bEN); langBar.appendChild(bJA);
+    const bEN=makeBtn('aiLangEn','EN');
+    const bJA=makeBtn('aiLangJa','JA');
+    const bZH=makeBtn('aiLangZh','ZH');
+    langBar.appendChild(bEN); langBar.appendChild(bJA); langBar.appendChild(bZH);
     (sel?.parentElement||pane).insertBefore(langBar, (sel?.nextSibling)||null);
   }
 
@@ -537,7 +540,7 @@ async function loadAI(){
   let data = null;
   try { const r = await fetch(url,{cache:'no-store'}); if(r.ok){ data = await r.json(); } } catch(e){}
 
-  // normalize supported shapes into a flat list
+  // normalize to flat list
   let items = [];
   if (Array.isArray(data)) {
     items = data;
@@ -546,17 +549,18 @@ async function loadAI(){
   } else if (data && data.sections) {
     items = Object.values(data.sections).flat().filter(Boolean);
   } else if (data && Array.isArray(data.topics)) {
-    items = data.topics.map(t=>({ title: t.title, prompt: t.prompt||t.question, hint: t.hint, sample: t.sample||t.answer, ja: t.ja }));
+    items = data.topics.map(t=>({ title: t.title, prompt: t.prompt||t.question, hint: t.hint, sample: t.sample||t.answer, ja: t.ja, zh: t.zh }));
   }
 
-  // map to common shape; keep nested ja
+  // common shape; preserve nested ja/zh
   items = (items||[]).map(x=>({
     title: x.title || x.topic || x.section || x.name || 'Topic',
     prompt: x.prompt || x.question || x.q || '',
     hint: x.hint || x.keywords || '',
     sample: x.sample || x.answer || x.demo || '',
-    ja: (typeof x.ja==='object') ? x.ja : null
-  })).filter(x=>x.prompt || (x.ja && (x.ja.prompt||x.ja.sample)));
+    ja: (typeof x.ja==='object') ? x.ja : null,
+    zh: (typeof x.zh==='object') ? x.zh : null
+  })).filter(x=>x.prompt || (x.ja && (x.ja.prompt||x.ja.sample)) || (x.zh && (x.zh.prompt||x.zh.sample)));
 
   if(!items.length){
     prog.textContent = '第 0/0 題';
@@ -566,15 +570,21 @@ async function loadAI(){
   }
 
   // language state
-  let lang = 'en'; // 'en' | 'ja'
+  let lang = 'en'; // 'en' | 'ja' | 'zh'
   const langEnBtn = document.getElementById('aiLangEn');
   const langJaBtn = document.getElementById('aiLangJa');
+  const langZhBtn = document.getElementById('aiLangZh');
   function paintLang(){
-    if(langEnBtn){ langEnBtn.style.opacity = (lang==='en')? '1':'0.6'; }
-    if(langJaBtn){ langJaBtn.style.opacity = (lang==='ja')? '1':'0.6'; }
+    const on = (b)=>{ if(b) b.style.opacity='1'; };
+    const off= (b)=>{ if(b) b.style.opacity='0.6'; };
+    off(langEnBtn); off(langJaBtn); off(langZhBtn);
+    if(lang==='en') on(langEnBtn);
+    if(lang==='ja') on(langJaBtn);
+    if(lang==='zh') on(langZhBtn);
   }
   langEnBtn?.addEventListener('click',()=>{ lang='en'; paintLang(); show(); });
   langJaBtn?.addEventListener('click',()=>{ lang='ja'; paintLang(); show(); });
+  langZhBtn?.addEventListener('click',()=>{ lang='zh'; paintLang(); show(); });
   paintLang();
 
   // Populate dropdown
@@ -583,6 +593,7 @@ async function loadAI(){
 
   function textFor(it, field){
     if(lang==='ja' && it.ja && it.ja[field]) return it.ja[field];
+    if(lang==='zh' && it.zh && it.zh[field]) return it.zh[field];
     if(field==='prompt') return it.prompt || '';
     if(field==='hint') return it.hint || '';
     if(field==='sample') return it.sample || '';
@@ -609,12 +620,13 @@ async function loadAI(){
   btnPrev.addEventListener('click',()=>{ idx = (idx - 1 + items.length) % items.length; show(); });
   btnNext.addEventListener('click',()=>{ idx = (idx + 1) % items.length; show(); });
 
-  btnTts.addEventListener('click',()=>tts(promptBox.value||'', lang==='ja' ? 'ja-JP':'en-US'));
+  const ttsLocale = (lang==='ja') ? 'ja-JP' : (lang==='zh' ? 'zh-TW' : 'en-US');
+  btnTts.addEventListener('click',()=>tts(promptBox.value||'', (lang==='ja')?'ja-JP':(lang==='zh'?'zh-TW':'en-US')));
   btnDemo?.addEventListener('click',()=>{
     const it = items[idx] || {};
     replyEl.textContent = textFor(it,'sample') || replyEl.textContent || '';
   });
-  btnDemoTts?.addEventListener('click',()=>tts(replyEl.textContent||'', lang==='ja' ? 'ja-JP':'en-US'));
+  btnDemoTts?.addEventListener('click',()=>tts(replyEl.textContent||'', (lang==='ja')?'ja-JP':(lang==='zh'?'zh-TW':'en-US')));
 
   // speech recognition with language
   let rec=null;
@@ -624,7 +636,7 @@ async function loadAI(){
       rec = new SR();
       rec.interimResults = false;
       rec.continuous = false;
-      const setRecLang = ()=>{ rec.lang = (lang==='ja') ? 'ja-JP' : 'en-US'; };
+      const setRecLang = ()=>{ rec.lang = (lang==='ja') ? 'ja-JP' : (lang==='zh' ? 'zh-TW' : 'en-US'); };
       setRecLang();
       rec.onresult = (ev)=>{
         const text = Array.from(ev.results).map(r=>r[0].transcript).join(' ');
@@ -643,6 +655,7 @@ async function loadAI(){
 
   show();
 }
+
 
 
 
@@ -675,6 +688,314 @@ if (!authData?.user) {
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
