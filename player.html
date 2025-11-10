@@ -488,7 +488,8 @@ $$('.tabs .tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab
 })();
 
 
-/* ---------- AI pane loader (reads /data/{cat}/ai-<slug>.json) ---------- */
+
+/* ---------- AI pane loader (reads /data/{cat}/ai-<slug>.json) — flat list + working prev/next ---------- */
 async function loadAI(){
   const pane = document.getElementById('pane-ai');
   if(!pane) return;
@@ -510,103 +511,84 @@ async function loadAI(){
 
   function tts(text){ try{ const u=new SpeechSynthesisUtterance(text||''); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch{} }
 
-  async function fetchJSON(paths){
-    for (const p of paths){
-      try{ const r = await fetch(p,{cache:'no-store'}); if(r.ok){ return {data: await r.json(), used: p}; } }catch(e){}
-    }
-    return {data:null, used:'error'};
-  }
-
-  
   const url = `${BASE}/data/${cat}/${primarySlug}/ai-${primarySlug}.json?v=${Date.now()}`;
   let data = null;
   try { const r = await fetch(url,{cache:'no-store'}); if(r.ok){ data = await r.json(); } } catch(e){}
 
+  // normalize supported shapes into a flat list
   let items = [];
-
-  // normalize formats
   if (Array.isArray(data)) {
     items = data;
   } else if (data && (data.items || data.questions)) {
     items = data.items || data.questions || [];
   } else if (data && data.sections) {
-    const sections = Object.values(data.sections).flat().filter(Boolean);
-    items = sections;
-  } else if (data && Array.isArray(data.topics)) { // support {topics:[]}
-    items = data.topics.map(t=>({
-      topic: t.title || 'Topic',
-      question: t.prompt || t.question || '',
-      hint: t.hint || '',
-      sample: t.sample || '',
-      answer: t.answer || ''
-    }));
+    items = Object.values(data.sections).flat().filter(Boolean);
+  } else if (data && Array.isArray(data.topics)) {
+    items = data.topics.map(t=>({ title: t.title, prompt: t.prompt||t.question, hint: t.hint, sample: t.sample||t.answer }));
   }
 
-  // map to common shape
+  // map to common shape (title + prompt/hint/sample), keep ja if present (shown as hints)
   items = (items||[]).map(x=>({
-    topic: x.topic || x.section || x.title || 'Default',
-    question: x.question || x.q || x.prompt || '',
+    title: x.title || x.topic || x.section || x.name || 'Topic',
+    prompt: x.prompt || x.question || x.q || '',
     hint: x.hint || x.keywords || '',
-    sample: x.sample || x.example || x.demo || '',
-    answer: x.answer || x.ans || ''
-  })).filter(x=>x.question);
+    sample: x.sample || x.answer || x.demo || '',
+    ja: x.ja || null
+  })).filter(x=>x.prompt);
 
-  // group by topic
-  const groups = {};
-  for(const it of items){
-    if(!groups[it.topic]) groups[it.topic] = [];
-    groups[it.topic].push(it);
-  }
-  const topics = Object.keys(groups);
-  if(!topics.length){
+  // If nothing, mark empty
+  if(!items.length){
     prog.textContent = '第 0/0 題';
     sel.innerHTML = `<option value="">No AI dataset</option>`;
     btnPrev.disabled = btnNext.disabled = true;
     return;
   }
-  sel.innerHTML = topics.map((t,i)=>`<option value="${encodeURIComponent(t)}"${i===0?' selected':''}>${t}</option>`).join('');
 
-  let topic = topics[0];
+  // Populate dropdown with each item title; selection corresponds to index
+  sel.innerHTML = items.map((it,i)=>`<option value="${i}">${(it.title||'Topic')}${items.length>1?` #${i+1}`:''}</option>`).join('');
   let idx = 0;
-  function currentList(){ return groups[topic]||[]; }
+
   function show(){
-    const list = currentList();
-    const total = list.length;
-    if(!total){
-      promptBox.value = '';
-      hintEl.textContent = '—';
-      prog.textContent = '第 0/0 題';
-      return;
+    const total = items.length;
+    const it = items[idx];
+    sel.value = String(idx);
+    promptBox.value = it.prompt || '';
+    // Combine zh/ja hints if author provided a nested ja object
+    let hint = it.hint || '';
+    if (it.ja && (it.ja.hint || it.ja.prompt)){
+      const jaHint = it.ja.hint || '';
+      hint = hint ? `${hint}　/　${jaHint}` : jaHint;
     }
-    const it = list[idx];
-    promptBox.value = it.question || '';
-    hintEl.textContent = it.hint || '—';
-    replyEl.textContent = it.sample || '';
+    hintEl.textContent = hint || '—';
+    // Prefer sample; if ja.sample exists, append on new line
+    let sample = it.sample || '';
+    if (it.ja && it.ja.sample){
+      sample = sample ? `${sample}` : '';
+      // Keep English sample in reply area; we only append JA if there's no EN sample
+      if(!sample){ sample = it.ja.sample; }
+    }
+    replyEl.textContent = sample || '（等待你的作答…）';
     prog.textContent = `第 ${idx+1}/${total} 題`;
+    btnPrev.disabled = btnNext.disabled = (total<=1);
   }
 
   sel.addEventListener('change',()=>{
-    topic = decodeURIComponent(sel.value||topics[0]);
-    idx = 0;
-    show();
+    const v = Number(sel.value);
+    if(!Number.isNaN(v)) { idx = Math.max(0, Math.min(items.length-1, v)); show(); }
   });
   btnPrev.addEventListener('click',()=>{
-    const total = currentList().length;
-    if(!total) return;
-    idx = (idx - 1 + total) % total;
+    idx = (idx - 1 + items.length) % items.length;
     show();
   });
   btnNext.addEventListener('click',()=>{
-    const total = currentList().length;
-    if(!total) return;
-    idx = (idx + 1) % total;
+    idx = (idx + 1) % items.length;
     show();
   });
 
   btnTts.addEventListener('click',()=>tts(promptBox.value||''));
   btnDemo?.addEventListener('click',()=>{
-    const it = (currentList()[idx]||{});
-    replyEl.textContent = it.sample || it.answer || replyEl.textContent || '';
+    const it = items[idx] || {};
+    replyEl.textContent = it.sample || replyEl.textContent || '';
   });
   btnDemoTts?.addEventListener('click',()=>tts(replyEl.textContent||''));
 
@@ -623,6 +605,7 @@ async function loadAI(){
         const text = Array.from(ev.results).map(r=>r[0].transcript).join(' ');
         replyEl.textContent = text;
         if(autoNext.checked){
+          // move to next after user speaks
           btnNext.click();
         }
       };
@@ -638,6 +621,7 @@ async function loadAI(){
 
   show();
 }
+
 
 /* ---------- init ---------- */
 (async function init(){
@@ -668,6 +652,314 @@ if (!authData?.user) {
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
