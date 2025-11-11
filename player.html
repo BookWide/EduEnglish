@@ -138,18 +138,7 @@ tr.active{background:#173a6e}
             <input id="speedRange" type="range" min="0.5" max="2" step="0.05" value="1"/>
             <span id="speedVal">1.00x</span>
           </div>
-        
-          <div class="row" id="audioTrackRow">
-            <label class="muted" for="audioTrack">配音音軌：</label>
-            <select id="audioTrack" class="btn">
-              <option value="none" selected>無（使用影片 + TTS）</option>
-              <option value="en">English 配音</option>
-              <option value="zh">中文 配音</option>
-              <option value="ja">日本語 配音</option>
-            </select>
-            <span class="muted" style="font-size:12px">（來源：Supabase /assets/audio/...）</span>
-          </div>
-</div>
+        </div>
       </section>
     </section>
 
@@ -670,44 +659,6 @@ async function loadAI(){
 
 
 
-
-/* ---------- External Narration Tracks (EN/ZH/JA) synced with cues ---------- */
-(function(){
-  const AUDIO_BASE = (typeof SUPA_ASSETS_BASE!=='undefined' ? SUPA_ASSETS_BASE : '') + '/audio';
-  let audioLang = 'none';
-  const audio = new Audio();
-  audio.preload = 'auto';
-  audio.crossOrigin = 'anonymous';
-  const videoEl = document.getElementById('player');
-  function pad2(n){ return String(n).padStart(2,'0'); }
-  function cueUrl(i){
-    if(audioLang==='none') return '';
-    const cat = (window.cat || (new URLSearchParams(location.search).get('cat')||'story')).toLowerCase();
-    const slug = (window.primarySlug || (new URLSearchParams(location.search).get('slug')||'mid-autumn'));
-    return `${AUDIO_BASE}/${cat}/${slug}/${audioLang}/${pad2(i)}.mp3`;
-  }
-  function setAudioLang(v){ audioLang = v || 'none'; try{ audio.pause(); audio.currentTime = 0; }catch{} }
-  function syncRate(){ try{ audio.playbackRate = videoEl?.playbackRate || 1; }catch{} }
-  document.getElementById('speedRange')?.addEventListener('input', syncRate);
-  videoEl?.addEventListener('ratechange', syncRate);
-  async function playNarrationAt(index){
-    if(audioLang==='none') return;
-    const url = cueUrl(index); if(!url) return;
-    if(audio.src !== url){ audio.src = url; }
-    try{ await audio.play(); }catch{}
-    syncRate();
-  }
-  document.getElementById('audioTrack')?.addEventListener('change', e=>{
-    setAudioLang(e.target.value);
-    if(typeof window.currentSubtitleIndex==='number'){ playNarrationAt(window.currentSubtitleIndex); }
-  });
-  window.BookWideAudio = { playAt: playNarrationAt, setLang: setAudioLang };
-  const origSeek = window.seekTo;
-  window.seekTo = function(idx, play=true){ origSeek?.(idx, play); if(document.getElementById('audioTrack')?.value!=='none'){ playNarrationAt(idx); } };
-  (function(){ let last=-1; function idxByTime(){ const cues=window.cues||window.cuesData||[]; const t=(videoEl?.currentTime||0)+(window.offset||0); let i=0; while(i+1<cues.length && cues[i+1].t<=t+1e-4) i++; return i; } videoEl?.addEventListener('timeupdate', ()=>{ if(audioLang==='none') return; const i=idxByTime(); if(i!==last){ last=i; window.currentSubtitleIndex=i; playNarrationAt(i); } }); })();
-})();
-
-
 /* ---------- init ---------- */
 (async function init(){
   const saved=localStorage.getItem(`offset:${slug}`); if(saved!=null) setOffset(parseFloat(saved)); else setOffset(0);
@@ -736,119 +687,433 @@ if (!authData?.user) {
 }
 </script>
 
-<audio id="ttsAudio"></audio>
-<script>
-/** 1️⃣ Supabase 設定 */
-const SUPA_PROJECT = "jeajrwpmpgczimmrflxo"; // ← 換成你的專案 ref
-const SUPA_BASE = `https://${SUPA_PROJECT}.supabase.co/storage/v1/object/public/assets`;
-
-/** 2️⃣ 語言對應資料夾 */
-function langFolder(lang){
-  if(lang.startsWith("ja")) return "ja";
-  if(lang.startsWith("zh")) return "zh";
-  return "en";
-}
-
-/** 3️⃣ 生成雲端 MP3 路徑 */
-function ttsUrl(cat, slug, lang, index){
-  const i = String(index).padStart(2,"0");
-  return `${SUPA_BASE}/audio/${cat}/${slug}/${langFolder(lang)}/${i}.mp3`;
-}
-
-/** 4️⃣ 播放優先邏輯：先播 Supabase MP3，找不到再用瀏覽器朗讀 */
-async function playTTS({cat, slug, lang, index, text}){
-  const url = ttsUrl(cat, slug, lang, index);
-  try{
-    const res = await fetch(url, {method:"HEAD"});
-    if(res.ok){
-      const a = document.getElementById("ttsAudio");
-      a.src = url;
-      await a.play();
-      console.log("[BookWide] 播放雲端音檔：", url);
-      return;
-    }
-  }catch(e){
-    console.warn("雲端音檔不存在，改用瀏覽器朗讀。");
-  }
-
-  // Fallback：瀏覽器朗讀
-  if("speechSynthesis" in window){
-    const u = new SpeechSynthesisUtterance(text || "");
-    u.lang = lang || "en-US";
-    speechSynthesis.cancel(); speechSynthesis.speak(u);
-  }
-}
-
-/** 5️⃣ 測試：可以手動呼叫
-playTTS({cat:"story", slug:"houyi", lang:"ja-JP", index:0, text:"テストです。"});
- */
-</script>
-</body>
-</html>
-  
-
-<!-- ==== Audio Bridge: Supabase pre-recorded voices (ja/zh/en) ==== -->
+<!-- ===== Patch: single-subtitle-track + robust follow ===== -->
 <script>
 (() => {
-  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-  const AUDIO_BASE   = `${SUPABASE_URL}/storage/v1/object/public/assets/audio`;
+  const video = document.getElementById('player');
+  const cuesBody = document.getElementById('cuesBody');
+  const followChk = document.getElementById('chkFollow');
 
-  function audioUrl(cat, slug, lang, index){
-    const idx = String(index).padStart(2, '0');
-    const folder = lang && lang.startsWith('ja') ? 'ja' : lang && lang.startsWith('zh') ? 'zh' : 'en';
-    return `${AUDIO_BASE}/${cat}/${slug}/${folder}/${idx}.mp3`;
-  }
-  async function urlExists(url){
-    try { const r = await fetch(url, { method:'HEAD' }); return r.ok; } catch(e){ return false; }
-  }
-  async function pickBestLang(cat, slug){
-    for (const lang of ['ja','zh','en']){
-      if (await urlExists(audioUrl(cat, slug, lang, 0))) return lang;
+  /* ---------- 1) Prevent dual subtitles overlap ---------- */
+  function ensureSingleSubtitleTrack() {
+    if (!video || !video.textTracks) return;
+    let shown = false;
+    for (const tr of video.textTracks) {
+      if ((tr.kind === 'subtitles' || tr.kind === 'captions') && !shown) {
+        tr.mode = 'showing';
+        shown = true;
+      } else {
+        tr.mode = 'disabled';
+      }
     }
-    return null;
+  }
+  // Apply on metadata load and whenever tracks list changes
+  if (video) {
+    video.addEventListener('loadedmetadata', ensureSingleSubtitleTrack);
+    video.textTracks && video.textTracks.addEventListener?.('addtrack', ensureSingleSubtitleTrack);
+    // Some browsers don't fire addtrack; run once more after a tick.
+    setTimeout(ensureSingleSubtitleTrack, 1000);
   }
 
-  const params = new URLSearchParams(location.search);
-  const cat  = params.get('cat')  || 'story';
-  const slug = params.get('slug') || 'houyi';
+  /* ---------- 2) Robust follow behavior ---------- */
+  let hoveringPanel = false;
+  const panel = document.querySelector('.panel-subtitles') || cuesBody?.closest('.panel');
 
-  window.__BW_AUDIO__ = {
-    SUPABASE_URL, AUDIO_BASE, audioUrl, urlExists, pickBestLang, cat, slug,
-    async playIndex(index, lang, fallbackFn){
-      const l = lang && lang !== 'none' ? lang : await pickBestLang(cat, slug);
-      if (l){
-        const url = audioUrl(cat, slug, l, index);
-        if (await urlExists(url)){
-          try { new Audio(url).play(); return true; } catch(e){}
+  panel?.addEventListener('mouseenter', () => hoveringPanel = true);
+  panel?.addEventListener('mouseleave', () => hoveringPanel = false);
+
+  // Build a light index of cue rows: each row should have data-start/end set in existing code,
+  // but we guard & compute from DOM text if missing.
+  function parseTime(t) {
+    // formats like "00:12", "00:12.345", or "00:12 → 00:16"
+    const m = String(t).match(/(?:(\d{1,2}):)?(\d{1,2}):(\d{1,2})(?:\.(\d+))?/);
+    if (!m) return 0;
+    const [_, h, m2, s, ms] = m;
+    return (parseInt(h||0)*3600 + parseInt(m2||0)*60 + parseInt(s||0)) + (ms ? parseInt(ms)/1000 : 0);
+  }
+
+  function findActiveRow(t) {
+    if (!cuesBody) return null;
+    // Prefer data attributes if present
+    let fallback = null;
+    for (const tr of cuesBody.rows) {
+      const s = parseFloat(tr.dataset.start || NaN);
+      const e = parseFloat(tr.dataset.end || NaN);
+      if (!Number.isNaN(s) && !Number.isNaN(e)) {
+        if (t >= s && t < e) return tr;
+      } else if (!fallback) {
+        // try read from first cell text "[00:01]"
+        const td = tr.cells?.[0];
+        if (td) {
+          const time = parseTime(td.textContent);
+          tr.dataset.start = time;
+          tr.dataset.end = time + 3; // coarse fallback window
+          if (t >= time && t < time + 3) fallback = tr;
         }
       }
-      if (typeof fallbackFn === 'function') fallbackFn();
-      return false;
     }
-  };
+    return fallback;
+  }
 
-  document.addEventListener('DOMContentLoaded', async () => {
-    const best = await pickBestLang(cat, slug);
-    const sel = document.querySelector('#voiceSelect, select[name="voiceSelect"], select[data-role="voiceSelect"]');
-    if (sel){
-      const ensure = (v, label) => {
-        if (!sel.querySelector(`option[value="${v}"]`)){
-          const o = document.createElement('option');
-          o.value = v; o.textContent = label; sel.appendChild(o);
-        }
-      };
-      ensure('none','無（使用影片＋TTS）'); ensure('ja','日本語配音'); ensure('zh','中文配音'); ensure('en','英語配音');
-      sel.value = best || 'none';
-      const hint = document.getElementById('voiceSourceHint');
-      if (hint && best) hint.textContent = '（來源：Supabase /assets/audio/...）';
+  // Throttled smooth autoscroll
+  let lastScrollAt = 0;
+  function scrollRowIntoView(tr) {
+    if (!tr || !panel) return;
+    const now = performance.now();
+    if (now - lastScrollAt < 250) return; // throttle
+    lastScrollAt = now;
+
+    // only scroll if row is outside the visible panel viewport
+    const pr = panel.getBoundingClientRect();
+    const rr = tr.getBoundingClientRect();
+    const visible = rr.top >= pr.top + 24 && rr.bottom <= pr.bottom - 24;
+    if (visible) return;
+
+    tr.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  function onTimeUpdate() {
+    // Respect the checkbox and user's manual scroll/hover
+    if (!followChk?.checked) return;
+    if (hoveringPanel) return;
+
+    const t = video?.currentTime ?? 0;
+    const row = findActiveRow(t);
+    if (row) {
+      // add active highlight class
+      for (const r of cuesBody.rows) r.classList.remove('is-active');
+      row.classList.add('is-active');
+      scrollRowIntoView(row);
     }
+  }
+
+  video?.addEventListener('timeupdate', onTimeUpdate);
+  // Also jump when user clicks the row (existing code likely does this;
+  // we just ensure highlight stays correct).
+  cuesBody?.addEventListener('click', (e) => {
+    const tr = e.target?.closest('tr');
+    if (!tr) return;
+    for (const r of cuesBody.rows) r.classList.remove('is-active');
+    tr.classList.add('is-active');
   });
 })();
 </script>
-<!-- ==== /Audio Bridge ==== -->
+<style>
+/* subtle row highlight used by the follow script */
+#cuesBody tr.is-active { background: rgba(60,124,255,.12); }
+</style>
+<!-- ===== /Patch ===== -->
+
 </body>
- 
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
