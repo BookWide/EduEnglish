@@ -139,14 +139,15 @@ tr.active{background:#173a6e}
             <span id="speedVal">1.00x</span>
           </div>
         
-          <div class="row" id="voiceRow">
-            <label class="muted" for="voiceLang">朗讀語言：</label>
-            <select id="voiceLang" class="btn">
-              <option value="en-US">English 🇺🇸</option>
-              <option value="zh-TW">中文 🇹🇼</option>
-              <option value="ja-JP" selected>日本語 🇯🇵</option>
+          <div class="row" id="audioTrackRow">
+            <label class="muted" for="audioTrack">配音音軌：</label>
+            <select id="audioTrack" class="btn">
+              <option value="none" selected>無（使用影片 + TTS）</option>
+              <option value="en">English 配音</option>
+              <option value="zh">中文 配音</option>
+              <option value="ja">日本語 配音</option>
             </select>
-            <label class="chip"><input id="autoSpeak" type="checkbox" checked/> 自動朗讀</label>
+            <span class="muted" style="font-size:12px">（來源：Supabase /assets/audio/...）</span>
           </div>
 </div>
       </section>
@@ -670,94 +671,40 @@ async function loadAI(){
 
 
 
-/* ---------- Multilingual Subtitle TTS (EN/ZH/JA) ---------- */
-(function () {
-  function initVoicesOnce(){
-    return new Promise(resolve=>{
-      const done=()=>resolve(speechSynthesis.getVoices());
-      const v=speechSynthesis.getVoices();
-      if(v&&v.length){ resolve(v); return; }
-      speechSynthesis.onvoiceschanged = done;
-      setTimeout(done, 800);
-    });
-  }
-  function pickVoice(lang){
-    const voices = speechSynthesis.getVoices()||[];
-    const like = kw => voices.find(v => v.lang===lang && v.name.toLowerCase().includes(kw));
-    if(lang==='ja-JP') return like('nanami') || like('female') || voices.find(v=>v.lang==='ja-JP');
-    if(lang==='zh-TW') return like('hsinchu') || like('hanhan') || voices.find(v=>v.lang==='zh-TW');
-    if(lang==='en-US') return like('jenny') || like('aria') || voices.find(v=>v.lang==='en-US');
-    return voices.find(v=>v.lang===lang);
-  }
-  async function speakLine(i){
-    const cues = window.cues || window.cuesData || [];
-    const c = cues[i];
-    if(!c) return;
-    const sel = document.getElementById('voiceLang');
-    const lang = sel ? sel.value : 'en-US';
-    let text = c.en || '';
-    if(lang==='zh-TW') text = c.zh || c.en || '';
-    if(lang==='ja-JP') text = c.ja || c.en || '';
-    if(!text) return;
-    await initVoicesOnce();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = lang;
-    const v = pickVoice(lang);
-    if(v) u.voice = v;
-    try{ speechSynthesis.cancel(); }catch{}
-    try{ speechSynthesis.speak(u); }catch{}
-  }
-  window.BookWideSpeak = {
-    speakLine,
-    maybeSpeak(i){
-      const auto = document.getElementById('autoSpeak');
-      if(auto && auto.checked) speakLine(i);
-    }
-  };
-  document.addEventListener('change', (e)=>{
-    if(e.target && e.target.id==='voiceLang' && typeof window.currentSubtitleIndex==='number'){
-      window.BookWideSpeak.maybeSpeak(window.currentSubtitleIndex);
-    }
-  });
-})();
-
-/* ---------- Auto-speak on index change & audio primer ---------- */
+/* ---------- External Narration Tracks (EN/ZH/JA) synced with cues ---------- */
 (function(){
-  let lastIdx = -1;
-  let primed = false;
-  function primer(){
-    if(primed) return; primed = true;
-    try{
-      const u = new SpeechSynthesisUtterance(' ');
-      u.volume = 0; u.lang = 'en-US';
-      speechSynthesis.cancel(); speechSynthesis.speak(u);
-      setTimeout(()=>speechSynthesis.cancel(), 50);
-    }catch{}
+  const AUDIO_BASE = (typeof SUPA_ASSETS_BASE!=='undefined' ? SUPA_ASSETS_BASE : '') + '/audio';
+  let audioLang = 'none';
+  const audio = new Audio();
+  audio.preload = 'auto';
+  audio.crossOrigin = 'anonymous';
+  const videoEl = document.getElementById('player');
+  function pad2(n){ return String(n).padStart(2,'0'); }
+  function cueUrl(i){
+    if(audioLang==='none') return '';
+    const cat = (window.cat || (new URLSearchParams(location.search).get('cat')||'story')).toLowerCase();
+    const slug = (window.primarySlug || (new URLSearchParams(location.search).get('slug')||'mid-autumn'));
+    return `${AUDIO_BASE}/${cat}/${slug}/${audioLang}/${pad2(i)}.mp3`;
   }
-  document.addEventListener('click', primer, { once:true, capture:true });
-  document.addEventListener('keydown', primer, { once:true, capture:true });
-
-  const v = document.getElementById('player');
-  function currentIndexLocal(){
-    const cues = window.cues || window.cuesData || [];
-    if(!cues.length || !v) return -1;
-    const t = v.currentTime + (window.offset || 0);
-    let i=0; while(i+1<cues.length && cues[i+1].t <= t + 0.0001) i++;
-    return i;
+  function setAudioLang(v){ audioLang = v || 'none'; try{ audio.pause(); audio.currentTime = 0; }catch{} }
+  function syncRate(){ try{ audio.playbackRate = videoEl?.playbackRate || 1; }catch{} }
+  document.getElementById('speedRange')?.addEventListener('input', syncRate);
+  videoEl?.addEventListener('ratechange', syncRate);
+  async function playNarrationAt(index){
+    if(audioLang==='none') return;
+    const url = cueUrl(index); if(!url) return;
+    if(audio.src !== url){ audio.src = url; }
+    try{ await audio.play(); }catch{}
+    syncRate();
   }
-  if(v){
-    v.addEventListener('timeupdate', ()=>{
-      const i = currentIndexLocal();
-      if(i<0) return;
-      if(i !== lastIdx){
-        lastIdx = i;
-        window.currentSubtitleIndex = i;
-        if(window.BookWideSpeak && document.getElementById('autoSpeak')?.checked){
-          window.BookWideSpeak.speakLine(i);
-        }
-      }
-    });
-  }
+  document.getElementById('audioTrack')?.addEventListener('change', e=>{
+    setAudioLang(e.target.value);
+    if(typeof window.currentSubtitleIndex==='number'){ playNarrationAt(window.currentSubtitleIndex); }
+  });
+  window.BookWideAudio = { playAt: playNarrationAt, setLang: setAudioLang };
+  const origSeek = window.seekTo;
+  window.seekTo = function(idx, play=true){ origSeek?.(idx, play); if(document.getElementById('audioTrack')?.value!=='none'){ playNarrationAt(idx); } };
+  (function(){ let last=-1; function idxByTime(){ const cues=window.cues||window.cuesData||[]; const t=(videoEl?.currentTime||0)+(window.offset||0); let i=0; while(i+1<cues.length && cues[i+1].t<=t+1e-4) i++; return i; } videoEl?.addEventListener('timeupdate', ()=>{ if(audioLang==='none') return; const i=idxByTime(); if(i!==last){ last=i; window.currentSubtitleIndex=i; playNarrationAt(i); } }); })();
 })();
 
 
@@ -790,6 +737,314 @@ if (!authData?.user) {
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
