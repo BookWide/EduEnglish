@@ -138,7 +138,18 @@ tr.active{background:#173a6e}
             <input id="speedRange" type="range" min="0.5" max="2" step="0.05" value="1"/>
             <span id="speedVal">1.00x</span>
           </div>
-        </div>
+        
+          <div class="row" id="audioTrackRow">
+            <label class="muted" for="audioTrack">配音音軌：</label>
+            <select id="audioTrack" class="btn">
+              <option value="none" selected>無（使用影片 + TTS）</option>
+              <option value="en">English 配音</option>
+              <option value="zh">中文 配音</option>
+              <option value="ja">日本語 配音</option>
+            </select>
+            <span class="muted" style="font-size:12px">（來源：Supabase /assets/audio/...）</span>
+          </div>
+</div>
       </section>
     </section>
 
@@ -659,6 +670,44 @@ async function loadAI(){
 
 
 
+
+/* ---------- External Narration Tracks (EN/ZH/JA) synced with cues ---------- */
+(function(){
+  const AUDIO_BASE = (typeof SUPA_ASSETS_BASE!=='undefined' ? SUPA_ASSETS_BASE : '') + '/audio';
+  let audioLang = 'none';
+  const audio = new Audio();
+  audio.preload = 'auto';
+  audio.crossOrigin = 'anonymous';
+  const videoEl = document.getElementById('player');
+  function pad2(n){ return String(n).padStart(2,'0'); }
+  function cueUrl(i){
+    if(audioLang==='none') return '';
+    const cat = (window.cat || (new URLSearchParams(location.search).get('cat')||'story')).toLowerCase();
+    const slug = (window.primarySlug || (new URLSearchParams(location.search).get('slug')||'mid-autumn'));
+    return `${AUDIO_BASE}/${cat}/${slug}/${audioLang}/${pad2(i)}.mp3`;
+  }
+  function setAudioLang(v){ audioLang = v || 'none'; try{ audio.pause(); audio.currentTime = 0; }catch{} }
+  function syncRate(){ try{ audio.playbackRate = videoEl?.playbackRate || 1; }catch{} }
+  document.getElementById('speedRange')?.addEventListener('input', syncRate);
+  videoEl?.addEventListener('ratechange', syncRate);
+  async function playNarrationAt(index){
+    if(audioLang==='none') return;
+    const url = cueUrl(index); if(!url) return;
+    if(audio.src !== url){ audio.src = url; }
+    try{ await audio.play(); }catch{}
+    syncRate();
+  }
+  document.getElementById('audioTrack')?.addEventListener('change', e=>{
+    setAudioLang(e.target.value);
+    if(typeof window.currentSubtitleIndex==='number'){ playNarrationAt(window.currentSubtitleIndex); }
+  });
+  window.BookWideAudio = { playAt: playNarrationAt, setLang: setAudioLang };
+  const origSeek = window.seekTo;
+  window.seekTo = function(idx, play=true){ origSeek?.(idx, play); if(document.getElementById('audioTrack')?.value!=='none'){ playNarrationAt(idx); } };
+  (function(){ let last=-1; function idxByTime(){ const cues=window.cues||window.cuesData||[]; const t=(videoEl?.currentTime||0)+(window.offset||0); let i=0; while(i+1<cues.length && cues[i+1].t<=t+1e-4) i++; return i; } videoEl?.addEventListener('timeupdate', ()=>{ if(audioLang==='none') return; const i=idxByTime(); if(i!==last){ last=i; window.currentSubtitleIndex=i; playNarrationAt(i); } }); })();
+})();
+
+
 /* ---------- init ---------- */
 (async function init(){
   const saved=localStorage.getItem(`offset:${slug}`); if(saved!=null) setOffset(parseFloat(saved)); else setOffset(0);
@@ -687,404 +736,59 @@ if (!authData?.user) {
 }
 </script>
 
-<!-- === Reading Mode Click-to-TTS injection (safe, standalone) === -->
-<style>
-  .reading-row { background: rgba(62, 142, 255, 0.18) !important; transition: background .2s; }
-</style>
+<audio id="ttsAudio"></audio>
 <script>
-(function(){
-  const cuesBody = document.getElementById('cuesBody');
-  const followChk = document.getElementById('chkFollow');
+/** 1️⃣ Supabase 設定 */
+const SUPA_PROJECT = "jeajrwpmpgczimmrflxo"; // ← 換成你的專案 ref
+const SUPA_BASE = `https://${SUPA_PROJECT}.supabase.co/storage/v1/object/public/assets`;
 
-  // Small helper to get current reading lang
-  function resolveLangFromClick(td){
-    // If project later adds #selReadLang, prefer it.
-    const sel = document.getElementById('selReadLang');
-    if (sel && sel.value) return sel.value;
-    // Otherwise infer by column index: 1=en, 2=zh, 3=ja (if present)
-    const idx = td ? td.cellIndex : 1;
-    if (idx === 2) return 'zh-TW';
-    if (idx === 3) return 'ja-JP';
-    return 'en-US';
-  }
+/** 2️⃣ 語言對應資料夾 */
+function langFolder(lang){
+  if(lang.startsWith("ja")) return "ja";
+  if(lang.startsWith("zh")) return "zh";
+  return "en";
+}
 
-  // Single-shot TTS via Supabase Edge Function /functions/v1/tts-once
-  async function speakOnce(text, lang){
-    try{
-      const url = (window.SUPABASE_URL || window.supabaseUrl || window.__SUPABASE_URL);
-      const key = (window.SUPABASE_ANON_KEY || window.supabaseAnonKey || window.__SUPABASE_ANON_KEY);
-      if(!url || !key){ console.warn('[ReadAloud] Missing SUPABASE_URL / SUPABASE_ANON_KEY'); return; }
-      const FN = url.replace(/\/$/,'') + '/functions/v1/tts-once';
-      const res = await fetch(FN, {
-        method: 'POST',
-        headers: {
-          'apikey': key,
-          'Authorization': 'Bearer ' + key,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ text, lang })
-      });
-      if(!res.ok){ console.warn('[ReadAloud] TTS failed', res.status); return; }
-      const blob = await res.blob();
-      const a = document.getElementById('readAloudAudio') || (()=>{
-        const el = document.createElement('audio');
-        el.id = 'readAloudAudio';
-        el.preload = 'auto';
-        el.style.display = 'none';
-        document.body.appendChild(el);
-        return el;
-      })();
-      a.src = URL.createObjectURL(blob);
-      a.onended = ()=> URL.revokeObjectURL(a.src);
+/** 3️⃣ 生成雲端 MP3 路徑 */
+function ttsUrl(cat, slug, lang, index){
+  const i = String(index).padStart(2,"0");
+  return `${SUPA_BASE}/audio/${cat}/${slug}/${langFolder(lang)}/${i}.mp3`;
+}
+
+/** 4️⃣ 播放優先邏輯：先播 Supabase MP3，找不到再用瀏覽器朗讀 */
+async function playTTS({cat, slug, lang, index, text}){
+  const url = ttsUrl(cat, slug, lang, index);
+  try{
+    const res = await fetch(url, {method:"HEAD"});
+    if(res.ok){
+      const a = document.getElementById("ttsAudio");
+      a.src = url;
       await a.play();
-    }catch(err){
-      console.error('[ReadAloud] error', err);
+      console.log("[BookWide] 播放雲端音檔：", url);
+      return;
     }
+  }catch(e){
+    console.warn("雲端音檔不存在，改用瀏覽器朗讀。");
   }
 
-  // Highlight management
-  let lastHi = null;
-  function highlight(tr){
-    if(lastHi) lastHi.classList.remove('reading-row');
-    lastHi = tr;
-    if(tr) tr.classList.add('reading-row');
+  // Fallback：瀏覽器朗讀
+  if("speechSynthesis" in window){
+    const u = new SpeechSynthesisUtterance(text || "");
+    u.lang = lang || "en-US";
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
   }
+}
 
-  if(cuesBody){
-    cuesBody.addEventListener('click', async (ev)=>{
-      const tr = ev.target.closest('tr');
-      if(!tr) return;
-      // When FOLLOW is OFF => intercept and read aloud (no seeking, no playback)
-      if(followChk && !followChk.checked){
-        ev.preventDefault();
-        ev.stopPropagation();
-        const td = ev.target.closest('td');
-        const lang = resolveLangFromClick(td);
-        const en = tr.querySelector('td[data-col="en"]')?.textContent?.trim();
-        const zh = tr.querySelector('td[data-col="zh"]')?.textContent?.trim();
-        const ja = tr.querySelector('td[data-col="ja"]')?.textContent?.trim();
-        let text = (lang==='zh-TW'? zh : lang==='ja-JP'? ja : en) || (td? td.textContent.trim(): '');
-        if(!text){ return; }
-        highlight(tr);
-        await speakOnce(text, lang);
-        return false;
-      }
-      // When FOLLOW is ON => let original behavior (seek/play) run; no extra action.
-    }, true); // useCapture to pre-empt any default click->seek in existing code when needed
-  }
-})();
+/** 5️⃣ 測試：可以手動呼叫
+playTTS({cat:"story", slug:"houyi", lang:"ja-JP", index:0, text:"テストです。"});
+ */
 </script>
-<!-- === /Reading Mode injection === -->
-
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+  
+</body>
+ 
+</html>
 
 
 
