@@ -138,7 +138,17 @@ tr.active{background:#173a6e}
             <input id="speedRange" type="range" min="0.5" max="2" step="0.05" value="1"/>
             <span id="speedVal">1.00x</span>
           </div>
-        </div>
+        
+          <div class="row" id="voiceRow">
+            <label class="muted" for="voiceLang">朗讀語言：</label>
+            <select id="voiceLang" class="btn">
+              <option value="en-US">English 🇺🇸</option>
+              <option value="zh-TW">中文 🇹🇼</option>
+              <option value="ja-JP" selected>日本語 🇯🇵</option>
+            </select>
+            <label class="chip"><input id="autoSpeak" type="checkbox" checked/> 自動朗讀</label>
+          </div>
+</div>
       </section>
     </section>
 
@@ -180,6 +190,7 @@ tr.active{background:#173a6e}
         <div class="pane" id="pane-ai" style="display:none">
           <div class="pane-ai" style="padding:10px">
             <div class="ai-row" style="margin:6px 0 10px">
+              <span class="muted">允許麥克風後可進行口說練習（建議 Chrome / Edge）。網址帶 <code>?cat=story|music|movie|news|pro&slug=mid-autumn</code></span>
             </div>
             <div class="ai-row" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <select id="aiTopic" class="btn" style="min-width:200px"></select>
@@ -451,7 +462,8 @@ function highlightRow(idx){
   }
 }
 
-function seekTo(idx,play=true){ if(!cues[idx])return; videoEl.currentTime=Math.max(0,cues[idx].t-offset+0.0001); highlightRow(idx); if(play) videoEl.play(); }
+function seekTo(idx,play=true){ if(!cues[idx])return; videoEl.currentTime=Math.max(0,cues[idx].t-offset+0.0001); highlightRow(idx); if(play) videoEl.play(); 
+  try{ if(window.BookWideSpeak){ BookWideSpeak.maybeSpeak(idx); } }catch(e){}}
 function sentenceRange(i){ if(!cues[i])return[0,0]; const s=cues[i].t,e=(i+1<cues.length?cues[i+1].t:s+3); return[s,e]; }
 btnPrev.addEventListener('click',()=>seekTo(Math.max(0,currentIndex()-1),true));
 btnNext.addEventListener('click',()=>seekTo(Math.min(cues.length-1,currentIndex()+1),true));
@@ -490,9 +502,7 @@ $$('.tabs .tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab
 
 
 
-
-
-/* ---------- AI pane loader (EN/JA/ZH switchable + voice timing fix v2) ---------- */
+/* ---------- AI pane loader (EN/JA/ZH switchable) ---------- */
 async function loadAI(){
   const pane = document.getElementById('pane-ai');
   if(!pane) return;
@@ -535,45 +545,7 @@ async function loadAI(){
     (sel?.parentElement||pane).insertBefore(langBar, (sel?.nextSibling)||null);
   }
 
-  // Unified speech guards
-  let speaking = false, ttsTimer = null;
-  function setBtns(disabled){
-    [btnTts, btnDemoTts, btnRec, btnStop].forEach(b=>{ if(b) b.disabled = disabled; });
-  }
-  function localesFor(lang){
-    return (lang==='ja') ? {tts:'ja-JP', stt:'ja-JP'} :
-           (lang==='zh') ? {tts:'zh-TW', stt:'zh-TW'} :
-                           {tts:'en-US', stt:'en-US'};
-  }
-
-  // Will be initialized later
-  let rec=null;
-  function stopRecognition(){
-    try{ if(rec) rec.stop(); }catch{}
-  }
-  async function tts(text, langCode){
-    try{
-      // hard-cancel any queued speech, and stop recognition to avoid mic/loopback
-      speechSynthesis.cancel();
-      stopRecognition();
-      if(ttsTimer) clearTimeout(ttsTimer);
-      speaking = true; setBtns(true);
-
-      // small delay to ensure queue is flushed before speaking
-      const p = new Promise(resolve=>{
-        ttsTimer = setTimeout(()=>{
-          const u = new SpeechSynthesisUtterance(text||'');
-          u.lang = langCode || 'en-US';
-          // slower for JA/ZH improves clarity (avoid double-voice effect)
-          u.rate = (u.lang==='ja-JP' || u.lang==='zh-TW' || u.lang==='zh-CN') ? 0.9 : 1.0;
-          u.pitch = 1.0; u.volume = 1.0;
-          u.onend = ()=>{ speaking=false; setBtns(false); resolve(); };
-          try{ speechSynthesis.speak(u); }catch{ speaking=false; setBtns(false); resolve(); }
-        }, 140);
-      });
-      return await p;
-    }catch(e){ speaking=false; setBtns(false); }
-  }
+  function tts(text, lang){ try{ const u=new SpeechSynthesisUtterance(text||''); u.lang=lang||'en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch{} }
 
   const url = `${BASE}/data/${cat}/${primarySlug}/ai-${primarySlug}.json?v=${Date.now()}`;
   let data = null;
@@ -659,47 +631,31 @@ async function loadAI(){
   btnPrev.addEventListener('click',()=>{ idx = (idx - 1 + items.length) % items.length; show(); });
   btnNext.addEventListener('click',()=>{ idx = (idx + 1) % items.length; show(); });
 
-  // TTS buttons: await to ensure one voice only
-  btnTts.addEventListener('click', async ()=>{
-    const loc = localesFor(lang);
-    await tts(promptBox.value||'', loc.tts);
-  });
+  const ttsLocale = (lang==='ja') ? 'ja-JP' : (lang==='zh' ? 'zh-TW' : 'en-US');
+  btnTts.addEventListener('click',()=>tts(promptBox.value||'', (lang==='ja')?'ja-JP':(lang==='zh'?'zh-TW':'en-US')));
   btnDemo?.addEventListener('click',()=>{
     const it = items[idx] || {};
     replyEl.textContent = textFor(it,'sample') || replyEl.textContent || '';
   });
-  btnDemoTts?.addEventListener('click', async ()=>{
-    const loc = localesFor(lang);
-    await tts(replyEl.textContent||'', loc.tts);
-  });
+  btnDemoTts?.addEventListener('click',()=>tts(replyEl.textContent||'', (lang==='ja')?'ja-JP':(lang==='zh'?'zh-TW':'en-US')));
 
-  // speech recognition with language + safe delays
+  // speech recognition with language
+  let rec=null;
   try{
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if(SR){
       rec = new SR();
       rec.interimResults = false;
       rec.continuous = false;
-      const setRecLang = ()=>{ const loc=localesFor(lang); rec.lang = loc.stt; };
-
-      function tryStartRecognition(delayMs){
-        if(speaking){ return; } // don't start if TTS still playing
-        setRecLang();
-        btnRec.disabled=true; btnStop.disabled=false;
-        setTimeout(()=>{ try{ rec.start(); }catch{} }, delayMs||800);
-      }
-
+      const setRecLang = ()=>{ rec.lang = (lang==='ja') ? 'ja-JP' : (lang==='zh' ? 'zh-TW' : 'en-US'); };
+      setRecLang();
       rec.onresult = (ev)=>{
         const text = Array.from(ev.results).map(r=>r[0].transcript).join(' ');
         replyEl.textContent = text;
         if(autoNext.checked){ btnNext.click(); }
       };
       rec.onend = ()=>{ btnRec.disabled=false; btnStop.disabled=true; };
-
-      btnRec.addEventListener('click',()=>{
-        speechSynthesis.cancel();
-        tryStartRecognition( (lang==='en')? 300 : 800 );
-      });
+      btnRec.addEventListener('click',()=>{ try{ setRecLang(); btnRec.disabled=true; btnStop.disabled=false; rec.start(); }catch{} });
       btnStop.addEventListener('click',()=>{ try{ rec.stop(); }catch{} });
     }else{
       btnRec.disabled = btnStop.disabled = true;
@@ -714,6 +670,58 @@ async function loadAI(){
 
 
 
+
+/* ---------- Multilingual Subtitle TTS (EN/ZH/JA) ---------- */
+(function () {
+  function initVoicesOnce(){
+    return new Promise(resolve=>{
+      const done=()=>resolve(speechSynthesis.getVoices());
+      const v=speechSynthesis.getVoices();
+      if(v&&v.length){ resolve(v); return; }
+      speechSynthesis.onvoiceschanged = done;
+      setTimeout(done, 800);
+    });
+  }
+  function pickVoice(lang){
+    const voices = speechSynthesis.getVoices()||[];
+    const like = kw => voices.find(v => v.lang===lang && v.name.toLowerCase().includes(kw));
+    if(lang==='ja-JP') return like('nanami') || like('female') || voices.find(v=>v.lang==='ja-JP');
+    if(lang==='zh-TW') return like('hsinchu') || like('hanhan') || voices.find(v=>v.lang==='zh-TW');
+    if(lang==='en-US') return like('jenny') || like('aria') || voices.find(v=>v.lang==='en-US');
+    return voices.find(v=>v.lang===lang);
+  }
+  async function speakLine(i){
+    const cues = window.cues || window.cuesData || [];
+    const c = cues[i];
+    if(!c) return;
+    const sel = document.getElementById('voiceLang');
+    const lang = sel ? sel.value : 'en-US';
+    let text = c.en || '';
+    if(lang==='zh-TW') text = c.zh || c.en || '';
+    if(lang==='ja-JP') text = c.ja || c.en || '';
+    if(!text) return;
+    await initVoicesOnce();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = lang;
+    const v = pickVoice(lang);
+    if(v) u.voice = v;
+    try{ speechSynthesis.cancel(); }catch{}
+    try{ speechSynthesis.speak(u); }catch{}
+  }
+  window.BookWideSpeak = {
+    speakLine,
+    maybeSpeak(i){
+      const auto = document.getElementById('autoSpeak');
+      if(auto && auto.checked) speakLine(i);
+    }
+  };
+  // When user changes voice language, re-speak current row if any
+  document.addEventListener('change', (e)=>{
+    if(e.target && e.target.id==='voiceLang' && typeof window.currentSubtitleIndex==='number'){
+      window.BookWideSpeak.maybeSpeak(window.currentSubtitleIndex);
+    }
+  });
+})();
 
 
 /* ---------- init ---------- */
@@ -745,6 +753,313 @@ if (!authData?.user) {
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
