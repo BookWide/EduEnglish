@@ -378,128 +378,166 @@ function speakText(text, lang){
 })();
 </script>
 
-<!-- === Reconnect Quiz/Vocab/AI with graceful fallbacks + diagnostics === -->
 <script>
-// Diagnostics: log all failed fetches
+// --- Minimal, safe tab split: no DOM moving, just show/hide parent containers of the 4 sections.
 (function(){
-  const _fetch = window.fetch;
-  window.fetch = async function(url, opts){
-    const res = await _fetch(url, opts);
-    if (!res.ok) { try { console.error('[FETCH !ok]', res.status, url); } catch(e){} }
-    return res;
-  };
-})();
-
-async function fetchJsonFirstOk(urls){
-  for(const u of urls){
-    try{ const r=await fetch(u,{cache:'no-store'}); if(r.ok){ return {data:await r.json(), used:u}; } }
-    catch(e){ console.warn('[json error]', u, e); }
+  function panelOf(idCandidates){
+    for (const id of idCandidates){
+      const el = document.getElementById(id);
+      if (el && el.parentElement) return el.parentElement;
+    }
+    return null;
   }
-  return {data:null, used:''};
-}
-function showMissing(elOrId, label){
-  const el = typeof elOrId==='string' ? document.getElementById(elOrId) : elOrId;
-  if(!el) return;
-  el.innerHTML = `<div class="muted" style="padding:8px 12px">⚠️ ${label} 檔尚未上傳</div>`;
-}
-
-(function(){
-  const _cat = (window.cat || new URLSearchParams(location.search).get('cat') || '').toLowerCase();
-  const _slug = (window.slug || new URLSearchParams(location.search).get('slug') || '');
-  const vnow = Date.now();
-
-  // QUIZ
-  window.loadQuiz = async function(){
-    const urls = [
-      `${BASE}/data/${_cat}/${_slug}/quiz-${_slug}.json?v=${vnow}`,
-      `${BASE}/data/${_slug}/quiz-${_slug}.json?v=${vnow}`
-    ];
-    const {data, used} = await fetchJsonFirstOk(urls);
-    const meta = document.getElementById('quizMeta');
-    const list = document.getElementById('quizList');
-    if(!data){ meta && (meta.textContent='⚠️ 測驗檔尚未上傳'); showMissing(list,'測驗'); return; }
-    meta && (meta.textContent = `已載入：${used}`);
-    list.innerHTML = (data||[]).map((q,idx)=>`
-      <li style="padding:8px 0">
-        <div style="font-weight:700">${(q.question||q.q||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}</div>
-        ${(q.options||[]).map(op=>`<div><label><input type="radio" name="q_${idx}" value="${String(op).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}"> ${String(op).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}</label></div>`).join('')}
-        <div class="ans muted" data-ans="${String(q.answer??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}" style="display:none;margin-top:6px">
-          答案：${String(q.answer??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}
-        </div>
-      </li>`).join('');
-    document.getElementById('btnShowAnswer').onclick=()=>[...document.querySelectorAll('#quizList .ans')].forEach(a=>a.style.display='block');
-    document.getElementById('btnSubmitQuiz').onclick=()=>{
-      let s=0,t=0;
-      [...document.querySelectorAll('#quizList > li')].forEach((li,i)=>{
-        const ans=(li.querySelector('.ans')?.dataset?.ans||'').toLowerCase();
-        const ch=[...li.querySelectorAll('input[type=radio]')].find(r=>r.checked)?.value?.toLowerCase()||'';
-        if(ans===ch) s++; t++;
-      });
-      document.getElementById('quizScore').textContent=`得分：${s} / ${t}`;
+  function show(name){
+    const map = {
+      cues:  panelOf(['cuesBody']),
+      quiz:  panelOf(['quizWrap']),
+      vocab: panelOf(['vocabBox','vocabWrap']),
+      ai:    panelOf(['aiWrap','aiBox'])
     };
-    document.getElementById('btnPrint').onclick=()=>window.print();
-  };
-
-  // VOCAB
-  window.loadVocab = async function(){
-    const urls = [
-      `${BASE}/data/${_cat}/${_slug}/vocab-${_slug}.json?v=${vnow}`,
-      `${BASE}/data/${_slug}/vocab-${_slug}.json?v=${vnow}`
-    ];
-    const {data:list, used} = await fetchJsonFirstOk(urls);
-    const vStatus=document.getElementById('vocabStatus'), vBox=document.getElementById('vocabBox');
-    if(!list || !list.length){ vStatus && (vStatus.textContent='⚠️ 單字檔尚未上傳'); showMissing(vBox,'單字'); return; }
-    vStatus && (vStatus.textContent=`已載入：${used}`);
-    function esc(s){ return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
-    vBox.innerHTML = list.map(v=>`
-      <div class="voc" style="border:1px solid #223048;border-radius:10px;padding:10px;margin:10px 0">
-        <div style="font-weight:800;font-size:18px">${esc(v.word||'')}</div>
-        ${v.zh?`<div>【中】${esc(v.zh)}</div>`:''}
-        ${v.en?`<div>【英】${esc(v.en)}</div>`:''}
-        ${v.ja?`<div>【日】${esc(v.ja)}</div>`:''}
-        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-          ${v.time?`<button class="btn" data-act="jump" data-time="${esc(v.time)}">跳到片段</button>`:''}
-          ${v.en?`<button class="btn" data-act="speak" data-lang="en-US" data-text="${esc(v.en)}">🔊 英</button>`:''}
-          ${v.zh?`<button class="btn" data-act="speak" data-lang="zh-TW" data-text="${esc(v.zh)}">🔊 中</button>`:''}
-          ${v.ja?`<button class="btn" data-act="speak" data-lang="ja-JP" data-text="${esc(v.ja)}">🔊 日</button>`:''}
-        </div>
-      </div>`).join('');
-    vBox.addEventListener('click',e=>{
-      const act=e.target?.dataset?.act; if(!act) return;
-      if(act==='jump'){ const p=Number((e.target.dataset.time||'0')); const t=isNaN(p)?0:p; const v=document.getElementById('player'); v.currentTime=Math.max(0,t); v.play(); }
-      if(act==='speak'){ const text=e.target.dataset.text||''; const lang=e.target.dataset.lang||'en-US'; speakText(text,lang); }
+    // if any missing, do nothing (keep SAFE behavior)
+    if (!map.cues && !map.quiz && !map.vocab && !map.ai) return;
+    Object.entries(map).forEach(([k,box])=>{
+      if (box){
+        box.style.display = (k===name) ? '' : 'none';
+      }
     });
-  };
-
-  // AI
-  window.loadAI = async function(){
-    const urls = [
-      `${BASE}/data/${_cat}/${_slug}/ai-${_slug}.json?v=${vnow}`,
-      `${BASE}/data/${_slug}/ai-${_slug}.json?v=${vnow}`
-    ];
-    const {data, used} = await fetchJsonFirstOk(urls);
-    const sel=document.getElementById('aiTopic'); const prompt=document.getElementById('aiPrompt');
-    const hint=document.getElementById('aiHint'); const demo=document.getElementById('aiReply'); const prog=document.getElementById('aiProgress');
-    if(!data){ sel.innerHTML=''; prompt.value=''; hint.textContent=''; demo.textContent='（等待你的作答…）'; prog.textContent='第 0/0 題'; return; }
-    const topics = Array.isArray(data)?data:(data.topics||[]);
-    sel.innerHTML = topics.map((t,i)=>`<option value="${i}">${String(t.title||t.q||('題目'+(i+1))).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}</option>`).join('');
-    let idx=0;
-    function esc(s){ return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
-    function render(){ const t=topics[idx]||{}; prompt.value=t.prompt||t.q||''; hint.textContent=t.hint||''; demo.textContent=t.sample||t.demo||'（等待你的作答…）'; prog.textContent=`第 ${idx+1}/${topics.length} 題`; sel.value=String(idx); }
-    render();
-    sel.onchange=()=>{ idx=+sel.value|0; render(); };
-    document.getElementById('btnPrevTopic').onclick=()=>{ idx=(idx-1+topics.length)%topics.length; render(); };
-    document.getElementById('btnNextTopic').onclick=()=>{ idx=(idx+1)%topics.length; render(); };
-    document.getElementById('btnTts').onclick=()=>speakText(prompt.value,'en-US');
-    document.getElementById('aiDemo').onclick =()=>{ const t=topics[idx]||{}; document.getElementById('aiReply').textContent=t.sample||t.demo||''; };
-    document.getElementById('aiDemoTts').onclick=()=>{ const t=topics[idx]||{}; const text=t.sample||t.demo||''; speakText(text,'en-US'); };
-  };
+  }
+  function bind(btn, name){
+    if (!btn || btn.__bwBound) return;
+    btn.__bwBound = true;
+    btn.addEventListener('click', function(){ show(name); });
+  }
+  document.addEventListener('DOMContentLoaded', function(){
+    // Bind by id and by text fallback
+    bind(document.getElementById('tabCues'), 'cues');
+    bind(document.getElementById('tabQuiz'), 'quiz');
+    bind(document.getElementById('tabVocab'),'vocab');
+    bind(document.getElementById('tabAI'),   'ai');
+    document.querySelectorAll('button,.btn,[role="tab"]').forEach(b=>{
+      const t=(b.textContent||'').trim();
+      if (t==='字幕') bind(b,'cues');
+      if (t==='測驗') bind(b,'quiz');
+      if (t==='單字') bind(b,'vocab');
+      if (t==='AI互動' || t==='AI 互動') bind(b,'ai');
+    });
+    // default to 字幕
+    show('cues');
+  });
 })();
 </script>
 
+
+<script>
+// --- FORCE tabs: immediately hide non-active panels on load, bind by text+id.
+(function(){
+  function boxOf(idList){
+    for (const id of idList){
+      const el = document.getElementById(id);
+      if (el && el.parentElement) return el.parentElement;
+    }
+    return null;
+  }
+  function collect(){
+    return {
+      cues:  boxOf(['cuesBody','cuesList','cuesPanel']),
+      quiz:  boxOf(['quizWrap','quizPanel']),
+      vocab: boxOf(['vocabBox','vocabWrap','vocabPanel']),
+      ai:    boxOf(['aiWrap','aiBox','aiPanel'])
+    };
+  }
+  const PANELS = collect();
+  function show(name){
+    Object.entries(PANELS).forEach(([k,el])=>{
+      if (!el) return;
+      el.style.display = (k===name)?'':'none';
+    });
+  }
+  function bind(btn, name){
+    if (!btn || btn.__bwBound) return;
+    btn.__bwBound = true;
+    btn.addEventListener('click', ()=>show(name));
+  }
+  document.addEventListener('DOMContentLoaded', function(){
+    // Default show cues, hide others if找到
+    if (PANELS.cues || PANELS.quiz || PANELS.vocab || PANELS.ai){
+      show('cues');
+    }
+    // Bind ids
+    bind(document.getElementById('tabCues'),'cues');
+    bind(document.getElementById('tabQuiz'),'quiz');
+    bind(document.getElementById('tabVocab'),'vocab');
+    bind(document.getElementById('tabAI'),'ai');
+    // Bind by text fallback
+    document.querySelectorAll('button,.btn,[role="tab"]').forEach(b=>{
+      const t=(b.textContent||'').trim();
+      if (t==='字幕') bind(b,'cues');
+      if (t==='測驗') bind(b,'quiz');
+      if (t==='單字') bind(b,'vocab');
+      if (t==='AI互動' || t==='AI 互動') bind(b,'ai');
+    });
+  });
+})();
+</script>
+
+
+<script>
+/** BookWide – 極簡分頁切換（不搬 DOM，僅顯示/隱藏四個內容本體） */
+(function(){
+  const sel = {
+    cues:  ['#cuesBody'],
+    quiz:  ['#quizWrap'],
+    vocab: ['#vocabBox','#vocabWrap'],
+    ai:    ['#aiWrap','#aiBox']
+  };
+
+  function q1(list){
+    for (const s of list){ const el = document.querySelector(s); if (el) return el; }
+    return null;
+  }
+  function show(name){
+    const map = {
+      cues:  q1(sel.cues),
+      quiz:  q1(sel.quiz),
+      vocab: q1(sel.vocab),
+      ai:    q1(sel.ai)
+    };
+    Object.entries(map).forEach(([k,el])=>{
+      if (!el) return;
+      el.style.display = (k===name) ? '' : 'none';
+    });
+  }
+
+  function bind(btn, name){
+    if (!btn || btn.__bwBound) return;
+    btn.__bwBound = true;
+    btn.addEventListener('click', ()=> show(name));
+  }
+
+  document.addEventListener('DOMContentLoaded', ()=>{
+    // 綁定四顆分頁按鈕（先用 id，找不到就用文字）
+    bind(document.getElementById('tabCues'),'cues');
+    bind(document.getElementById('tabQuiz'),'quiz');
+    bind(document.getElementById('tabVocab'),'vocab');
+    bind(document.getElementById('tabAI'),'ai');
+
+    document.querySelectorAll('button,.btn,[role="tab"]').forEach(b=>{
+      const t=(b.textContent||'').trim();
+      if (t==='字幕') bind(b,'cues');
+      if (t==='測驗') bind(b,'quiz');
+      if (t==='單字') bind(b,'vocab');
+      if (t==='AI互動' || t==='AI 互動') bind(b,'ai');
+    });
+
+    // 預設顯示：字幕
+    show('cues');
+  });
+})();
+</script>
+
+
 </body>
 </html>
-
 
 
 
