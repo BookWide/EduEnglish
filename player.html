@@ -83,7 +83,6 @@ tr.active{background:#173a6e}
   #pane-sub thead th{ top: 44px; }
 }
 
-
 /* --- print fix: show FULL quiz list with no blank first page --- */
 @media print{
   #backHome{ display:none !important; }
@@ -103,29 +102,13 @@ tr.active{background:#173a6e}
 
 .ja-line{margin-top:6px;opacity:.9}
 </style>
-<style>
-/* === BookWide ReadMode Patch (2025-11-12) === */
-#btnSpeak, .btn-speak, [data-role="speak"], .icon-speaker { display: none !important; }
-tr.reading-row { background: rgba(255, 208, 0, .09); }
-tr.speaking td:first-child::before{
-  content:"🔊"; margin-right:6px;
-  filter: drop-shadow(0 0 0 rgba(255,208,0,0));
-  animation:bwPing 1s infinite;
-}
-@keyframes bwPing{
-  0%{ filter:drop-shadow(0 0 0 rgba(255,208,0,0)); opacity:.9; }
-  50%{ filter:drop-shadow(0 0 8px rgba(255,208,0,.85)); opacity:1; }
-  100%{ filter:drop-shadow(0 0 0 rgba(255,208,0,0)); opacity:.9; }
-}
-@media (max-width:768px){
-  #voiceTrack, #selReadLang, #readLang, [data-read-lang]{
-    min-width:160px !important;
-    display:inline-block !important;
-    visibility:visible !important;
-  }
-}
-/* === /BookWide ReadMode Patch === */
+
+<style id="bw-puretts-css">
+/* Pure TTS: remove horn icon; show subtle left indicator */
+tr.speaking::before { content: none !important; }
+tr.speaking { box-shadow: inset 3px 0 0 0 #3c7cff88; }
 </style>
+
 </head>
 <body>
 <a id="backHome" href="/EduEnglish/index.html" style="position:fixed;left:16px;top:14px;z-index:10000;padding:6px 10px;border-radius:8px;background:#eef5ff;border:1px solid #c7ddff;color:#1b5eaa;text-decoration:none;font-weight:600;box-shadow:0 2px 6px rgba(0,0,0,.08)">← 回首頁</a>
@@ -161,18 +144,8 @@ tr.speaking td:first-child::before{
             <input id="speedRange" type="range" min="0.5" max="2" step="0.05" value="1"/>
             <span id="speedVal">1.00x</span>
           </div>
-        
-          <div class="row" id="audioTrackRow">
-            <label class="muted" for="audioTrack">配音音軌：</label>
-            <select id="audioTrack" class="btn">
-              <option value="none" selected>無（使用影片 + TTS）</option>
-              <option value="en">English 配音</option>
-              <option value="zh">中文 配音</option>
-              <option value="ja">日本語 配音</option>
-            </select>
-            <span class="muted" style="font-size:12px">（來源：Supabase /assets/audio/...）</span>
+
           </div>
-</div>
       </section>
     </section>
 
@@ -246,500 +219,6 @@ tr.speaking td:first-child::before{
 
 <button id="btnExitFocus" class="btn" style="display:none">返回影片</button>
 
-<script>
-const $=(s,e=document)=>e.querySelector(s);
-const $$=(s,e=document)=>[...e.querySelectorAll(s)];
-const toSec=t=>{ if(typeof t==='number')return t; const p=String(t).split(':').map(Number);
-  if(p.length===3)return p[0]*3600+p[1]*60+p[2]; if(p.length===2)return p[0]*60+p[1]; return Number(t)||0; };
-const fmt=sec=>{ sec=Math.max(0,sec|0); const m=(sec/60)|0,s=sec%60; return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;}
-const esc=s=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
-
-const BASE='/EduEnglish';
-const params=new URLSearchParams(location.search);
-const cat=(params.get('cat')||'story').toLowerCase();
-const primarySlug=params.get('slug')||'mid-autumn';
-let slug=primarySlug;
-// --- Supabase public Storage bases ---
-const SUPA_PUBLIC_BASE = 'https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public';
-const SUPA_VIDEOS_BASE = SUPA_PUBLIC_BASE + '/videos';
-const SUPA_ASSETS_BASE = SUPA_PUBLIC_BASE + '/assets';
-
-
-const video=$('#player'); const cuesBody=$('#cuesBody'); const cuesStatus=$('#cuesStatus');
-const btnPrev=$('#btnPrev'),btnPlay=$('#btnPlay'),btnNext=$('#btnNext'),btnReplay=$('#btnReplay');
-const btnOffsetMinus=$('#btnOffsetMinus'),btnOffsetPlus=$('#btnOffsetPlus'),offsetVal=$('#offsetVal');
-const chkFollow=$('#chkFollow'); const speedRange=$('#speedRange'),speedVal=$('#speedVal');
-const btnPrint=$('#btnPrint'); const paneSub=$('#pane-sub'),paneQuiz=$('#pane-quiz'),paneVocab=$('#pane-vocab');
-
-let cues=[]; let offset=0; let loopSentence=false;
-function setOffset(v){offset=Number(v)||0; offsetVal.textContent=`${offset.toFixed(1)}s`; localStorage.setItem(`offset:${slug}`,String(offset));}
-window.player={ setOffset, clearRepeat:()=>{ loopSentence=false; btnReplay?.classList.remove('blue'); } };
-
-/* ---------- smart fetcher: try cat folder -> legacy root -> story fallback ---------- */
-async function fetchJSONMulti(paths, kind){
-  for(const p of paths){
-    try{ const r=await fetch(p,{cache:'no-store'}); if(r.ok){ return {data:await r.json(), used:p}; } }catch{}
-  }
-  console.error(`[fatal] ${kind} 讀取失敗`, paths);
-  return {data:null, used:'error'};
-}
-
-/* ---------- video ---------- */
-async function loadVideo(){
-  const trySources=[
-    // 1) Supabase Storage (preferred)
-    `${SUPA_VIDEOS_BASE}/${cat}/${primarySlug}.mp4`,
-    // 2) GitHub fallbacks
-    `${BASE}/videos/${cat}/${primarySlug}.mp4`,
-    `${BASE}/videos/${primarySlug}.mp4`,
-    `${BASE}/videos/story/mid-autumn.mp4`
-  ];
-  let i=0;
-  function setSrc(idx){ video.src=trySources[idx]; }
-  setSrc(0);
-  video.addEventListener('error',()=>{ if(i<trySources.length-1){ i++; setSrc(i); } },{passive:true});
-}
-
-
-/* ---------- cues ---------- */
-async function loadCues(){
-  cuesStatus.textContent='（字幕載入中…）';
-  const url = `${BASE}/data/${cat}/${primarySlug}/cues-${primarySlug}.json?v=${Date.now()}`;
-  let data=null;
-  try{
-    const r=await fetch(url,{cache:'no-store'});
-    if(r.ok){ data=await r.json(); }
-  }catch{}
-  if(!data){ cuesStatus.textContent='⚠️ 字幕讀取失敗'; return; }
-
-  cues=data.map(x=>({t:toSec(x.time),en:x.en||'',zh:x.zh||'',ja:x.ja||''}));
-  cuesBody.innerHTML=cues.map((c,i)=>`<tr data-i="${i}">
-      <td class="cue-time">${c.t?fmt(c.t):''}</td>
-      <td class="cue-en">
-        ${esc(c.en)}
-        ${c.zh?`<div class="zh-line">${esc(c.zh)}</div>`:''}
-        ${c.ja?`<div class="ja-line">${esc(c.ja)}</div>`:''}
-      </td>
-      <td class="cue-zh">${esc(c.zh)}</td>
-    </tr>`).join('');
-  $$('#cuesBody tr').forEach(tr=>tr.addEventListener('click',()=>{const i=+tr.dataset.i; seekTo(i,true);}));
-  cuesStatus.textContent = `已載入：${url}`;
-}
-
-/* ---------- quiz ---------- */
-async function loadQuiz(){
-  const qStatus = document.getElementById('quizMeta');
-  if(qStatus) qStatus.textContent='（測驗載入中…）';
-  const url = `${BASE}/data/${cat}/${primarySlug}/quiz-${primarySlug}.json?v=${Date.now()}`;
-  let data=null;
-  try{
-    const r=await fetch(url,{cache:'no-store'});
-    if(r.ok){ data=await r.json(); }
-  }catch{}
-  if(!data){ if(qStatus) qStatus.textContent='❌ 題庫讀取失敗'; return; }
-  if(qStatus) qStatus.textContent=`已載入：${url}`;
-  renderQuiz(data);
-}
-
-/* ---------- vocab ---------- */
-async function loadVocab(){
-  const vStatus=$('#vocabStatus'), vBox=$('#vocabBox');
-  const url = `${BASE}/data/${cat}/${primarySlug}/vocab-${primarySlug}.json?v=${Date.now()}`;
-  let data=null;
-  try{
-    const r=await fetch(url,{cache:'no-store'});
-    if(r.ok){ data=await r.json(); }
-  }catch{}
-  if(!data||!data.length){ vStatus.textContent='⚠️ 查無單字資料'; vBox.innerHTML=''; return; }
-  vStatus.textContent=`已載入：${url}`;
-
-  const go=t=>{ const p=toSec(t); player.currentTime=Math.max(0,p); player.play(); };
-  vBox.innerHTML=data.map(v=>{
-    const ja   = v.ja ? `<div class="voc-ja">【日】${esc(v.ja)}</div>` : '';
-    const jaDef= v.ja_def ? `<div class="voc-jadef muted">${esc(v.ja_def)}</div>` : '';
-    const jaEx = v.ja_example ? `<div class="voc-jaex muted" style="margin-top:4px">例：${esc(v.ja_example)}</div>` : '';
-    return `<div class="voc" style="border:1px solid #223048;border-radius:10px;padding:10px;margin:10px 0">
-      <div class="voc-h" style="display:flex;gap:8px;align-items:center">
-        <div class="voc-word" style="font-weight:800;font-size:18px">${esc(v.word||'')}</div>
-        <div class="voc-pos" style="opacity:.85">${esc(v.pos||'')}</div>
-      </div>
-      ${v.zh?`<div class="voc-zh">【中】${esc(v.zh)}</div>`:''}
-      ${v.en?`<div class="voc-en">【英】${esc(v.en)}</div>`:''}
-      ${ja}${jaDef}${jaEx}
-      <div class="voc-actions" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
-        ${v.time?`<button class="btn" data-act="jump" data-time="${esc(v.time)}">跳到片段</button>`:''}
-        <button class="btn" data-act="speak" data-lang="en" data-text="${esc(v.word||v.en||'')}">🔊 英文朗讀</button>
-        ${v.ja?`<button class="btn" data-act="speak" data-lang="ja" data-text="${esc(v.ja)}">🔊 日文朗讀</button>`:''}
-      </div>
-    </div>`;
-  }).join('');
-
-  vBox.addEventListener('click',e=>{
-    const act=e.target?.dataset?.act; if(!act)return;
-    if(act==='jump'){ go(e.target.dataset.time||0); return; }
-    if(act==='speak'){
-      try{
-        const lang = (e.target.dataset.lang||'en').toLowerCase()==='ja' ? 'ja-JP' : 'en-US';
-        const u=new SpeechSynthesisUtterance(e.target.dataset.text||''); u.lang=lang;
-        speechSynthesis.cancel(); speechSynthesis.speak(u);
-      }catch{}
-    }
-  });
-}
-
-/* ---------- renderQuiz (simple MCQ/TF/Cloze) ---------- */
-function renderQuiz(list){
-  const ol = document.getElementById('quizList');
-  const header = document.getElementById('quizHeader');
-  const filters = $$('#quizFilters .btn');
-  if(!Array.isArray(list)){ ol.innerHTML='<li>無效的題庫格式</li>'; return; }
-
-  // Basic normalize
-  const items = list.map((q,idx)=>{
-    const type = (q.type||'MCQ').toUpperCase();
-    return {
-      idx, section: q.section||'General', type,
-      question: q.question||q.q||'',
-      options: q.options||[],
-      answer: q.answer,
-      explanation: q.explanation||'',
-      ja: q.ja||null
-    };
-  });
-
-  function render(itemsToShow){
-    header.textContent = `共 ${itemsToShow.length} 題`;
-    ol.innerHTML = itemsToShow.map(it=>{
-      const name = `q_${it.idx}`;
-      let body = '';
-      if(it.type==='TRUEFALSE'){
-        const opts = ['True','False'];
-        body = opts.map((op,i)=>`<label style="margin-right:10px"><input type="radio" name="${name}" value="${op}"> ${op}</label>`).join('');
-      }else if(it.type==='CLOZE'){
-        body = `<input type="text" name="${name}" style="width:280px" placeholder="輸入答案">`;
-      }else{
-        body = (it.options||[]).map((op,i)=>`<div><label><input type="radio" name="${name}" value="${esc(op)}"> ${esc(op)}</label></div>`).join('');
-      }
-      const jaBlock = it.ja ? [
-        it.ja.question ? `<div class="muted" style="margin-top:4px">【日】${esc(it.ja.question)}</div>` : '',
-        (it.ja.options && it.ja.options.length) ? `<div class="muted" style="margin-top:2px">${it.ja.options.map(o=>`・${esc(o)}`).join('<br>')}</div>` : '',
-        it.ja.explanation ? `<div class="muted" style="margin-top:4px">解說（日）：${esc(it.ja.explanation)}</div>` : ''
-      ].join('') : '';
-      return `<li data-i="${it.idx}" style="padding:8px 0">
-        <div style="font-weight:700">${esc(it.question)}</div>
-        ${jaBlock}
-        <div style="margin-top:6px">${body}</div>
-        <div class="ans muted" data-ans="${esc(String(it.answer??''))}" style="display:none;margin-top:6px">答案：${esc(String(it.answer??''))}${it.explanation?`，${esc(it.explanation)}`:''}</div>
-      </li>`;
-    }).join('');
-  }
-
-  // initial render + filters
-  render(items);
-  filters.forEach(btn=>btn.addEventListener('click',()=>{
-    const sec = btn.dataset.sec;
-    const subset = (sec==='all') ? items : items.filter(x=>x.section===sec);
-    render(subset);
-  }));
-
-  // actions
-  document.getElementById('btnShowAnswer')?.addEventListener('click',()=>{
-    $$('#quizList .ans').forEach(el=>el.style.display='block');
-  });
-  document.getElementById('btnSubmitQuiz')?.addEventListener('click',()=>{
-    let score=0,total=0;
-    $$('#quizList > li').forEach(li=>{
-      const ans = li.querySelector('.ans')?.dataset?.ans ?? '';
-      const radios = li.querySelectorAll('input[type="radio"]');
-      const text = li.querySelector('input[type="text"]');
-      let user='';
-      if(radios.length){
-        const chosen = [...radios].find(r=>r.checked);
-        if(chosen) user = chosen.value;
-      }else if(text){
-        user = text.value.trim();
-      }
-      if(String(ans).toLowerCase() === String(user).toLowerCase()) score++;
-      total++;
-    });
-    document.getElementById('quizScore').textContent = `得分：${score} / ${total}`;
-  });
-  document.getElementById('btnPrint')?.addEventListener('click',()=>window.print());
-}
-/* ---------- controls ---------- */
-const videoEl = document.getElementById('player');
-speedRange.addEventListener('input',()=>{ const r=Number(speedRange.value)||1; videoEl.playbackRate=r; speedVal.textContent=`${r.toFixed(2)}x`; });
-btnPlay.addEventListener('click',()=>{ if(videoEl.paused) videoEl.play(); else videoEl.pause(); });
-function currentIndex(){ const t=videoEl.currentTime+offset; let i=0; while(i+1<cues.length&&cues[i+1].t<=t+0.0001)i++; return i; }
-
-function highlightRow(idx){
-  const trs = $$('#cuesBody tr');
-  trs.forEach(tr => tr.classList.remove('active'));
-  const tr = trs[idx]; if (!tr) return;
-  tr.classList.add('active');
-  if (chkFollow.checked){
-    const container = document.getElementById('pane-sub');
-    if (container){
-      const targetTop = tr.offsetTop - container.clientHeight/2 + tr.offsetHeight/2;
-      container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
-    }
-  }
-}
-
-function seekTo(idx,play=true){ if(!cues[idx])return; videoEl.currentTime=Math.max(0,cues[idx].t-offset+0.0001); highlightRow(idx); if(play) videoEl.play(); }
-function sentenceRange(i){ if(!cues[i])return[0,0]; const s=cues[i].t,e=(i+1<cues.length?cues[i+1].t:s+3); return[s,e]; }
-btnPrev.addEventListener('click',()=>seekTo(Math.max(0,currentIndex()-1),true));
-btnNext.addEventListener('click',()=>seekTo(Math.min(cues.length-1,currentIndex()+1),true));
-(function(){ const btn=btnReplay; const on=()=>{btn.dataset.active='1';btn.classList.add('blue')}; const off=()=>{btn.dataset.active='0';btn.classList.remove('blue');loopSentence=false}; off(); btn.addEventListener('click',function(e){ const isOn=btn.dataset.active==='1'; if(isOn){ e.stopImmediatePropagation(); window.player.clearRepeat(); off(); return; } loopSentence=true; on(); seekTo(currentIndex(),true); },true); })();
-btnOffsetMinus.addEventListener('click',()=>setOffset(offset-0.5));
-btnOffsetPlus .addEventListener('click',()=>setOffset(offset+0.5));
-videoEl.addEventListener('timeupdate',()=>{ if(!cues.length)return; const i=currentIndex(); highlightRow(i); if(loopSentence){ const [s,e]=sentenceRange(i); const t=videoEl.currentTime+offset; if(t>=e-0.02){ videoEl.currentTime=Math.max(0,s-offset+0.0001); videoEl.play(); } } });
-
-function showTab(name){
-  paneSub.style.display=name==='sub'?'':'none';
-  paneQuiz.style.display=name==='quiz'?'':'none';
-  paneVocab.style.display=name==='vocab'?'':'none';
-  $('#pane-ai').style.display = name==='ai' ? '' : 'none';
-  $$('.tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
-  if(['sub','quiz','vocab','ai'].includes(name)){ document.body.classList.add('at-right'); $('#track').scrollTo({left:$('#track').clientWidth,behavior:'smooth'}); }
-}
-$$('.tabs .tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab)));
-
-/* ---------- tiny AI demo cosmetics ---------- */
-(function(){
-  const prog = document.getElementById('aiProgress');
-  const replyEl = document.getElementById('aiReply');
-  function refresh(i=0,total=0){ if(prog) prog.textContent=`第 ${total?i+1:0}/${total} 題`; }
-  document.getElementById('aiDemo')?.addEventListener('click',()=>{
-    const text = 'The Mid-Autumn Festival is celebrated on the 15th day of the eighth lunar month.';
-    replyEl.textContent = text;
-    refresh(0,10);
-  });
-  document.getElementById('aiDemoTts')?.addEventListener('click',()=>{
-    try{ const u=new SpeechSynthesisUtterance(replyEl.textContent||''); u.lang='en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch{}
-  });
-  refresh();
-})();
-
-
-
-
-
-/* ---------- AI pane loader (EN/JA/ZH switchable) ---------- */
-async function loadAI(){
-  const pane = document.getElementById('pane-ai');
-  if(!pane) return;
-
-  const BASE = '/EduEnglish';
-  const sel = document.getElementById('aiTopic');
-  const promptBox = document.getElementById('aiPrompt');
-  const hintEl = document.getElementById('aiHint');
-  const replyEl = document.getElementById('aiReply');
-  const prog = document.getElementById('aiProgress');
-  const autoNext = document.getElementById('aiAutoNext');
-  const btnPrev = document.getElementById('btnPrevTopic');
-  const btnNext = document.getElementById('btnNextTopic');
-  const btnTts  = document.getElementById('btnTts');
-  const btnDemo = document.getElementById('aiDemo');
-  const btnDemoTts = document.getElementById('aiDemoTts');
-  const btnRec  = document.getElementById('btnRec');
-  const btnStop = document.getElementById('btnStop');
-
-  // Language bar (EN / JA / ZH)
-  let langBar = document.getElementById('aiLangBar');
-  if(!langBar){
-    langBar = document.createElement('div');
-    langBar.id = 'aiLangBar';
-    langBar.style.display = 'inline-flex';
-    langBar.style.gap = '8px';
-    langBar.style.marginLeft = '8px';
-    const makeBtn = (id, label)=>{
-      const b=document.createElement('button'); b.id=id; b.textContent=label;
-      b.className='px-2 py-1 rounded border';
-      b.style.background = 'rgba(255,255,255,0.06)';
-      b.style.borderColor = 'rgba(255,255,255,0.2)';
-      b.style.cursor='pointer';
-      return b;
-    };
-    const bEN=makeBtn('aiLangEn','EN');
-    const bJA=makeBtn('aiLangJa','JA');
-    const bZH=makeBtn('aiLangZh','ZH');
-    langBar.appendChild(bEN); langBar.appendChild(bJA); langBar.appendChild(bZH);
-    (sel?.parentElement||pane).insertBefore(langBar, (sel?.nextSibling)||null);
-  }
-
-  function tts(text, lang){ try{ const u=new SpeechSynthesisUtterance(text||''); u.lang=lang||'en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u);}catch{} }
-
-  const url = `${BASE}/data/${cat}/${primarySlug}/ai-${primarySlug}.json?v=${Date.now()}`;
-  let data = null;
-  try { const r = await fetch(url,{cache:'no-store'}); if(r.ok){ data = await r.json(); } } catch(e){}
-
-  // normalize to flat list
-  let items = [];
-  if (Array.isArray(data)) {
-    items = data;
-  } else if (data && (data.items || data.questions)) {
-    items = data.items || data.questions || [];
-  } else if (data && data.sections) {
-    items = Object.values(data.sections).flat().filter(Boolean);
-  } else if (data && Array.isArray(data.topics)) {
-    items = data.topics.map(t=>({ title: t.title, prompt: t.prompt||t.question, hint: t.hint, sample: t.sample||t.answer, ja: t.ja, zh: t.zh }));
-  }
-
-  // common shape; preserve nested ja/zh
-  items = (items||[]).map(x=>({
-    title: x.title || x.topic || x.section || x.name || 'Topic',
-    prompt: x.prompt || x.question || x.q || '',
-    hint: x.hint || x.keywords || '',
-    sample: x.sample || x.answer || x.demo || '',
-    ja: (typeof x.ja==='object') ? x.ja : null,
-    zh: (typeof x.zh==='object') ? x.zh : null
-  })).filter(x=>x.prompt || (x.ja && (x.ja.prompt||x.ja.sample)) || (x.zh && (x.zh.prompt||x.zh.sample)));
-
-  if(!items.length){
-    prog.textContent = '第 0/0 題';
-    sel.innerHTML = `<option value="">No AI dataset</option>`;
-    btnPrev.disabled = btnNext.disabled = true;
-    return;
-  }
-
-  // language state
-  let lang = 'en'; // 'en' | 'ja' | 'zh'
-  const langEnBtn = document.getElementById('aiLangEn');
-  const langJaBtn = document.getElementById('aiLangJa');
-  const langZhBtn = document.getElementById('aiLangZh');
-  function paintLang(){
-    const on = (b)=>{ if(b) b.style.opacity='1'; };
-    const off= (b)=>{ if(b) b.style.opacity='0.6'; };
-    off(langEnBtn); off(langJaBtn); off(langZhBtn);
-    if(lang==='en') on(langEnBtn);
-    if(lang==='ja') on(langJaBtn);
-    if(lang==='zh') on(langZhBtn);
-  }
-  langEnBtn?.addEventListener('click',()=>{ lang='en'; paintLang(); show(); });
-  langJaBtn?.addEventListener('click',()=>{ lang='ja'; paintLang(); show(); });
-  langZhBtn?.addEventListener('click',()=>{ lang='zh'; paintLang(); show(); });
-  paintLang();
-
-  // Populate dropdown
-  sel.innerHTML = items.map((it,i)=>`<option value="${i}">${(it.title||'Topic')}${items.length>1?` #${i+1}`:''}</option>`).join('');
-  let idx = 0;
-
-  function textFor(it, field){
-    if(lang==='ja' && it.ja && it.ja[field]) return it.ja[field];
-    if(lang==='zh' && it.zh && it.zh[field]) return it.zh[field];
-    if(field==='prompt') return it.prompt || '';
-    if(field==='hint') return it.hint || '';
-    if(field==='sample') return it.sample || '';
-    return '';
-  }
-
-  function show(){
-    const total = items.length;
-    const it = items[idx];
-    sel.value = String(idx);
-    promptBox.value = textFor(it,'prompt');
-    const hint = textFor(it,'hint');
-    hintEl.textContent = hint || '—';
-    const sample = textFor(it,'sample');
-    replyEl.textContent = sample || '（等待你的作答…）';
-    prog.textContent = `第 ${idx+1}/${total} 題`;
-    btnPrev.disabled = btnNext.disabled = (total<=1);
-  }
-
-  sel.addEventListener('change',()=>{
-    const v = Number(sel.value);
-    if(!Number.isNaN(v)) { idx = Math.max(0, Math.min(items.length-1, v)); show(); }
-  });
-  btnPrev.addEventListener('click',()=>{ idx = (idx - 1 + items.length) % items.length; show(); });
-  btnNext.addEventListener('click',()=>{ idx = (idx + 1) % items.length; show(); });
-
-  const ttsLocale = (lang==='ja') ? 'ja-JP' : (lang==='zh' ? 'zh-TW' : 'en-US');
-  btnTts.addEventListener('click',()=>tts(promptBox.value||'', (lang==='ja')?'ja-JP':(lang==='zh'?'zh-TW':'en-US')));
-  btnDemo?.addEventListener('click',()=>{
-    const it = items[idx] || {};
-    replyEl.textContent = textFor(it,'sample') || replyEl.textContent || '';
-  });
-  btnDemoTts?.addEventListener('click',()=>tts(replyEl.textContent||'', (lang==='ja')?'ja-JP':(lang==='zh'?'zh-TW':'en-US')));
-
-  // speech recognition with language
-  let rec=null;
-  try{
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if(SR){
-      rec = new SR();
-      rec.interimResults = false;
-      rec.continuous = false;
-      const setRecLang = ()=>{ rec.lang = (lang==='ja') ? 'ja-JP' : (lang==='zh' ? 'zh-TW' : 'en-US'); };
-      setRecLang();
-      rec.onresult = (ev)=>{
-        const text = Array.from(ev.results).map(r=>r[0].transcript).join(' ');
-        replyEl.textContent = text;
-        if(autoNext.checked){ btnNext.click(); }
-      };
-      rec.onend = ()=>{ btnRec.disabled=false; btnStop.disabled=true; };
-      btnRec.addEventListener('click',()=>{ try{ setRecLang(); btnRec.disabled=true; btnStop.disabled=false; rec.start(); }catch{} });
-      btnStop.addEventListener('click',()=>{ try{ rec.stop(); }catch{} });
-    }else{
-      btnRec.disabled = btnStop.disabled = true;
-    }
-  }catch(e){
-    btnRec.disabled = btnStop.disabled = true;
-  }
-
-  show();
-}
-
-
-
-
-
-/* ---------- External Narration Tracks (EN/ZH/JA) synced with cues ---------- */
-(function(){
-  const AUDIO_BASE = (typeof SUPA_ASSETS_BASE!=='undefined' ? SUPA_ASSETS_BASE : '') + '/audio';
-  let audioLang = 'none';
-  const audio = new Audio();
-  audio.preload = 'auto';
-  audio.crossOrigin = 'anonymous';
-  const videoEl = document.getElementById('player');
-  function pad2(n){ return String(n).padStart(2,'0'); }
-  function cueUrl(i){
-    if(audioLang==='none') return '';
-    const cat = (window.cat || (new URLSearchParams(location.search).get('cat')||'story')).toLowerCase();
-    const slug = (window.primarySlug || (new URLSearchParams(location.search).get('slug')||'mid-autumn'));
-    return `${AUDIO_BASE}/${cat}/${slug}/${audioLang}/${pad2(i)}.mp3`;
-  }
-  function setAudioLang(v){ audioLang = v || 'none'; try{ audio.pause(); audio.currentTime = 0; }catch{} }
-  function syncRate(){ try{ audio.playbackRate = videoEl?.playbackRate || 1; }catch{} }
-  document.getElementById('speedRange')?.addEventListener('input', syncRate);
-  videoEl?.addEventListener('ratechange', syncRate);
-  async function playNarrationAt(index){
-    if(audioLang==='none') return;
-    const url = cueUrl(index); if(!url) return;
-    if(audio.src !== url){ audio.src = url; }
-    try{ await audio.play(); }catch{}
-    syncRate();
-  }
-  document.getElementById('audioTrack')?.addEventListener('change', e=>{
-    setAudioLang(e.target.value);
-    if(typeof window.currentSubtitleIndex==='number'){ playNarrationAt(window.currentSubtitleIndex); }
-  });
-  window.BookWideAudio = { playAt: playNarrationAt, setLang: setAudioLang };
-  const origSeek = window.seekTo;
-  window.seekTo = function(idx, play=true){ origSeek?.(idx, play); if(document.getElementById('audioTrack')?.value!=='none'){ playNarrationAt(idx); } };
-  (function(){ let last=-1; function idxByTime(){ const cues=window.cues||window.cuesData||[]; const t=(videoEl?.currentTime||0)+(window.offset||0); let i=0; while(i+1<cues.length && cues[i+1].t<=t+1e-4) i++; return i; } videoEl?.addEventListener('timeupdate', ()=>{ if(audioLang==='none') return; const i=idxByTime(); if(i!==last){ last=i; window.currentSubtitleIndex=i; playNarrationAt(i); } }); })();
-})();
-
-
-/* ---------- init ---------- */
-(async function init(){
-  const saved=localStorage.getItem(`offset:${slug}`); if(saved!=null) setOffset(parseFloat(saved)); else setOffset(0);
-  const r=Number(speedRange.value)||1; videoEl.playbackRate=r; speedVal.textContent=`${r.toFixed(2)}x`;
-  await loadVideo(); await loadCues(); await loadQuiz(); await loadVocab(); await loadAI();
-  showTab('sub');
-})();
-</script>
-
 <script type="module">
 import { supabase } from '/EduEnglish/supa.js?v=20251018';
 const { data: authData } = await supabase.auth.getUser();
@@ -759,265 +238,126 @@ if (!authData?.user) {
 }
 </script>
 
-<audio id="ttsAudio"></audio>
-<script>
-/** 1️⃣ Supabase 設定 */
-const SUPA_PROJECT = "jeajrwpmpgczimmrflxo"; // ← 換成你的專案 ref
-const SUPA_BASE = `https://${SUPA_PROJECT}.supabase.co/storage/v1/object/public/assets`;
-
-/** 2️⃣ 語言對應資料夾 */
-function langFolder(lang){
-  if(lang.startsWith("ja")) return "ja";
-  if(lang.startsWith("zh")) return "zh";
-  return "en";
-}
-
-/** 3️⃣ 生成雲端 MP3 路徑 */
-function ttsUrl(cat, slug, lang, index){
-  const i = String(index).padStart(2,"0");
-  return `${SUPA_BASE}/audio/${cat}/${slug}/${langFolder(lang)}/${i}.mp3`;
-}
-
-/** 4️⃣ 播放優先邏輯：先播 Supabase MP3，找不到再用瀏覽器朗讀 */
-async function playTTS({cat, slug, lang, index, text}){
-  const url = ttsUrl(cat, slug, lang, index);
-  try{
-    const res = await fetch(url, {method:"HEAD"});
-    if(res.ok){
-      const a = document.getElementById("ttsAudio");
-      a.src = url;
-      await a.play();
-      console.log("[BookWide] 播放雲端音檔：", url);
-      return;
-    }
-  }catch(e){
-    console.warn("雲端音檔不存在，改用瀏覽器朗讀。");
-  }
-
-  // Fallback：瀏覽器朗讀
-  if("speechSynthesis" in window){
-    const u = new SpeechSynthesisUtterance(text || "");
-    u.lang = lang || "en-US";
-    speechSynthesis.cancel(); speechSynthesis.speak(u);
-  }
-}
-
-/** 5️⃣ 測試：可以手動呼叫
-playTTS({cat:"story", slug:"houyi", lang:"ja-JP", index:0, text:"テストです。"});
- */
-</script>
-
-<!-- === BookWide: Simple Read/Follow behavior using language dropdown (2025-11-12) === -->
-<script>
+<script id="bw-puretts-controller">
 (function(){
-  const tbody = document.querySelector('#cuesBody, #tbody, .cue-table tbody, table tbody');
-  const followChk = document.querySelector('#chkFollow, #followToggle, [data-follow] input[type=checkbox]');
-  if (!tbody) return;
+  if (!("speechSynthesis" in window)) return;
+  if (window.__BW_PURE_TTS__) return; window.__BW_PURE_TTS__ = true;
 
-  const langSel = document.querySelector('#voiceTrack, #selReadLang, #readLang, [data-read-lang]');
-  const LS_KEY = 'bw_read_lang';
+  const video = document.getElementById('player');
+  const cuesBody = document.getElementById('cuesBody');
+  const speedRange = document.getElementById('speedRange');
+  const followChk = document.getElementById('chkFollow');
 
-  function normLang(v){
-    if (!v) return 'ja-JP';
-    v = String(v).trim();
-    if (v === 'ja') return 'ja-JP';
-    if (v === 'zh') return 'zh-TW';
-    if (v === 'en') return 'en-US';
-    if (/^ja\b/i.test(v)) return 'ja-JP';
-    if (/^zh\b/i.test(v)) return 'zh-TW';
-    if (/^en\b/i.test(v)) return 'en-US';
-    return 'ja-JP';
-  }
-
-  function getReadLang(){
-    let v = null;
-    if (langSel) v = langSel.value || langSel.getAttribute('data-read-lang');
-    if (!v) v = localStorage.getItem(LS_KEY);
-    return normLang(v || 'ja-JP');
-  }
-
-  if (langSel){
-    try {
-      const saved = localStorage.getItem(LS_KEY);
-      if (saved){
-        const wanted = saved.startsWith('ja') ? 'ja' : saved.startsWith('zh') ? 'zh' : saved.startsWith('en') ? 'en' : saved;
-        if ([...langSel.options||[]].some(o => o.value === wanted)) {
-          langSel.value = wanted;
-        }
-      }
-    } catch(e){}
-    langSel.addEventListener('change', () => {
-      const v = langSel.value || langSel.getAttribute('data-read-lang') || 'ja';
-      const bcp = normLang(v);
-      localStorage.setItem(LS_KEY, bcp);
-    });
-  } else {
-    if (!localStorage.getItem(LS_KEY)) localStorage.setItem(LS_KEY, 'ja-JP');
-  }
-
-  function pickText(tr, lang){
-    const get = sel => (tr.querySelector(sel)?.textContent || '').trim();
-    const ja = get('.ja, .col-ja, td[data-col=ja], .ja-line') || '';
-    const zh = get('.zh, .col-zh, td[data-col=zh], .zh-line') || '';
-    let  en = get('.en, .cue-en, .col-en, td[data-col=en]') || get('td:nth-child(2)') || '';
-    if (lang.startsWith('ja')) return ja || zh || en;
-    if (lang.startsWith('zh')) return zh || ja || en;
-    return en || ja || zh;
-  }
-
-  async function speak(text, lang, row){
-    if (!text) return;
-    try { row.classList.add('reading-row','speaking'); } catch(e){}
-    try {
-      if (typeof window.playTTS === 'function'){
-        await window.playTTS({ lang, text });
-      } else if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(text);
-        u.lang = lang;
-        speechSynthesis.speak(u);
-      }
-    } catch(e){ console.warn('speak failed', e); }
-    setTimeout(()=> row.classList.remove('speaking'), 2000);
-  }
-
-  function highlightRow(tr){
-    document.querySelectorAll('tr.active, .reading-row').forEach(el=>el.classList.remove('active','reading-row'));
-    tr.classList.add('active','reading-row');
-    tr.scrollIntoView({ block:'center', behavior:'smooth' });
-  }
-
-  tbody.addEventListener('click', function(evt){
-    const tr = evt.target.closest('tr');
-    if (!tr) return;
-    const isFollow = !!(followChk && followChk.checked);
-    if (isFollow){
-      const idx = Number(tr.dataset.i ?? tr.dataset.idx ?? -1);
-      if (!Number.isNaN(idx) && typeof window.seekTo === 'function'){
-        evt.preventDefault(); evt.stopPropagation();
-        window.seekTo(idx, true);
-      }
-      return;
+  // Block any residual <audio> playback
+  document.addEventListener('play', function(ev){
+    const el = ev.target;
+    if (el && el.tagName === 'AUDIO') {
+      try { el.pause(); el.src=""; } catch {}
+      ev.stopImmediatePropagation(); ev.stopPropagation(); ev.preventDefault();
     }
-    evt.preventDefault(); evt.stopPropagation();
-    const lang = getReadLang();
-    const text = pickText(tr, lang);
-    highlightRow(tr);
-    speak(text, lang, tr);
   }, true);
+  try { document.querySelectorAll('audio').forEach(a=>{ a.pause(); a.src=""; }); } catch {}
+
+  let voices = [];
+  function loadVoices(){ try{ voices = speechSynthesis.getVoices()||[]; }catch{ voices=[]; } }
+  loadVoices(); speechSynthesis.onvoiceschanged = loadVoices;
+
+  function pickVoice(bcp){
+    if (!voices.length) voices = speechSynthesis.getVoices()||[];
+    const lc = (bcp||'').toLowerCase();
+    let v = voices.find(v=> (v.lang||'').toLowerCase()===lc);
+    if (v) return v;
+    const pref = lc.slice(0,2);
+    return voices.find(v=> (v.lang||'').toLowerCase().startsWith(pref)) || null;
+  }
+  function splitSentences(text,bcp){
+    const s = String(text||'').trim().replace(/\s+/g,' ');
+    if (!s) return [];
+    if (/^zh/i.test(bcp)) return s.split(/(?<=[。！？；、])/u).map(t=>t.trim()).filter(Boolean);
+    if (/^ja/i.test(bcp)) return s.split(/(?<=[。！？、])/u).map(t=>t.trim()).filter(Boolean);
+    return s.split(/(?<=[\.\?\!;,:])\s+/).map(t=>t.trim()).filter(Boolean);
+  }
+  function rate(){
+    const v = (video && typeof video.playbackRate==='number')? video.playbackRate : 1;
+    const s = speedRange ? Number(speedRange.value||"") : NaN;
+    return (s>0? s : v) || 1;
+  }
+  function cancel(){ try{ speechSynthesis.cancel(); }catch{} }
+  function speak(text,bcp){
+    const chunks = splitSentences(text,bcp);
+    if(!chunks.length) return;
+    const voice = pickVoice(bcp);
+    chunks.forEach((piece,i)=>{
+      const u = new SpeechSynthesisUtterance(piece);
+      u.lang = bcp; u.rate = rate();
+      if (voice) u.voice = voice;
+      if (i===0) u.onstart = ()=> document.body.classList.add('tts-speaking');
+      if (i===chunks.length-1) u.onend = ()=> document.body.classList.remove('tts-speaking');
+      speechSynthesis.speak(u);
+    });
+  }
+  function bcpFromTarget(t){
+    if (t && t.closest && t.closest('.ja-line')) return 'ja-JP';
+    if (t && t.closest && t.closest('.zh-line')) return 'zh-TW';
+    return 'en-US';
+  }
+  function textFromRow(tr,bcp){
+    const enNode = (tr.querySelector('.cue-en')||{});
+    const en = (enNode.childNodes && enNode.childNodes[0] ? enNode.childNodes[0].textContent : '') || '';
+    const zh = (tr.querySelector('.zh-line')||{}).textContent || '';
+    const ja = (tr.querySelector('.ja-line')||{}).textContent || '';
+    if (/^ja/i.test(bcp)) return (ja||zh||en).trim();
+    if (/^zh/i.test(bcp)) return (zh||ja||en).trim();
+    return (en||zh||ja).trim();
+  }
+
+  if (cuesBody) {
+    cuesBody.addEventListener('click', (e)=>{
+      const tr = e.target.closest('tr'); if (!tr) return;
+      const idx = Number(tr.dataset.i ?? tr.dataset.idx ?? -1);
+      if (!(idx>=0)) return;
+
+      // Prevent other click handlers from also triggering audio
+      e.stopImmediatePropagation(); e.stopPropagation(); e.preventDefault();
+
+      // Follow (seek) behavior
+      try { if (typeof window.seekTo==='function') window.seekTo(idx, true); } catch {}
+
+      const bcp = bcpFromTarget(e.target);
+      const text = textFromRow(tr, bcp);
+
+      cancel();
+      speak(text, bcp);
+
+      document.querySelectorAll('#cuesBody tr.speaking').forEach(x=>x.classList.remove('speaking'));
+      tr.classList.add('speaking');
+      try { tr.scrollIntoView({block:'center', behavior:'smooth'}); } catch {}
+    }, true);
+  }
+
+  // simple API for programmatic speak
+  window.BW_PURE_TTS = {
+    speakByIndex(i, preferBCP){
+      const tr = document.querySelector(`#cuesBody tr[data-i="${i}"]`); if (!tr) return;
+      const bcp = preferBCP || 'en-US';
+      const text = textFromRow(tr, bcp);
+      cancel(); speak(text, bcp);
+      document.querySelectorAll('#cuesBody tr.speaking').forEach(x=>x.classList.remove('speaking'));
+      tr.classList.add('speaking');
+      try { tr.scrollIntoView({block:'center'}); } catch {}
+    },
+    cancel: cancel
+  };
 })();
 </script>
-<!-- === /BookWide ReadMode Patch === -->
 
 </body>
 </html>
-  
-
-<!-- === BookWide: Simple Read/Follow behavior using language dropdown (2025-11-12) === -->
-<script>
-(function(){
-  const tbody = document.querySelector('#cuesBody, #tbody, .cue-table tbody, table tbody');
-  const followChk = document.querySelector('#chkFollow, #followToggle, [data-follow] input[type=checkbox]');
-  if (!tbody) return;
-
-  const langSel = document.querySelector('#voiceTrack, #selReadLang, #readLang, [data-read-lang]');
-  const LS_KEY = 'bw_read_lang';
-
-  function normLang(v){
-    if (!v) return 'ja-JP';
-    v = String(v).trim();
-    if (v === 'ja') return 'ja-JP';
-    if (v === 'zh') return 'zh-TW';
-    if (v === 'en') return 'en-US';
-    if (/^ja\b/i.test(v)) return 'ja-JP';
-    if (/^zh\b/i.test(v)) return 'zh-TW';
-    if (/^en\b/i.test(v)) return 'en-US';
-    return 'ja-JP';
-  }
-
-  function getReadLang(){
-    let v = null;
-    if (langSel) v = langSel.value || langSel.getAttribute('data-read-lang');
-    if (!v) v = localStorage.getItem(LS_KEY);
-    return normLang(v || 'ja-JP');
-  }
-
-  if (langSel){
-    try {
-      const saved = localStorage.getItem(LS_KEY);
-      if (saved){
-        const wanted = saved.startsWith('ja') ? 'ja' : saved.startsWith('zh') ? 'zh' : saved.startsWith('en') ? 'en' : saved;
-        if ([...langSel.options||[]].some(o => o.value === wanted)) {
-          langSel.value = wanted;
-        }
-      }
-    } catch(e){}
-    langSel.addEventListener('change', () => {
-      const v = langSel.value || langSel.getAttribute('data-read-lang') || 'ja';
-      const bcp = normLang(v);
-      localStorage.setItem(LS_KEY, bcp);
-    });
-  } else {
-    if (!localStorage.getItem(LS_KEY)) localStorage.setItem(LS_KEY, 'ja-JP');
-  }
-
-  function pickText(tr, lang){
-    const get = sel => (tr.querySelector(sel)?.textContent || '').trim();
-    const ja = get('.ja, .col-ja, td[data-col=ja], .ja-line') || '';
-    const zh = get('.zh, .col-zh, td[data-col=zh], .zh-line') || '';
-    let  en = get('.en, .cue-en, .col-en, td[data-col=en]') || get('td:nth-child(2)') || '';
-    if (lang.startsWith('ja')) return ja || zh || en;
-    if (lang.startsWith('zh')) return zh || ja || en;
-    return en || ja || zh;
-  }
-
-  async function speak(text, lang, row){
-    if (!text) return;
-    try { row.classList.add('reading-row','speaking'); } catch(e){}
-    try {
-      if (typeof window.playTTS === 'function'){
-        await window.playTTS({ lang, text });
-      } else if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(text);
-        u.lang = lang;
-        speechSynthesis.speak(u);
-      }
-    } catch(e){ console.warn('speak failed', e); }
-    setTimeout(()=> row.classList.remove('speaking'), 2000);
-  }
-
-  function highlightRow(tr){
-    document.querySelectorAll('tr.active, .reading-row').forEach(el=>el.classList.remove('active','reading-row'));
-    tr.classList.add('active','reading-row');
-    tr.scrollIntoView({ block:'center', behavior:'smooth' });
-  }
-
-  tbody.addEventListener('click', function(evt){
-    const tr = evt.target.closest('tr');
-    if (!tr) return;
-    const isFollow = !!(followChk && followChk.checked);
-    if (isFollow){
-      const idx = Number(tr.dataset.i ?? tr.dataset.idx ?? -1);
-      if (!Number.isNaN(idx) && typeof window.seekTo === 'function'){
-        evt.preventDefault(); evt.stopPropagation();
-        window.seekTo(idx, true);
-      }
-      return;
-    }
-    evt.preventDefault(); evt.stopPropagation();
-    const lang = getReadLang();
-    const text = pickText(tr, lang);
-    highlightRow(tr);
-    speak(text, lang, tr);
-  }, true);
-})();
-</script>
-<!-- === /BookWide ReadMode Patch === -->
 
 </body>
- 
+
 </html>
+
 
 
 
