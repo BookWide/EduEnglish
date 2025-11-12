@@ -49,22 +49,14 @@ tr.speaking::before{content:"🔊";position:absolute;left:6px;top:6px;opacity:.7
 }
 </style>
   <script src="https://bookwide.github.io/EduEnglish/js/supa.js"></script>
-<script>
 
-// 來源說明（本機 / GitHub）
-function sourceLabel(url){
-  try {
-    if (!url) return '';
-    const u = String(url);
-    if (u.includes('bookwide.github.io')) return '（GitHub）';
-    if (u.startsWith('./') || u.startsWith('../') || u.startsWith('/')) return '（本機/相對路徑）';
-    const lh = location.host || '';
-    if (lh && u.includes(lh)) return '（本機）';
-  } catch(e){}
-  return '';
-}
+<style id="bw-puretts-css">
+/* Pure TTS: remove horn icon that visually interferes */
+tr.speaking::before { content: none !important; }
+/* Optional: subtle indicator for the speaking row (non-blocking) */
+tr.speaking { box-shadow: inset 3px 0 0 0 #3c7cff88; }
+</style>
 
-</script>
 </head>
 <body>
 <header>
@@ -183,10 +175,7 @@ const esc=s=>String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replac
 
 const params=new URLSearchParams(location.search);
 const paramBase=params.get('base');
-// === BASE 路徑：優先本機/相對路徑，其次 GitHub Pages；?base= 可覆寫 ===
-const __params = new URLSearchParams(location.search);
-const __paramBase = __params.get('base');
-let BASE = __paramBase || (location.host.includes('github.io') ? '/EduEnglish' : '.');
+const BASE = paramBase || (location.host.includes('github.io')? '/EduEnglish' : 'https://bookwide.github.io/EduEnglish');
 const cat=(params.get('cat')||'story').toLowerCase();
 let slug=params.get('slug')||'houyi'; if(slug==='huyi') slug='houyi';
 const vnow = Date.now();
@@ -389,6 +378,140 @@ function speakText(text, lang){
   showTab('sub');
 })();
 </script>
+
+<script id="bw-puretts-controller">
+/** === BookWide · Pure Browser TTS (speechSynthesis only) ===
+ * - Only uses speechSynthesis (no external/remote MP3).
+ * - Click on any cue row: read that row in the language you clicked (en/zh/ja).
+ * - Syncs TTS rate with video playbackRate (or speed slider if present).
+ * - Splits long sentences to keep latency low.
+ */
+(function(){
+  if (window.__BW_PURE_TTS_ACTIVE__) return; // avoid mounting twice
+  window.__BW_PURE_TTS_ACTIVE__ = true;
+
+  const video = document.getElementById('player');
+  const cuesBody = document.getElementById('cuesBody');
+  const speedRange = document.getElementById('speedRange');
+  const followChk = document.getElementById('chkFollow');
+
+  const FOLLOW_ALSO_READ = true; // when following, also read out loud
+
+  // Voice cache
+  let voices = [];
+  function loadVoicesOnce(){
+    try { voices = speechSynthesis.getVoices() || []; } catch { voices = []; }
+  }
+  if ("speechSynthesis" in window) {
+    loadVoicesOnce();
+    window.speechSynthesis.onvoiceschanged = loadVoicesOnce;
+  }
+
+  function pickVoice(bcp){
+    if (!voices.length) voices = (speechSynthesis.getVoices ? speechSynthesis.getVoices() : []) || [];
+    const lc = (bcp||'').toLowerCase();
+    let v = voices.find(v => (v.lang||'').toLowerCase() === lc);
+    if (v) return v;
+    const pref = lc.slice(0,2);
+    v = voices.find(v => (v.lang||'').toLowerCase().startsWith(pref));
+    return v || null;
+  }
+
+  function splitSentences(text, bcp){
+    const s = String(text||'').trim().replace(/\s+/g,' ');
+    if (!s) return [];
+    if (/^zh/i.test(bcp)) return s.split(/(?<=[。！？；、])/u).map(t=>t.trim()).filter(Boolean);
+    if (/^ja/i.test(bcp)) return s.split(/(?<=[。！？、])/u).map(t=>t.trim()).filter(Boolean);
+    return s.split(/(?<=[\.\?\!;,:])\s+/).map(t=>t.trim()).filter(Boolean);
+  }
+
+  function cancelTTS(){ try { speechSynthesis.cancel(); } catch {} }
+
+  function speakNow(text, bcp, rate){
+    const chunks = splitSentences(text, bcp);
+    if (!chunks.length) return;
+    const voice = pickVoice(bcp);
+    chunks.forEach((piece, idx)=>{
+      const u = new SpeechSynthesisUtterance(piece);
+      u.lang = bcp;
+      u.rate = rate > 0 ? rate : 1;
+      if (voice) u.voice = voice;
+      if (idx === 0) u.onstart = ()=> document.body.classList.add('tts-speaking');
+      if (idx === chunks.length - 1) u.onend = ()=> document.body.classList.remove('tts-speaking');
+      speechSynthesis.speak(u);
+    });
+  }
+
+  function langFromClickTarget(target){
+    if (target && target.closest && target.closest('.ja-line')) return 'ja-JP';
+    if (target && target.closest && target.closest('.zh-line')) return 'zh-TW';
+    return 'en-US';
+  }
+
+  function textFromRowByLang(row, bcp){
+    const en = (row.querySelector('.en-line')||{}).textContent || "";
+    const zh = (row.querySelector('.zh-line')||{}).textContent || "";
+    const ja = (row.querySelector('.ja-line')||{}).textContent || "";
+    if (/^ja/i.test(bcp)) return (ja||zh||en).trim();
+    if (/^zh/i.test(bcp)) return (zh||ja||en).trim();
+    return (en||zh||ja).trim();
+  }
+
+  function currentRate(){
+    const v = (video && typeof video.playbackRate === 'number') ? video.playbackRate : 1;
+    const s = speedRange ? Number(speedRange.value) : NaN;
+    return (s && s > 0) ? s : (v > 0 ? v : 1);
+  }
+
+  // Mount a high-priority click handler on cuesBody (capture phase) to avoid old handlers overriding.
+  if (cuesBody) {
+    cuesBody.addEventListener('click', (e)=>{
+      const tr = e.target.closest('tr');
+      if (!tr || !tr.dataset) return;
+      const i = Number(tr.dataset.i ?? tr.dataset.idx ?? -1);
+      if (!(i >= 0)) return;
+
+      // prevent duplicate legacy listeners from doubling the read
+      // (we still allow other UI handlers, just avoid duplicate speak flows)
+      e.stopImmediatePropagation();
+
+      // Always highlight and center
+      try { tr.scrollIntoView({ block:'center', behavior:'smooth' }); } catch {}
+
+      // Seek when following (or always seek; adjust if needed)
+      try { if (typeof window.seekTo === 'function') window.seekTo(i, true); } catch {}
+
+      // If follow and you don't want to read, uncomment next 2 lines:
+      // if (followChk && followChk.checked && !FOLLOW_ALSO_READ) return;
+
+      const bcp = langFromClickTarget(e.target);
+      const text = textFromRowByLang(tr, bcp);
+
+      cancelTTS();
+      speakNow(text, bcp, currentRate());
+
+      document.querySelectorAll('#cuesBody tr.speaking').forEach(x=>x.classList.remove('speaking'));
+      tr.classList.add('speaking');
+    }, true);
+  }
+
+  // Expose a small API for programmatic follow
+  window.BW_PURE_TTS = {
+    speakByIndex(i, preferBCP){
+      const tr = document.querySelector(`#cuesBody tr[data-i="${i}"]`); if (!tr) return;
+      const bcp = preferBCP || 'en-US';
+      const text = textFromRowByLang(tr, bcp);
+      cancelTTS();
+      speakNow(text, bcp, currentRate());
+      document.querySelectorAll('#cuesBody tr.speaking').forEach(x=>x.classList.remove('speaking'));
+      tr.classList.add('speaking');
+      try { tr.scrollIntoView({ block:'center' }); } catch {}
+    },
+    cancel: cancelTTS
+  };
+})();
+</script>
+
 </body>
 </html>
 
