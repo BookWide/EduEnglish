@@ -50,11 +50,10 @@ tr.speaking::before{content:"🔊";position:absolute;left:6px;top:6px;opacity:.7
 </style>
   <script src="https://bookwide.github.io/EduEnglish/js/supa.js"></script>
 
-<style id="bw-puretts-css">
-/* Pure TTS: remove horn icon that visually interferes */
+<style id="bw-nohorn">
+/* Remove horn icon that may affect layout, use subtle left highlight instead */
 tr.speaking::before { content: none !important; }
-/* Optional: subtle indicator for the speaking row (non-blocking) */
-tr.speaking { box-shadow: inset 3px 0 0 0 #3c7cff88; }
+tr.speaking { box-shadow: inset 3px 0 0 0 rgba(60,124,255,.55) !important; background: rgba(60,124,255,.10) !important; }
 </style>
 
 </head>
@@ -379,135 +378,121 @@ function speakText(text, lang){
 })();
 </script>
 
-<script id="bw-puretts-controller">
-/** === BookWide · Pure Browser TTS (speechSynthesis only) ===
- * - Only uses speechSynthesis (no external/remote MP3).
- * - Click on any cue row: read that row in the language you clicked (en/zh/ja).
- * - Syncs TTS rate with video playbackRate (or speed slider if present).
- * - Splits long sentences to keep latency low.
- */
+<!-- === Reconnect Quiz/Vocab/AI with graceful fallbacks + diagnostics === -->
+<script>
+// Diagnostics: log all failed fetches
 (function(){
-  if (window.__BW_PURE_TTS_ACTIVE__) return; // avoid mounting twice
-  window.__BW_PURE_TTS_ACTIVE__ = true;
+  const _fetch = window.fetch;
+  window.fetch = async function(url, opts){
+    const res = await _fetch(url, opts);
+    if (!res.ok) { try { console.error('[FETCH !ok]', res.status, url); } catch(e){} }
+    return res;
+  };
+})();
 
-  const video = document.getElementById('player');
-  const cuesBody = document.getElementById('cuesBody');
-  const speedRange = document.getElementById('speedRange');
-  const followChk = document.getElementById('chkFollow');
-
-  const FOLLOW_ALSO_READ = true; // when following, also read out loud
-
-  // Voice cache
-  let voices = [];
-  function loadVoicesOnce(){
-    try { voices = speechSynthesis.getVoices() || []; } catch { voices = []; }
+async function fetchJsonFirstOk(urls){
+  for(const u of urls){
+    try{ const r=await fetch(u,{cache:'no-store'}); if(r.ok){ return {data:await r.json(), used:u}; } }
+    catch(e){ console.warn('[json error]', u, e); }
   }
-  if ("speechSynthesis" in window) {
-    loadVoicesOnce();
-    window.speechSynthesis.onvoiceschanged = loadVoicesOnce;
-  }
+  return {data:null, used:''};
+}
+function showMissing(elOrId, label){
+  const el = typeof elOrId==='string' ? document.getElementById(elOrId) : elOrId;
+  if(!el) return;
+  el.innerHTML = `<div class="muted" style="padding:8px 12px">⚠️ ${label} 檔尚未上傳</div>`;
+}
 
-  function pickVoice(bcp){
-    if (!voices.length) voices = (speechSynthesis.getVoices ? speechSynthesis.getVoices() : []) || [];
-    const lc = (bcp||'').toLowerCase();
-    let v = voices.find(v => (v.lang||'').toLowerCase() === lc);
-    if (v) return v;
-    const pref = lc.slice(0,2);
-    v = voices.find(v => (v.lang||'').toLowerCase().startsWith(pref));
-    return v || null;
-  }
+(function(){
+  const _cat = (window.cat || new URLSearchParams(location.search).get('cat') || '').toLowerCase();
+  const _slug = (window.slug || new URLSearchParams(location.search).get('slug') || '');
+  const vnow = Date.now();
 
-  function splitSentences(text, bcp){
-    const s = String(text||'').trim().replace(/\s+/g,' ');
-    if (!s) return [];
-    if (/^zh/i.test(bcp)) return s.split(/(?<=[。！？；、])/u).map(t=>t.trim()).filter(Boolean);
-    if (/^ja/i.test(bcp)) return s.split(/(?<=[。！？、])/u).map(t=>t.trim()).filter(Boolean);
-    return s.split(/(?<=[\.\?\!;,:])\s+/).map(t=>t.trim()).filter(Boolean);
-  }
+  // QUIZ
+  window.loadQuiz = async function(){
+    const urls = [
+      `${BASE}/data/${_cat}/${_slug}/quiz-${_slug}.json?v=${vnow}`,
+      `${BASE}/data/${_slug}/quiz-${_slug}.json?v=${vnow}`
+    ];
+    const {data, used} = await fetchJsonFirstOk(urls);
+    const meta = document.getElementById('quizMeta');
+    const list = document.getElementById('quizList');
+    if(!data){ meta && (meta.textContent='⚠️ 測驗檔尚未上傳'); showMissing(list,'測驗'); return; }
+    meta && (meta.textContent = `已載入：${used}`);
+    list.innerHTML = (data||[]).map((q,idx)=>`
+      <li style="padding:8px 0">
+        <div style="font-weight:700">${(q.question||q.q||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}</div>
+        ${(q.options||[]).map(op=>`<div><label><input type="radio" name="q_${idx}" value="${String(op).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}"> ${String(op).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}</label></div>`).join('')}
+        <div class="ans muted" data-ans="${String(q.answer??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}" style="display:none;margin-top:6px">
+          答案：${String(q.answer??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}
+        </div>
+      </li>`).join('');
+    document.getElementById('btnShowAnswer').onclick=()=>[...document.querySelectorAll('#quizList .ans')].forEach(a=>a.style.display='block');
+    document.getElementById('btnSubmitQuiz').onclick=()=>{
+      let s=0,t=0;
+      [...document.querySelectorAll('#quizList > li')].forEach((li,i)=>{
+        const ans=(li.querySelector('.ans')?.dataset?.ans||'').toLowerCase();
+        const ch=[...li.querySelectorAll('input[type=radio]')].find(r=>r.checked)?.value?.toLowerCase()||'';
+        if(ans===ch) s++; t++;
+      });
+      document.getElementById('quizScore').textContent=`得分：${s} / ${t}`;
+    };
+    document.getElementById('btnPrint').onclick=()=>window.print();
+  };
 
-  function cancelTTS(){ try { speechSynthesis.cancel(); } catch {} }
-
-  function speakNow(text, bcp, rate){
-    const chunks = splitSentences(text, bcp);
-    if (!chunks.length) return;
-    const voice = pickVoice(bcp);
-    chunks.forEach((piece, idx)=>{
-      const u = new SpeechSynthesisUtterance(piece);
-      u.lang = bcp;
-      u.rate = rate > 0 ? rate : 1;
-      if (voice) u.voice = voice;
-      if (idx === 0) u.onstart = ()=> document.body.classList.add('tts-speaking');
-      if (idx === chunks.length - 1) u.onend = ()=> document.body.classList.remove('tts-speaking');
-      speechSynthesis.speak(u);
+  // VOCAB
+  window.loadVocab = async function(){
+    const urls = [
+      `${BASE}/data/${_cat}/${_slug}/vocab-${_slug}.json?v=${vnow}`,
+      `${BASE}/data/${_slug}/vocab-${_slug}.json?v=${vnow}`
+    ];
+    const {data:list, used} = await fetchJsonFirstOk(urls);
+    const vStatus=document.getElementById('vocabStatus'), vBox=document.getElementById('vocabBox');
+    if(!list || !list.length){ vStatus && (vStatus.textContent='⚠️ 單字檔尚未上傳'); showMissing(vBox,'單字'); return; }
+    vStatus && (vStatus.textContent=`已載入：${used}`);
+    function esc(s){ return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+    vBox.innerHTML = list.map(v=>`
+      <div class="voc" style="border:1px solid #223048;border-radius:10px;padding:10px;margin:10px 0">
+        <div style="font-weight:800;font-size:18px">${esc(v.word||'')}</div>
+        ${v.zh?`<div>【中】${esc(v.zh)}</div>`:''}
+        ${v.en?`<div>【英】${esc(v.en)}</div>`:''}
+        ${v.ja?`<div>【日】${esc(v.ja)}</div>`:''}
+        <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+          ${v.time?`<button class="btn" data-act="jump" data-time="${esc(v.time)}">跳到片段</button>`:''}
+          ${v.en?`<button class="btn" data-act="speak" data-lang="en-US" data-text="${esc(v.en)}">🔊 英</button>`:''}
+          ${v.zh?`<button class="btn" data-act="speak" data-lang="zh-TW" data-text="${esc(v.zh)}">🔊 中</button>`:''}
+          ${v.ja?`<button class="btn" data-act="speak" data-lang="ja-JP" data-text="${esc(v.ja)}">🔊 日</button>`:''}
+        </div>
+      </div>`).join('');
+    vBox.addEventListener('click',e=>{
+      const act=e.target?.dataset?.act; if(!act) return;
+      if(act==='jump'){ const p=Number((e.target.dataset.time||'0')); const t=isNaN(p)?0:p; const v=document.getElementById('player'); v.currentTime=Math.max(0,t); v.play(); }
+      if(act==='speak'){ const text=e.target.dataset.text||''; const lang=e.target.dataset.lang||'en-US'; speakText(text,lang); }
     });
-  }
+  };
 
-  function langFromClickTarget(target){
-    if (target && target.closest && target.closest('.ja-line')) return 'ja-JP';
-    if (target && target.closest && target.closest('.zh-line')) return 'zh-TW';
-    return 'en-US';
-  }
-
-  function textFromRowByLang(row, bcp){
-    const en = (row.querySelector('.en-line')||{}).textContent || "";
-    const zh = (row.querySelector('.zh-line')||{}).textContent || "";
-    const ja = (row.querySelector('.ja-line')||{}).textContent || "";
-    if (/^ja/i.test(bcp)) return (ja||zh||en).trim();
-    if (/^zh/i.test(bcp)) return (zh||ja||en).trim();
-    return (en||zh||ja).trim();
-  }
-
-  function currentRate(){
-    const v = (video && typeof video.playbackRate === 'number') ? video.playbackRate : 1;
-    const s = speedRange ? Number(speedRange.value) : NaN;
-    return (s && s > 0) ? s : (v > 0 ? v : 1);
-  }
-
-  // Mount a high-priority click handler on cuesBody (capture phase) to avoid old handlers overriding.
-  if (cuesBody) {
-    cuesBody.addEventListener('click', (e)=>{
-      const tr = e.target.closest('tr');
-      if (!tr || !tr.dataset) return;
-      const i = Number(tr.dataset.i ?? tr.dataset.idx ?? -1);
-      if (!(i >= 0)) return;
-
-      // prevent duplicate legacy listeners from doubling the read
-      // (we still allow other UI handlers, just avoid duplicate speak flows)
-      e.stopImmediatePropagation();
-
-      // Always highlight and center
-      try { tr.scrollIntoView({ block:'center', behavior:'smooth' }); } catch {}
-
-      // Seek when following (or always seek; adjust if needed)
-      try { if (typeof window.seekTo === 'function') window.seekTo(i, true); } catch {}
-
-      // If follow and you don't want to read, uncomment next 2 lines:
-      // if (followChk && followChk.checked && !FOLLOW_ALSO_READ) return;
-
-      const bcp = langFromClickTarget(e.target);
-      const text = textFromRowByLang(tr, bcp);
-
-      cancelTTS();
-      speakNow(text, bcp, currentRate());
-
-      document.querySelectorAll('#cuesBody tr.speaking').forEach(x=>x.classList.remove('speaking'));
-      tr.classList.add('speaking');
-    }, true);
-  }
-
-  // Expose a small API for programmatic follow
-  window.BW_PURE_TTS = {
-    speakByIndex(i, preferBCP){
-      const tr = document.querySelector(`#cuesBody tr[data-i="${i}"]`); if (!tr) return;
-      const bcp = preferBCP || 'en-US';
-      const text = textFromRowByLang(tr, bcp);
-      cancelTTS();
-      speakNow(text, bcp, currentRate());
-      document.querySelectorAll('#cuesBody tr.speaking').forEach(x=>x.classList.remove('speaking'));
-      tr.classList.add('speaking');
-      try { tr.scrollIntoView({ block:'center' }); } catch {}
-    },
-    cancel: cancelTTS
+  // AI
+  window.loadAI = async function(){
+    const urls = [
+      `${BASE}/data/${_cat}/${_slug}/ai-${_slug}.json?v=${vnow}`,
+      `${BASE}/data/${_slug}/ai-${_slug}.json?v=${vnow}`
+    ];
+    const {data, used} = await fetchJsonFirstOk(urls);
+    const sel=document.getElementById('aiTopic'); const prompt=document.getElementById('aiPrompt');
+    const hint=document.getElementById('aiHint'); const demo=document.getElementById('aiReply'); const prog=document.getElementById('aiProgress');
+    if(!data){ sel.innerHTML=''; prompt.value=''; hint.textContent=''; demo.textContent='（等待你的作答…）'; prog.textContent='第 0/0 題'; return; }
+    const topics = Array.isArray(data)?data:(data.topics||[]);
+    sel.innerHTML = topics.map((t,i)=>`<option value="${i}">${String(t.title||t.q||('題目'+(i+1))).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;')}</option>`).join('');
+    let idx=0;
+    function esc(s){ return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
+    function render(){ const t=topics[idx]||{}; prompt.value=t.prompt||t.q||''; hint.textContent=t.hint||''; demo.textContent=t.sample||t.demo||'（等待你的作答…）'; prog.textContent=`第 ${idx+1}/${topics.length} 題`; sel.value=String(idx); }
+    render();
+    sel.onchange=()=>{ idx=+sel.value|0; render(); };
+    document.getElementById('btnPrevTopic').onclick=()=>{ idx=(idx-1+topics.length)%topics.length; render(); };
+    document.getElementById('btnNextTopic').onclick=()=>{ idx=(idx+1)%topics.length; render(); };
+    document.getElementById('btnTts').onclick=()=>speakText(prompt.value,'en-US');
+    document.getElementById('aiDemo').onclick =()=>{ const t=topics[idx]||{}; document.getElementById('aiReply').textContent=t.sample||t.demo||''; };
+    document.getElementById('aiDemoTts').onclick=()=>{ const t=topics[idx]||{}; const text=t.sample||t.demo||''; speakText(text,'en-US'); };
   };
 })();
 </script>
