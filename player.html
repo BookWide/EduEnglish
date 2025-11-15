@@ -934,24 +934,83 @@ function speakText(text,lang){
 (async function init(){
   try{
     // 守門程式：需登入 Supabase 才能進播放器
+    let user = null;
+
     if(typeof ensureAuth==='function'){
+      // 舊版守門（如果未來又有 ensureAuth，就沿用舊流程）
       await ensureAuth({
         redirect:'/EduEnglish/index.html',
         next:location.pathname+location.search
       });
-    }
-    let email='';
-    if(typeof getSessionUser==='function'){
-      const u=await getSessionUser();
-      email=(u&&(u.email||(u.user&&u.user.email)))||'';
-    }else if(typeof supaGetUser==='function'){
-      const u=await supaGetUser();
-      email=(u&&(u.email||(u.user&&u.user.email)))||'';
-    }
-    if(email) $('#userNameBadge').textContent=email;
-  }catch(e){console.warn('[auth] error:',e);}
+      if(typeof getSessionUser==='function'){
+        const u = await getSessionUser();
+        user = u && (u.user || u);
+      }else if(typeof supaGetUser==='function'){
+        const u = await supaGetUser();
+        user = u && (u.user || u);
+      }
+    }else if(typeof BW!=='undefined' && BW && typeof BW.getUser==='function'){
+      // 新版：直接使用 supa.js 內的 BW 物件守門
+      user = await BW.getUser();
+      if(!user){
+        const next = location.pathname + location.search;
+        // 未登入 → 送回首頁登入，帶 next 回來
+        location.href = `./index.html?denied=signin&next=${encodeURIComponent(next)}`;
+        return;
+      }
 
-  const saved=localStorage.getItem(`offset:${slug}`);
+      // 檢查 profiles 內的訂閱狀態
+      try{
+        const { data, error } = await BW.supa
+          .from('profiles')
+          .select('expires_at,is_paused,is_suspended')
+          .eq('id', user.id)
+          .maybeSingle();
+
+        if(error || !data){
+          // 找不到 profile，就視為沒有權限
+          location.href = './index.html?denied=profile';
+          return;
+        }
+
+        const now = new Date();
+        const exp = data.expires_at ? new Date(data.expires_at) : null;
+
+        if(data.is_paused || data.is_suspended){
+          // 被暫停／凍結
+          location.href = './index.html?denied=paused';
+          return;
+        }
+
+        if(exp && exp < now){
+          // 已過期
+          location.href = './index.html?denied=expired';
+          return;
+        }
+      }catch(e){
+        console.warn('[player-guard] profile check failed', e);
+      }
+    }
+
+    // 顯示登入 email（若有）
+    let email = '';
+    if(typeof getSessionUser==='function'){
+      const u = await getSessionUser();
+      email = (u && (u.email || (u.user && u.user.email))) || '';
+    }else if(typeof supaGetUser==='function'){
+      const u = await supaGetUser();
+      email = (u && (u.email || (u.user && u.user.email))) || '';
+    }else if(user){
+      email = user.email || (user.user && user.user.email) || '';
+    }
+
+    if(email) $('#userNameBadge').textContent = email;
+  }catch(e){
+    console.warn('[auth] error:', e);
+  }
+
+  const saved = localStorage.getItem(`offset:${slug}`);
+
   if(saved!=null)setOffset(parseFloat(saved));else setOffset(0);
   const r=Number(speedRange.value)||1;video.playbackRate=r;
   speedVal.textContent=`${r.toFixed(2)}x`;
