@@ -978,38 +978,21 @@ function speakText(text,lang){
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
 (async function init(){
-  // 解析 URL 參數（判斷 preview）
   const params = new URLSearchParams(location.search);
   const isPreview = params.get('preview') === '1';
 
   let user = null;
 
-  // 1️⃣ 優先使用既有 helper（若有）
+  // 1️⃣ 先用 player.html 專用的 bwPlayerGetUser() 取得登入使用者
   try {
-    if (typeof getSessionUser === 'function') {
-      const u = await getSessionUser();
-      if (u) user = u.user || u;
-    } else if (typeof supaGetUser === 'function') {
-      const u = await supaGetUser();
-      if (u) user = u.user || u;
+    if (typeof bwPlayerGetUser === 'function') {
+      user = await bwPlayerGetUser();
     }
   } catch (e) {
-    console.error('[BW-player] getSessionUser / supaGetUser error', e);
+    console.error('[BW-player] bwPlayerGetUser error', e);
   }
 
-  // 2️⃣ 若還沒有 user，再從 Supabase session 補一次
-  try {
-    if (!user && window.supa && window.supa.auth && typeof window.supa.auth.getSession === 'function') {
-      const { data, error } = await window.supa.auth.getSession();
-      if (!error && data && data.session && data.session.user) {
-        user = data.session.user;
-      }
-    }
-  } catch (e) {
-    console.error('[BW-player] supa.auth.getSession error', e);
-  }
-
-  // 3️⃣ 未登入：非 preview 一律導回首頁
+  // 2️⃣ 若未登入：非 preview 一律導回首頁
   if (!user) {
     if (!isPreview) {
       const next = location.pathname + location.search;
@@ -1020,7 +1003,7 @@ function speakText(text,lang){
       return;
     }
   } else {
-    // 有登入：顯示 Email
+    // 顯示登入者 Email
     const email = user.email || (user.user && user.user.email) || '';
     if (email) {
       const badge = $('#userNameBadge');
@@ -1028,13 +1011,12 @@ function speakText(text,lang){
     }
   }
 
-  // 4️⃣ 非 preview 模式才檢查訂閱（看 profiles.expires_at）
+  // 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
+  let validUntil = null;
   if (!isPreview && user) {
-    let validUntil = null;
     try {
-      const supa = window.supa;
-      if (supa) {
-        const { data, error } = await supa
+      if (typeof playerSupa !== 'undefined') {
+        const { data, error } = await playerSupa
           .from('profiles')
           .select('expires_at')
           .eq('id', user.id)
@@ -1044,7 +1026,7 @@ function speakText(text,lang){
         }
         console.log('[BW-player] expires_at raw =', data && data.expires_at, 'parsed =', validUntil);
       } else {
-        console.warn('[BW-player] no Supabase client for subscription check');
+        console.warn('[BW-player] playerSupa not defined for subscription check');
       }
     } catch (e) {
       console.error('[BW-player] check subscription error', e);
@@ -1053,23 +1035,24 @@ function speakText(text,lang){
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    if (!validUntil ||
-        !(validUntil instanceof Date) ||
-        isNaN(validUntil.getTime()) ||
-        validUntil.getTime() < today.getTime()) {
-      const next = location.pathname + location.search;
-      const url = new URL('/EduEnglish/pricing.html', location.origin);
-      url.searchParams.set('denied', 'expired');
-      url.searchParams.set('next', next);
-      location.href = url.toString();
-      return;
+    // 只有在「有取得有效日期」的情況下才做過期判斷
+    if (validUntil instanceof Date && !isNaN(validUntil.getTime())) {
+      if (validUntil.getTime() < today.getTime()) {
+        const next = location.pathname + location.search;
+        const url = new URL('/EduEnglish/pricing.html', location.origin);
+        url.searchParams.set('denied', 'expired');
+        url.searchParams.set('next', next);
+        location.href = url.toString();
+        return;
+      }
     }
   }
 
-  // 5️⃣ 通過守門後，再初始化播放器狀態與載入資料
+  // 4️⃣ 守門通過後，初始化播放器 + 載入資料
   try {
     const saved = localStorage.getItem(`offset:${slug}`);
     if (saved != null) setOffset(parseFloat(saved)); else setOffset(0);
+
     const r = Number(speedRange.value) || 1;
     video.playbackRate = r;
     speedVal.textContent = `${r.toFixed(2)}x`;
@@ -1089,6 +1072,7 @@ function speakText(text,lang){
 </script>
 </body>
 </html>
+
 
 
 
