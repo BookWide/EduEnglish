@@ -355,53 +355,8 @@ tr.speaking{
 
 </style>
 
-
-<!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script>
-  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-  const SUPABASE_ANON_KEY =
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-
-  // 僅供 player.html 使用的 Supabase Client
-  const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-  async function bwPlayerGetUser() {
-    try {
-      const { data, error } = await playerSupa.auth.getUser();
-      if (error || !data || !data.user) return null;
-      return data.user;
-    } catch (err) {
-      console.error('[player-auth] getUser error', err);
-      return null;
-    }
-  }
-
-  // 提供給舊程式使用的守門 / 取 user 函式
-  async function ensureAuth(options = {}) {
-    const redirect = options.redirect || '/EduEnglish/index.html';
-    const next =
-      options.next || (location.pathname + location.search);
-
-    const user = await bwPlayerGetUser();
-    if (user) return user;
-
-    const url =
-      redirect +
-      '?denied=signin&next=' +
-      encodeURIComponent(next);
-    window.location.href = url;
-    return null;
-  }
-
-  async function getSessionUser() {
-    return await bwPlayerGetUser();
-  }
-
-  async function supaGetUser() {
-    return await bwPlayerGetUser();
-  }
-</script>
+<!-- 直接從 GitHub 載入 supa.js（守門 + Supabase 共用） -->
+<script type="module" src="./supa.js"></script></script>
 </head>
 <body>
 <header>
@@ -975,40 +930,100 @@ function speakText(text,lang){
   speechSynthesis.speak(u);
 }
 
-/* ==== 初始化 + 守門程序（保留） ==== */
+/* ==== 初始化 + 守門程序（新版：登入 + 訂閱） ==== */
 (async function init(){
-  try{
-    // 守門程式：需登入 Supabase 才能進播放器
-    if(typeof ensureAuth==='function'){
-      await ensureAuth({
-        redirect:'/EduEnglish/index.html',
-        next:location.pathname+location.search
-      });
+  const params = new URLSearchParams(location.search);
+  const isPreview = params.get('preview') === '1';
+
+  let user = null;
+
+  // 先用 BW.getUser() 取得登入者
+  try {
+    if (window.BW && typeof BW.getUser === 'function') {
+      user = await BW.getUser();
     }
-    let email='';
-    if(typeof getSessionUser==='function'){
-      const u=await getSessionUser();
-      email=(u&&(u.email||(u.user&&u.user.email)))||'';
-    }else if(typeof supaGetUser==='function'){
-      const u=await supaGetUser();
-      email=(u&&(u.email||(u.user&&u.user.email)))||'';
+  } catch (e) {
+    console.error('[BW-player] getUser error', e);
+  }
+
+  // 若 BW.getUser() 尚未抓到，再從 Supabase session 補一次
+  if (!user && window.BW && BW.supa && BW.supa.auth && typeof BW.supa.auth.getSession === 'function') {
+    try {
+      const { data, error } = await BW.supa.auth.getSession();
+      if (!error && data && data.session && data.session.user) {
+        user = data.session.user;
+      }
+    } catch (e) {
+      console.error('[BW-player] getSession fallback error', e);
     }
-    if(email) $('#userNameBadge').textContent=email;
-  }catch(e){console.warn('[auth] error:',e);}
+  }
 
-  const saved=localStorage.getItem(`offset:${slug}`);
-  if(saved!=null)setOffset(parseFloat(saved));else setOffset(0);
-  const r=Number(speedRange.value)||1;video.playbackRate=r;
-  speedVal.textContent=`${r.toFixed(2)}x`;
+  // 未登入
+  if (!user) {
+    if (!isPreview) {
+      const next = location.pathname + location.search;
+      const url = new URL('/EduEnglish/index.html', location.origin);
+      url.searchParams.set('denied', 'signin');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
+    }
+  } else {
+    // 有登入 → 顯示 email
+    if (user.email) {
+      const badge = $('#userNameBadge');
+      if (badge) badge.textContent = user.email;
+    }
+  }
 
-  await loadVideo();
-  await loadCues();
-  await loadQuiz();
-  await loadVocab();
-  await loadAI();
+  // 非 preview 模式才檢查訂閱（看 profiles.expires_at）
+  if (!isPreview && user) {
+    let validUntil = null;
+    try {
+      if (BW.supa) {
+        const { data, error } = await BW.supa
+          .from('profiles')
+          .select('expires_at')
+          .eq('id', user.id)
+          .maybeSingle();
+        if (!error && data && data.expires_at) {
+          validUntil = new Date(data.expires_at);
+        }
+      }
+    } catch (e) {
+      console.error('[BW-player] check subscription error', e);
+    }
 
-  showTab('sub');
+    const today = new Date();
+    if (!validUntil || validUntil < today) {
+      const next = location.pathname + location.search;
+      const url = new URL('/EduEnglish/account/subscription.html', location.origin);
+      url.searchParams.set('denied', 'expired');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
+    }
+  }
+
+  try {
+    const saved = localStorage.getItem(`offset:${slug}`);
+    if (saved != null) setOffset(parseFloat(saved)); else setOffset(0);
+    const r = Number(speedRange.value) || 1;
+    video.playbackRate = r;
+    speedVal.textContent = `${r.toFixed(2)}x`;
+
+    await loadVideo();
+    await loadCues();
+    await loadQuiz();
+    await loadVocab();
+    await loadAI();
+
+    showTab('sub');
+  } catch (e) {
+    console.warn('[BW-player] init error:', e);
+  }
 })();
+;
 </script>
 </body>
 </html>
@@ -366228,53 +366243,8 @@ tr.speaking{
 
 </style>
 
-
-<!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script>
-  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-  const SUPABASE_ANON_KEY =
-    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-
-  // 僅供 player.html 使用的 Supabase Client
-  const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-  async function bwPlayerGetUser() {
-    try {
-      const { data, error } = await playerSupa.auth.getUser();
-      if (error || !data || !data.user) return null;
-      return data.user;
-    } catch (err) {
-      console.error('[player-auth] getUser error', err);
-      return null;
-    }
-  }
-
-  // 提供給舊程式使用的守門 / 取 user 函式
-  async function ensureAuth(options = {}) {
-    const redirect = options.redirect || '/EduEnglish/index.html';
-    const next =
-      options.next || (location.pathname + location.search);
-
-    const user = await bwPlayerGetUser();
-    if (user) return user;
-
-    const url =
-      redirect +
-      '?denied=signin&next=' +
-      encodeURIComponent(next);
-    window.location.href = url;
-    return null;
-  }
-
-  async function getSessionUser() {
-    return await bwPlayerGetUser();
-  }
-
-  async function supaGetUser() {
-    return await bwPlayerGetUser();
-  }
-</script>
+<!-- 直接從 GitHub 載入 supa.js（守門 + Supabase 共用） -->
+<script type="module" src="./supa.js"></script></script>
 </head>
 <body>
 <header>
