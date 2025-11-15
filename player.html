@@ -975,112 +975,107 @@ function speakText(text,lang){
   speechSynthesis.speak(u);
 }
 
-/* ==== /* ==== 初始化 + 守門程序（登入 + 訂閱，支援 preview=1） ==== */
+/* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
 (async function init(){
   const params = new URLSearchParams(location.search);
   const isPreview = params.get('preview') === '1';
 
   let user = null;
 
-  // 優先使用 supa.js 提供的 helper
+  // 嘗試取得目前登入者
   try{
     if(typeof getSessionUser === 'function'){
       const u = await getSessionUser();
-      if(u) user = u.user || u;
+      if(u){
+        user = u.user || u;
+      }
     }else if(typeof supaGetUser === 'function'){
       const u = await supaGetUser();
-      if(u) user = u.user || u;
-    }else if(window.BW && typeof BW.getUser === 'function'){
-      user = await BW.getUser();
+      if(u){
+        user = u.user || u;
+      }
+    }else if(window.supa && window.supa.auth && typeof window.supa.auth.getUser === 'function'){
+      const { data, error } = await window.supa.auth.getUser();
+      if(!error && data && data.user){
+        user = data.user;
+      }
     }
   }catch(e){
-    console.error('[BW-player] getUser error:', e);
+    console.warn('[auth] get user error:', e);
   }
 
-  // 若還沒有 user，再從 window.supa 的 session 補一次
-  if(!user && window.supa && window.supa.auth && typeof window.supa.auth.getSession === 'function'){
-    try{
-      const { data, error } = await window.supa.auth.getSession();
-      if(!error && data && data.session && data.session.user){
-        user = data.session.user;
-      }
-    }catch(e){
-      console.error('[BW-player] getSession fallback error:', e);
+  // 未登入
+  if(!user){
+    if(!isPreview){
+      const next = location.pathname + location.search;
+      const url = new URL('/EduEnglish/index.html', location.origin);
+      url.searchParams.set('denied', 'signin');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
     }
-  }
-
-  // 未登入且不是 preview → 導回首頁登入
-  if(!user && !isPreview){
-    const next = location.pathname + location.search;
-    const url = new URL('/EduEnglish/index.html', location.origin);
-    url.searchParams.set('denied','signin');
-    url.searchParams.set('next', next);
-    location.href = url.toString();
-    return;
-  }
-
-  // 顯示登入者 email（如果有）
-  try{
-    const email = user && (user.email || (user.user && user.user.email)) || '';
+  }else{
+    // 有登入 → 顯示 email
+    const email = user.email || (user.user && user.user.email) || '';
     if(email){
       const badge = $('#userNameBadge');
       if(badge) badge.textContent = email;
     }
-  }catch(e){
-    console.warn('[BW-player] paint user error:', e);
   }
 
-  // 非 preview 才檢查訂閱有效期（profiles.expires_at）
-  if(!isPreview && user && window.supa && window.supa.from){
+  // 訂閱檢查（非 preview 模式）
+  if(!isPreview && user){
+    let validUntil = null;
     try{
-      const { data, error } = await window.supa
-        .from('profiles')
-        .select('expires_at')
-        .eq('id', user.id || (user.user && user.user.id))
-        .maybeSingle();
-      if(!error){
-        let validUntil = null;
-        if(data && data.expires_at){
-          const d = new Date(data.expires_at);
-          if(!isNaN(d.getTime())){
-            validUntil = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-          }
+      const supa = window.supa;
+      if(supa){
+        const { data, error } = await supa
+          .from('profiles')
+          .select('expires_at')
+          .eq('id', user.id)
+          .maybeSingle();
+        if(!error && data && data.expires_at){
+          validUntil = new Date(data.expires_at);
         }
-        const today = new Date();
-        const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-        if(!validUntil || validUntil < todayDate){
-          const next = location.pathname + location.search;
-          const url = new URL('/EduEnglish/account/subscription.html', location.origin);
-          url.searchParams.set('denied','expired');
-          url.searchParams.set('next', next);
-          location.href = url.toString();
-          return;
-        }
+        console.log('[BW-player] expires_at raw =', data && data.expires_at, 'parsed =', validUntil);
+      }else{
+        console.warn('[BW-player] no Supabase client for subscription check');
       }
     }catch(e){
-      console.error('[BW-player] subscription check error:', e);
+      console.error('[BW-player] check subscription error', e);
+    }
+
+    const today = new Date();
+    today.setHours(0,0,0,0);
+    if(!validUntil || !(validUntil instanceof Date) || isNaN(validUntil.getTime()) || validUntil.getTime() < today.getTime()){
+      const next = location.pathname + location.search;
+      const url = new URL('/EduEnglish/account/subscription.html', location.origin);
+      url.searchParams.set('denied', 'expired');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
     }
   }
 
-  // 其餘初始化：偏移、速度、載入影片與資料
+  // 播放器初始化（維持原本行為）
   try{
     const saved = localStorage.getItem(`offset:${slug}`);
     if(saved != null) setOffset(parseFloat(saved)); else setOffset(0);
     const r = Number(speedRange.value) || 1;
     video.playbackRate = r;
     speedVal.textContent = `${r.toFixed(2)}x`;
-
-    await loadVideo();
-    await loadCues();
-    await loadQuiz();
-    await loadVocab();
-    await loadAI();
-
-    showTab('sub');
   }catch(e){
-    console.warn('[BW-player] init error:', e);
+    console.warn('[player] init controls error:', e);
   }
-})();;
+
+  await loadVideo();
+  await loadCues();
+  await loadQuiz();
+  await loadVocab();
+  await loadAI();
+
+  showTab('sub');
+})();
 </script>
 </body>
 </html>
