@@ -113,7 +113,7 @@
     </div>
   </section>
 
-  <!-- Supabase JS（若你的站已全域載入，可移除） -->
+  <!-- Supabase JS -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
   (function(){
@@ -128,15 +128,20 @@
     const topics = (usp.get('topics')||'').split(',').filter(Boolean);
     const plan   = usp.get('plan') || 'month';   // month|half|year
     const ref    = usp.get('ref') || '';
-    const unitPrice = { month: 200, half: 960, year: 1680 }; // 每主題價格（可與 pricing.html 保持一致）
+    const unitPrice = { month: 200, half: 960, year: 1680 }; // 每主題價格（NTD）
     const qty = Math.max(1, topics.length || 1);
     const subtotal = (unitPrice[plan] || 200) * qty;
     const discount = ref ? Math.round(subtotal * 0.10) : 0;      // 有推薦碼→ 10% 折扣
     const tax      = Math.round(Math.max(0, subtotal - discount) * 0.05); // 5% 稅
     const total    = Math.max(0, subtotal - discount) + tax;
 
+    const unitPriceCents = (unitPrice[plan] || 200) * 100;
+    const subtotalCents  = subtotal * 100;
+    const discountCents  = discount * 100;
+    const totalCents     = total * 100;
+
     // ===== Supabase init =====
-    const PROJECT_REF = "jeajrwpmrgczimmrflxo"; // 你提供的專案
+    const PROJECT_REF = "jeajrwpmrgczimmrflxo";
     const SUPA_URL = `https://${PROJECT_REF}.supabase.co`;
     const ANON = document.querySelector('meta[name="supabase-anon-key"]')?.content || (window.SUPABASE_ANON_KEY||"");
     let sb = null;
@@ -144,7 +149,11 @@
     try { sb = supabase.createClient(SUPA_URL, ANON); } catch(e){ /* ignore for mock */ }
 
     async function getUser(){
-      try{ const { data } = await sb.auth.getUser(); return data?.user || null; }catch(_){ return null; }
+      try{
+        if(!sb) return null;
+        const { data } = await sb.auth.getUser();
+        return data?.user || null;
+      }catch(_){ return null; }
     }
 
     // ===== Render Summary =====
@@ -179,29 +188,64 @@
 
     renderSummary();
 
-    // ===== Write orders (mock) =====
     const orderId = uuid();
+
+    function calcExpireISO(){
+      const monthsMap = { month:1, half:6, year:12 };
+      const m = monthsMap[plan] || 1;
+      const d = new Date();
+      d.setMonth(d.getMonth() + m);
+      return d.toISOString();
+    }
+
+    // ===== Write orders (mock) =====
     async function writeOrder(status){
-      if(!sb){ $('#status').textContent = '（未載入 Supabase：以 mock 流程顯示）'; return true; }
+      if(!sb){
+        $('#status').textContent = '（未載入 Supabase：以 mock 流程顯示）';
+        return true;
+      }
 
       const user = await getUser();
+      if(!user){
+        $('#status').textContent = '請先登入後再結帳。';
+        return false;
+      }
+
+      const nowISO = new Date().toISOString();
+      const itemsArray = topics.length ? topics : ['default'];
+
       const payload = {
         id: orderId,
-        user_id: user?.id ?? null,
-        items: [{plan, topics}],
-        amount: total,
-        tax: tax,
-        currency: 'TWD',
-        status: status,                 // 'paid' | 'failed'
-        provider: 'mock',
-        provider_order_id: 'MOCK-' + Date.now(),
+        user_id: user.id,
+        buyer_id: user.id,
+        items: itemsArray,
+        period: plan,
+        unit_price: unitPriceCents,
+        quantity: qty,
+        subtotal: subtotal,
+        discount: discount,
+        total: total,
+        subtotal_cents: subtotalCents,
+        discount_cents: discountCents,
+        commission_cents: 0,
+        total_cents: totalCents,
         ref_code: ref || null,
-        created_at: new Date().toISOString()
+        referral_code: ref || null,
+        status: status,                 // 'paid' | 'failed'
+        paid_at: status === 'paid' ? nowISO : null,
+        expire_at: status === 'paid' ? calcExpireISO() : null,
+        created_at: nowISO
       };
+
       try{
         const { error } = await sb.from('orders').insert(payload);
-        if(error){ $('#status').textContent = '寫入 orders 失敗：' + (error.message||error); return false; }
-        $('#status').textContent = status==='paid' ? '✅ 已寫入 orders（paid）。' : '❗ 已寫入 orders（failed）。';
+        if(error){
+          $('#status').textContent = '寫入 orders 失敗：' + (error.message||error);
+          return false;
+        }
+        $('#status').textContent = status==='paid'
+          ? '✅ 已寫入 orders（paid）。'
+          : '❗ 已寫入 orders（failed）。';
         return true;
       }catch(e){
         $('#status').textContent = '寫入 orders 例外：' + e;
@@ -255,6 +299,8 @@
   </script>
 </body>
 </html>
+
+
 
 
 
