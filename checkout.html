@@ -7,7 +7,7 @@
 
   <!-- ★ Supabase 設定：請把 anon key 換成你自己的 -->
   <meta name="supabase-url" content="https://jeajrwmprgczimmrflxo.supabase.co" />
-  <meta name="supabase-anon-key" content="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do" />
+  <meta name="supabase-anon-key" content="在這裡放你的 SUPABASE_ANON_KEY" />
 
   <script type="module" src="https://esm.sh/@supabase/supabase-js@2"></script>
 
@@ -153,7 +153,6 @@
     .status.ok{color:var(--ok);}
     .status.bad{color:var(--bad);}
 
-    /* 發票預覽 */
     .invoice{
       border:1px solid var(--line);
       border-radius:10px;
@@ -209,7 +208,6 @@
       margin-right:6px;
     }
 
-    /* 列印時只印發票區塊 */
     @media print{
       body{background:#fff;}
       header,.card.main-card{display:none!important;}
@@ -247,7 +245,7 @@
         <h3>方案內容</h3>
         <div class="pair">
           <div class="pair-label">方案名稱</div>
-          <div class="pair-value" id="plan-label">（自動帶入）</div>
+          <div class="pair-value" id="plan-label">自訂方案</div>
         </div>
         <div class="pair">
           <div class="pair-label">計費週期</div>
@@ -284,7 +282,7 @@
 
         <h3>付款動作</h3>
         <p style="font-size:13px;margin:4px 0 10px;color:var(--muted);">
-          先用「模擬付款」測試整個流程是否正常紀錄訂單，再開啟綠界正式付款。
+          先用「模擬付款」測試整個流程是否正常紀錄訂單，再啟用綠界正式付款。
         </p>
 
         <div class="btn-row">
@@ -310,7 +308,7 @@
         </div>
       </section>
 
-      <!-- 右側：發票/帳單預覽 -->
+      <!-- 右側：帳單預覽 -->
       <section class="card invoice-card">
         <h2>帳單預覽（列印用）</h2>
         <div class="invoice" id="invoice">
@@ -363,7 +361,7 @@
     </div>
   </div>
 
-  <!-- ★ 結帳邏輯：呼叫 create-order Edge Function -->
+  <!-- ★ 結帳邏輯：抓登入 ＋ 呼叫 create-order -->
   <script type="module">
     import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
@@ -415,21 +413,19 @@
       const params = new URLSearchParams(window.location.search)
 
       const planId = params.get('plan') || params.get('plan_id') || 'unknown'
-      const planLabel = params.get('plan_label') || '自訂方案'
+      const planLabel = params.get('plan_label') || '自訂方案（一）'
       const period = params.get('period') || '—'
       const categories = (params.get('cats') || params.get('categories') || '')
         .split(',')
         .filter(Boolean)
 
       const amountRaw = Number(params.get('amount') || '0') || 0
-      // 假設 amount 是「分」，顯示成 NTD
       const ntd = (amountRaw / 100).toFixed(0)
 
       const refFromQuery = params.get('ref') || params.get('referral') || ''
       const refFromStorage = localStorage.getItem('bw_referral_code') || ''
       const refCode = refFromQuery || refFromStorage || ''
 
-      // UI 填值
       elPlanLabel.textContent = planLabel
       elPlanPeriod.textContent = period
       if (categories.length) {
@@ -456,14 +452,12 @@
         elRefCode.textContent = refCode
       }
 
-      // 發票日期
       const today = new Date()
       const d = today.getFullYear() + '-' +
         String(today.getMonth() + 1).padStart(2, '0') + '-' +
         String(today.getDate()).padStart(2, '0')
       elInvDate.textContent = d
 
-      // 存起來給送單使用
       return {
         plan_id: planId,
         plan_label: planLabel,
@@ -479,10 +473,13 @@
 
     async function initUser() {
       const { data, error } = await supabase.auth.getUser()
+      console.log('auth.getUser() 回傳：', data, error)
+
       if (error || !data.user) {
         elUserEmail.textContent = '尚未登入'
         elUserId.textContent = ''
         elPairEmail.textContent = '請先登入後再結帳'
+        elInvBuyer.textContent = '（請先登入）'
         setStatus('尚未登入，請先回首頁登入再進入結帳頁面。', 'bad')
         btnMock.disabled = true
         btnEcpay.disabled = true
@@ -494,9 +491,9 @@
       elPairEmail.textContent = currentUser.email
       elInvBuyer.textContent = currentUser.email
 
-      // 已登入就可以操作
       btnMock.disabled = false
       btnEcpay.disabled = false
+      setStatus('')
     }
 
     async function callCreateOrder(mode) {
@@ -514,7 +511,7 @@
       btnEcpay.disabled = true
 
       const payload = {
-        mode, // 'mock' 或 'ecpay'
+        mode,
         amount: orderContext.amount_raw,
         currency: 'TWD',
         plan_id: orderContext.plan_id,
@@ -541,7 +538,6 @@
         const orderNo = data?.order_id || data?.order_no || data?.id || '(未回傳編號)'
         currentOrderNo = orderNo
 
-        // 更新發票與「我的訂閱」區
         elInvNo.textContent = orderNo
         elSubPlan.textContent = orderContext.plan_label + '（' + orderContext.period + '）'
         elSubOrderNo.textContent = orderNo
@@ -553,7 +549,6 @@
         } else if (mode === 'ecpay') {
           if (data?.payment_url) {
             setStatus('已建立正式訂單，準備導向綠界付款頁面…', 'ok')
-            // 真的開綠界就導頁
             window.location.href = data.payment_url
           } else {
             setStatus('已建立正式訂單（編號：' + orderNo + '），但後端未回傳付款網址。', 'ok')
@@ -563,13 +558,11 @@
         console.error(e)
         setStatus('建立訂單時發生例外錯誤：' + e.message, 'bad')
       } finally {
-        // 如需防止重複送單，可以在成功之後不再啟用
         btnMock.disabled = false
         btnEcpay.disabled = false
       }
     }
 
-    // 綁定按鈕
     btnMock.addEventListener('click', (e) => {
       e.preventDefault()
       callCreateOrder('mock')
@@ -585,11 +578,11 @@
       window.print()
     })
 
-    // 初始化
     initUser()
   </script>
 </body>
 </html>
+
 
 
 
