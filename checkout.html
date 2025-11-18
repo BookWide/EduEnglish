@@ -180,7 +180,8 @@
       d.setMonth(d.getMonth() + m);
       return d.toISOString();
     }
-    const orderId = uuid();
+    let orderId = uuid();
+    
     async function writeOrder(status){
       const user = await getUser();
       if(!user){
@@ -188,49 +189,46 @@
         return false;
       }
 
-      const nowISO = new Date().toISOString();
+      // 呼叫 Edge Function create-order，寫入 orders + 寄出 email
       const itemsArray = topics.length ? topics : ['story'];
 
       const payload = {
-        id: orderId,
         user_id: user.id,
         buyer_id: user.id,
         items: itemsArray,
-        period: plan,
-        unit_price: (unitPrice[plan] || 200) * 100,
-        quantity: qty,
-        subtotal: subtotal,
-        discount: discount,
-        total: total,
-        subtotal_cents: subtotal * 100,
-        discount_cents: discount * 100,
-        commission_cents: 0,
-        total_cents: total * 100,
-        ref_code: ref || null,
-        referral_code: ref || null,
+        period: plan,      // 直接沿用目前的 plan (month / half / year)
         status: status,
-        paid_at: status === 'paid' ? nowISO : null,
-        expire_at: status === 'paid' ? calcExpireISO() : null,
-        created_at: nowISO
+        email_to: user.email
       };
 
       try{
-        const { error } = await supabase.from('orders').insert(payload);
+        const { data, error } = await supabase.functions.invoke('create-order', {
+          body: payload
+        });
         if(error){
-          $('#status').textContent = '寫入 orders 失敗：' + (error.message||error);
+          console.error('create-order error', error);
+          $('#status').textContent = '建立訂單失敗：' + (error.message || error);
           return false;
         }
+
+        const order = data && (data.order || data);
+        if(order && order.id){
+          orderId = order.id; // 讓列印帳單顯示後端的訂單編號
+        }
+
         $('#status').textContent = status==='paid'
-          ? '✅ 已寫入 orders（paid）。'
-          : '❗ 已寫入 orders（failed）。';
+          ? '✅ 已建立訂單並寄出通知信（若有設定）。'
+          : '❗ 已建立訂單（狀態：failed）。';
         return true;
       }catch(e){
-        $('#status').textContent = '寫入 orders 例外：' + e;
+        console.error('create-order exception', e);
+        $('#status').textContent = '建立訂單時發生錯誤：' + e;
         return false;
       }
     }
 
     // ===== Print invoice =====
+
     function renderInvoice(){
       $('#rec-order-id').textContent = orderId;
       $('#rec-date').textContent = new Date().toLocaleString('zh-TW', { hour12:false });
@@ -275,6 +273,18 @@
   </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
