@@ -582,13 +582,16 @@ const paneSub=$('#pane-sub'),paneQuiz=$('#pane-quiz'),
 
 let cues=[],offset=0,loopSentence=false;
 let quizData=[],currentQuizCat='all';
+let vocabData=[],vocabLoop=null;
+
 
 function setOffset(v){
   offset=Number(v)||0;
   offsetVal.textContent=`${offset.toFixed(1)}s`;
   localStorage.setItem(`offset:${slug}`,String(offset));
 }
-window.player={setOffset,clearRepeat:()=>{loopSentence=false;btnReplay?.classList.remove('blue');}};
+window.player={setOffset,clearRepeat:()=>{loopSentence=false;vocabLoop=null;btnReplay?.classList.remove('blue');}};
+
 
 /* ==== 掛影片（Supabase 優先） ==== */
 async function loadVideo(){
@@ -752,111 +755,123 @@ function setupQuizButtons(){
 
 /* ==== 單字 ==== */
 async function loadVocab(){
-  const vStatus = $('#vocabStatus'), vBox = $('#vocabBox');
-  const url = `${BASE}/data/${cat}/${slug}/vocab-${slug}.json?v=${vnow}`;
-
+  const vStatus=$('#vocabStatus'),vBox=$('#vocabBox');
+  const url=`${BASE}/data/${cat}/${slug}/vocab-${slug}.json?v=${vnow}`;
   try{
-    const r = await fetch(url,{cache:'no-store'});
+    const r=await fetch(url,{cache:'no-store'});
     if(!r.ok) throw 0;
-    const list = await r.json();
-
-    if(!list?.length){
-      vStatus.textContent = '⚠️ 查無單字資料';
-      vBox.innerHTML = '';
+    const rawList=await r.json();
+    if(!rawList?.length){
+      vStatus.textContent='⚠️ 查無單字資料';
+      vBox.innerHTML='';
       return;
     }
 
-    vStatus.textContent = `已載入：${url}`;
+    // 正規化 + 計算片段時間（若未提供 clip_start / clip_end 則自動推估）
+    vocabData=rawList.map((v,i)=>{
+      const t=toSec(v.time||0);
 
-    vBox.innerHTML = list.map(v=>{
-      const zh   = v.zh || '';
-      const en   = v.en || '';
-      const ja   = v.ja || v.ja_def || '';
-      const enEx = v.en_example || '';
-      const zhEx = v.zh_example || '';
-      const jaEx = v.ja_example || '';
+      // 支援兩種寫法：clip_start / clipStart
+      let clipStart=v.clip_start!=null?v.clip_start:v.clipStart;
+      let clipEnd=v.clip_end!=null?v.clip_end:v.clipEnd;
 
-      const hasExample = enEx || zhEx || jaEx;
+      let cs=clipStart!=null?toSec(clipStart):t;
+      let ce=clipEnd!=null?toSec(clipEnd):0;
 
-      return `
-      <div style="border:1px solid #223048;border-radius:10px;padding:10px 12px;margin:10px 0">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:4px;">
-          <div style="font-weight:800;font-size:18px;">${esc(v.word||'')}</div>
-          ${v.pos ? `<div style="font-size:12px;color:#9fb0c9;">${esc(v.pos)}</div>` : ''}
+      // 若沒給 end 或 end <= start，就抓下一個字的 time，或 +3 秒
+      if(!ce||ce<=cs){
+        const next=rawList[i+1];
+        const nextT=next&&next.time?toSec(next.time):cs+3;
+        ce=nextT>cs?nextT:cs+3;
+      }
+      return {...v,t,clipStart:cs,clipEnd:ce};
+    });
+
+    vStatus.textContent=`已載入：${url}`;
+
+    // 渲染卡片：中英日 + 例句 +（可選）圖片
+    vBox.innerHTML=vocabData.map((v,i)=>`
+      <div class="vocab-card" data-i="${i}" style="border:1px solid #223048;border-radius:10px;padding:10px;margin:10px 0;">
+        <div style="display:flex;gap:12px;align-items:flex-start;">
+          <div style="flex:1 1 auto;min-width:0;">
+            <div style="font-weight:800;font-size:18px;">${esc(v.word||'')}</div>
+            ${v.pos?`<div style="font-size:13px;color:#9fb0c9;margin-bottom:4px;">${esc(v.pos)}</div>`:''}
+            ${v.zh?`<div style="margin-bottom:2px;">【中】${esc(v.zh)}</div>`:''}
+            ${v.en?`<div style="margin-bottom:2px;">【英】${esc(v.en)}</div>`:''}
+            ${v.ja?`<div style="margin-bottom:2px;">【日】${esc(v.ja)}</div>`:''}
+          </div>
+          ${v.img?`
+          <div style="flex:0 0 120px;">
+            <img src="${esc(v.img)}" alt="${esc(v.word||'')}"
+                 style="max-width:100%;border-radius:8px;display:block;" loading="lazy" />
+          </div>`:''}
         </div>
 
-        ${zh ? `
-        <div style="margin:2px 0;">
-          <span style="font-size:13px;color:#9fb0c9;">【中】</span>
-          <span>${esc(zh)}</span>
-          <button class="btn sm" data-act="speak" data-lang="zh-TW" data-text="${esc(zh)}" style="margin-left:6px;">🔊</button>
-        </div>` : ''}
-
-        ${en ? `
-        <div style="margin:2px 0;">
-          <span style="font-size:13px;color:#9fb0c9;">【英】</span>
-          <span>${esc(en)}</span>
-          <button class="btn sm" data-act="speak" data-lang="en-US" data-text="${esc(en)}" style="margin-left:6px;">🔊</button>
-        </div>` : ''}
-
-        ${ja ? `
-        <div style="margin:2px 0;">
-          <span style="font-size:13px;color:#9fb0c9;">【日】</span>
-          <span>${esc(ja)}</span>
-          <button class="btn sm" data-act="speak" data-lang="ja-JP" data-text="${esc(ja)}" style="margin-left:6px;">🔊</button>
-        </div>` : ''}
-
-        ${hasExample ? `
-        <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #223048;font-size:13px;">
-          <div style="font-size:12px;color:#9fb0c9;margin-bottom:2px;">例句 Example</div>
-
-          ${enEx ? `
-          <div style="margin:2px 0;">
-            <span style="color:#9fb0c9;">EN：</span>
-            <span>${esc(enEx)}</span>
-            <button class="btn sm" data-act="speak" data-lang="en-US" data-text="${esc(enEx)}" style="margin-left:6px;">🔊</button>
-          </div>` : ''}
-
-          ${zhEx ? `
-          <div style="margin:2px 0;">
-            <span style="color:#9fb0c9;">中：</span>
-            <span>${esc(zhEx)}</span>
-            <button class="btn sm" data-act="speak" data-lang="zh-TW" data-text="${esc(zhEx)}" style="margin-left:6px;">🔊</button>
-          </div>` : ''}
-
-          ${jaEx ? `
-          <div style="margin:2px 0;">
-            <span style="color:#9fb0c9;">日：</span>
-            <span>${esc(jaEx)}</span>
-            <button class="btn sm" data-act="speak" data-lang="ja-JP" data-text="${esc(jaEx)}" style="margin-left:6px;">🔊</button>
-          </div>` : ''}
-        </div>` : ''}
+        ${(v.en_example||v.zh_example||v.ja_example)?`
+        <div style="margin-top:6px;font-size:14px;line-height:1.6;">
+          ${v.en_example?`<div>💬 <span class="vocab-en-example">${esc(v.en_example)}</span></div>`:''}
+          ${v.zh_example?`<div>💬 <span class="vocab-zh-example">${esc(v.zh_example)}</span></div>`:''}
+          ${v.ja_example?`<div>💬 <span class="vocab-ja-example">${esc(v.ja_example)}</span></div>`:''}
+        </div>`:''}
 
         <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
-          ${v.time ? `<button class="btn sm" data-act="jump" data-time="${esc(v.time)}">跳到片段</button>` : ''}
+          ${v.time?`<button class="btn sm" data-act="jump" data-i="${i}">▶ 片段循環</button>`:''}
+          ${v.en?`<button class="btn sm" data-act="speak" data-lang="en-US" data-text="${esc(v.en)}">🔊 英</button>`:''}
+          ${v.zh?`<button class="btn sm" data-act="speak" data-lang="zh-TW" data-text="${esc(v.zh)}">🔊 中</button>`:''}
+          ${v.ja?`<button class="btn sm" data-act="speak" data-lang="ja-JP" data-text="${esc(v.ja)}">🔊 日</button>`:''}
         </div>
-      </div>`;
-    }).join('');
+      </div>
+    `).join('');
 
+    // 單字區事件：跳片段 + 朗讀
     vBox.addEventListener('click',e=>{
-      const act = e.target?.dataset?.act;
-      if(!act) return;
+      const btn=e.target.closest('button');
+      if(!btn)return;
+      const act=btn.dataset.act;
+      if(!act)return;
 
-      if(act === 'jump'){
-        const p = toSec(e.target.dataset.time || 0);
-        video.currentTime = Math.max(0,p);
+      if(act==='jump'){
+        const i=Number(btn.dataset.i??-1);
+        let start=0,end=0;
+
+        if(i>=0 && vocabData[i]){
+          const v=vocabData[i];
+          const cs=v.clipStart??v.t;
+          const ce=v.clipEnd??(cs+3);
+          // 套用同一個 offset，跟字幕跳行邏輯一致
+          start=Math.max(0,cs-offset+0.0001);
+          end=Math.max(start+0.5,ce-offset);
+        }else{
+          // 後備：如果未帶索引，退回用 time
+          const p=toSec(btn.dataset.time||0);
+          start=Math.max(0,p-offset+0.0001);
+          end=start+3;
+        }
+
+        vocabLoop={start,end};
+
+        // 關掉字幕句子循環，避免互相搶播
+        loopSentence=false;
+        btnReplay?.classList.remove('blue');
+
+        video.currentTime=start;
         video.play();
       }
 
-      if(act === 'speak'){
-        speakText(e.target.dataset.text || '', e.target.dataset.lang || 'en-US');
+      if(act==='speak'){
+        const text=btn.dataset.text||'';
+        const lang=btn.dataset.lang||'en-US';
+        speakText(text,lang);
       }
-    });
+    },true);
+
   }catch(e){
-    console.warn(e);
-    vStatus.textContent = '⚠️ 讀取失敗：' + url;
+    console.error(e);
+    vStatus.textContent='⚠️ 無法載入單字資料';
+    vBox.innerHTML='';
   }
 }
+
 
 
 /* ==== AI（三語示範 + 對應朗讀） ==== */
@@ -1043,7 +1058,15 @@ video.addEventListener('timeupdate',()=>{
       video.play();
     }
   }
+  if(vocabLoop){
+    const t2=video.currentTime;
+    if(t2>=vocabLoop.end-0.02){
+      video.currentTime=Math.max(0,vocabLoop.start);
+      video.play();
+    }
+  }
 });
+
 
 /* ==== Browser TTS ==== */
 function speakText(text,lang){
