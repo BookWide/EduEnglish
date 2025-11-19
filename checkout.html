@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BookWide｜結帳（模擬付款 + 建立訂單）</title>
+  <title>BookWide｜結帳（模擬付款＋綠界測試）</title>
 
   <style>
     :root{
@@ -205,16 +205,16 @@
     <section class="section">
       <h2>付款方式</h2>
       <div class="note">
-        目前先使用「模擬付款」流程：按下按鈕後，系統會：
+        目前提供兩種流程：
       </div>
       <ul class="note" style="margin-top:4px;padding-left:20px;">
-        <li>建立一筆訂單到 <code>public.orders</code></li>
-        <li>由 Edge Function <code>create-order</code> 寄出通知 Email</li>
-        <li>完成後自動導向 <code>account/subscription.html</code> 顯示訂閱資訊</li>
+        <li><strong>模擬付款</strong>：只在系統內建立訂單、標記為已付款，方便測試守門與訂閱流程。</li>
+        <li><strong>綠界測試付款</strong>：呼叫 Edge Function 串接綠界 <code>Stage</code> 測試環境，完整走正式付款流程（但不會真正扣款）。</li>
       </ul>
 
       <div class="btn-row">
         <button id="payBtn" type="button">模擬付款並送出訂單</button>
+        <button id="ecpayBtn" type="button">綠界測試付款（Stage）</button>
         <button class="btn-ghost" type="button" onclick="history.back()">返回上一頁</button>
       </div>
 
@@ -318,6 +318,7 @@
   const userHintEl = document.getElementById('userHint');
   const loginWarnEl = document.getElementById('loginWarn');
   const payBtn = document.getElementById('payBtn');
+  const ecpayBtn = document.getElementById('ecpayBtn');
   const statusBox = document.getElementById('statusBox');
 
   let currentUser = null;
@@ -331,6 +332,7 @@
       userHintEl.textContent = '請先登入後再結帳';
       loginWarnEl.style.display = 'block';
       payBtn.disabled = true;
+      ecpayBtn.disabled = true;
       return;
     }
 
@@ -339,33 +341,48 @@
     userHintEl.textContent = '已登入，請確認下方方案再送出訂單';
     loginWarnEl.style.display = 'none';
     payBtn.disabled = false;
+    ecpayBtn.disabled = false;
   }
 
   loadUser();
 
-  // ========= 4. 按下「模擬付款並送出訂單」 =========
+  // 共用：組 payload
+  function buildPayload(mockFlag) {
+    const note = document.getElementById('noteInput').value.trim();
+    return {
+      user_id: currentUser.id,
+      email: currentUser.email,
+      items,
+      period,
+      amount,
+      referral_code: refCode || null,
+      note: note || null,
+      mock: !!mockFlag,
+      gateway: mockFlag ? 'mock' : 'ecpay'
+    };
+  }
+
+  function disableButtons() {
+    payBtn.disabled = true;
+    ecpayBtn.disabled = true;
+  }
+  function enableButtons() {
+    payBtn.disabled = false;
+    ecpayBtn.disabled = false;
+  }
+
+  // ========= 4. 「模擬付款並送出訂單」 =========
   async function handleMockPay() {
     if (!currentUser) {
       alert('請先登入後再結帳。');
       return;
     }
 
-    statusBox.textContent = '正在建立訂單與寄出 Email…';
+    statusBox.textContent = '正在建立訂單與寄出 Email（模擬付款）…';
     statusBox.className = 'status';
-    payBtn.disabled = true;
+    disableButtons();
 
-    const note = document.getElementById('noteInput').value.trim();
-
-    const payload = {
-      user_id: currentUser.id,
-      email: currentUser.email,
-      items,
-      period,
-      amount,             // ✅ 用剛才算好的金額
-      referral_code: refCode || null,
-      note: note || null,
-      mock: true          // 告訴 Edge Function：這是模擬付款
-    };
+    const payload = buildPayload(true); // mock = true
 
     try {
       const res = await fetch(
@@ -388,10 +405,9 @@
         throw new Error(data?.message || `Edge Function 錯誤：${res.status}`);
       }
 
-      statusBox.textContent = '✅ 訂單建立成功，Email 已寄出，準備前往訂閱狀態頁…';
+      statusBox.textContent = '✅ 訂單建立成功（模擬），Email 已寄出，準備前往訂閱狀態頁…';
       statusBox.className = 'status ok';
 
-      // 1.2 秒後轉到訂閱頁
       setTimeout(() => {
         const qs = new URLSearchParams({
           items: items.join(','),
@@ -406,15 +422,82 @@
       console.error(err);
       statusBox.textContent = '❌ 建立訂單或寄信失敗：' + err.message;
       statusBox.className = 'status bad';
-      payBtn.disabled = false;
+      enableButtons();
+    }
+  }
+
+  // ========= 5. 「綠界測試付款」 =========
+  async function handleEcpayPay() {
+    if (!currentUser) {
+      alert('請先登入後再結帳。');
+      return;
+    }
+
+    statusBox.textContent = '正在連線綠界 Stage 測試環境，請稍候…';
+    statusBox.className = 'status';
+    disableButtons();
+
+    const payload = buildPayload(false); // mock = false, gateway = 'ecpay'
+
+    try {
+      const res = await fetch(
+        'https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/create-ecpay-order',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${SUPABASE_ANON_KEY}`
+          },
+          body: JSON.stringify(payload)
+        }
+      );
+
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        console.error('create-ecpay-order error', data || res.statusText);
+        throw new Error(data?.message || `create-ecpay-order 錯誤：${res.status}`);
+      }
+
+      // 期待 Edge Function 回傳 { html: '<form ... 綠界表單 ...</form>' }
+      if (data && data.html) {
+        statusBox.textContent = '✅ 已建立綠界訂單，即將前往綠界測試付款頁面…';
+        statusBox.className = 'status ok';
+
+        // 以目前視窗開啟綠界表單
+        const payWin = window.open('', '_self');
+        payWin.document.open();
+        payWin.document.write(data.html);
+        payWin.document.close();
+        return;
+      }
+
+      // 後備方案：若改成回傳 redirect_url
+      if (data && data.redirect_url) {
+        statusBox.textContent = '✅ 已建立綠界訂單，準備重新導向…';
+        statusBox.className = 'status ok';
+        window.location.href = data.redirect_url;
+        return;
+      }
+
+      throw new Error('Edge Function 回傳格式不符合預期，缺少 html / redirect_url');
+
+    } catch (err) {
+      console.error(err);
+      statusBox.textContent = '❌ 串接綠界測試付款失敗：' + err.message;
+      statusBox.className = 'status bad';
+      enableButtons();
     }
   }
 
   payBtn.addEventListener('click', handleMockPay);
+  ecpayBtn.addEventListener('click', handleEcpayPay);
 </script>
 
 </body>
 </html>
+
 
 
 
