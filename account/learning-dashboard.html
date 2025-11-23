@@ -419,7 +419,7 @@ function formatTime(ts) {
 }
 
 /* -------------------------------------------------
-   內部渲染功能
+   DOM 渲染
 ------------------------------------------------- */
 function renderContinue(item) {
   const box = document.getElementById("continueBox");
@@ -500,7 +500,7 @@ function renderFavorites(list) {
       return `
       <div class="review-item">
         <div class="review-thumb">
-          <img src="${cover}">
+          <img src="${cover}" alt="${v.title}">
         </div>
         <div class="review-info">
           <div>${v.title}</div>
@@ -526,7 +526,7 @@ function renderReview(list) {
       return `
       <div class="review-item">
         <div class="review-thumb">
-          <img src="${cover}">
+          <img src="${cover}" alt="${v.title}">
         </div>
         <div class="review-info">
           <div>${v.title}</div>
@@ -561,42 +561,55 @@ function renderCurve(list) {
    主邏輯：讀取 Supabase 真資料
 ------------------------------------------------- */
 async function loadData(userEmail) {
+  // 先再拿一次 user（為了 user.id 查 favorites）
+  const { data: userData, error: userErr } = await supabase.auth.getUser();
+  const userId = userData?.user?.id || null;
+  if (userErr) console.error("getUser in loadData error", userErr);
+
   /* 1) 讀影片清單 videos */
-  const { data: videos } = await supabase.from("videos").select("*");
+  const { data: videos, error: videoErr } = await supabase.from("videos").select("*");
+  if (videoErr) console.error("load videos error", videoErr);
 
   const mapVideos = {};
-  videos.forEach((v) => {
+  (videos || []).forEach((v) => {
     mapVideos[v.slug] = v;
   });
 
   /* 2) watch_logs（用 email 查） */
-  const { data: logs } = await supabase
+  const { data: logs, error: logsErr } = await supabase
     .from("watch_logs")
     .select("*")
     .eq("email", userEmail)
     .order("updated_at", { ascending: false });
 
-  const logsFilled = logs.map((l) => ({
+  if (logsErr) console.error("load watch_logs error", logsErr);
+
+  const logsFilled = (logs || []).map((l) => ({
     ...l,
     ...mapVideos[l.video_slug], // 合併 title / cover_path / category
   }));
 
-  /* 3) favorites */
-  const { data: favs } = await supabase
-    .from("favorites")
-    .select("*")
-    .eq("user_id", null); 
-    // ⚠ 你的 favorites 目前 user_id 都是 NULL（你貼的圖），你要之後改正！
-    // 我先不擋，不然畫面會空
+  /* 3) favorites — 用 user_id (uuid) 查（不再 eq null） */
+  let favFull = [];
+  if (userId) {
+    const { data: favs, error: favErr } = await supabase
+      .from("favorites")
+      .select("*")
+      .eq("user_id", userId);
 
-  const favFull = (favs || []).map((f) => mapVideos[f.video_slug]).filter(Boolean);
+    if (favErr) console.error("load favorites error", favErr);
 
-  /* 4) 今日複習：未完成 */
+    favFull = (favs || [])
+      .map((f) => mapVideos[f.video_slug])
+      .filter(Boolean);
+  }
+
+  /* 4) 今日複習：未完成（progress_pct < 100） */
   const todayReview = logsFilled.filter((v) => (v.progress_pct || 0) < 100);
 
-  /* 5) 繼續播放：最新未完成 */
+  /* 5) 繼續播放：最新未完成，沒有就拿最新一筆 */
   const continueItem =
-    logsFilled.find((v) => (v.progress_pct || 0) < 100) || logsFilled[0];
+    logsFilled.find((v) => (v.progress_pct || 0) < 100) || logsFilled[0] || null;
 
   /* 6) 最近看過 */
   const recent = logsFilled.slice(0, 10);
@@ -610,13 +623,13 @@ async function loadData(userEmail) {
     const key = day.toISOString().slice(0, 10);
 
     const list = logsFilled.filter((v) =>
-      v.updated_at.startsWith(key)
+      (v.updated_at || "").startsWith(key)
     );
 
     const avg =
       list.length > 0
         ? Math.round(
-            (list.reduce((a, c) => a + (c.progress_pct || 0), 0) / list.length)
+            list.reduce((a, c) => a + (c.progress_pct || 0), 0) / list.length
           )
         : 0;
 
@@ -659,6 +672,8 @@ async function init() {
 
 init();
 </script>
+
+
 
 
 
