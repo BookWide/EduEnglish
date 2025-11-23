@@ -400,12 +400,15 @@
 
   function storageUrl(path){
     if(!path) return "";
+    // 若資料庫已經存完整網址，就直接用
+    if(/^https?:\/\//.test(path)) return path;
     return `${SUPABASE_URL}/storage/v1/object/public/${path}`;
   }
 
   function formatTime(ts){
     if(!ts) return "";
     const d = new Date(ts);
+    if(isNaN(d.getTime())) return "";
     const y = d.getFullYear();
     const m = String(d.getMonth()+1).padStart(2,"0");
     const day = String(d.getDate()).padStart(2,"0");
@@ -425,17 +428,19 @@
       return;
     }
 
-    const pct = Math.round(item.progress_pct || 0);
+    const pct = Math.max(0, Math.min(100, Math.round(item.progress_pct || 0)));
     const cover = item.cover_path ? storageUrl(item.cover_path) : "";
+    const title = item.title || item.video_title || item.video_slug || item.slug || "未命名影片";
+    const updated = formatTime(item.updated_at);
 
     box.innerHTML = `
       <div class="thumb">
-        <img src="${cover}" alt="${item.title || item.video_slug}">
+        ${cover ? `<img src="${cover}" alt="${title}">` : ""}
       </div>
       <div class="cont-meta">
-        <div class="title">${item.title || item.video_slug}</div>
+        <div class="title">${title}</div>
         <div class="sub">
-          上次進度 ${pct}%　更新：${formatTime(item.updated_at)}
+          上次進度 ${pct}%　${updated ? `更新：${updated}` : ""}
         </div>
         <div class="progress-wrap">
           <div class="bar"><span style="width:${pct}%;"></span></div>
@@ -448,7 +453,9 @@
 
     const btn = document.getElementById("btnResume");
     btn.onclick = () => {
-      const url = `../player.html?cat=${encodeURIComponent(item.category)}&slug=${encodeURIComponent(item.video_slug)}&resume=1`;
+      const cat = item.category || item.video_category || "story";
+      const slug = item.video_slug || item.slug || "";
+      const url = `../player.html?cat=${encodeURIComponent(cat)}&slug=${encodeURIComponent(slug)}&resume=1`;
       window.location.href = url;
     };
   }
@@ -461,15 +468,17 @@
     }
 
     ul.innerHTML = list.slice(0,10).map(v => {
-      const pct = Math.round(v.progress_pct || 0);
+      const pct = Math.max(0, Math.min(100, Math.round(v.progress_pct || 0)));
+      const title = v.title || v.video_title || v.video_slug || v.slug || "未命名影片";
+      const updated = formatTime(v.updated_at);
       return `
         <li class="recent-item">
           <div class="recent-left">
             <div class="dot">影片</div>
-            <div class="recent-title">${v.title || v.video_slug}</div>
+            <div class="recent-title">${title}</div>
           </div>
           <div class="recent-meta">
-            進度 ${pct}% · ${formatTime(v.updated_at)}
+            ${pct ? `進度 ${pct}%` : ""}${pct && updated ? " · " : ""}${updated || ""}
           </div>
         </li>
       `;
@@ -486,14 +495,16 @@
     box.className = "";
     box.innerHTML = list.map(v => {
       const cover = v.cover_path ? storageUrl(v.cover_path) : "";
+      const title = v.title || v.video_title || v.slug || v.video_slug || "未命名影片";
+      const cat = v.category || v.video_category || "";
       return `
         <div class="review-item">
           <div class="review-thumb">
-            <img src="${cover}" alt="${v.title || v.slug}">
+            ${cover ? `<img src="${cover}" alt="${title}">` : ""}
           </div>
           <div class="review-info">
-            <div>${v.title || v.slug}</div>
-            <small>${v.category}</small>
+            <div>${title}</div>
+            <small>${cat}</small>
           </div>
         </div>
       `;
@@ -508,14 +519,16 @@
     }
     box.innerHTML = list.slice(0,3).map(v => {
       const cover = v.cover_path ? storageUrl(v.cover_path) : "";
+      const title = v.title || v.video_title || v.slug || v.video_slug || "未命名影片";
+      const cat = v.category || v.video_category || "";
       return `
         <div class="review-item">
           <div class="review-thumb">
-            <img src="${cover}" alt="${v.title || v.slug}">
+            ${cover ? `<img src="${cover}" alt="${title}">` : ""}
           </div>
           <div class="review-info">
-            <div>${v.title || v.slug}</div>
-            <small>${v.category}</small>
+            <div>${title}</div>
+            <small>${cat}</small>
           </div>
         </div>
       `;
@@ -531,7 +544,7 @@
     area.innerHTML = curve.map(d => `
       <div class="chart-row">
         <div class="chart-label">${d.label}</div>
-        <div class="chart-bar"><span style="width:${d.value}%"></span></div>
+        <div class="chart-bar"><span style="width:${d.value}%;"></span></div>
         <div class="chart-val">${d.value}%</div>
       </div>
     `).join("");
@@ -548,10 +561,13 @@
       .select("*")
       .eq("is_public", true);
 
-    if(vErr) console.error("videos error", vErr);
+    if(vErr){
+      console.error("videos error", vErr);
+    }
 
     const mapVideos = {};
     (videos || []).forEach(v => {
+      if(!v.slug) return;
       mapVideos[v.slug] = v;
     });
 
@@ -562,12 +578,17 @@
       .eq("email", userEmail)
       .order("updated_at", { ascending:false });
 
-    if(lErr) console.error("watch_logs error", lErr);
+    if(lErr){
+      console.error("watch_logs error", lErr);
+    }
 
-    const logsFilled = (logs || []).map(row => ({
-      ...row,
-      ...mapVideos[row.video_slug]
-    }));
+    const logsFilled = (logs || []).map(row => {
+      const videoMeta = mapVideos[row.video_slug] || {};
+      return {
+        ...row,
+        ...videoMeta
+      };
+    });
 
     // 3) favorites (用 user_id)
     let favoritesFull = [];
@@ -576,20 +597,31 @@
         .from("favorites")
         .select("*")
         .eq("user_id", userId);
-      if(fErr) console.error("favorites error", fErr);
+      if(fErr){
+        console.error("favorites error", fErr);
+      }
       favoritesFull = (favRows || [])
         .map(f => mapVideos[f.video_slug])
         .filter(Boolean);
+
+      // 去重複
+      const favMap = new Map();
+      favoritesFull.forEach(v => {
+        const key = v.slug || v.video_slug || v.id;
+        if(!favMap.has(key)) favMap.set(key, v);
+      });
+      favoritesFull = Array.from(favMap.values());
     }
 
     // 今日複習：未完成
     const todayReview = logsFilled.filter(r => (r.progress_pct || 0) < 100);
 
-    // 繼續播放
-    const continueItem =
-      logsFilled.find(r => (r.progress_pct || 0) < 100) ||
-      logsFilled[0] ||
-      null;
+    // 繼續播放：最新一筆未完成，沒有的話取最新一筆
+    let continueItem = null;
+    if(logsFilled.length){
+      const incomplete = logsFilled.filter(r => (r.progress_pct || 0) < 100);
+      continueItem = incomplete[0] || logsFilled[0] || null;
+    }
 
     // 最近看過
     const recent = logsFilled.slice(0,10);
@@ -599,15 +631,16 @@
     const curve = [];
     for(let i=6;i>=0;i--){
       const d = new Date(now.getTime() - i*24*60*60*1000);
-      const key = d.toISOString().slice(0,10);
-      const list = logsFilled.filter(r =>
-        (r.updated_at || "").startsWith(key)
-      );
+      const key = d.toISOString().slice(0,10); // yyyy-mm-dd
+      const list = logsFilled.filter(r => {
+        const u = (r.updated_at || "").toString();
+        return u.startsWith(key);
+      });
       const avg = list.length
         ? Math.round(list.reduce((a,c)=>a+(c.progress_pct||0),0)/list.length)
         : 0;
       const label = i===0 ? "今天" : i===1 ? "昨天" : `${d.getMonth()+1}/${d.getDate()}`;
-      curve.push({ label, value: avg });
+      curve.push({ label, value: Math.max(0, Math.min(100, avg)) });
     }
 
     // 渲染
@@ -644,6 +677,8 @@
 </script>
 </body>
 </html>
+
+
 
 
 
