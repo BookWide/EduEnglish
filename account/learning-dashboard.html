@@ -37,14 +37,12 @@
     .list{ margin:8px 0 0; padding-left:18px; }
     .list li{ margin:8px 0; }
 
-    /* 新增：藍底白字徽章 */
     .pill{
       display:inline-block; padding:4px 10px; border-radius:999px;
       background:var(--brand); color:#fff; font-size:12px; font-weight:700;
       vertical-align:middle;
     }
 
-    /* 可點的卡片鍊結 */
     .link-card{
       display:block; padding:12px 14px; border-radius:12px;
       background:#f9fafb; color:inherit; text-decoration:none;
@@ -54,7 +52,6 @@
     .title-line{ font-weight:700; font-size:17px; margin-bottom:6px; }
     .sub-line{ color:#374151; font-size:14px; }
 
-    /* 右上角 mail */
     .mail{ color:#374151; }
   </style>
 </head>
@@ -80,7 +77,7 @@
         <div id="continueBody" class="muted">目前沒有未看完的影片。</div>
       </section>
 
-      <!-- 今日複習（保留外觀與占位） -->
+      <!-- 今日複習 -->
       <section class="card">
         <h2>今日複習</h2>
         <div class="muted" id="reviewToday">今日沒有到期的複習項目。</div>
@@ -94,21 +91,21 @@
         </ul>
       </section>
 
-      <!-- 我的清單（保留） -->
+      <!-- 我的清單 -->
       <section class="card">
         <h2>我的清單</h2>
-        <div class="muted">尚未收藏任何影片。</div>
+        <div class="muted" id="favBox">尚未收藏任何影片。</div>
       </section>
 
-      <!-- 學習曲線（預留） -->
+      <!-- 學習曲線（最近 7 天） -->
       <section class="card" style="grid-column:1/-1">
         <h2>學習曲線（最近 7 天）</h2>
-        <div class="muted">（預留；之後改為 Chart.js 折線圖）</div>
+        <div class="muted" id="learnCurveWrap">（預留；之後改為 Chart.js 折線圖）</div>
       </section>
     </div>
   </div>
 
-  <!-- 這支照你的專案結構，從 /EduEnglish/account/ 回上一層取用 -->
+  <!-- 主邏輯：登入守門 + 繼續播放 / 最近看過 -->
   <script type="module">
     import { supabase } from '../supa.js';
 
@@ -127,21 +124,20 @@
       return `${y}/${m}/${day} ${hh}:${mm}`;
     };
 
-    // 1) 取得登入
+    // 1) 取得登入（守門）
     const { data:authData, error:authErr } = await supabase.auth.getUser();
     const user = authData?.user || null;
     if (!user) {
-      // 未登入仍顯示頁面，但提醒並導回首頁
       alert('請先登入後再使用學習控制台');
       location.href = '../index.html';
       throw new Error('No session');
     }
     emailEl.textContent = user.email ?? '';
 
-    // 2) 撈 watch_logs（已在 DB 啟用 RLS -> 只能看到自己的）
+    // 2) 撈 watch_logs（RLS 僅可看到自己的）
     const { data:logs, error:logErr } = await supabase
       .from('watch_logs')
-      .select('*')
+      .select('video_slug, progress_pct, updated_at')
       .order('updated_at', { ascending:false })
       .limit(30);
 
@@ -153,193 +149,216 @@
       contBody.textContent = '目前沒有未看完的影片。';
       recentUl.innerHTML = '<li>尚無觀看紀錄。</li>';
     } else {
-      // A. 繼續播放：找到第一個進度 < 100 的條目；若都 100%，就用最最新的一筆當作提示
+      // A. 繼續播放：找第一個進度 < 100 的條目；若都 100%，就用最新一筆
       const cont = logs.find(l => (l.progress_pct ?? 0) < 100) ?? logs[0];
       const pct  = Math.round(cont.progress_pct ?? 0);
       const slug = cont.video_slug;
       const videoUrl = `../player.html?slug=${encodeURIComponent(slug)}`;
 
-      contBody.innerHTML = `
-        <a class="link-card" href="${videoUrl}">
-          <div class="title-line">🎬 ${slug}</div>
-          <div class="sub-line">上次進度 <b>${pct}%</b>　更新：${fmtDate(cont.updated_at)}</div>
+      contBody.innerHTML = \`
+        <a class="link-card" href="\${videoUrl}">
+          <div class="title-line">🎬 \${slug}</div>
+          <div class="sub-line">上次進度 <b>\${pct}%</b>　更新：\${fmtDate(cont.updated_at)}</div>
         </a>
-      `;
+      \`;
       contBadge.style.display = (pct >= 100) ? 'none' : 'inline-block';
 
       // B. 最近看過：列 6 筆
       const items = logs.slice(0, 6).map(r => {
         const p = Math.round(r.progress_pct ?? 0);
         const s = r.video_slug;
-        const url = `../player.html?slug=${encodeURIComponent(s)}`;
-        return `
+        const url = \`../player.html?slug=\${encodeURIComponent(s)}\`;
+        return \`
           <li>
-            <a href="${url}" style="text-decoration:none;color:inherit;"><b>🎞 ${s}</b></a>
-            <span class="muted">　進度 ${p}%・${fmtDate(r.updated_at)}</span>
+            <a href="\${url}" style="text-decoration:none;color:inherit;"><b>🎞 \${s}</b></a>
+            <span class="muted">　進度 \${p}%・\${fmtDate(r.updated_at)}</span>
           </li>
-        `;
+        \`;
       }).join('');
       recentUl.innerHTML = items;
     }
-
-    // （「今日複習」、「我的清單」、「學習曲線」保留你既有結構，之後要串資料再補。）
   </script>
-  <!-- Chart.js 折線圖補釘：學習曲線（最近 7 天） -->
-<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-<script type="module">
-import { supabase } from '../supa.js';
 
-async function drawLearningCurve() {
-  const wrap = document.querySelector('section.card:last-of-type .muted');
-  if (!wrap) return;
+  <!-- Chart.js 折線圖：學習曲線（最近 7 天） -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script type="module">
+    import { supabase } from '../supa.js';
 
-  // 先清空預留文字，加入畫布
-  wrap.innerHTML = `
-    <div style="width:30%;min-width:260px;margin:20px auto;">
-      <canvas id="learnCurve"></canvas>
-    </div>
-    <div id="learnCurveEmpty" style="text-align:center;color:#888;font-size:.9rem;display:none;">
-      尚無資料（過去 7 天沒有觀看紀錄）
-    </div>
-  `;
+    async function drawLearningCurve() {
+      const wrap = document.getElementById('learnCurveWrap');
+      if (!wrap) return;
 
-  // 取得登入
-  const { data:auth } = await supabase.auth.getUser();
-  if (!auth?.user) {
-    document.getElementById('learnCurveEmpty').style.display='block';
-    return;
-  }
+      wrap.innerHTML = \`
+        <div style="width:100%;max-width:520px;margin:20px auto;">
+          <canvas id="learnCurve"></canvas>
+        </div>
+        <div id="learnCurveEmpty" style="text-align:center;color:#888;font-size:.9rem;display:none;">
+          尚無資料（過去 7 天沒有觀看紀錄）
+        </div>
+      \`;
 
-  // 從你建立的檢視抓最近 7 天資料
-  const { data, error } = await supabase
-    .from('v_watch_events_last7')
-    .select('*')
-    .order('d');
-  if (error) {
-    console.warn('學習曲線資料讀取失敗:', error);
-    document.getElementById('learnCurveEmpty').style.display='block';
-    return;
-  }
+      const { data:auth } = await supabase.auth.getUser();
+      if (!auth?.user) {
+        document.getElementById('learnCurveEmpty').style.display='block';
+        return;
+      }
 
-  // 建立最近七天日期 (YYYY-MM-DD)
-  const days = [...Array(7)].map((_,i)=>{
-    const d=new Date();d.setDate(d.getDate()-6+i);
-    return d.toISOString().slice(0,10);
-  });
-  const map=new Map((data||[]).map(r=>[r.d,r.events]));
-  const labels=days.map(d=>d.slice(5)); // 顯示 MM-DD
-  const values=days.map(d=>map.get(d)||0);
-  if(values.every(v=>v===0)){
-    document.getElementById('learnCurveEmpty').style.display='block';
-    return;
-  }
+      // 最近 7 天的起始（今天往回 6 天）
+      const start = new Date();
+      start.setDate(start.getDate() - 6);
+      start.setHours(0,0,0,0);
 
-  new Chart(document.getElementById('learnCurve'),{
-    type:'line',
-    data:{labels,
-      datasets:[{label:'觀看次數',data:values,
-        borderColor:'#2563eb',borderWidth:2,
-        pointRadius:3,tension:.3,fill:false}]},
-    options:{
-      plugins:{legend:{display:false}},
-      scales:{y:{beginAtZero:true,ticks:{precision:0}}}
+      const { data:logs, error } = await supabase
+        .from('watch_logs')
+        .select('updated_at')
+        .gte('updated_at', start.toISOString())
+        .order('updated_at', { ascending:true });
+
+      if (error || !logs || logs.length === 0) {
+        document.getElementById('learnCurveEmpty').style.display='block';
+        return;
+      }
+
+      // 建立日期 -> 次數 map
+      const days = [...Array(7)].map((_,i)=>{
+        const d=new Date(start);
+        d.setDate(start.getDate()+i);
+        return d.toISOString().slice(0,10);
+      });
+      const map = new Map();
+      logs.forEach(r => {
+        const d = new Date(r.updated_at);
+        const key = d.toISOString().slice(0,10);
+        map.set(key, (map.get(key) || 0) + 1);
+      });
+
+      const labels = days.map(d => d.slice(5)); // MM-DD
+      const values = days.map(d => map.get(d) || 0);
+
+      if (values.every(v => v === 0)) {
+        document.getElementById('learnCurveEmpty').style.display='block';
+        return;
+      }
+
+      new Chart(document.getElementById('learnCurve'),{
+        type:'line',
+        data:{
+          labels,
+          datasets:[{
+            label:'觀看次數',
+            data:values,
+            borderWidth:2,
+            pointRadius:3,
+            tension:.3,
+            fill:false
+          }]
+        },
+        options:{
+          plugins:{legend:{display:false}},
+          scales:{
+            y:{beginAtZero:true,ticks:{precision:0}},
+            x:{ticks:{autoSkip:true,maxTicksLimit:7}}
+          }
+        }
+      });
     }
-  });
-}
 
-drawLearningCurve();
-</script>
-<!-- 今日複習自動推薦補釘 -->
-<script type="module">
-import { supabase } from '../supa.js';
+    drawLearningCurve();
+  </script>
 
-// 取得目前週次（同一年中第幾週，用來每週變換）
-function getWeekNumber(d = new Date()) {
-  d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  const weekNo = Math.ceil(((d - yearStart) / 86400000 + yearStart.getUTCDay() + 1) / 7);
-  return weekNo;
-}
+  <!-- 今日複習：每週輪換推薦 3 支影片 -->
+  <script type="module">
+    import { supabase } from '../supa.js';
 
-async function loadWeeklyRecommendations() {
-  const recArea = document.querySelector('section.card:nth-of-type(2) .card-body'); // 第二塊卡片「今日複習」
-  if (!recArea) return;
+    function getWeekNumber(d = new Date()) {
+      d = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+      const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+      const weekNo = Math.ceil(((d - yearStart) / 86400000 + yearStart.getUTCDay() + 1) / 7);
+      return weekNo;
+    }
 
-  // 加載中提示
-  recArea.innerHTML = '<p class="muted">載入推薦中...</p>';
+    async function loadWeeklyRecommendations() {
+      const recArea = document.getElementById('reviewToday');
+      if (!recArea) return;
 
-  const { data, error } = await supabase
-    .from('video_meta')
-    .select('slug,title,category,thumbnail_url')
-    .eq('active', true)
-    .order('created_at', { ascending: false });
+      recArea.textContent = '載入推薦中…';
 
-  if (error || !data?.length) {
-    recArea.innerHTML = '<p class="muted">目前沒有推薦影片。</p>';
-    return;
-  }
+      const { data, error } = await supabase
+        .from('video_meta')
+        .select('slug,title,category,thumbnail_url,active')
+        .eq('active', true)
+        .order('created_at', { ascending: false });
 
-  // 以週次為種子，挑 3 支輪動影片
-  const week = getWeekNumber();
-  const shuffled = [...data].sort((a, b) => ((a.slug.charCodeAt(0) + week) % 37) - ((b.slug.charCodeAt(0) + week) % 37));
-  const picks = shuffled.slice(0, 3);
+      if (error || !data || data.length === 0) {
+        recArea.textContent = '目前沒有推薦影片。';
+        return;
+      }
 
-  // 顯示
-  recArea.innerHTML = picks.map(v => `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
-      <img src="${v.thumbnail_url || '../img/video-thumb.png'}" 
-           style="width:60px;height:40px;object-fit:cover;border-radius:6px;">
-      <div>
-        <a href="../player.html?slug=${encodeURIComponent(v.slug)}"
-           style="font-weight:600;color:#1e40af;text-decoration:none;">${v.title || v.slug}</a>
-        <div class="muted">${v.category || '未分類'}</div>
-      </div>
-    </div>
-  `).join('');
-}
+      const week = getWeekNumber();
+      const shuffled = [...data].sort((a, b) =>
+        ((a.slug.charCodeAt(0) + week) % 37) - ((b.slug.charCodeAt(0) + week) % 37)
+      );
+      const picks = shuffled.slice(0, 3);
 
-loadWeeklyRecommendations();
-</script>
-<!-- 我的清單：收藏影片列表補釘 -->
-<script type="module">
-import { supabase } from '../supa.js';
+      recArea.innerHTML = picks.map(v => \`
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+          <img src="\${v.thumbnail_url || '../img/video-thumb.png'}"
+               style="width:60px;height:40px;object-fit:cover;border-radius:6px;">
+          <div>
+            <a href="../player.html?slug=\${encodeURIComponent(v.slug)}"
+               style="font-weight:600;color:#1e40af;text-decoration:none;">\${v.title || v.slug}</a>
+            <div class="muted">\${v.category || '未分類'}</div>
+          </div>
+        </div>
+      \`).join('');
+    }
 
-async function loadFavorites() {
-  const favBox = document.querySelector('section.card:nth-of-type(4) .card-body'); // 「我的清單」
-  if (!favBox) return;
-  favBox.innerHTML = '<p class="muted">讀取中...</p>';
+    loadWeeklyRecommendations();
+  </script>
 
-  const { data:auth } = await supabase.auth.getUser();
-  if (!auth?.user) {
-    favBox.innerHTML = '<p class="muted">請先登入以查看收藏影片。</p>';
-    return;
-  }
+  <!-- 我的清單：favorite_videos -->
+  <script type="module">
+    import { supabase } from '../supa.js';
 
-  const { data, error } = await supabase
-    .from('favorite_videos')
-    .select('video_slug, created_at')
-    .eq('user_id', auth.user.id)
-    .order('created_at', { ascending:false });
+    async function loadFavorites() {
+      const favBox = document.getElementById('favBox');
+      if (!favBox) return;
 
-  if (error || !data?.length) {
-    favBox.innerHTML = '<p class="muted">尚未收藏任何影片。</p>';
-    return;
-  }
+      favBox.textContent = '讀取中…';
 
-  favBox.innerHTML = data.map(v => `
-    <div style="margin-bottom:8px;">
-      <a href="../player.html?slug=${encodeURIComponent(v.video_slug)}"
-         style="text-decoration:none;color:#2563eb;font-weight:600;">${v.video_slug}</a>
-      <span class="muted" style="margin-left:4px;">${new Date(v.created_at).toLocaleString()}</span>
-    </div>
-  `).join('');
-}
+      const { data:auth } = await supabase.auth.getUser();
+      if (!auth?.user) {
+        favBox.textContent = '請先登入以查看收藏影片。';
+        return;
+      }
 
-loadFavorites();
-</script>
+      const { data, error } = await supabase
+        .from('favorite_videos')
+        .select('video_slug, created_at')
+        .eq('user_id', auth.user.id)
+        .order('created_at', { ascending:false });
+
+      if (error || !data || data.length === 0) {
+        favBox.textContent = '尚未收藏任何影片。';
+        return;
+      }
+
+      favBox.innerHTML = data.map(v => \`
+        <div style="margin-bottom:8px;">
+          <a href="../player.html?slug=\${encodeURIComponent(v.video_slug)}"
+             style="text-decoration:none;color:#2563eb;font-weight:600;">\${v.video_slug}</a>
+          <span class="muted" style="margin-left:4px;">\${new Date(v.created_at).toLocaleString()}</span>
+        </div>
+      \`).join('');
+    }
+
+    loadFavorites();
+  </script>
 
 </body>
 </html>
+
+
 
 
 
