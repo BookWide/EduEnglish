@@ -720,9 +720,10 @@
     const from = new Date(now.getTime() - 29*24*60*60*1000);
     const fromISO = from.toISOString();
 
+    // 1) 影片學習紀錄（watch_logs）
     const { data: logs, error } = await supabase
       .from("watch_logs")
-      .select("email, progress_pct, updated_at")
+      .select("email, progress_pct, created_at, updated_at")
       .gte("updated_at", fromISO);
 
     if(error){
@@ -731,28 +732,91 @@
       return;
     }
 
+    // 2) 測驗紀錄（quiz_logs，若尚未建立此表，下面查詢會失敗但不影響影片排行）
+    let quizLogs = [];
+    try{
+      const { data: qData, error: qErr } = await supabase
+        .from("quiz_logs")
+        .select("email, score, max_score, created_at, updated_at")
+        .gte("updated_at", fromISO);
+      if(!qErr && qData){
+        quizLogs = qData;
+      }else if(qErr){
+        console.warn("quiz_logs not ready", qErr);
+      }
+    }catch(e){
+      console.warn("quiz_logs query failed", e);
+    }
+
+    // 合併：同一位學員的「影片完成度」+「測驗得分」
     const map = new Map();
+
+    function touch(email){
+      if(!email) return null;
+      let cur = map.get(email);
+      if(!cur){
+        cur = {
+          email,
+          learnPct: 0,
+          quizPct: 0,
+          learnCount: 0,
+          quizCount: 0,
+          last: null
+        };
+        map.set(email, cur);
+      }
+      return cur;
+    }
+
+    // 影片：累積 progress_pct 當作學習分數
     (logs || []).forEach(row => {
       const email = row.email || "";
-      if(!email) return;
+      const cur = touch(email);
+      if(!cur) return;
       const pct = row.progress_pct || 0;
-      const cur = map.get(email) || { email, totalPct:0, count:0, last:null };
-      cur.totalPct += pct;
-      cur.count += 1;
-      const d = row.updated_at ? new Date(row.updated_at) : null;
+      cur.learnPct += pct;
+      cur.learnCount += 1;
+
+      const t = row.updated_at || row.created_at;
+      const d = t ? new Date(t) : null;
       if(d && (!cur.last || d > cur.last)) cur.last = d;
-      map.set(email, cur);
+    });
+
+    // 測驗：假設 quiz_logs 有欄位 score / max_score（得分 / 滿分），轉成百分比再加總
+    (quizLogs || []).forEach(row => {
+      const email = row.email || "";
+      const cur = touch(email);
+      if(!cur) return;
+
+      const raw = (typeof row.score === "number") ? row.score : parseFloat(row.score) || 0;
+      const max = (typeof row.max_score === "number") ? row.max_score : parseFloat(row.max_score) || 100;
+      const pct = max > 0 ? (raw / max) * 100 : 0;
+
+      cur.quizPct += pct;
+      cur.quizCount += 1;
+
+      const t = row.updated_at || row.created_at;
+      const d = t ? new Date(t) : null;
+      if(d && (!cur.last || d > cur.last)) cur.last = d;
     });
 
     let list = Array.from(map.values()).map(u => {
+      const learnScore = u.learnPct;   // 影片學習累積％
+      const quizScore  = u.quizPct;    // 測驗得分累積％
+      const total      = learnScore + quizScore; // 總分 = 影片 + 測驗
+
       return {
         email: u.email,
-        score: Math.round(u.totalPct),  // 累積完成度 ％ 當作分數
-        count: u.count,
+        score: Math.round(total),          // 排名用分數（顯示在「分」）
+        learnScore: Math.round(learnScore),
+        quizScore: Math.round(quizScore),
+        learnCount: u.learnCount,
+        quizCount: u.quizCount,
         last: u.last
       };
     });
 
+    // 依照「影片 + 測驗」總分由高到低排序
     list.sort((a,b) => b.score - a.score);
     const top10 = list.slice(0,10);
 
@@ -775,7 +839,7 @@
               <span class="rank-no">${rank}</span>
               <span class="rank-name">${shortEmail}</span>
               <span class="rank-score">${u.score} 分</span>
-              <span class="rank-meta">${u.count} 筆 · ${lastStr}</span>
+              <span class="rank-meta">影片 ${u.learnCount} · 測驗 ${u.quizCount} · ${lastStr}</span>
             </li>
           `;
         }).join("")}
@@ -783,7 +847,7 @@
     `;
   }
 
-  /* ---------- 主流程 ---------- */
+/* ---------- 主流程 ---------- */
   async function loadDashboard(user){
     const userEmail = user.email;
     const userId = user.id;
@@ -900,6 +964,84 @@
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
