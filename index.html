@@ -745,6 +745,41 @@
     let currentLevel = 0;
     let currentSearch = "";
 
+    const WEEKLY_LIMIT_PER_CATEGORY = 3; // 每個分類預設 3 片
+    let CURRENT_USER_IS_ADMIN = false;   // 從 profiles.is_admin 讀取
+
+    function getWeekIndex() {
+      const base = new Date(2025, 0, 1); // 固定基準日
+      const now  = new Date();
+      const diffMs = now.getTime() - base.getTime();
+      const weekMs = 7 * 24 * 60 * 60 * 1000;
+      return Math.floor(diffMs / weekMs);
+    }
+
+    function pickWeeklyVideos(items, perCat) {
+      const weekIndex = getWeekIndex();
+      const byCat = {};
+      for (const v of items) {
+        if (!byCat[v.category]) byCat[v.category] = [];
+        byCat[v.category].push(v);
+      }
+      const result = [];
+      const cats = Object.keys(byCat).sort();
+      for (const cat of cats) {
+        const list = byCat[cat];
+        const total = list.length;
+        if (!total) continue;
+        const count = Math.min(perCat, total);
+        const start = total ? (weekIndex % total) : 0;
+        for (let i = 0; i < count; i++) {
+          const idx = (start + i) % total;
+          result.push(list[idx]);
+        }
+      }
+      return result;
+    }
+
+
     const gridEl = document.getElementById("videoGrid");
     const searchEl = document.getElementById("searchInput");
 
@@ -762,7 +797,13 @@
         return true;
       });
 
-      if (!filtered.length) {
+      // 一般會員在「全部 + 全部程度 + 沒關鍵字」時，每個分類只顯示固定數量
+      let limited = filtered;
+      if (currentCategory === "all" && !currentLevel && !kw && !CURRENT_USER_IS_ADMIN) {
+        limited = pickWeeklyVideos(filtered, WEEKLY_LIMIT_PER_CATEGORY);
+      }
+
+      if (!limited.length) {
         gridEl.innerHTML =
           `<div style="grid-column: 1 / -1; padding: 20px; text-align: center; color: #6b7280;">
              找不到符合條件的教材。請試試其他分類、程度或關鍵字。
@@ -770,7 +811,7 @@
         return;
       }
 
-      for (const v of filtered) {
+      for (const v of limited) {
         // ✅ 使用你指定的封面命名：assets/{category}/{slug}.cover.jpg
         const cover = `${STORAGE_BASE}/assets/${v.category}/${v.slug}.jpg`;
         const href = `player.html?cat=${encodeURIComponent(v.category)}&slug=${encodeURIComponent(v.slug)}`;
@@ -1030,7 +1071,11 @@
 
     async function doLogout(){
       await supa.auth.signOut();
+      CURRENT_USER_IS_ADMIN = false;
       await paintUser(null);
+      if (typeof renderGrid === 'function') {
+        renderGrid();
+      }
       location.reload();
     }
 
@@ -1072,7 +1117,7 @@
         if (authMode === 'login') {
           const { data, error } = await supa.auth.signInWithPassword({ email, password });
           if (error) throw error;
-          await paintUser(data.user);
+          await initAuthAndProfile();
           closeModal();
         } else {
           const { data, error } = await supa.auth.signUp({ email, password });
@@ -1104,10 +1149,34 @@
       }
     });
 
-    (async ()=>{
-      const { data } = await supa.auth.getSession();
-      await paintUser(data.session?.user ?? null);
-    })();
+    async function initAuthAndProfile(){
+      try {
+        const { data } = await supa.auth.getSession();
+        const user = data.session?.user ?? null;
+        await paintUser(user);
+
+        CURRENT_USER_IS_ADMIN = false;
+        if (user) {
+          const { data: profile, error } = await supa
+            .from('profiles')
+            .select('is_admin')
+            .eq('id', user.id)
+            .maybeSingle();
+          if (!error && profile && profile.is_admin === true) {
+            CURRENT_USER_IS_ADMIN = true;
+          }
+        }
+      } catch (e) {
+        console.error('check admin failed', e);
+        CURRENT_USER_IS_ADMIN = false;
+      }
+      // 使用者狀態確定後，再重畫一次列表（決定是否套用 15 片限制）
+      if (typeof renderGrid === 'function') {
+        renderGrid();
+      }
+    }
+
+    initAuthAndProfile();
   </script>
 </body>
 </html>
