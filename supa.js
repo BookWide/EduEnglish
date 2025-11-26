@@ -1,8 +1,9 @@
 // ====== BookWide Supabase Helper (merged export + global) ======
-// v20251104-merge (+ idle logout)
+// v20251126-merge
 // - Exports { supabase, BW } for ESM imports
 // - Also attaches window.BW for legacy inline usage
 // - Auto heartbeat when user is signed in
+// - 可選：BW.startIdleLogout(分鐘, redirectUrl) 自動閒置登出
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -13,27 +14,33 @@ const SUPABASE_ANON_KEY =
 
 // ---- Client (singleton) ----
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    detectSessionInUrl: true,
+  },
 });
 
 // ---- Utilities ----
 export const BW = {
   supa: supabase,
 
-  /** Return current signed-in user or null */
+  /** 取得當前登入 user（沒有就回 null） */
   async getUser() {
     const { data, error } = await supabase.auth.getUser();
     if (error) return null;
     return data?.user ?? null;
   },
 
-  /** Guard for admin-only page */
+  /** 僅允許 admin 進入的頁面使用 */
   async requireAdmin() {
     const user = await this.getUser();
     if (!user) {
-      location.href = './index.html?denied=signin';
+      // 沒登入：導回 admin 首頁（用根目錄的 /admin.html）
+      location.href = '/admin.html?denied=signin';
       return;
     }
+
     const { data, error } = await supabase
       .from('profiles')
       .select('id,is_admin,is_paused')
@@ -41,21 +48,21 @@ export const BW = {
       .maybeSingle();
 
     if (error || !data) {
-      location.href = './index.html?denied=profile';
+      location.href = '/admin.html?denied=profile';
       return;
     }
     if (!data.is_admin) {
-      location.href = './index.html?denied=notadmin';
+      location.href = '/admin.html?denied=notadmin';
       return;
     }
     if (data.is_paused) {
-      location.href = './index.html?denied=paused';
+      location.href = '/admin.html?denied=paused';
       return;
     }
     return true;
   },
 
-  /** Start heartbeat: update profiles.last_seen_at every N minutes */
+  /** 心跳：每 N 分鐘更新 profiles.last_seen_at */
   startHeartbeat(minutes = 2) {
     let ticking = false;
     const beat = async () => {
@@ -72,40 +79,38 @@ export const BW = {
         ticking = false;
       }
     };
-    // fire immediately then interval
+    // 先打一次，之後固定間隔
     beat();
     const ms = Math.max(1, minutes) * 60 * 1000;
     return setInterval(beat, ms);
   },
 
-  /** Auto idle logout: 閒置 N 分鐘自動登出並導回登入頁 */
+  /** 閒置自動登出（可選） */
   startIdleLogout(minutes = 30, redirect = '/login.html?timeout=1') {
     const ms = minutes * 60 * 1000;
     let timer;
 
     const reset = () => {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       timer = setTimeout(async () => {
         console.log('[BookWide] auto logout by idle');
         try {
           await supabase.auth.signOut();
-        } catch (err) {
-          console.warn('[BookWide] auto logout signOut error', err);
-        } finally {
-          window.location.href = redirect;
+        } catch (e) {
+          console.warn('auto logout error', e);
         }
+        window.location.href = redirect;
       }, ms);
     };
 
-    // 下列行為算「使用中」，會重置計時器
-    ['click', 'mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
+    ['click', 'mousemove', 'keydown', 'touchstart', 'scroll'].forEach((evt) => {
       window.addEventListener(evt, reset, { passive: true });
     });
 
-    reset(); // 進頁面先啟動一次
+    reset();
   },
 
-  /** Format ISO string in Asia/Taipei */
+  /** 以台北時間格式化 ISO 字串 */
   fmtTW(iso) {
     if (!iso) return '—';
     const d = new Date(iso);
@@ -121,14 +126,14 @@ export const BW = {
     }).format(d);
   },
 
-  /** Is online within N minutes */
+  /** 判斷某個時間在 N 分鐘內是否算「在線」 */
   isOnlineWithin(iso, minutes = 10) {
     if (!iso) return false;
     const last = Date.parse(iso); // UTC ms
     return Date.now() - last <= minutes * 60 * 1000;
   },
 
-  /** Fetch profiles for admin list */
+  /** 管理員使用：抓全部 profiles */
   async fetchProfiles() {
     const cols =
       'id,email,display_name,is_admin,last_sign_in_at,last_seen_at,expires_at,is_paused,is_suspended';
@@ -158,6 +163,7 @@ if (typeof window !== 'undefined') {
     // ignore
   }
 })();
+
 
 
 
