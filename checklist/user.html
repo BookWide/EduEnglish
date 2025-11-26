@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>BookWide Admin｜使用者清單</title>
 
-  <!-- 共用 Supabase 包裝：跟 admin.html 一樣，只是路徑改成 ../ -->
   <script type="module" src="../supa.js?v=20251109g"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 
@@ -173,7 +172,7 @@
   <div class="title-row">
     <div>
       <div class="title">BookWide Admin｜使用者清單</div>
-      <div class="subtitle">查看所有使用者登入紀錄、在線狀態與訂閱期限。</div>
+      <div class="subtitle">查看所有使用者登入紀錄、在線狀態與訂閱期限（以 orders 為準）。</div>
     </div>
     <div class="admin-info">管理員：<span id="adminEmail">檢查中…</span></div>
   </div>
@@ -194,7 +193,7 @@
     <div class="toolbar">
       <input id="q" class="ipt" placeholder="搜尋 Email / 顯示名稱…" />
       <button id="btnRefresh" class="btn">重新整理</button>
-      <span class="hint">資料表：public.profiles · 台灣時區顯示 · 10 分鐘內視為「在線」。</span>
+      <span class="hint">資料表：public.profiles + public.orders · 台灣時區顯示 · 10 分鐘內視為「在線」。</span>
     </div>
 
     <div style="overflow-x:auto;">
@@ -228,17 +227,15 @@
   });
 
   await ready();
-  await BW.requireAdmin();         // 確認 admin + is_paused
-  BW.startHeartbeat(2);            // 兩分鐘心跳一次
+  await BW.requireAdmin();      // admin + 未被 is_paused
+  BW.startHeartbeat(2);         // 心跳
 
   const supa = BW.supa;
   const $  = (q,root=document)=>root.querySelector(q);
-  const fmtTW = ts => !ts ? '' : new Date(ts).toLocaleString(
-    'zh-TW',
-    { timeZone:'Asia/Taipei', hour12:false }
-  );
+  const fmtTW = ts => !ts ? '' :
+    new Date(ts).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false});
 
-  // 顯示登入 admin 的 email
+  // 顯示目前管理員 email
   try{
     const { data:{user} } = await supa.auth.getUser();
     if(user?.email) $('#adminEmail').textContent = user.email;
@@ -252,7 +249,7 @@
     tbody.innerHTML = '<tr><td class="hint" colspan="8">載入中…</td></tr>';
 
     try{
-      // 1) 讀 profiles（欄位同舊 admin.html，避免 400）
+      // 1) profiles：基本資料（完全不看 profiles.expires_at）
       const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at';
       const r = await supa
         .from('profiles')
@@ -260,37 +257,38 @@
         .order('email',{ascending:true});
 
       if(r.error){
-        tbody.innerHTML = `<tr><td class="hint" colspan="8">讀取失敗：${r.error.message}</td></tr>`;
+        tbody.innerHTML =
+          `<tr><td class="hint" colspan="8">讀取失敗：${r.error.message}</td></tr>`;
         return;
       }
-
       const profiles = r.data || [];
       if(!profiles.length){
-        tbody.innerHTML = '<tr><td class="hint" colspan="8">目前沒有任何使用者</td></tr>';
+        tbody.innerHTML =
+          '<tr><td class="hint" colspan="8">目前沒有任何使用者</td></tr>';
         return;
       }
 
-      // 2) 讀 orders，找每個 user 最新一筆「已付款」訂單
+      // 2) orders：抓每個 user 「expire_at 最大」的那一筆，不再限定 status = 'paid'
       const ids = profiles.map(p=>p.id).filter(Boolean);
       const latestByUser = {};
       if(ids.length){
         const oRes = await supa
           .from('orders')
-          .select('buyer_id, status, expire_at, period, created_at')
+          .select('buyer_id, status, paid_at, expire_at, period, created_at')
           .in('buyer_id', ids)
           .order('expire_at',{ascending:false});
 
         if(!oRes.error && oRes.data){
           for(const o of oRes.data){
-            if(o.status !== 'paid') continue;
             if(!latestByUser[o.buyer_id]){
-              latestByUser[o.buyer_id] = o; // 第一筆就是 expire_at 最新
+              // 第一筆（因已按 expire_at desc 排序）就是最新一筆
+              latestByUser[o.buyer_id] = o;
             }
           }
         }
       }
 
-      // 3) 搜尋過濾（email / display_name）
+      // 3) 搜尋（email / display_name）
       const q = ($('#q').value||'').trim().toLowerCase();
       const rows = profiles.filter(x=>{
         if(!q) return true;
@@ -299,13 +297,15 @@
       });
 
       if(!rows.length){
-        tbody.innerHTML = '<tr><td class="hint" colspan="8">沒有符合的資料</td></tr>';
+        tbody.innerHTML =
+          '<tr><td class="hint" colspan="8">沒有符合的資料</td></tr>';
         return;
       }
 
+      // 4) 畫表：訂閱狀態完全以 orders.expire_at 判斷
       const now = new Date();
       tbody.innerHTML = rows.map((x,idx)=>{
-        const online = BW.isOnlineWithin(x.last_seen_at, 10);  // 10 分鐘內視為在線
+        const online = BW.isOnlineWithin(x.last_seen_at, 10); // 10 分鐘內算在線
         const ord = latestByUser[x.id];
 
         let expireText = '—';
@@ -314,15 +314,19 @@
         if(ord && ord.expire_at){
           const exp   = new Date(ord.expire_at);
           const start = ord.created_at ? new Date(ord.created_at) : null;
+
           const startStr = (start && !isNaN(start)) ? fmtTW(start.toISOString()) : '—';
           const endStr   = (!isNaN(exp)) ? fmtTW(exp.toISOString()) : '—';
 
+          expireText = endStr;
+
           if(!isNaN(exp)){
-            expireText = endStr;
             if(exp > now){
-              statusHtml = `<span class="pill ok">有效（期間：${startStr} → ${endStr}）</span>`;
+              statusHtml =
+                `<span class="pill ok">有效（期間：${startStr} → ${endStr}）</span>`;
             }else{
-              statusHtml = `<span class="pill warn">已到期（${endStr}）</span>`;
+              statusHtml =
+                `<span class="pill warn">已到期（${endStr}）</span>`;
             }
           }
         }
