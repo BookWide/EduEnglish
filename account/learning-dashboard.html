@@ -436,7 +436,7 @@
         <section class="card">
           <div class="card-title">
             <h2>學習曲線（最近 30 天）</h2>
-            <span class="tag blue">以完成度統計</span>
+            <span class="tag blue">折線：完成度，上方圓圈：當日總分</span>
           </div>
           <div id="chartArea" class="chart-wrap">
             <div class="empty-tip">載入中...</div>
@@ -458,7 +458,7 @@
 
         <section class="card">
           <div class="card-title">
-            <h2>金榜排行（最近 30 天）</h2>
+            <h2>金榜排行（最近 7 天）</h2>
             <span class="tag">前 10 名</span>
           </div>
           <div id="leaderboardBox">
@@ -668,22 +668,13 @@
     const newsData  = curve.map(d => d.cats.news  || 0);
     const proData   = curve.map(d => d.cats.pro   || 0);
 
-    // 上方圓點：用五類平均值當當天總分
+    // 上方圓點：當日總分 = watch_sec + quiz_score
     const dotBox = document.getElementById("dayDots");
     curve.forEach((d,i)=>{
-      const cats = d.cats || {};
-      const vals = [
-        cats.story || 0,
-        cats.music || 0,
-        cats.movie || 0,
-        cats.news  || 0,
-        cats.pro   || 0
-      ];
-      const sum = vals.reduce((a,c)=>a+c,0);
-      const avg = vals.length ? Math.round(sum/vals.length) : 0;
+      const score = Math.round(d.totalScore || 0);
       dotBox.insertAdjacentHTML("beforeend",`
         <div class="day-dot">
-          <div class="day-dot-circle">${avg}</div>
+          <div class="day-dot-circle">${score}</div>
           <div>${labels[i]}</div>
         </div>
       `);
@@ -719,13 +710,13 @@
     });
   }
 
-  // 金榜排行：呼叫 SQL 函式 get_leaderboard_30days()
+  // 金榜排行：最近 7 天 total_score
   async function loadLeaderboard(user){
     const box = document.getElementById("leaderboardBox");
     box.innerHTML = `<div class="empty-tip">載入中...</div>`;
 
     try{
-      const { data, error } = await supabase.rpc("get_leaderboard_30days");
+      const { data, error } = await supabase.rpc("get_leaderboard_7days");
       if(error) throw error;
 
       const rows = Array.isArray(data) ? data : [];
@@ -733,7 +724,7 @@
       const top10 = rows.slice(0,10);
 
       if(!top10.length){
-        box.innerHTML = `<div class="empty-tip">最近 30 天尚無資料。</div>`;
+        box.innerHTML = `<div class="empty-tip">最近 7 天尚無資料。</div>`;
         return;
       }
 
@@ -776,6 +767,7 @@
 
     await loadVideoIndex();
 
+    // 觀看紀錄
     const { data: logs, error: lErr } = await supabase
       .from("watch_logs")
       .select("*")
@@ -804,6 +796,17 @@
       })
       .filter(Boolean);
 
+    // 測驗紀錄（只需要分數與日期）
+    const { data: quizLogs, error: qErr } = await supabase
+      .from("quiz_logs")
+      .select("email,score,created_at")
+      .eq("email", userEmail)
+      .order("created_at",{ ascending:false });
+
+    if(qErr){
+      console.error("quiz_logs error", qErr);
+    }
+
     // 今日複習：未完成
     const todayReview = logsFilled.filter(r => (r.progress_pct || 0) < 100);
 
@@ -816,20 +819,26 @@
 
     const recent = logsFilled.slice(0,10);
 
-    // 學習曲線 30 天 + 分類
+    // 學習曲線 30 天 + 分類完成度 + 每日總分（watch_sec + quiz_score）
     const now = new Date();
     const curve = [];
     const cats = ["story","music","movie","news","pro"];
 
     for(let i=29;i>=0;i--){
       const d = new Date(now.getTime() - i*24*60*60*1000);
-      const key = d.toISOString().slice(0,10);
+      const key = d.toISOString().slice(0,10); // YYYY-MM-DD
 
       const dayLogs = logsFilled.filter(r => {
         const u = (r.updated_at || "").toString();
         return u.startsWith(key);
       });
 
+      const dayQuiz = (quizLogs || []).filter(q => {
+        const u = (q.created_at || "").toString();
+        return u.startsWith(key);
+      });
+
+      // 每一類別的平均完成度（給折線用）
       const byCat = {};
       cats.forEach(cat => {
         const list = dayLogs.filter(r => (r.video_category || r.category) === cat);
@@ -839,6 +848,11 @@
         byCat[cat] = Math.max(0, Math.min(100, avg));
       });
 
+      // 當日總分：watch_sec + quiz_score
+      const watchSecDay = dayLogs.reduce((a,c)=> a + (c.duration_sec || 0), 0);
+      const quizScoreDay = dayQuiz.reduce((a,c)=> a + (c.score || 0), 0);
+      const totalScoreDay = watchSecDay + quizScoreDay;
+
       const label =
         i===0 ? "今天" :
         i===1 ? "昨天" :
@@ -846,7 +860,8 @@
 
       curve.push({
         label,
-        cats: byCat
+        cats: byCat,
+        totalScore: totalScoreDay
       });
     }
 
@@ -855,7 +870,7 @@
     renderReview(todayReview);
     renderCurve(curve);
 
-    // 金榜排行（全站前 10 名）
+    // 金榜排行（最近 7 天，全站前 10 名）
     loadLeaderboard(user);
   }
 
