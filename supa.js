@@ -1,5 +1,5 @@
 // ====== BookWide Supabase Helper (merged export + global) ======
-// v20251104-merge
+// v20251104-merge (+ idle logout)
 // - Exports { supabase, BW } for ESM imports
 // - Also attaches window.BW for legacy inline usage
 // - Auto heartbeat when user is signed in
@@ -78,6 +78,33 @@ export const BW = {
     return setInterval(beat, ms);
   },
 
+  /** Auto idle logout: 閒置 N 分鐘自動登出並導回登入頁 */
+  startIdleLogout(minutes = 30, redirect = '/login.html?timeout=1') {
+    const ms = minutes * 60 * 1000;
+    let timer;
+
+    const reset = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(async () => {
+        console.log('[BookWide] auto logout by idle');
+        try {
+          await supabase.auth.signOut();
+        } catch (err) {
+          console.warn('[BookWide] auto logout signOut error', err);
+        } finally {
+          window.location.href = redirect;
+        }
+      }, ms);
+    };
+
+    // 下列行為算「使用中」，會重置計時器
+    ['click', 'mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
+      window.addEventListener(evt, reset, { passive: true });
+    });
+
+    reset(); // 進頁面先啟動一次
+  },
+
   /** Format ISO string in Asia/Taipei */
   fmtTW(iso) {
     if (!iso) return '—';
@@ -131,6 +158,7 @@ if (typeof window !== 'undefined') {
     // ignore
   }
 })();
+
 
 
 
