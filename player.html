@@ -362,7 +362,8 @@ tr.speaking{
 </style>
 
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2">  BW.startIdleLogout(30, '/login.html?timeout=1');
+</script>
 <script>
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
   const SUPABASE_ANON_KEY =
@@ -412,6 +413,7 @@ tr.speaking{
   async function supaGetUser() {
     return await bwPlayerGetUser();
   }
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 </head>
 <body>
@@ -698,14 +700,30 @@ function renderQuiz(cat){
   ol.innerHTML=list.map((q,idx)=>{
     const question=q.question||q.q||'';
     const options=q.options||q.choices||[];
-    const ans=String(q.answer??'');
+    const ansLetter=String(q.answer??'').trim();
+    const ansEn=q.answer_en||'';
+    const ansZh=q.answer_zh||'';
+    const ansJa=q.answer_ja||'';
+    const explainZh=q.explanation_zh||q.explain_zh||q.explanation||'';
+    const letters=['A','B','C','D','E','F'];
+    const ansTexts=[];
+    if(ansEn) ansTexts.push(esc(ansEn));
+    if(ansZh) ansTexts.push(esc(ansZh));
+    if(ansJa) ansTexts.push(esc(ansJa));
+    const ansDetail=ansTexts.length?`（${ansTexts.join(' / ')}）`:'';
     return `<li style="padding:8px 0" data-cat="${q._cat||''}">
       <div style="font-weight:700">[${labelMap[q._cat]||''}] ${esc(question)}</div>
-      ${options.map(op=>`<div><label>
-        <input type="radio" name="q_${idx}" value="${esc(op)}"> ${esc(op)}
-      </label></div>`).join('')}
-      <div class="ans muted" data-ans="${esc(ans)}"
-           style="display:none;margin-top:6px">答案：${esc(ans)}</div>
+      ${options.map((op,i)=>{
+        const letter=letters[i]||String.fromCharCode(65+i);
+        return `<div><label>
+        <input type="radio" name="q_${idx}" value="${letter}"> ${letter}. ${esc(op)}
+      </label></div>`;
+      }).join('')}
+      <div class="ans muted" data-ans="${esc(ansLetter)}"
+           style="display:none;margin-top:6px">
+        答案：${esc(ansLetter)}${ansDetail}
+        ${explainZh?`<div class="muted" style="margin-top:2px">${esc(explainZh)}</div>`:''}
+      </div>
     </li>`;
   }).join('');
 
@@ -883,61 +901,9 @@ async function loadAI(){
     const sel=$('#aiTopic');
     sel.innerHTML=topics.map((t,i)=>`
       <option value="${i}">${esc(t.title||t.q||('題目'+(i+1)))}</option>`).join('');
-
-    const prompt=$('#aiPrompt');
-    const hint=$('#aiHint');
-    const reply=$('#aiReply');
-    const total=topics.length;
-    let idx=0;
+    const prompt=$('#aiPrompt'),hint=$('#aiHint'),reply=$('#aiReply');
+    const total=topics.length;let idx=0;
     let currentLang='en';
-
-    // ✅ 建立「你的回答」區塊（語音辨識結果）
-    let userAns=$('#aiUserAnswer');
-    if(!userAns && hint && hint.parentElement){
-      const wrap=document.createElement('div');
-      wrap.innerHTML=
-`<div style="margin:8px 0 4px">
-  <span class="muted">你的回答（語音辨識）：</span>
-  <div id="aiUserAnswer" style="margin-top:4px;padding:6px 8px;border-radius:8px;border:1px dashed var(--border);min-height:28px;"></div>
-</div>`;
-      hint.parentElement.insertAdjacentElement('afterend',wrap.firstElementChild);
-      userAns=$('#aiUserAnswer');
-    }
-
-    // ✅ 調整 AI 示範區樣式，讓答案看起來像一塊卡片
-    if(reply){
-      reply.style.marginTop='6px';
-      reply.style.padding='8px 10px';
-      reply.style.borderRadius='8px';
-      reply.style.border='1px solid var(--border)';
-      reply.style.background='rgba(15,23,42,.3)';
-    }
-
-    // ✅ 在控制列插入「語速」選單
-    const btnTts=$('#btnTts');
-    const btnRec=$('#btnRec');
-    const btnStop=$('#btnStop');
-    let rateSel=$('#aiRate');
-    if(!rateSel && btnTts && btnTts.parentElement){
-      const span=document.createElement('span');
-      span.style.display='inline-flex';
-      span.style.alignItems='center';
-      span.style.gap='4px';
-      span.innerHTML=
-`<span class="muted">語速：</span>
-<select id="aiRate" class="btn sm">
-  <option value="0.8">0.8x</option>
-  <option value="1.0" selected>1.0x</option>
-  <option value="1.2">1.2x</option>
-</select>`;
-      // 插在「題目朗讀」跟「開始說」之間
-      btnTts.parentElement.insertBefore(span,btnRec);
-      rateSel=span.querySelector('#aiRate');
-    }
-    if(rateSel){
-      window.BW_AI_RATE=parseFloat(rateSel.value)||1.0;
-      rateSel.onchange=()=>{window.BW_AI_RATE=parseFloat(rateSel.value)||1.0;};
-    }
 
     function getSamples(t){
       const jaObj=(t.ja && typeof t.ja==='object')?t.ja:null;
@@ -977,10 +943,7 @@ async function loadAI(){
       setReplyByLang(t,currentLang);
       $('#aiProgress').textContent=`第 ${idx+1}/${total} 題`;
       sel.value=String(idx);
-      // 清空上一題的語音答案
-      if(userAns) userAns.textContent='';
     }
-
     if(total) render();
 
     sel.onchange=()=>{idx=+sel.value|0;render();};
@@ -1001,55 +964,6 @@ async function loadAI(){
       else {text=sampleEn||sampleZh||sampleJa;langCode='en-US';}
       if(text) speakText(text,langCode);
     };
-
-    // ✅ Web Speech API：語音辨識
-    let rec=null;
-    let recognizing=false;
-
-    function ensureRec(){
-      if(rec) return rec;
-      const SR=window.SpeechRecognition || window.webkitSpeechRecognition;
-      if(!SR){
-        alert('此瀏覽器尚未支援語音辨識，建議改用桌機版 Chrome。');
-        return null;
-      }
-      rec=new SR();
-      rec.lang='en-US';
-      rec.interimResults=false;
-      rec.continuous=false;
-
-      rec.onresult=(ev)=>{
-        try{
-          const txt=ev.results[0][0].transcript||'';
-          if(userAns) userAns.textContent=txt;
-        }catch(e){console.warn(e);}
-      };
-      rec.onerror=(ev)=>{console.warn(ev);};
-      rec.onend=()=>{
-        recognizing=false;
-        if(btnRec) btnRec.disabled=false;
-        if(btnStop) btnStop.disabled=true;
-      };
-      return rec;
-    }
-
-    if(btnRec && btnStop){
-      btnStop.disabled=true;
-      btnRec.onclick=()=>{
-        const r=ensureRec();
-        if(!r) return;
-        if(recognizing) return;
-        recognizing=true;
-        if(userAns) userAns.textContent='';
-        btnRec.disabled=true;
-        btnStop.disabled=false;
-        try{r.start();}catch(e){console.warn(e);}
-      };
-      btnStop.onclick=()=>{
-        if(!rec) return;
-        try{rec.stop();}catch(e){console.warn(e);}
-      };
-    }
 
   }catch(e){console.warn(e);}
 }
@@ -1167,8 +1081,7 @@ function speakText(text,lang){
   if(!text || !('speechSynthesis' in window))return;
   try{speechSynthesis.cancel();}catch{}
   const u=new SpeechSynthesisUtterance(String(text));
-  const rate=(typeof window!=='undefined' && window.BW_AI_RATE)?window.BW_AI_RATE:1.0;
-  u.lang=lang||'en-US';u.rate=rate;u.pitch=1.0;u.volume=1.0;
+  u.lang=lang||'en-US';u.rate=1.0;u.pitch=1.0;u.volume=1.0;
   speechSynthesis.speak(u);
 }
 
@@ -1280,6 +1193,7 @@ function speakText(text,lang){
     console.warn('[BW-player] init error:', e);
   }
 })();
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 
   <!-- 播放進度寫入 watch_logs（供學習控制台使用） --> <!-- V20251124-fixed by ChatGPT -->
@@ -1417,6 +1331,7 @@ function speakText(text,lang){
     });
   }
 })();
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 
 </body>
