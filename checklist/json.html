@@ -111,7 +111,7 @@
       color:var(--muted);
     }
     .status.ok{color:#15803d;}
-    .status.err{color:var(--danger);}
+    .status.err{color:#b91c1c;}
     .two-col{
       display:grid;
       grid-template-columns:minmax(0,1fr) minmax(0,1fr);
@@ -138,6 +138,14 @@
       opacity:1;pointer-events:auto;
       transform:translateX(-50%) translateY(-4px);
     }
+    .api-row{
+      display:flex;
+      align-items:center;
+      gap:8px;
+    }
+    .api-row input{
+      flex:1;
+    }
   </style>
 </head>
 <body>
@@ -157,7 +165,13 @@
       <div class="tagline">0. OpenAI 設定</div>
       <div class="field">
         <label for="apiKey">OpenAI API Key（只存在這個瀏覽器，不會傳到 BookWide 伺服器）</label>
-        <input type="password" id="apiKey" placeholder="sk-..." autocomplete="off" />
+        <div class="api-row">
+          <input type="password" id="apiKey" placeholder="sk-..." autocomplete="off" />
+          <button type="button" class="btn btn-ghost" id="toggleKey">顯示</button>
+        </div>
+        <div class="hint">
+          金鑰會儲存在這台電腦的瀏覽器（localStorage），下次開啟會自動帶入。若是共用電腦，建議用完後在瀏覽器清除。
+        </div>
       </div>
       <div class="two-col">
         <div class="field">
@@ -212,6 +226,18 @@
       <div class="block">
         <h3>2.2 測驗 quiz JSON</h3>
         <div class="file-label">輸出檔名：<code id="nameQuiz">quiz-.json</code></div>
+
+        <!-- ★ 新增 Quiz 等級選單（Level 1/2/3） -->
+        <div class="field">
+          <label for="quizLevel">Quiz 等級（只影響測驗題數）</label>
+          <select id="quizLevel">
+            <option value="1">Level 1：每類 5 題 × 4 類 = 20 題</option>
+            <option value="2">Level 2：每類 10 題 × 4 類 = 40 題</option>
+            <option value="3">Level 3：每類 15 題 × 4 類 = 60 題</option>
+          </select>
+          <div class="hint">vocab / AI 題庫不管控題數，只限制 quiz。</div>
+        </div>
+
         <div class="btn-row">
           <button class="btn btn-primary" type="button" onclick="handleGenerate('quiz')">
             ② 用 GPT 產生 quiz JSON
@@ -303,6 +329,30 @@
     };
 
     const $ = (q) => document.querySelector(q);
+
+    // --- OpenAI API Key：localStorage 記住 + 顯示/隱藏 ---
+
+    const apiKeyInput = $('#apiKey');
+    const toggleKeyBtn = $('#toggleKey');
+
+    if (apiKeyInput) {
+      // 載入已儲存的 key
+      const savedKey = localStorage.getItem('bw_json_api_key') || '';
+      if (savedKey) apiKeyInput.value = savedKey;
+
+      // 輸入時自動儲存
+      apiKeyInput.addEventListener('input', () => {
+        localStorage.setItem('bw_json_api_key', apiKeyInput.value.trim());
+      });
+    }
+
+    if (toggleKeyBtn && apiKeyInput) {
+      toggleKeyBtn.addEventListener('click', () => {
+        const isPw = apiKeyInput.type === 'password';
+        apiKeyInput.type = isPw ? 'text' : 'password';
+        toggleKeyBtn.textContent = isPw ? '隱藏' : '顯示';
+      });
+    }
 
     // --- SRT 上傳 & 解析 ---
 
@@ -456,7 +506,6 @@
       const transcript = srtSegments.map(s=>`${s.time} ${s.text}`).join('\n');
       const commonSystem = '你是一位幫助製作英語學習教材的助手，會根據英文字幕產生 JSON。回覆時只輸出純 JSON，不要解釋文字，也不要加註解。';
 
-      // --- cues ---
       if(kind === 'cues'){
         const userPrompt =
 `請根據下面的英文字幕，產生多語字幕 JSON 陣列。
@@ -483,10 +532,14 @@ ${transcript}`;
         };
       }
 
-      // --- quiz ---
       if(kind === 'quiz'){
+        // 依 level 決定每類幾題 / 總題數
+        const levelValue = parseInt(document.getElementById('quizLevel')?.value || '1', 10);
+        const perSection = levelValue === 1 ? 5 : (levelValue === 2 ? 10 : 15);
+        const totalQuestions = perSection * 4;
+
         const userPrompt =
-`請根據下面的英文字幕內容，為學生設計「共 20 題」的單選題，分成 4 個 section，每個 section 剛好 5 題，輸出 JSON 陣列。
+`請根據下面的英文字幕內容，為學生設計「共 ${totalQuestions} 題」的單選題，分成 4 個 section，每個 section 剛好 ${perSection} 題，輸出 JSON 陣列。
 每個題目格式如下：
 {
   "section": "理解內容",              // 或「細節理解」「字彙與片語」「延伸口說」四類之一
@@ -505,7 +558,7 @@ ${transcript}`;
   2. "細節理解"
   3. "字彙與片語"
   4. "延伸口說"
-- 每個 section 必須剛好 5 題，總題數要剛好 20 題。
+- 每個 section 必須剛好 ${perSection} 題，總題數要剛好 ${totalQuestions} 題。
 - 題目要涵蓋整首歌／全文的重要內容與細節。
 - 不要有重複題目，也不要出超出歌詞範圍的知識題。
 
@@ -520,7 +573,6 @@ ${transcript}`;
         };
       }
 
-      // --- vocab ---
       if(kind === 'vocab'){
         const userPrompt =
 `請根據下面的英文字幕內容，挑選 15〜25 個適合學習的字詞（單字或片語），輸出 JSON 陣列。
@@ -553,7 +605,6 @@ ${transcript}`;
         };
       }
 
-      // --- ai topics（三語固定模板，與 ai-houyi.json 結構相同） ---
       if(kind === 'ai'){
         const userPrompt =
 `請根據下面的歌曲或故事主題，幫我設計 8〜12 個「練習說話的題目」，輸出 JSON 物件，格式如下：
@@ -561,29 +612,18 @@ ${transcript}`;
   "topics": [
     {
       "title": "簡短中文或英文標題",
-      "prompt": "給學生的英語說話指示（英文 1〜2 句）",
-      "hint": "繁體中文提示，說明要說幾句、可以包含哪些重點",
-      "sample": "英文示範回答，大約 3〜5 句",
-      "ja": {
-        "prompt": "日本語での指示文（1〜2文）",
-        "hint": "日本語のヒント（何文ぐらい話すか、ポイントなど）",
-        "sample": "日本語の模範解答（3〜5文）"
-      },
-      "zh": {
-        "prompt": "繁體中文的指示句（1〜2 句）",
-        "hint": "繁體中文提示（與上方英文指示對應）",
-        "sample": "繁體中文示範回答，大約 3〜5 句"
-      }
+      "prompt": "給學生的英語說話指示，可以 1〜2 句，使用英文",
+      "hint": "中文或英文提示，說明要說幾句、可以包含哪些重點（建議繁體中文）",
+      "sample": "示範英文回答，大約 3〜5 句"
     }
   ]
 }
 
 要求：
-- 最外層的 prompt 一律使用英文，適合 B1 程度學生。
-- ja 區塊全部用自然的日本語；zh 區塊全部用繁體中文。
-- 每個題目都要同時提供英文 sample、日文 sample、中文 sample，不要留空字串。
-- 題目要聚焦在不同角度，例如：描述個人經驗、喜好、感受、故事延伸等等。
-- 可以參考歌詞或故事主題，但不要直接抄原文句子，以避免版權問題，可適度改寫。
+- prompt 必須是英文，適合 B1 程度左右的學生。
+- 每個題目聚焦在不同角度，例如：描述個人經驗、喜好、感受、故事延伸等等。
+- hint 可以用繁體中文，幫老師或學生理解題目重點。
+- sample 一定要填入英文示範答案，不要留空字串；內容可以參考故事／歌詞主題，但不要直接抄原文，以避免版權問題。
 
 以下是字幕內容：
 ${transcript}`;
