@@ -521,6 +521,7 @@ tr.speaking{
                 <span id="aiProgress" class="muted">第 0/0 題</span>
               </div>
               <textarea id="aiPrompt" rows="3" readonly placeholder="題目會顯示在這裡…"></textarea>
+              <textarea id="aiAnswer" rows="3" placeholder="請用英文作答，或按「開始說」用說的。"></textarea>
               <div style="margin:8px 0 4px">
                 <span class="muted">提示：</span><span id="aiHint" class="muted">—</span>
               </div>
@@ -730,52 +731,6 @@ function renderQuiz(cat){
   $('#quizMeta').textContent=`目前顯示：${labelMap[cat]||'全部'}，共 ${list.length} 題。`;
 }
 
-
-// === 將測驗結果寫入 Supabase quiz_logs（給學習控制台排行榜用） ===
-async function saveQuizResultToSupabase(correct, total) {
-  try {
-    if (typeof playerSupa === 'undefined') return;
-    if (!slug) return;
-
-    const { data: userData, error: userErr } = await playerSupa.auth.getUser();
-    if (userErr || !userData || !userData.user) {
-      console.warn('[quiz_logs] no auth user, skip');
-      return;
-    }
-
-    const user = userData.user;
-    const email = user.email || '';
-    if (!email) return;
-
-    const score = Number(correct) || 0;
-    const totalQ = Number(total) || 0;
-
-    const catForLog = (typeof currentQuizCat !== 'undefined' && currentQuizCat)
-      ? currentQuizCat
-      : 'all';
-
-    const payload = {
-      email,
-      slug,
-      category: catForLog,
-      score,
-      created_at: new Date().toISOString()
-    };
-
-    const { error: insErr } = await playerSupa
-      .from('quiz_logs')
-      .insert(payload);
-
-    if (insErr) {
-      console.error('[quiz_logs] insert error', insErr);
-    } else {
-      console.log('[quiz_logs] saved', payload);
-    }
-  } catch (e) {
-    console.error('[quiz_logs] exception', e);
-  }
-}
-
 function setupQuizButtons(){
   if(setupQuizButtons._done) return;
   setupQuizButtons._done=true;
@@ -805,10 +760,7 @@ function setupQuizButtons(){
       if(ans.toLowerCase()===chosen.toLowerCase()) s++;
     });
     $('#quizScore').textContent=`得分：${s} / ${t}`;
-    // ✅ 同步寫入 Supabase，提供排行榜使用
-    saveQuizResultToSupabase(s, t);
   };
-
 
   $('#btnPrint').onclick=()=>{
     if(typeof showTab==='function') showTab('quiz');
@@ -1017,6 +969,59 @@ async function loadAI(){
   }catch(e){console.warn(e);}
 }
 
+
+/* ==== AI 語音作答（瀏覽器語音辨識） ==== */
+(function(){
+  const btnRec = $('#btnRec');
+  const btnStop = $('#btnStop');
+  const ansEl = $('#aiAnswer');
+  if(!btnRec || !btnStop || !ansEl) return;
+
+  let recognition = null;
+
+  function getSR(){
+    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+  }
+
+  btnRec.addEventListener('click', () => {
+    const SR = getSR();
+    if(!SR){
+      alert('此瀏覽器暫不支援語音辨識，請直接在下方輸入答案。');
+      return;
+    }
+    if(recognition) recognition.stop();
+    recognition = new SR();
+    recognition.lang = 'en-US';
+    recognition.interimResults = true;
+    recognition.continuous = true;
+
+    ansEl.value = '';
+    btnRec.disabled = true;
+    btnStop.disabled = false;
+
+    recognition.onresult = (e) => {
+      let text = '';
+      for(let i = 0; i < e.results.length; i++){
+        text += e.results[i][0].transcript + (e.results[i].isFinal ? ' ' : ' ');
+      }
+      ansEl.value = text.trim();
+    };
+    const reset = () => {
+      btnRec.disabled = false;
+      btnStop.disabled = true;
+    };
+    recognition.onerror = reset;
+    recognition.onend = reset;
+
+    recognition.start();
+  });
+
+  btnStop.addEventListener('click', () => {
+    if(recognition){
+      recognition.stop();
+    }
+  });
+})();
 /* ==== 四個 tab 切換 + 手機右頁 focus ==== */
 function showTab(name){
   paneSub.style.display=(name==='sub')?'':'none';
