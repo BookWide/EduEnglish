@@ -215,6 +215,9 @@
           <button class="btn btn-primary" type="button" onclick="handleGenerate('cues')">
             ① 用 GPT 產生 cues JSON
           </button>
+          <button class="btn btn-ghost" type="button" id="btnGenerateAll" onclick="handleGenerateAll()">
+            一鍵產生全部 JSON
+          </button>
           <button class="btn btn-ghost" type="button" id="downloadCues" disabled onclick="downloadSaved('cues')">
             下載 cues-*.json
           </button>
@@ -345,6 +348,17 @@
     $('#srtFile').addEventListener('change', async (ev)=>{
       const file = ev.target.files[0];
       if(!file) return;
+
+      // 自動從檔名產生 slug（若目前 slug 為空）
+      const slugInput = $('#slug');
+      if(slugInput && !slugInput.value.trim()){
+        const autoSlug = autoSlugFromFileName(file.name);
+        if(autoSlug){
+          slugInput.value = autoSlug;
+          updateNames();
+        }
+      }
+
       const text = await file.text();
       parseSrt(text);
     });
@@ -393,6 +407,16 @@
       const m2 = Math.floor(total/60);
       const s2 = total%60;
       return String(m2).padStart(2,"0")+":"+String(s2).padStart(2,"0");
+    }
+
+
+    function autoSlugFromFileName(name){
+      if(!name) return '';
+      let base = name.replace(/\.[^.]+$/, '');
+      base = base.replace(/\([^)]*\)/g, ' ');
+      base = base.replace(/[^A-Za-z0-9]+/g, ' ');
+      base = base.toLowerCase().trim().replace(/\s+/g, '');
+      return base;
     }
 
     function updateNames(){
@@ -462,6 +486,43 @@
       }
     }
 
+
+    let generatingAll = false;
+    async function handleGenerateAll(){
+      if(generatingAll) return;
+      const apiKey = ($('#apiKey').value || '').trim();
+      const slug   = ($('#slug').value || '').trim();
+      if(!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
+      if(!slug){ alert('請先填寫片名 slug（用在檔名）。'); return; }
+      if(!srtSegments.length){ alert('請先上傳並解析 SRT 檔。'); return; }
+
+      const btnAll = document.getElementById('btnGenerateAll');
+      const btnLabel = btnAll ? btnAll.textContent : '';
+      if(btnAll){
+        btnAll.disabled = true;
+        btnAll.textContent = '產生中…';
+      }
+
+      generatingAll = true;
+      try{
+        await handleGenerate('cues');
+        await handleGenerate('quiz');
+        await handleGenerate('vocab');
+        await handleGenerate('ai');
+        generateIndexJson();
+        showToast('全部 JSON 已產生並下載完成。');
+      }catch(err){
+        console.error(err);
+        showToast('一鍵產生過程中有錯誤，請查看各區域狀態。');
+      }finally{
+        generatingAll = false;
+        if(btnAll){
+          btnAll.disabled = false;
+          btnAll.textContent = btnLabel || '一鍵產生全部 JSON';
+        }
+      }
+    }
+
     function buildChatPayload(kind, model, slug){
       const transcript = srtSegments.map(s=>`${s.time} ${s.text}`).join('\n');
       const commonSystem = '你是一位幫助製作英語學習教材的助手，會根據英文字幕產生 JSON。回覆時只輸出純 JSON，不要解釋文字，也不要加註解。';
@@ -491,7 +552,6 @@ mm:ss 原始英文句子
 ${transcript}`;
         return { model, messages:[{role:'system',content:commonSystem},{role:'user',content:userPrompt}] };
       }
-
 
       if(kind === 'quiz'){
         const levelValue = parseInt(document.getElementById('quizLevel')?.value || '1', 10);
@@ -564,28 +624,21 @@ ${transcript}`;
     {
       "title": "簡短中文或英文標題",
       "prompt": "給學生的英語說話指示，可以 1〜2 句，使用英文",
-      "hint": "繁體中文提示，說明要說幾句、可以包含哪些重點",
-      "sample_en": "示範英文回答，大約 3〜5 句",
-      "sample_zh": "對應的繁體中文示範回答，大約 3〜5 句",
-      "sample_ja": "對應的日本語示範回答，大約 3〜5 文"
+      "hint": "中文或英文提示，說明要說幾句、可以包含哪些重點（建議繁體中文）",
+      "sample": "示範英文回答，大約 3〜5 句"
     }
   ]
 }
 要求：
-- 整個檔案是一個物件，最外層鍵名固定為 "topics"，其值是一個陣列。
-- topics 陣列中要有 8〜12 個題目。
-- prompt 一律使用英文，適合 B1 程度左右的學生閱讀。
-- 每個題目聚焦在不同角度，例如：描述個人經驗、喜好、感受、故事延伸、價值觀等。
-- hint 使用繁體中文，幫老師或學生理解題目重點與回答方向。
-- sample_en / sample_zh / sample_ja 三個欄位都必須填入內容，不可以是空字串。
-- sample_* 內容可以參考故事／歌詞主題，但請改寫成新的句子，以避免直接抄襲原文。
-- 返回結果必須是合法 JSON，不允許出現註解或多餘文字。
+- prompt 必須是英文，適合 B1 程度左右的學生。
+- 每個題目聚焦在不同角度，例如：描述個人經驗、喜好、感受、故事延伸等等。
+- hint 可以用繁體中文，幫老師或學生理解題目重點。
+- sample 一定要填入英文示範答案，不要留空字串；內容可以參考故事／歌詞主題，但不要直接抄原文，以避免版權問題。
 
 以下是字幕內容：
 ${transcript}`;
         return { model, messages:[{role:'system',content:commonSystem},{role:'user',content:userPrompt}] };
       }
-
 
       throw new Error('unknown kind: '+kind);
     }
@@ -660,6 +713,12 @@ ${transcript}`;
   </script>
 </body>
 </html>
+
+
+
+
+
+
 
 
 
