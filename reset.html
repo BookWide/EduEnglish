@@ -74,7 +74,7 @@
       font-size:14px;
       color:var(--muted);
       line-height:1.6;
-      margin-bottom:18px;
+      margin-bottom:8px;
     }
     label{
       display:block;
@@ -127,6 +127,17 @@
       transform:translateY(1px);
       box-shadow:0 8px 20px rgba(37,99,235,.5);
     }
+    .btn-text{
+      border:none;
+      background:transparent;
+      color:var(--muted);
+      font-size:13px;
+      cursor:pointer;
+      padding:0;
+      margin-top:4px;
+      text-decoration:underline;
+      text-underline-offset:3px;
+    }
     .note{
       margin-top:12px;
       font-size:13px;
@@ -173,6 +184,8 @@
     <p class="hint" id="subtitle">
       已確認你的身分，請輸入新的密碼並儲存。之後請用新密碼重新登入。
     </p>
+    <!-- 60 秒倒數提示 -->
+    <p class="hint hidden" id="timerHint"></p>
 
     <!-- ① 輸入 Email ，寄出重設連結 -->
     <section id="sectionRequest" class="hidden">
@@ -182,7 +195,8 @@
       </div>
       <button id="btnSend" class="btn-primary">寄送重設密碼連結</button>
       <p class="note">
-        會寄出一封「Reset Password」郵件到你的信箱，請在 30 分鐘內點擊信中的連結。
+        系統會寄出一封「Reset Password」郵件到你的信箱，<br>
+        請在幾分鐘內點擊信中的連結完成重設。
       </p>
     </section>
 
@@ -203,6 +217,10 @@
         密碼更新成功後，會自動導向登入畫面：<br>
         <a href="index.html?denied=signin" id="linkLogin">返回登入</a>
       </p>
+      <!-- 當連結失效時顯示，用同頁重新寄信 -->
+      <button id="btnBackToRequest" class="btn-text hidden">
+        重新寄送重設密碼連結
+      </button>
     </section>
 
     <p id="msg" class="msg hidden"></p>
@@ -217,6 +235,7 @@
     const statusPill     = document.getElementById('statusPill');
     const titleEl        = document.getElementById('title');
     const subtitleEl     = document.getElementById('subtitle');
+    const timerHint      = document.getElementById('timerHint');
 
     const emailInput = document.getElementById('email');
     const btnSend    = document.getElementById('btnSend');
@@ -224,8 +243,10 @@
     const pwd2Input  = document.getElementById('pwd2');
     const btnSave    = document.getElementById('btnSave');
     const btnSaveLabel = document.getElementById('btnSaveLabel');
+    const btnBackToRequest = document.getElementById('btnBackToRequest');
 
     const BACK_LOGIN_URL = 'index.html?denied=signin';
+    let countdownTimer = null;
 
     function showMessage(text, type = 'info') {
       msgEl.textContent = text;
@@ -239,12 +260,32 @@
       msgEl.classList.remove('error','success');
     }
 
-    // 判斷「寄信模式」或「真正重設密碼模式」
+    function startCountdown(seconds){
+      if (!timerHint) return;
+      if (countdownTimer) clearInterval(countdownTimer);
+
+      let remain = seconds;
+      timerHint.classList.remove('hidden');
+      timerHint.textContent = `建議在 ${remain} 秒內完成密碼重設（實際連結有效時間約 5 分鐘）。`;
+
+      countdownTimer = setInterval(() => {
+        remain--;
+        if (remain <= 0) {
+          clearInterval(countdownTimer);
+          countdownTimer = null;
+          timerHint.textContent = '若尚未完成，建議盡快完成重設，或重新申請新的重設連結。';
+        } else {
+          timerHint.textContent = `建議在 ${remain} 秒內完成密碼重設（實際連結有效時間約 5 分鐘）。`;
+        }
+      }, 1000);
+    }
+
+    // 決定現在是「寄信模式」還是「真正重設密碼模式」
     const params = new URLSearchParams(window.location.search);
     const code   = params.get('code');
 
     if (code) {
-      // 從 Email 連結進來
+      // 從 Email 連結進來 → 嘗試驗證
       sectionRequest.classList.add('hidden');
       sectionSetPwd.classList.remove('hidden');
       statusPill.textContent = 'Verify';
@@ -280,7 +321,7 @@
         console.error('resetPasswordForEmail error:', error);
         showMessage('寄送重設密碼連結時發生錯誤：' + (error.message || ''),'error');
       } else {
-        showMessage('已寄出重設密碼連結，請到信箱收信並點擊郵件中的「Reset Password」。','success');
+        showMessage('已寄出重設密碼連結，請在 5 分鐘內到信箱收信並點擊郵件中的「Reset Password」。','success');
       }
       btnSend.disabled = false;
       btnSend.textContent = '寄送重設密碼連結';
@@ -291,22 +332,59 @@
       clearMessage();
       showMessage('正在驗證重設密碼連結，請稍候…');
 
-      const { data: sessionData, error: sessionError } =
-        await supa.auth.exchangeCodeForSession(code);
+      let sessionData, sessionError;
+      try {
+        const result = await supa.auth.exchangeCodeForSession(code);
+        sessionData = result.data;
+        sessionError = result.error;
+      } catch (e) {
+        sessionError = e;
+      }
 
       if (sessionError || !sessionData?.session) {
         console.error('exchangeCodeForSession error:', sessionError);
-        showMessage('驗證連結無效或已過期，請回登入畫面重新申請重設密碼。','error');
+        const msg = String(sessionError?.message || '');
+        // 針對 PKCE 常見錯誤給比較明確的提示
+        if (msg.includes('code verifier') || msg.includes('code_verifier')) {
+          showMessage(
+            '驗證失敗：請確認你是在「同一台裝置、同一個瀏覽器」中，先按下「忘記密碼？」寄出連結，再點開同一封信。若有疑慮，請重新申請一次重設密碼。',
+            'error'
+          );
+        } else {
+          showMessage('驗證連結無效或已過期，請重新申請重設密碼。','error');
+        }
+
         titleEl.textContent = '連結已失效';
-        subtitleEl.textContent = '請回登入頁，使用「忘記密碼？」重新申請新的重設連結。';
+        subtitleEl.textContent = '請回登入頁，使用「忘記密碼？」重新申請新的重設連結，或直接在下方重新寄送。';
         statusPill.textContent = 'Invalid';
+
+        // 顯示「重新寄送」按鈕，並停用儲存按鈕
+        btnSave.disabled = true;
+        btnSaveLabel.textContent = '連結已失效';
+        btnBackToRequest.classList.remove('hidden');
+        timerHint.classList.add('hidden');
+        if (countdownTimer) clearInterval(countdownTimer);
         return;
       }
 
       // 成功建立 session，準備讓使用者輸入新密碼
       clearMessage();
       statusPill.textContent = 'Verified';
+      startCountdown(60);
     }
+
+    // 從失效畫面 → 回到寄信畫面（同一頁重新寄信）
+    btnBackToRequest?.addEventListener('click', () => {
+      clearMessage();
+      sectionSetPwd.classList.add('hidden');
+      sectionRequest.classList.remove('hidden');
+      statusPill.textContent = 'Request';
+      titleEl.textContent = '寄送重設密碼連結';
+      subtitleEl.textContent = '輸入你的 Email，我們會寄一封包含重設連結的郵件給你。';
+      btnBackToRequest.classList.add('hidden');
+      timerHint.classList.add('hidden');
+      if (countdownTimer) clearInterval(countdownTimer);
+    });
 
     btnSave?.addEventListener('click', async () => {
       clearMessage();
@@ -332,7 +410,7 @@
       // 再確認一次 session 是否存在
       const { data: sessionCheck } = await supa.auth.getSession();
       if (!sessionCheck?.session) {
-        showMessage('目前尚未通過身分驗證，請重新從信箱中的「Reset Password」連結進入。','error');
+        showMessage('目前尚未通過身分驗證，請重新從信箱中的「Reset Password」連結進入，或重新申請新的連結。','error');
         btnSave.disabled = false;
         btnSaveLabel.textContent = '儲存新密碼';
         return;
@@ -362,6 +440,8 @@
   </script>
 </body>
 </html>
+
+
 
 
 
