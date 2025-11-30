@@ -232,7 +232,7 @@
     }
   </script>
 
-  <!-- Supabase 整合邏輯 -->
+  <!-- Supabase 整合邏輯：同時支援 ?code=... 與 #access_token=... -->
   <script type="module">
     import { supabase as supa } from './supa.js';
 
@@ -270,39 +270,42 @@
       }
     }
 
-    // --- 初始化：檢查 URL 是否帶有 recovery token ---
+    // --- 初始化：檢查 URL 是否帶有 recovery 資訊 (?code=... 或 #access_token=...) ---
     (async () => {
-      const hash = window.location.hash || '';
-      const params = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash);
-      const hasRecovery = params.get('type') === 'recovery' && params.get('access_token');
+      const searchParams = new URLSearchParams(window.location.search);
+      const hashParams   = new URLSearchParams(window.location.hash.startsWith('#')
+                            ? window.location.hash.slice(1)
+                            : window.location.hash);
+
+      const hasCode       = !!searchParams.get('code');                // PKCE: ?code=...
+      const tokenType     = searchParams.get('token_type') || hashParams.get('type');
+      const hasAccessTok  = !!hashParams.get('access_token');          // Implicit: #access_token=...
+      const isRecovery    = tokenType === 'recovery' || hasCode;       // 有可能沒 token_type，但只要有 code 也視為 recovery
+      const hasRecovery   = isRecovery && (hasCode || hasAccessTok);
 
       if(!hasRecovery){
-        // 沒有帶 token：只顯示「寄送重設連結」畫面
+        // 沒帶任何 recovery 資訊 → 顯示寄送畫面
         title.textContent = '重設密碼';
         showState('request');
         return;
       }
 
-      // 有 token，嘗試交換 session
+      // 有 recovery 相關資訊，嘗試用 Supabase 交換成 Session
       title.textContent = '設定新密碼';
       badge.textContent = '驗證中…';
-      showState('request'); // 先暫時蓋著畫面
+      showState('request'); // 暫時遮住，其實用不到
 
       try{
-        // 先看看是不是已經有 session
-        let { data: userData } = await supa.auth.getUser();
-        if(!userData || !userData.user){
-          const { error } = await supa.auth.exchangeCodeForSession(hash);
-          if(error) throw error;
+        // 直接丟整個 URL，Supabase 會自己從 search / hash 分析
+        const { error } = await supa.auth.exchangeCodeForSession(window.location.href);
+        if(error) throw error;
+
+        const { data, error: userErr } = await supa.auth.getUser();
+        if(userErr || !data || !data.user){
+          throw userErr || new Error('no-user');
         }
 
-        // 再次確認是否有 user
-        const { data: after, error: userErr } = await supa.auth.getUser();
-        if(userErr || !after || !after.user){
-          throw userErr || new Error('link-invalid');
-        }
-
-        // 成功：顯示設定新密碼表單
+        // 成功取得 user → 顯示設定密碼畫面
         showState('update');
       }catch(e){
         console.error('[reset] exchange error', e);
@@ -338,6 +341,10 @@
       title.textContent = '重設密碼';
       showState('request');
       window.location.hash = '';
+      const url = new URL(window.location.href);
+      url.searchParams.delete('code');
+      url.searchParams.delete('token_type');
+      window.history.replaceState({}, '', url.toString());
       msg3.textContent = '';
     });
 
@@ -360,7 +367,6 @@
         const { error } = await supa.auth.updateUser({ password: p1 });
         if(error){
           console.error('[reset] update error', error);
-          // 多數情況會是 token 過期
           showMsg(msg2,'驗證連結無效或已過期，請回登入畫面重新申請重設密碼。');
           return;
         }
@@ -376,6 +382,7 @@
   </script>
 </body>
 </html>
+
 
 
 
