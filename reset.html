@@ -232,7 +232,7 @@
     }
   </script>
 
-  <!-- Supabase 整合邏輯：正確使用 ?code=... -->
+  <!-- Supabase 整合邏輯（已修正 Cloudflare 會吃掉 hash 的問題） -->
   <script type="module">
     import { supabase as supa } from './supa.js';
 
@@ -256,7 +256,6 @@
     }
 
     function showState(state){
-      // state: 'request' | 'update' | 'invalid'
       pReq.style.display = state === 'request' ? '' : 'none';
       pUpd.style.display = state === 'update' ? '' : 'none';
       pInv.style.display = state === 'invalid' ? '' : 'none';
@@ -270,38 +269,45 @@
       }
     }
 
-    // --- 初始化：檢查 URL 是否帶有 PKCE code (?code=...) ---
+    // --- 初始化（完整修正版） ---
     (async () => {
-      const url = new URL(window.location.href);
-      const searchParams = url.searchParams;
-      const code = searchParams.get('code');       // PKCE: ?code=...
-      const type = searchParams.get('type');       // type=recovery
+      let rawHash = window.location.hash;
 
-      const hasRecovery = !!code && (type === 'recovery' || !type);
+      // Cloudflare 轉址可能會吃掉 #
+      if(!rawHash || rawHash.length < 10){
+        const qs = new URLSearchParams(window.location.search);
+        const at = qs.get('access_token');
+        const tp = qs.get('type');
+        if(at && tp){
+          rawHash = `#access_token=${at}&type=${tp}`;
+        }
+      }
 
-      if(!hasRecovery){
-        // 沒帶任何 recovery 資訊 → 顯示寄送畫面
+      const params = new URLSearchParams(rawHash.replace('#',''));
+      const access_token = params.get('access_token');
+      const type = params.get('type');
+
+      if(type !== 'recovery' || !access_token){
         title.textContent = '重設密碼';
         showState('request');
         return;
       }
 
-      // 有 recovery code，嘗試用 Supabase 交換成 Session
+      // 顯示「驗證中」
       title.textContent = '設定新密碼';
       badge.textContent = '驗證中…';
-      showState('request'); // 先暫時保持 request 畫面
 
       try{
-        const { error } = await supa.auth.exchangeCodeForSession(code);
-        if(error) throw error;
+        const { error: exErr } = await supa.auth.exchangeCodeForSession(rawHash);
+        if(exErr) throw exErr;
 
-        const { data, error: userErr } = await supa.auth.getUser();
-        if(userErr || !data || !data.user){
-          throw userErr || new Error('no-user');
+        const { data: userData, error: userErr } = await supa.auth.getUser();
+        if(userErr || !userData?.user){
+          throw userErr || new Error('invalid');
         }
 
-        // 成功取得 user → 顯示設定密碼畫面
         showState('update');
+
       }catch(e){
         console.error('[reset] exchange error', e);
         title.textContent = '連結已失效';
@@ -309,7 +315,7 @@
       }
     })();
 
-    // --- 按鈕：寄送重設連結（從 request 畫面） ---
+    // --- 寄送重設連結 ---
     document.getElementById('btnSend')?.addEventListener('click', async () => {
       msg1.textContent = '';
       const email = (document.getElementById('email').value || '').trim();
@@ -325,24 +331,21 @@
           showMsg(msg1, error.message || '寄送失敗，請稍後再試。');
           return;
         }
-        showMsg(msg1, '已寄出重設連結（請在 5 分鐘內點擊信中的按鈕）', true);
+        showMsg(msg1, '已寄出重設連結（請在 5 分鐘內點擊）', true);
       }catch(e){
         showMsg(msg1, String(e));
       }
     });
 
-    // --- 從「連結失效」畫面重新寄送 / 回到輸入 Email ---
+    // --- 從「連結失效」重新寄送 ---
     document.getElementById('btnResendFromInvalid')?.addEventListener('click', () => {
       title.textContent = '重設密碼';
       showState('request');
-      const url = new URL(window.location.href);
-      url.searchParams.delete('code');
-      url.searchParams.delete('type');
-      window.history.replaceState({}, '', url.toString());
+      window.location.hash = '';
       msg3.textContent = '';
     });
 
-    // --- 按鈕：更新密碼 ---
+    // --- 更新密碼 ---
     document.getElementById('btnUpdate')?.addEventListener('click', async () => {
       msg2.textContent = '';
       const p1 = document.getElementById('pwd').value;
@@ -360,22 +363,22 @@
       try{
         const { error } = await supa.auth.updateUser({ password: p1 });
         if(error){
-          console.error('[reset] update error', error);
-          showMsg(msg2,'驗證連結無效或已過期，請回登入畫面重新申請重設密碼。');
+          showMsg(msg2,'驗證連結無效或已過期，請重新申請。');
           return;
         }
-        showMsg(msg2,'已成功更新密碼，將自動導回登入畫面…', true);
+        showMsg(msg2,'密碼更新成功，將自動導回登入畫面…', true);
         setTimeout(() => {
           window.location.href = redirect;
         }, 1500);
       }catch(e){
-        console.error('[reset] update exception', e);
         showMsg(msg2,'更新失敗，請稍後再試。');
       }
     });
   </script>
 </body>
 </html>
+
+
 
 
 
