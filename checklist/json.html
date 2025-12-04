@@ -571,11 +571,6 @@
         const text = e.target.result;
         srtSegments = parseSrtText(text);
         if (!srtSegments.length){
-        if (catSel.value==='pro'){
-            // PRO: auto grammar inference
-            // generate minimal placeholder in srtSegments to bypass SRT requirement
-            srtSegments=[{time:"00:00",en:"",zh:"",ja:""}];
-        } else {
           srtPreview.textContent = '解析後沒有取得任何字幕段落，請確認 SRT 格式。';
           return;
         }
@@ -596,9 +591,17 @@
     });
 
     function buildChatPayload(kind, model, slug){
+      const cat = catSel ? catSel.value : '';
+      const isProNoSrt = (cat === 'pro' && !srtSegments.length);
       const srtSample = srtSegments.map(s => `${s.time} ${s.text}`).join('\n');
       let systemMsg = `你是 BookWide 的內容編輯助手，請輸出合法 JSON（不要加註解）。\n`;
       let userMsg = '';
+
+      // PRO 類別且沒有 SRT：改用 slug 推論文法主題，不再引用字幕
+      let grammarTopic = '';
+      if (isProNoSrt){
+        grammarTopic = inferGrammarTopicFromSlug(slug || '');
+      }
 
       if (kind === 'cues'){
         systemMsg += `
@@ -612,30 +615,59 @@
         userMsg = `以下是影片的英文字幕（時間 + 內容），請依說明產生 cues JSON 陣列：
 ${srtSample}`;
       } else if (kind === 'quiz'){
-        systemMsg += `
+        if (isProNoSrt){
+          systemMsg += `
+任務：根據「文法主題」設計 BookWide 文法測驗題目，輸出 JSON 陣列。
+題型聚焦文法理解與句型練習，不需依照逐句字幕。
+每題需包含：id, type, question_en, question_zh, options, answer, answer_en, answer_zh, explanation_zh。
+僅輸出 JSON 陣列。`;
+          userMsg = `文法課程主題是：「${grammarTopic || '基礎英文文法'}」。
+請為此主題設計約 8~15 題文法測驗題（選擇題或填空題），題目難度為初級～國中程度。`;
+        } else {
+          systemMsg += `
 任務：為影片設計測驗題目，輸出 JSON 陣列。
 題型：listening / vocab / grammar / speaking。
 Level 1：約 20 題，平均分配。
 每題包含 id, type, time, question_en, question_zh, options, answer。
 僅輸出 JSON 陣列。`;
-        userMsg = `以下是影片的英文字幕，請依說明產生 quiz JSON：
+          userMsg = `以下是影片的英文字幕，請依說明產生 quiz JSON：
 ${srtSample}`;
+        }
       } else if (kind === 'vocab'){
-        systemMsg += `
+        if (isProNoSrt){
+          systemMsg += `
+任務：根據「文法主題」產出與該主題相關的關鍵字彙 JSON 陣列。
+每筆包含：word, pos, zh, en, en_example, zh_example, ja, ja_example。
+請挑選約 8~15 個關鍵字彙，適合初級學習者。
+僅輸出 JSON 陣列。`;
+          userMsg = `文法課程主題是：「${grammarTopic || '基礎英文文法'}」。
+請根據此主題產出適合放在單字表中的關鍵字彙（例如功能詞、常見例句中的字）。`;
+        } else {
+          systemMsg += `
 任務：挑出適合學習的單字或片語，產生 vocab JSON 陣列。
 每筆包含：time, word, pos, zh, en, en_example, zh_example, ja, ja_example。
 大約 15~25 筆。僅輸出 JSON 陣列。`;
-        userMsg = `以下是影片字幕，請依說明產生 vocab JSON：
+          userMsg = `以下是影片字幕，請依說明產生 vocab JSON：
 ${srtSample}`;
+        }
       } else if (kind === 'ai'){
-        systemMsg += `
+        if (isProNoSrt){
+          systemMsg += `
+任務：根據「文法主題」設計 AI 互動練習腳本 JSON 陣列。
+每個物件包含：id, title, desc, prompt_en, prompt_zh, sample_questions (陣列)。
+題型可以是造句、改錯句、情境問答等，幫助學生練習該文法。
+僅輸出 JSON 陣列。`;
+          userMsg = `文法課程主題是：「${grammarTopic || '基礎英文文法'}」。
+請設計約 3~6 種不同型態的 AI 練習任務，讓學生可以與聊天機器人互動練習這個文法。`;
+        } else {
+          systemMsg += `
 任務：根據影片情境產生 AI 互動腳本 JSON 陣列。
 每個物件包含：id, title, desc, prompt_en, prompt_zh, sample_questions (陣列)。
 僅輸出 JSON 陣列。`;
-        userMsg = `以下是影片字幕，請依說明產生 ai JSON：
+          userMsg = `以下是影片字幕，請依說明產生 ai JSON：
 ${srtSample}`;
+        }
       } else if (kind === 'index'){
-        const cat = catSel.value;
         const title = slug.replace(/-/g,' ');
         systemMsg += `
 任務：為單支影片產生 index JSON 物件，包含：
@@ -657,7 +689,8 @@ title: ${title || slug}`;
       };
     }
 
-    function getFileName(kind, slug){
+
+        function getFileName(kind, slug){
       if (!slug) return `${kind}-.json`;
       if (kind === 'index') return `index-${slug}.json`;
       return `${kind}-${slug}.json`;
@@ -671,33 +704,35 @@ title: ${title || slug}`;
       if (!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
       if (!slug){ alert('請先填寫影片 slug。'); return; }
 
-      // 如果沒有 SRT：只有在 PRO + cues 情況下允許，並輸出空白模板 JSON
+      // 如果沒有 SRT：
+      // - 一般類別：仍然禁止呼叫（避免 GPT 毫無依據亂編）
+      // - PRO 類別：
+      //     * cues：直接輸出空白模板（僅保留欄位）
+      //     * quiz / vocab / ai / index：允許繼續，改由 slug 推論文法主題
       if (!srtSegments.length){
-        if (catSel.value==='pro'){
-            // PRO: auto grammar inference
-            // generate minimal placeholder in srtSegments to bypass SRT requirement
-            srtSegments=[{time:"00:00",en:"",zh:"",ja:""}];
-        } else {
-        if (cat === 'pro' && kind === 'cues'){
-          const statusEl = document.getElementById(`status-${kind}`);
-          const obj = [
-            {
-              "time": "",
-              "en": "",
-              "zh": "",
-              "ja": "",
-              "source_url": ""
-            }
-          ];
-          savedJson[kind] = obj;
-          const fileName = getFileName(kind, slug);
-          triggerDownload(JSON.stringify(obj,null,2), fileName);
-          document.getElementById(`download${cap(kind)}`).disabled = false;
-          statusEl.textContent = `已完成並下載 ${fileName}（PRO 無 SRT，輸出空白模板）。`;
-          statusEl.className = 'status ok';
-          document.getElementById('jsonPreview').value = JSON.stringify(obj,null,2);
-          showToast(`已下載 ${fileName}`);
-          return;
+        if (cat === 'pro'){
+          if (kind === 'cues'){
+            const statusEl = document.getElementById(`status-${kind}`);
+            const obj = [
+              {
+                "time": "",
+                "en": "",
+                "zh": "",
+                "ja": "",
+                "source_url": ""
+              }
+            ];
+            savedJson[kind] = obj;
+            const fileName = getFileName(kind, slug);
+            triggerDownload(JSON.stringify(obj,null,2), fileName);
+            document.getElementById(`download${cap(kind)}`).disabled = false;
+            statusEl.textContent = `已完成並下載 ${fileName}（PRO 無 SRT，輸出空白模板）。`;
+            statusEl.className = 'status ok';
+            document.getElementById('jsonPreview').value = JSON.stringify(obj,null,2);
+            showToast(`已下載 ${fileName}`);
+            return;
+          }
+          // PRO 但非 cues：允許繼續往下，由 buildChatPayload 依 slug 推論文法主題
         }else{
           alert('請先上傳並解析 SRT 檔。'); 
           return;
@@ -795,12 +830,7 @@ title: ${title || slug}`;
       const slug   = ($('#slug').value || '').trim();
       if (!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
       if (!slug){ alert('請先填寫影片 slug。'); return; }
-      if (!srtSegments.length){
-        if (catSel.value==='pro'){
-            // PRO: auto grammar inference
-            // generate minimal placeholder in srtSegments to bypass SRT requirement
-            srtSegments=[{time:"00:00",en:"",zh:"",ja:""}];
-        } else { alert('請先上傳並解析 SRT 檔。'); return; }
+      if (!srtSegments.length){ alert('請先上傳並解析 SRT 檔。'); return; }
 
       const btnAll = document.getElementById('btnGenerateAll');
       const originalText = btnAll.textContent;
@@ -822,6 +852,21 @@ title: ${title || slug}`;
     }
 
     let toastTimer = null;
+    // 依 slug 推論 PRO 文法主題（沒有 SRT 時使用）
+    function inferGrammarTopicFromSlug(slug){
+      const s = String(slug || '').toLowerCase();
+      if (s.includes('indefinite')) return '不定冠詞 a/an 的用法（indefinite articles）';
+      if (s.includes('specific') && s.includes('the')) return '定冠詞 the 的特指與唯一性用法（specific reference）';
+      if (s.includes('pronoun')) return '代名詞（主格、受格、所有格等）';
+      if (s.includes('simple') && s.includes('present')) return '一般現在式（simple present）';
+      if (s.includes('present') && s.includes('continuous')) return '現在進行式（present continuous）';
+      if (s.includes('plural') || s.includes('singular')) return '可數名詞與複數變化規則';
+      if (s.includes('preposition')) return '介系詞（prepositions）';
+      if (s.includes('adjective') || s.includes('comparative')) return '形容詞比較級與最高級';
+      if (s.includes('modal')) return '情態助動詞（can, may, must 等）';
+      return '基礎英文文法';
+    }
+
     function showToast(msg){
       const el = document.getElementById('toast');
       el.textContent = msg;
@@ -829,20 +874,31 @@ title: ${title || slug}`;
       clearTimeout(toastTimer);
       toastTimer = setTimeout(()=>el.classList.remove('show'),2600);
     }
-  
-function inferGrammarTopicFromSlug(slug){
- slug=slug.toLowerCase();
- if(slug.includes("indefinite")) return "不定冠詞 a/an";
- if(slug.includes("specific")||slug.includes("the")) return "定冠詞 the 的特指用法";
- if(slug.includes("pronoun")) return "代名詞";
- if(slug.includes("simple-present")) return "一般現在式";
- if(slug.includes("present-continuous")) return "現在進行式";
- return "基礎英文文法";
-}
-
-</script>
+  </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
