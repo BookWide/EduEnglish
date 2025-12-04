@@ -499,6 +499,7 @@
     const apiKeyInput = $('#apiKey');
     const toggleKeyBtn = $('#toggleKey');
 
+    // API Key 暫存 localStorage + 顯示/隱藏
     if (apiKeyInput) {
       const savedKey = localStorage.getItem('bw_json_api_key') || '';
       if (savedKey) apiKeyInput.value = savedKey;
@@ -689,8 +690,7 @@ title: ${title || slug}`;
       };
     }
 
-
-        function getFileName(kind, slug){
+    function getFileName(kind, slug){
       if (!slug) return `${kind}-.json`;
       if (kind === 'index') return `index-${slug}.json`;
       return `${kind}-${slug}.json`;
@@ -704,11 +704,11 @@ title: ${title || slug}`;
       if (!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
       if (!slug){ alert('請先填寫影片 slug。'); return; }
 
-      // 如果沒有 SRT：
-      // - 一般類別：仍然禁止呼叫（避免 GPT 毫無依據亂編）
+      // 沒有 SRT 的處理：
+      // - 一般類別：禁止呼叫（避免 GPT 毫無依據亂編）
       // - PRO 類別：
       //     * cues：直接輸出空白模板（僅保留欄位）
-      //     * quiz / vocab / ai / index：允許繼續，改由 slug 推論文法主題
+      //     * quiz / vocab / ai / index：允許繼續，由 buildChatPayload 依 slug 推論文法主題
       if (!srtSegments.length){
         if (cat === 'pro'){
           if (kind === 'cues'){
@@ -732,9 +732,9 @@ title: ${title || slug}`;
             showToast(`已下載 ${fileName}`);
             return;
           }
-          // PRO 但非 cues：允許繼續往下，由 buildChatPayload 依 slug 推論文法主題
+          // PRO 但非 cues：允許繼續往下
         }else{
-          alert('請先上傳並解析 SRT 檔。'); 
+          alert('請先上傳並解析 SRT 檔。');
           return;
         }
       }
@@ -828,9 +828,15 @@ title: ${title || slug}`;
       if (generatingAll) return;
       const apiKey = ($('#apiKey').value || '').trim();
       const slug   = ($('#slug').value || '').trim();
+      const cat    = catSel ? catSel.value : '';
       if (!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
       if (!slug){ alert('請先填寫影片 slug。'); return; }
-      if (!srtSegments.length){ alert('請先上傳並解析 SRT 檔。'); return; }
+
+      // 一鍵模式下：非 PRO 類別仍然強制要有 SRT；PRO 可允許無 SRT
+      if (!srtSegments.length && cat !== 'pro'){
+        alert('請先上傳並解析 SRT 檔。');
+        return;
+      }
 
       const btnAll = document.getElementById('btnGenerateAll');
       const originalText = btnAll.textContent;
@@ -841,42 +847,48 @@ title: ${title || slug}`;
       for (const kind of order){
         const statusEl = document.getElementById(`status-${kind}`);
         statusEl.textContent = '排隊產生中…';
+        statusEl.className = 'status';
       }
 
       for (const kind of order){
-        await handleGenerate(kind);
+        try{
+          await handleGenerate(kind);
+        }catch(e){
+          console.error(e);
+        }
       }
 
       generatingAll = false;
       btnAll.textContent = originalText;
+      showToast('全部 JSON 產生流程結束');
     }
 
-    let toastTimer = null;
-    // 依 slug 推論 PRO 文法主題（沒有 SRT 時使用）
+    // 從 slug 推文法主題（給 PRO 無 SRT 使用）
     function inferGrammarTopicFromSlug(slug){
-      const s = String(slug || '').toLowerCase();
-      if (s.includes('indefinite')) return '不定冠詞 a/an 的用法（indefinite articles）';
-      if (s.includes('specific') && s.includes('the')) return '定冠詞 the 的特指與唯一性用法（specific reference）';
-      if (s.includes('pronoun')) return '代名詞（主格、受格、所有格等）';
-      if (s.includes('simple') && s.includes('present')) return '一般現在式（simple present）';
-      if (s.includes('present') && s.includes('continuous')) return '現在進行式（present continuous）';
-      if (s.includes('plural') || s.includes('singular')) return '可數名詞與複數變化規則';
-      if (s.includes('preposition')) return '介系詞（prepositions）';
-      if (s.includes('adjective') || s.includes('comparative')) return '形容詞比較級與最高級';
-      if (s.includes('modal')) return '情態助動詞（can, may, must 等）';
-      return '基礎英文文法';
+      const s = (slug || '').toLowerCase();
+      if (!s) return '基礎英文文法';
+      if (s.includes('indefinite-article')) return '不定冠詞 a / an';
+      if (s.includes('specific-references-the')) return '定冠詞 the 的用法';
+      if (s.includes('personal-pronoun')) return '人稱代名詞';
+      if (s.includes('possessive-pronoun')) return '物主代詞';
+      return slug.replace(/-/g,' ');
     }
 
+    const toastEl = $('#toast');
+    let toastTimer = null;
     function showToast(msg){
-      const el = document.getElementById('toast');
-      el.textContent = msg;
-      el.classList.add('show');
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(()=>el.classList.remove('show'),2600);
+      if (!toastEl) return;
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => {
+        toastEl.classList.remove('show');
+      }, 2000);
     }
   </script>
 </body>
 </html>
+
 
 
 
