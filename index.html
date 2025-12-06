@@ -762,6 +762,10 @@
     // 統一總清單 JSON（用相對路徑，不寫死網域）
     const INDEX_JSON_URL = "./data/index-all.json?v=" + Date.now();
 
+    // 每週課表 JSON（每週 15 支影片）
+    const WEEKLY_INDEX_URL = "./data/weekly-index.json?v=" + Date.now();
+    let WEEKLY_INDEX = null;
+
     // 首頁 Hero 設定（由 checklist/banner.html 產生 hero-banner.json）
     const HERO_JSON_URL = "./data/hero-banner.json?v=" + Date.now();
     let HERO_CTA_LINK = "player.html?cat=story&slug=mid-autumn";
@@ -859,16 +863,141 @@
     const WEEKLY_LIMIT_PER_CATEGORY = 3; // 每個分類預設 3 片
     let CURRENT_USER_IS_ADMIN = false;   // 從 profiles.is_admin 讀取
 
-    function getWeekIndex() {
-      const base = new Date(2025, 0, 1); // 固定基準日
-      const now  = new Date();
-      const diffMs = now.getTime() - base.getTime();
-      const weekMs = 7 * 24 * 60 * 60 * 1000;
-      return Math.floor(diffMs / weekMs);
+    
+async function loadWeeklyIndex() {
+  try {
+    const res = await fetch(WEEKLY_INDEX_URL, { cache: "no-store" });
+    if (!res.ok) {
+      console.warn("weekly-index.json not found, fallback to 輪播模式");
+      WEEKLY_INDEX = null;
+      return;
     }
+    const data = await res.json();
+    if (!data || !Array.isArray(data.weeks)) {
+      console.warn("weekly-index.json 格式不正確，改用輪播模式");
+      WEEKLY_INDEX = null;
+      return;
+    }
+    WEEKLY_INDEX = data;
+  } catch (e) {
+    console.error("loadWeeklyIndex failed", e);
+    WEEKLY_INDEX = null;
+  }
+}
+
+    
+const PLAN_MAX_WEEKS = {
+  trial: 4,
+  month: 4,
+  half: 27,
+  half_year: 27,
+  year: 54,
+  annual: 54
+};
+
+// 目前內容最大週數（你現在 weekly-index.json 有 54 週）
+const CONTENT_MAX_WEEKS = 54;
+
+function getUrlParams() {
+  const out = {};
+  try {
+    const usp = new URLSearchParams(window.location.search);
+    for (const [k, v] of usp.entries()) {
+      out[k] = v;
+    }
+  } catch (e) {}
+  return out;
+}
+
+function getSubscriptionContext() {
+  const params = getUrlParams();
+
+  // 1️⃣ 先看網址參數（方便你測試：?plan=year&start=2025-01-15）
+  let plan  = params.plan || params.sub_plan || null;
+  let start = params.start || params.sub_start || null;
+
+  // 2️⃣ 再看 localStorage（之後 subscription.html 可以寫入這兩個 key）
+  if (!plan) {
+    try { plan = localStorage.getItem('bwSubPlan') || null; } catch(e){}
+  }
+  if (!start) {
+    try { start = localStorage.getItem('bwSubStart') || null; } catch(e){}
+  }
+
+  // 預設方案：如果什麼都沒有，就當成 month（4 週），只是為了不讓程式掛掉
+  if (!plan || !PLAN_MAX_WEEKS[plan]) {
+    plan = 'month';
+  }
+
+  let startDate = null;
+  if (start) {
+    const d = new Date(start);
+    if (!Number.isNaN(d.getTime())) {
+      startDate = d;
+    }
+  }
+
+  // 如果沒有起始日，就用今天當第 1 週起點
+  if (!startDate) {
+    const today = new Date();
+    startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  }
+
+  return { plan, startDate };
+}
+
+function getWeekIndex() {
+  const { plan, startDate } = getSubscriptionContext();
+  const today = new Date();
+
+  startDate.setHours(0,0,0,0);
+  today.setHours(0,0,0,0);
+
+  const diffDays = Math.floor((today.getTime() - startDate.getTime()) / 86400000);
+  let weekNumber = Math.floor(diffDays / 7) + 1; // 第 1 週從 0~6 天開始
+
+  if (weekNumber < 1) weekNumber = 1;
+
+  const planMax  = PLAN_MAX_WEEKS[plan] || 4;
+  // weekly-index.json 可能還沒載入，所以先用 CONTENT_MAX_WEEKS，實際 pickWeeklyVideos 裡還會再做一次保護
+  const maxWeek  = Math.min(planMax, CONTENT_MAX_WEEKS);
+  if (weekNumber > maxWeek) weekNumber = maxWeek;
+
+  const weekIndex = weekNumber - 1; // 轉成 0-based，方便拿陣列索引
+  console.debug('[weekly] plan=%s start=%s weekNumber=%d index=%d',
+    plan,
+    startDate.toISOString().slice(0,10),
+    weekNumber,
+    weekIndex
+  );
+  return weekIndex;
+}
 
     function pickWeeklyVideos(items, perCat) {
-      const weekIndex = getWeekIndex();
+      // 1️⃣ 優先使用 weekly-index.json 指定的 15 支影片
+      if (WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) && WEEKLY_INDEX.weeks.length) {
+        const weekIndex = getWeekIndex();
+        const weeksArr = WEEKLY_INDEX.weeks;
+        // 取對應週次（安全起見加上 %）
+        const target = weeksArr[(weekIndex % weeksArr.length + weeksArr.length) % weeksArr.length];
+
+        if (target && Array.isArray(target.videos)) {
+          const allowed = new Set(
+            target.videos.map(v => `${v.category}::${v.slug}`)
+          );
+          const result = [];
+          for (const v of items) {
+            const key = `${v.category}::${v.slug}`;
+            if (allowed.has(key)) result.push(v);
+          }
+          if (result.length) {
+            return result;
+          }
+        }
+      }
+
+      // 2️⃣ 沒有 weekly-index.json 或格式錯誤，就退回舊的「每類固定數量 + 每週輪播」邏輯
+      const weekIndexFallback = getWeekIndex();
       const byCat = {};
       for (const v of items) {
         if (!byCat[v.category]) byCat[v.category] = [];
@@ -881,7 +1010,7 @@
         const total = list.length;
         if (!total) continue;
         const count = Math.min(perCat, total);
-        const start = total ? (weekIndex % total) : 0;
+        const start = total ? (weekIndexFallback % total) : 0;
         for (let i = 0; i < count; i++) {
           const idx = (start + i) % total;
           result.push(list[idx]);
@@ -970,6 +1099,9 @@
           difficulty_level: item.difficulty_level ?? item.level ?? 0,
           duration_sec: item.duration_sec ?? item.duration ?? 0
         }));
+
+        // 先嘗試載入 weekly-index.json（若不存在就忽略，退回預設輪播）
+        await loadWeeklyIndex();
 
         renderGrid();
       } catch (err) {
