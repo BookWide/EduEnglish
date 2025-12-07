@@ -840,14 +840,55 @@ function renderQuiz(cat){
   const ol = $('#quizList');
 
   ol.innerHTML = list.map((q, idx) => {
-    const question = q.question || q.q || '';
+    const questionRaw = q.question || q.q || '';
     const options  = q.options || q.choices || [];
-    const ansLetter = String(q.answer ?? '').trim();
+    const ansRaw  = String(q.answer ?? '').trim();
     const ansEn  = (q.answer_en  || '').trim();
     const ansZh  = (q.answer_zh  || '').trim();
     const ansJa  = (q.answer_ja  || '').trim();
     const explainZh = q.explanation_zh || q.explain_zh || q.explanation || '';
     const letters = ['A','B','C','D','E','F'];
+
+    // 題目：如果沒有提供，依題型給一個預設說明，避免「題目不見」
+    let question = questionRaw;
+    if (!question) {
+      const t = (q.type || '').toLowerCase();
+      if (t === 'vocab' || t === 'word' || t === '單字') {
+        question = '請選出意思最接近的選項。';
+      } else if (t === 'grammar' || t === '文法') {
+        question = '請選出文法或用法正確的一句。';
+      } else if (t === 'reading' || t === '閱讀') {
+        question = '請根據文章內容選出最適合的答案。';
+      } else {
+        question = '請選出最適合的答案。';
+      }
+    }
+
+    // 統一把正確答案轉成 A/B/C/D，兼容「字母 / 數字 / 英文內容」三種格式
+    const normalize = s => String(s || '').trim().toLowerCase();
+    let correctLetter = ansRaw;
+
+    // 1) 如果是數字 1-6，轉成 A-F
+    if (correctLetter && !/^[A-F]$/i.test(correctLetter)) {
+      const num = parseInt(correctLetter, 10);
+      if (!isNaN(num) && num >= 1 && num <= letters.length) {
+        correctLetter = letters[num - 1];
+      }
+    }
+
+    // 2) 如果不是單一字母，再用英文 / 中文 / 日文答案去對應選項文字
+    if (!/^[A-F]$/i.test(correctLetter) && options.length) {
+      const ansTexts = [ansEn, ansZh, ansJa].map(normalize).filter(Boolean);
+      const optIndex = options.findIndex(opt => {
+        const text = (typeof opt === 'string') ? opt : (opt.text || '');
+        return ansTexts.includes(normalize(text));
+      });
+      if (optIndex >= 0) {
+        correctLetter = letters[optIndex];
+      }
+    }
+
+    const finalAnsLetter = /^[A-F]$/i.test(correctLetter) ? correctLetter.toUpperCase() : '';
 
     const ansParts = [];
     if (ansEn) ansParts.push(esc(ansEn));
@@ -880,9 +921,9 @@ function renderQuiz(cat){
           </label>`;
         }).join('')}
       </div>
-      <div class="ans muted" data-ans="${esc(ansLetter)}" style="display:none;margin-top:8px;font-size:13px;color:#e5e7eb;border-top:1px dashed #334155;padding-top:6px;">
+      <div class="ans muted" data-ans="${esc(finalAnsLetter || ansRaw)}" style="display:none;margin-top:8px;font-size:13px;color:#e5e7eb;border-top:1px dashed #334155;padding-top:6px;">
         <div>
-          答案：${esc(ansLetter || '?')}${ansDetail}${ttsHtml}
+          答案：${esc(finalAnsLetter || '?')}${ansDetail}${ttsHtml}
         </div>
         ${explainZh ? `<div style="margin-top:4px;color:#c4d4f7;line-height:1.5;">${esc(explainZh)}</div>` : ''}
       </div>
@@ -930,12 +971,45 @@ function setupQuizButtons(){
     const lis = $$('#quizList > li');
     let s = 0, t = 0;
     lis.forEach(li => {
-      const ans = li.querySelector('.ans')?.dataset.ans || '';
-      const chosen = [...li.querySelectorAll('input[type=radio]')]
-        .find(r => r.checked)?.value || '';
-      if (!ans) return;
+      const ansRaw = (li.querySelector('.ans')?.dataset.ans || '').trim();
+      const radios = [...li.querySelectorAll('input[type=radio]')];
+      const chosenRadio = radios.find(r => r.checked);
+      const chosenVal = (chosenRadio?.value || '').trim();
+      if (!ansRaw) return;
       t++;
-      if (ans.toLowerCase() === chosen.toLowerCase()) s++;
+
+      const letters = ['A','B','C','D','E','F'];
+      const normalize = str => String(str || '').replace(/\s+/g,' ').trim().toLowerCase();
+      let correctLetter = ansRaw;
+
+      // 1) 如果是數字 1–6，轉成 A–F
+      if (!/^[A-F]$/i.test(correctLetter)) {
+        const num = parseInt(correctLetter, 10);
+        if (!isNaN(num) && num >= 1 && num <= letters.length) {
+          correctLetter = letters[num - 1];
+        }
+      }
+
+      // 2) 如果還不是單一英文字母，試著用文字去對應選項內容
+      if (!/^[A-F]$/i.test(correctLetter) && radios.length) {
+        const target = normalize(ansRaw);
+        const idx = radios.findIndex(r => {
+          const label = r.closest('label');
+          if (!label) return false;
+          const text = normalize(label.textContent || '');
+          return target && text.includes(target);
+        });
+        if (idx >= 0) {
+          correctLetter = letters[idx];
+        }
+      }
+
+      let isCorrect = false;
+      if (/^[A-F]$/i.test(correctLetter) && chosenVal) {
+        isCorrect = correctLetter.toLowerCase() === chosenVal.toLowerCase();
+      }
+
+      if (isCorrect) s++;
     });
     $('#quizScore').textContent = `得分：${s} / ${t}`;
 
