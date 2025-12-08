@@ -840,19 +840,64 @@ function renderQuiz(cat){
   const ol = $('#quizList');
 
   ol.innerHTML = list.map((q, idx) => {
-    const question = q.question || q.q || '';
+    const question = q.question || q.q || q.question_en || '';
     const options  = q.options || q.choices || [];
-    const ansLetter = String(q.answer ?? '').trim();
+    const answerRaw = String(q.answer ?? '').trim();
     const ansEn  = (q.answer_en  || '').trim();
     const ansZh  = (q.answer_zh  || '').trim();
     const ansJa  = (q.answer_ja  || '').trim();
     const explainZh = q.explanation_zh || q.explain_zh || q.explanation || '';
     const letters = ['A','B','C','D','E','F'];
 
+    // 依照 answer + options 推導正確選項（字母 + 文字）
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const hasOptions = Array.isArray(options) && options.length > 0;
+    let correctLetter = '';
+    let correctText   = '';
+
+    if (answerRaw){
+      // 1) 直接是 A~F
+      if (/^[A-F]$/i.test(answerRaw)){
+        correctLetter = answerRaw.toUpperCase();
+        const idx = letters.indexOf(correctLetter);
+        if (idx >= 0 && options[idx]){
+          const opt = options[idx];
+          correctText = (typeof opt === 'string') ? opt : (opt.text || '');
+        }
+      } else {
+        // 2) 數字 1~6 → A~F
+        const num = parseInt(answerRaw, 10);
+        if (!Number.isNaN(num) && num >= 1 && num <= letters.length){
+          const idx = num - 1;
+          correctLetter = letters[idx];
+          const opt = options[idx];
+          if (opt) correctText = (typeof opt === 'string') ? opt : (opt.text || '');
+        } else if (hasOptions){
+          // 3) 文字 → 從 options 比對開頭或完整字串
+          const target = norm(answerRaw);
+          const optIndex = options.findIndex(opt => {
+            const text = (typeof opt === 'string') ? opt : (opt.text || '');
+            const t = norm(text);
+            if (!t) return false;
+            return t === target || t.startsWith(target) || t.includes(' ' + target + ' ') || t.endsWith(' ' + target);
+          });
+          if (optIndex >= 0){
+            correctLetter = letters[optIndex] || String.fromCharCode(65 + optIndex);
+            const opt = options[optIndex];
+            correctText = (typeof opt === 'string') ? opt : (opt.text || '');
+          }
+        }
+      }
+    }
+
+    // 答案三語顯示：優先使用 answer_en/zh/ja，若都沒有則退回正確選項文字
     const ansParts = [];
     if (ansEn) ansParts.push(esc(ansEn));
     if (ansZh) ansParts.push(esc(ansZh));
     if (ansJa) ansParts.push(esc(ansJa));
+    if (!ansParts.length && correctText){
+      ansParts.push(esc(correctText));
+    }
     const ansDetail = ansParts.length ? '（' + ansParts.join(' / ') + '）' : '';
 
     const ttsBtns = [];
@@ -880,9 +925,9 @@ function renderQuiz(cat){
           </label>`;
         }).join('')}
       </div>
-      <div class="ans muted" data-ans="${esc(ansLetter)}" style="display:none;margin-top:8px;font-size:13px;color:#e5e7eb;border-top:1px dashed #334155;padding-top:6px;">
+      <div class="ans muted" data-ans="${esc(answerRaw)}" data-ans-letter="${esc(correctLetter)}" style="display:none;margin-top:8px;font-size:13px;color:#e5e7eb;border-top:1px dashed #334155;padding-top:6px;">
         <div>
-          答案：${esc(ansLetter || '?')}${ansDetail}${ttsHtml}
+          答案：${hasOptions ? esc(correctLetter || '?') : ''}${ansDetail ? (hasOptions ? ' ' + ansDetail : ansDetail) : '' }${ttsHtml}
         </div>
         ${explainZh ? `<div style="margin-top:4px;color:#c4d4f7;line-height:1.5;">${esc(explainZh)}</div>` : ''}
       </div>
@@ -930,12 +975,14 @@ function setupQuizButtons(){
     const lis = $$('#quizList > li');
     let s = 0, t = 0;
     lis.forEach(li => {
-      const ans = li.querySelector('.ans')?.dataset.ans || '';
-      const chosen = [...li.querySelectorAll('input[type=radio]')]
-        .find(r => r.checked)?.value || '';
-      if (!ans) return;
+      const ansEl = li.querySelector('.ans');
+      if (!ansEl) return;
+      const letter = (ansEl.dataset.ansLetter || '').trim();
+      const chosen = ([...li.querySelectorAll('input[type=radio]')]
+        .find(r => r.checked)?.value || '').trim();
+      if (!letter || !chosen) return;
       t++;
-      if (ans.toLowerCase() === chosen.toLowerCase()) s++;
+      if (letter.toLowerCase() === chosen.toLowerCase()) s++;
     });
     $('#quizScore').textContent = `得分：${s} / ${t}`;
 
