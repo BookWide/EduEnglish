@@ -1374,14 +1374,109 @@ video.addEventListener('timeupdate',()=>{
   }
 });
 
-/* ==== Browser TTS ==== */
-function speakText(text,lang){
-  if(!text || !('speechSynthesis' in window))return;
-  try{speechSynthesis.cancel();}catch{}
-  const u=new SpeechSynthesisUtterance(String(text));
-  u.lang=lang||'en-US';u.rate=1.0;u.pitch=1.0;u.volume=1.0;
-  speechSynthesis.speak(u);
+/* ==== TTS (iOS-friendly) ==== */
+const TTS_CLOUD_ENDPOINT = window.BOOKWIDE_TTS_ENDPOINT || ""; 
+// 例：window.BOOKWIDE_TTS_ENDPOINT = "https://bookwide.net/api/tts"（你可用 Cloudflare Worker / Supabase Edge Function）
+
+const __ttsAudio = new Audio();
+__ttsAudio.preload = "auto";
+
+function isIOS(){
+  const ua = navigator.userAgent || "";
+  return /iP(hone|ad|od)/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 }
+
+async function cloudTTS(text, lang){
+  if (!TTS_CLOUD_ENDPOINT) return false;
+  try{
+    const r = await fetch(TTS_CLOUD_ENDPOINT, {
+      method: "POST",
+      headers: {"content-type":"application/json"},
+      body: JSON.stringify({
+        text,
+        lang,                 // "ja-JP" / "zh-TW" / "en-US"
+        format: "mp3",
+        cache: true
+      })
+    });
+    if(!r.ok) return false;
+    const j = await r.json();
+    if(j && j.url){
+      __ttsAudio.src = j.url;
+      __ttsAudio.currentTime = 0;
+      await __ttsAudio.play();
+      return true;
+    }
+    if(j && j.audio_base64){
+      const bin = atob(j.audio_base64);
+      const bytes = new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+      const blob = new Blob([bytes], {type:"audio/mpeg"});
+      __ttsAudio.src = URL.createObjectURL(blob);
+      __ttsAudio.currentTime = 0;
+      await __ttsAudio.play();
+      return true;
+    }
+  }catch(e){ /* ignore */ }
+  return false;
+}
+
+function pickVoice(lang){
+  // iOS/Chrome 的 voice 名稱不一致，這裡只做「盡量挑到」的策略
+  try{
+    const vs = speechSynthesis.getVoices();
+    const target = (lang||"").toLowerCase();
+    if(!vs || !vs.length) return null;
+
+    // 先找完全匹配
+    let v = vs.find(x => (x.lang||"").toLowerCase() === target);
+    if(v) return v;
+
+    // 再找同語系（ja / zh / en）
+    const key = target.split("-")[0];
+    v = vs.find(x => (x.lang||"").toLowerCase().startsWith(key));
+    return v || null;
+  }catch(e){ return null; }
+}
+
+async function speakText(text, lang){
+  if(!text) return;
+
+  // ✅ iPhone 日文常見問題：Web Speech 可能沒有 ja voice 或念起來像英文
+  // 解法：iOS + 日文 → 優先走雲端 MP3（若你有設 TTS_CLOUD_ENDPOINT）
+  const target = (lang||"").toLowerCase();
+  const preferCloud = isIOS() && target.startsWith("ja");
+  if(preferCloud){
+    const ok = await cloudTTS(text, lang || "ja-JP");
+    if(ok) return;
+  }
+
+  // 一般情況：先用 browser TTS（快、免錢）
+  try{
+    if (!("speechSynthesis" in window)) throw new Error("no speechSynthesis");
+    speechSynthesis.cancel();
+
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = lang || "en-US";
+    u.rate = 1;
+    u.pitch = 1;
+
+    const v = pickVoice(u.lang);
+    if(v) u.voice = v;
+
+    // 若是 iOS 但沒有對應 voice，也嘗試走雲端（最後備援）
+    if(isIOS() && !v && (target.startsWith("ja") || target.startsWith("zh"))){
+      const ok = await cloudTTS(text, lang || "ja-JP");
+      if(ok) return;
+    }
+
+    speechSynthesis.speak(u);
+  }catch(e){
+    // 最後備援：雲端（若有）
+    await cloudTTS(text, lang || "en-US");
+  }
+}
+
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
 (async function init(){
