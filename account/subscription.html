@@ -263,15 +263,30 @@
       return fmt.format(d);
     };
 
-    const pricePerTopicFromOrder = (p) => {
-      switch (p) {
-        case 'month': return 200;   // 月繳 200 / 主題
-        case 'half':  return 1080;   // 半年 1080 / 主題
-        case 'year':  return 1920;  // 年繳 1920 / 主題
-        default:      return 0;
-      }
+    // ✅ 固定含稅價（圖五基準）
+    const FIXED_GROSS_TWD = {
+      month: 1000,
+      half:  5400,
+      year:  9600
     };
 
+    // ✅ 由「含稅總額」反推未稅/稅額（5%）
+    function splitTaxFromGrossTwd(grossTwd){
+      const gross = Number(grossTwd || 0);
+      const net = Math.round(gross / 1.05);
+      const tax = gross - net;
+      return { net, tax, gross };
+    }
+
+    // ✅ 取得訂單「含稅總額（TWD）」：
+    // - 以 create-order 新規則：orders.subtotal_cents = 含稅總額（分）
+    // - 若舊單缺值，再用固定含稅價補
+    function grossTwdFromOrder(o){
+      const cents = Number(o?.subtotal_cents ?? o?.total_cents ?? 0);
+      if (Number.isFinite(cents) && cents > 0) return Math.round(cents / 100);
+      const p = String(o?.period || 'month');
+      return FIXED_GROSS_TWD[p] ?? 0;
+    }
 
     async function loadSubscriptions(){
       const boxCurrent = document.querySelector('[data-current-sub]');
@@ -338,26 +353,11 @@
             ? activeOrder.items.join(', ')
             : String(activeOrder.items || 'EduEnglish');
 
-          // 金額：先看資料表有沒有 amount_twd / tax_twd，沒有就用 5% 計算
-          let amount = 0;
-          let tax5  = 0;
-          let total = 0;
+          // ✅ 新規則：subtotal_cents = 含稅總額
+          const grossTwd = grossTwdFromOrder(activeOrder);
+          const { net, tax, gross } = splitTaxFromGrossTwd(grossTwd);
 
-          const centsSubtotalA = Number(activeOrder.total_cents ?? activeOrder.subtotal_cents ?? 0);
-          const centsTaxA      = Number(activeOrder.tax_cents ?? 0);
-
-          if (centsSubtotalA > 0 || centsTaxA > 0) {
-            amount = Math.round(centsSubtotalA / 100);
-            tax5   = centsTaxA ? Math.round(centsTaxA / 100) : Math.round(amount * 0.05);
-            total  = amount + tax5;
-          } else {
-            const perTopic = pricePerTopicFromOrder(activeOrder.period || 'month');
-            const topics   = Array.isArray(activeOrder.items) ? activeOrder.items.length : 1;
-            amount = perTopic * topics;
-            tax5   = Math.round(amount * 0.05);
-            total  = amount + tax5;
-          }
-          const ref   = activeOrder.referral_code
+          const ref = activeOrder.referral_code
             ? ` / 推薦碼：${activeOrder.referral_code}`
             : '';
 
@@ -368,8 +368,7 @@
             </div>
             <div>起始日：${fmtDate(startsAt)}　到期日：${fmtDate(expiresAt)}</div>
             <div style="margin-top:4px;">
-              金額：${currency(amount)}　稅額（5%）：${currency(tax5)}　
-              合計：${currency(total)}${ref}
+              金額（含稅）：${currency(gross)}　未稅：${currency(net)}　稅額（5%）：${currency(tax)}${ref}
             </div>
           `;
         }else{
@@ -383,31 +382,14 @@
             ? o.items.join(', ')
             : String(o.items || 'EduEnglish');
 
-          let amount = 0;
-          let tax5   = 0;
-          let total  = 0;
-
-          const centsSubtotal = Number(o.total_cents ?? o.subtotal_cents ?? 0);
-          const centsTax      = Number(o.tax_cents ?? 0);
-
-          if (centsSubtotal > 0 || centsTax > 0) {
-            amount = Math.round(centsSubtotal / 100);
-            tax5   = centsTax ? Math.round(centsTax / 100) : Math.round(amount * 0.05);
-            total  = amount + tax5;
-          } else {
-            const perTopic = pricePerTopicFromOrder(o.period || 'month');
-            const topics   = Array.isArray(o.items) ? o.items.length : 1;
-            amount = perTopic * topics;
-            tax5   = Math.round(amount * 0.05);
-            total  = amount + tax5;
-          }
+          const grossTwd = grossTwdFromOrder(o);
 
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td>${fmtDate(o.paid_at || o.created_at)}</td>
             <td>${list}</td>
             <td>${o.period || 'month'}</td>
-            <td>${currency(total)}</td>
+            <td>${currency(grossTwd)}</td>
             <td class="${o.status === 'paid' ? 'status-ok' : (o.status ? 'status-fail' : '')}">
               ${o.status === 'paid' ? '已付款' : (o.status || '—')}
             </td>
