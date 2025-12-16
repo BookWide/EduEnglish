@@ -14,11 +14,11 @@
   const COMPANY = {
     name: "BookWide",
     legal: "BookWide",
-    phone: "+886-2-0000-0000",
+    phone: "+886-4-24623591",
     serviceHours: "週一～週五 14:00–22:00",
     email: "support@bookwide.net",
-    address: "Taipei City, Taiwan",
-    vat: "統一編號：（待填）",
+    address: "Taichung City, Taiwan",
+    vat: "統一編號：53270306",
   };
 
   const icon = {
