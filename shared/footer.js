@@ -1,156 +1,200 @@
-/* BookWide Shared Footer v1 */
-(function(){
-  const el = document.getElementById('bw-footer');
-  if(!el) return;
+/* ========== BookWide Global Footer (Dark Theme) ========== */
 
-  // 你之後如果要全站換內容，只要改這裡
-  const links = {
-    about: [
-      { t:'關於我們', href:'/about.html' },
-      { t:'新聞中心', href:'/news-center.html' },
-      { t:'CEFR 分級', href:'/cefr.html' },
-      { t:'教學中心', href:'/teaching.html' },
-      { t:'學習專區', href:'/learning.html' },
-    ],
-    channels: [
-      { t:'Story', href:'/index.html?cat=story' },
-      { t:'Music', href:'/index.html?cat=music' },
-      { t:'Movie', href:'/index.html?cat=movie' },
-      { t:'News', href:'/index.html?cat=news' },
-      { t:'Pro / Grammar', href:'/index.html?cat=pro' },
-    ],
-    services: [
-      { t:'企業培訓', href:'/enterprise.html' },
-      { t:'常見問題', href:'/faq.html' },
-      { t:'合作夥伴', href:'/partners.html' },
-      { t:'菁英榜單', href:'/leaderboard.html' },
-    ],
-    policy: [
-      { t:'隱私權政策', href:'/privacy.html' },
-      { t:'服務條款', href:'/terms.html' },
-      { t:'著作權聲明', href:'/copyright.html' },
-      { t:'網路安全提醒', href:'/security.html' },
-    ],
-    social: [
-      // 先留空也可以，之後有正式連結再換
-      { k:'fb',  title:'Facebook', href:'#', label:'f' },
-      { k:'ig',  title:'Instagram', href:'#', label:'◎' },
-      { k:'yt',  title:'YouTube', href:'#', label:'▶' },
-      { k:'line',title:'LINE', href:'#', label:'LINE' },
-      { k:'tt',  title:'TikTok', href:'#', label:'♪' },
-    ],
-  };
+:root{
+  --bw-footer-bg: #0b1220;        /* 主黑底 */
+  --bw-footer-bg-2: #060b14;      /* 更深黑（底部） */
+  --bw-footer-text: #e5e7eb;      /* 主文字 */
+  --bw-footer-muted: #9ca3af;     /* 次要文字 */
+  --bw-footer-border: #1f2937;    /* 分隔線 */
+  --bw-footer-accent: #4f8cff;    /* BookWide 藍 */
+}
 
-  const year = new Date().getFullYear();
+#bw-footer{
+  margin-top: 64px;
+}
 
-  el.innerHTML = `
-    <div class="bw-footer-wrap">
-      <div class="bw-footer-grid">
+/* 整體 */
+.bw-footer{
+  background: linear-gradient(
+    180deg,
+    var(--bw-footer-bg) 0%,
+    #080f1d 100%
+  );
+  color: var(--bw-footer-text);
+  font-size: 14px;
+}
 
-        <div class="bw-col">
-          <div class="bw-brand">
-            <div class="bw-logo" aria-hidden="true"></div>
-            <div>
-              <h3>BookWide</h3>
-              <p>
-                ENGLISH LEARNING・影片<br/>
-                字幕・測驗・單字・AI 互動<br/>
-                價格、到期提醒與訂閱狀態以系統最新訂單為準。
-              </p>
-              <div class="bw-support">
-                若需協助，請來信：<a href="mailto:support@bookwide.net">support@bookwide.net</a>
-              </div>
-            </div>
-          </div>
-        </div>
+/* 內層寬度 */
+.bw-footer__inner{
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 48px 24px 36px;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 48px;
+}
 
-        <div class="bw-col">
-          <h4>關於我們</h4>
-          ${links.about.map(x=>`<a href="${x.href}">${x.t}</a>`).join('')}
-        </div>
+/* ================= 左側品牌 ================= */
 
-        <div class="bw-col">
-          <h4>更多頻道</h4>
-          ${links.channels.map(x=>`<a href="${x.href}">${x.t}</a>`).join('')}
-        </div>
+.bw-footer__brand{
+  display: flex;
+}
 
-        <div class="bw-col">
-          <h4>其他服務</h4>
-          ${links.services.map(x=>`<a href="${x.href}">${x.t}</a>`).join('')}
-        </div>
+.bw-footer__logoBox{
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
 
-        <div class="bw-col">
-          <h4>政策條款</h4>
-          ${links.policy.map(x=>`<a href="${x.href}">${x.t}</a>`).join('')}
-        </div>
+.bw-footer__tiny{
+  font-size: 12px;
+  color: var(--bw-footer-muted);
+  letter-spacing: .08em;
+}
 
-        <div class="bw-col">
-          <h4>聯絡我們</h4>
+.bw-footer__logo{
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: .02em;
+  color: #ffffff;
+}
 
-          <div class="bw-contact">
-            <div class="bw-contact-item">
-              <span class="bw-ico" aria-hidden="true">☎</span>
-              <div>+886-4-24623591</div>
-            </div>
-            <div class="bw-contact-item">
-              <span class="bw-ico" aria-hidden="true">✉</span>
-              <div><a href="mailto:support@bookwide.net" style="color:var(--bw-footer-muted);text-decoration:none;">support@bookwide.net</a></div>
-            </div>
-            <div class="bw-contact-item">
-              <span class="bw-ico" aria-hidden="true">⌖</span>
-              <div>Taichung City, Taiwan</div>
-            </div>
-            <div class="bw-contact-item">
-              <span class="bw-ico" aria-hidden="true">⏱</span>
-              <div>週一～週五 14:00–22:00</div>
-            </div>
+/* 社群 icon */
+.bw-footer__social{
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+}
 
-            <div class="bw-social" aria-label="social links">
-              ${links.social.map(s=>`
-                <a href="${s.href}" title="${s.title}" aria-label="${s.title}">
-                  <span style="font-size:${s.k==='line' ? '11px':'14px'};font-weight:${s.k==='line' ? '700':'600'}">${s.label}</span>
-                </a>
-              `).join('')}
-            </div>
+.bw-social{
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: #111827;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--bw-footer-muted);
+  transition: all .2s ease;
+}
 
-            <div class="bw-badges">
-              <div class="bw-badge">
-                <div class="left">
-                  <div class="mark"></div>
-                  <div class="txt">
-                    <b>App Store</b>
-                    <span>Download on the App Store</span>
-                  </div>
-                </div>
-                <div class="tag">即將上架</div>
-              </div>
+.bw-social:hover{
+  background: var(--bw-footer-accent);
+  color: #fff;
+  transform: translateY(-2px);
+}
 
-              <div class="bw-badge">
-                <div class="left">
-                  <div class="mark">▶</div>
-                  <div class="txt">
-                    <b>Google Play</b>
-                    <span>Get it on Google Play</span>
-                  </div>
-                </div>
-                <div class="tag">即將上架</div>
-              </div>
-            </div>
+/* ================= 右側連結 ================= */
 
-          </div>
-        </div>
+.bw-footer__cols{
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
 
-      </div>
+/* 上排：BookWide + 快捷 */
+.bw-footer__row--top{
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 28px;
+}
 
-      <div class="bw-footer-bottom">
-        <div>© ${year} BookWide ・建議使用最新 Chrome / Edge / Safari</div>
-        <div>
-          <a href="/sitemap.html">網站地圖</a>
-          <span style="opacity:.6;">|</span>
-          <a href="/privacy.html">Privacy policy</a>
-        </div>
-      </div>
-    </div>
-  `;
-})();
+.bw-footer__topTitle{
+  font-size: 18px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.bw-footer__topLinks a{
+  margin-right: 18px;
+  color: var(--bw-footer-text);
+  text-decoration: none;
+}
+
+.bw-footer__topLinks a:hover{
+  color: var(--bw-footer-accent);
+}
+
+/* 中段 grid */
+.bw-footer__grid{
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0,1fr));
+  gap: 28px;
+}
+
+.bw-col--wide{
+  grid-column: span 1;
+}
+
+.bw-col__title{
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 10px;
+  color: #fff;
+}
+
+.bw-col__link{
+  display: block;
+  padding: 4px 0;
+  color: var(--bw-footer-muted);
+  text-decoration: none;
+  line-height: 1.6;
+}
+
+.bw-col__link:hover{
+  color: var(--bw-footer-accent);
+}
+
+/* 外連箭頭 */
+.bw-ext{
+  margin-left: 4px;
+  font-size: 12px;
+  opacity: .8;
+}
+
+/* ================= 底部公司資訊 ================= */
+
+.bw-footer__bottom{
+  background: var(--bw-footer-bg-2);
+  border-top: 1px solid var(--bw-footer-border);
+  padding: 18px 16px;
+  text-align: center;
+}
+
+.bw-footer__bottomLine{
+  font-size: 12px;
+  color: var(--bw-footer-muted);
+  line-height: 1.6;
+}
+
+.bw-footer__bottom a{
+  color: var(--bw-footer-text);
+}
+
+.bw-footer__bottom a:hover{
+  color: var(--bw-footer-accent);
+}
+
+/* ================= RWD ================= */
+
+@media (max-width: 900px){
+  .bw-footer__inner{
+    grid-template-columns: 1fr;
+    gap: 36px;
+  }
+  .bw-footer__grid{
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 520px){
+  .bw-footer__grid{
+    grid-template-columns: 1fr;
+  }
+  .bw-footer__topLinks a{
+    margin-right: 12px;
+  }
+}
+
 
