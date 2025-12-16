@@ -124,7 +124,7 @@
         <!-- 底部公司資訊（依圖） -->
         <div class="bw-footer__bottom">
           <div class="bw-footer__bottomLine">
-            聯鎖企業有限公司｜統一編號：53270306｜Taichung City, Taiwan
+            聯鑽企業有限公司｜統一編號：53270306｜Taichung City, Taiwan
           </div>
           <div class="bw-footer__bottomLine">
             BookWide Enterprise Co., Ltd.　Tel: +886 4 24623591　e-mail : <a href="mailto:support@bookwide.net">support@bookwide.net</a>
