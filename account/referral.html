@@ -7,7 +7,7 @@
   <style>
     :root{
       --bg:#f4f6fb; --card:#fff; --ink:#0f172a; --muted:#64748b; --line:#e5e7eb;
-      --brand:#2563eb; --brand2:#1d4ed8; --soft:#eff6ff;
+      --brand:#2563eb; --soft:#eff6ff;
       --radius:18px; --shadow:0 10px 30px rgba(15,23,42,.08);
     }
     *{box-sizing:border-box}
@@ -114,7 +114,7 @@
 
         <div class="hint" id="hint">
           這頁會先顯示你的<b>推薦碼</b>與<b>推薦連結</b>。<br>
-          若「成功推薦 / 累積金額」顯示為 0，通常是因為<b>尚無他人成功付款</b>，或是後端尚未寫入 orders 的分潤欄位。
+          之後「成功推薦 / 累積金額」會由後端彙總回傳（避免 RLS 無法讀取他人訂單）。
         </div>
 
         <div class="rules">
@@ -137,8 +137,8 @@
         </ol>
         <hr style="border:none;border-top:1px solid var(--line);margin:14px 0">
         <div class="small">
-          若你要「折扣/分潤」精準算到訂單：<br>
-          建議在付費成功（paid）時，由後端寫入：<code>orders.discount_amount</code>、<code>orders.commission_amount</code>、<code>orders.ref_code</code>。
+          此頁統計來源：Edge Function <code>referral-summary</code>（service role）<br>
+          訂單需寫入：<code>orders.status='paid'</code>、<code>orders.referral_code</code>、<code>orders.commission_cents</code>
         </div>
       </div>
     </div>
@@ -150,22 +150,24 @@
 
   <script src="https://unpkg.com/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
   <script>
-    // ✅ 你的 Supabase 設定
+    // ✅ Supabase 設定
     const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
     const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
     const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-    // ✅ 你的規則
-    const DISCOUNT_RATE = 0.10;   // 10%
-    const COMMISSION_RATE = 0.10; // 10%
-    const SELF_REF_DISCOUNT = false; // 自推：不給折扣
+    // ✅ 規則（僅顯示用）
+    const DISCOUNT_RATE = 0.10;
+    const COMMISSION_RATE = 0.10;
 
-    const elCode = document.getElementById('refCode');
-    const elLink = document.getElementById('refLink');
-    const elOk = document.getElementById('okCount');
-    const elSum = document.getElementById('sumAmt');
+    // ✅ Edge Function：統計彙總（避開 RLS）
+    const SUMMARY_FN_URL = "https://jeajrwpmrgczimmrflxo.functions.supabase.co/referral-summary";
+
+    const elCode  = document.getElementById('refCode');
+    const elLink  = document.getElementById('refLink');
+    const elOk    = document.getElementById('okCount');
+    const elSum   = document.getElementById('sumAmt');
     const elState = document.getElementById('loginState');
-    const elHint = document.getElementById('hint');
+    const elHint  = document.getElementById('hint');
 
     function toast(msg){
       const t = document.getElementById('toast');
@@ -178,7 +180,6 @@
       try{
         await navigator.clipboard.writeText(text);
       }catch(e){
-        // fallback
         const ta = document.createElement('textarea');
         ta.value = text;
         ta.style.position='fixed'; ta.style.left='-9999px';
@@ -191,11 +192,10 @@
     }
 
     function makeRefLink(code){
-      // pricing 在根目錄
       return `${location.origin}/pricing.html?ref=${encodeURIComponent(code)}`;
     }
 
-    // 產生一個「穩定」的 5 位數（只用於 profiles 沒有 ref_code 欄位、或資料還沒填時）
+    // 產生穩定 5 位數（profiles 沒填 ref_code 時 fallback）
     function stable5FromEmail(email){
       let h = 2166136261;
       for (let i=0;i<email.length;i++){
@@ -211,13 +211,13 @@
       return session || null;
     }
 
-    // ✅ 嘗試從 profiles 讀出推薦碼（兼容 ref_code / referral_code）
+    // 嘗試從 profiles 讀 ref_code（你的 referral.html 既有邏輯保留）
     async function getMyRefCode(userId){
-      // 1) try ref_code
+      // 1) ref_code
       try{
         const { data, error } = await sb
           .from('profiles')
-          .select('email, ref_code, is_admin, is_paused')
+          .select('email, ref_code')
           .eq('id', userId)
           .single();
         if (!error && data){
@@ -225,11 +225,11 @@
         }
       }catch(_e){}
 
-      // 2) try referral_code
+      // 2) referral_code
       try{
         const { data, error } = await sb
           .from('profiles')
-          .select('email, referral_code, is_admin, is_paused')
+          .select('email, referral_code')
           .eq('id', userId)
           .single();
         if (!error && data){
@@ -237,7 +237,7 @@
         }
       }catch(_e){}
 
-      // 3) minimal
+      // 3) email only
       try{
         const { data, error } = await sb
           .from('profiles')
@@ -252,7 +252,6 @@
       return { email: '', code: '', field: '' };
     }
 
-    // ✅ 如果 profiles 有欄位且為空：嘗試回寫（不成功也不阻塞 UI）
     async function trySaveRefCode(userId, field, code){
       if (!field) return;
       try{
@@ -261,38 +260,41 @@
       }catch(_e){}
     }
 
-    // ✅ 讀取統計（盡可能做；若 RLS 擋住，就只顯示 0 並提示）
-    async function loadStats(myEmail, myCode){
-      // 只有在有推薦碼時才查
+    // ✅ 用 Edge Function 讀彙總（成功推薦 / 累積分潤）
+    async function loadStatsFromFunction(session, myCode){
       if (!myCode) return;
 
-      // 注意：如果 orders RLS 不允許看「被推薦人的訂單」，這裡會被擋
-      // 建議做 Edge Function 用 service role 算 summary。
+      elHint.innerHTML = `正在讀取統計…`;
+
       try{
-        const { data, error } = await sb
-          .from('orders')
-          .select('id,email,ref_code,pay_status,commission_amount')
-          .eq('ref_code', myCode)
-          .eq('pay_status', 'paid')
-          .limit(500);
+        const res = await fetch(SUMMARY_FN_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_ANON,
+            "Authorization": `Bearer ${session.access_token}`,
+          },
+          body: JSON.stringify({ ref_code: myCode })
+        });
 
-        if (error) throw error;
+        const out = await res.json().catch(()=>null);
+        if (!res.ok || !out?.ok) throw new Error(out?.error || out?.message || `HTTP ${res.status}`);
 
-        // 排除自推
-        const rows = (data||[]).filter(r => (r.email||'') !== myEmail);
-        const okCount = rows.length;
-        const sum = rows.reduce((acc,r)=> acc + (Number(r.commission_amount)||0), 0);
+        elOk.textContent = String(out.ok_count || 0);
+        elSum.textContent = String(out.sum_commission_twd || 0);
 
-        elOk.textContent = String(okCount);
-        elSum.textContent = String(Math.round(sum));
-
-        if (okCount===0){
+        const ok = Number(out.ok_count || 0);
+        if (ok === 0){
           elHint.innerHTML = `目前還沒有「他人付款成功」的推薦紀錄。<br><b>你的推薦碼與連結已可使用</b>：分享給朋友，完成付款後這裡就會累積。`;
         }else{
-          elHint.innerHTML = `已偵測到 <b>${okCount}</b> 筆成功推薦付款。<br>累積分潤以 orders.commission_amount 為準。`;
+          elHint.innerHTML = `已偵測到 <b>${ok}</b> 位成功推薦付款。<br>累積分潤以 <code>orders.commission_cents</code> 彙總為準。`;
         }
       }catch(e){
-        elHint.innerHTML = `你已可正常分享推薦碼/連結。<br><b>但目前無法讀取統計</b>（常見原因：orders 的 RLS 不允許讀取他人訂單，或 orders 欄位尚未建立）。<br><span class="muted">建議用 Edge Function（service role）計算 summary，再回傳到這頁。</span>`;
+        elOk.textContent = "0";
+        elSum.textContent = "0";
+        elHint.innerHTML =
+          `你已可正常分享推薦碼/連結。<br><b>但目前無法讀取統計</b>：${String(e.message||e)}<br>` +
+          `<span class="muted">請確認 referral-summary 已部署，且 orders 有寫入 status='paid' / referral_code / commission_cents。</span>`;
       }
     }
 
@@ -311,19 +313,18 @@
       const me = await getMyRefCode(session.user.id);
       const email = me.email || (session.user.email||'');
 
-      // ✅ 若資料庫沒填推薦碼，就用穩定演算法生成並嘗試回寫
+      // 若 profiles 沒填推薦碼 → 用穩定演算法生成並嘗試回寫
       let code = (me.code||'').trim();
       if (!code){
         code = stable5FromEmail(email || session.user.id);
-        // 嘗試回寫到 profiles（欄位存在的情況才會成功）
         await trySaveRefCode(session.user.id, me.field, code);
       }
 
       elCode.textContent = code;
       elLink.value = makeRefLink(code);
 
-      // 統計
-      await loadStats(email, code);
+      // ✅ 統計：走 Edge Function（service role）
+      await loadStatsFromFunction(session, code);
     }
 
     document.getElementById('copyLink').addEventListener('click', ()=>{
@@ -344,7 +345,7 @@
         '1) 先按「複製連結」\n' +
         '2) 貼給朋友（LINE/WeChat/Email 都可）\n' +
         '3) 對方開啟 pricing 後會自動帶入推薦碼\n' +
-        '4) 付款成功後：對方享 10% 折扣，你累積 10% 分潤\n\n' +
+        `4) 付款成功後：對方享 ${(DISCOUNT_RATE*100).toFixed(0)}% 折扣，你累積 ${(COMMISSION_RATE*100).toFixed(0)}% 分潤\n\n` +
         '自推：不給折扣，也不計分潤。'
       );
     });
@@ -353,6 +354,8 @@
   </script>
 </body>
 </html>
+
+
 
 
 
