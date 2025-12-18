@@ -1521,21 +1521,42 @@ async function speakText(text, lang){
         const todayISO = new Date();
         todayISO.setHours(0, 0, 0, 0);
 
-        const topic = (['story','music','movie','news','pro'].includes(cat) ? cat : null);
-// ✅ 唯一真相：SQL RPC（public.has_active_subscription）
-const { data: ok, error: rpcErr } = await playerSupa.rpc('has_active_subscription', { p_topic: topic });
-if (rpcErr) throw rpcErr;
+        const { data, error } = await playerSupa
+          .from('orders')
+          .select('expire_at, items, buyer_id, user_id, status')
+          .eq('status', 'paid')
+          .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+          // JP 類別視為與 Grammar / PRO 相同訂閱主題，因此實際用 pro 來查訂單
+          .contains('items', [cat === 'jp' ? 'pro' : cat])
+          .order('expire_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
 
-if (ok) {
-  // 只要 RPC 回 true，就代表 DB 裡有「已付費且未到期」的訂單
-  validUntil = new Date('2999-12-31T00:00:00.000Z');
-  console.log('[SUB] active via RPC', { topic });
-} else {
-  validUntil = new Date('2000-01-01T00:00:00.000Z'); // 讓後續判斷視為過期
-  console.warn('[SUB] no active subscription via RPC', { topic });
-}
+        if (!error && data && data.expire_at) {
+          validUntil = new Date(data.expire_at);
+        }
+        console.log('[BW-player] order expire_at raw =', data && data.expire_at, 'parsed =', validUntil);
+      } else {
+        console.warn('[BW-player] playerSupa not defined for subscription check');
+      }
+    } catch (e) {
+      console.error('[BW-player] check subscription error', e);
+    }
 
-// 訂閱已過期
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // 沒訂閱（沒有任何有效訂單）也視為不通過，導回 pricing
+    if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
+      const next = location.pathname + location.search;
+      const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+      url.searchParams.set('denied', 'noactive');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
+    }
+
+    // 訂閱已過期
     if (validUntil.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1864,37 +1885,6 @@ async function loadProOutline(){
 
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
