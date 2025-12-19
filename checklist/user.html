@@ -225,10 +225,9 @@
     <h1>BookWide Admin｜使用者清單</h1>
     <p class="sub">查看所有使用者登入紀錄、在線狀態與訂閱期限。</p>
 
+    <!-- 只保留「使用者清單」：其它分頁先拿掉，避免畫面干擾 -->
     <div class="tabs">
       <a class="tab active" href="user.html">使用者清單</a>
-      <a class="tab" href="authorize.html">授權 / 暫停管理員</a>
-      <a class="tab" href="upload.html">MP4 上傳</a>
     </div>
 
     <div class="card">
@@ -240,7 +239,7 @@
       </div>
 
       <div class="meta">
-        資料表：<b>public.profiles + public.orders</b>．台灣時區顯示．10 分鐘內視為「在線」。
+        資料表：<b>public.profiles + public.orders</b>．台灣時區顯示．10 分鐘內視為「使用中」。
       </div>
 
       <div style="overflow-x:auto;">
@@ -265,9 +264,7 @@
     </div>
   </div>
 
-  <!-- 下面這段就是你剛貼給我的 script，完整放回來即可 -->
   <script type="module">
-    // 等 supa.js 準備好
     const ready = () => new Promise(r=>{
       if (window.BW && window.BW.supa) return r();
       const t=setInterval(()=>{
@@ -276,29 +273,26 @@
     });
 
     await ready();
-    await BW.requireAdmin();      // 只允許 admin 進入
-    BW.startHeartbeat(2);         // 2 分鐘心跳一次（更新 last_seen_at）
+    await BW.requireAdmin();
+    BW.startHeartbeat(2);
 
     const supa = BW.supa;
     const $  = (q,root=document)=>root.querySelector(q);
     const fmtTW = ts => !ts ? '' :
       new Date(ts).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false});
 
-    // 顯示目前管理員 email
     try{
       const { data:{user} } = await supa.auth.getUser();
       if(user?.email) $('#adminEmail').textContent = user.email;
     }catch(_){}
 
     const pillOnline = online =>
-      `<span class="pill ${online?'online':'offline'}">${online?'在線':'離線'}</span>`;
+      `<span class="pill ${online?'online':'offline'}">${online?'使用中':'離線'}</span>`;
 
-    // 先用 IN(...) 抓全部，再對沒抓到的 user 個別補查 1 筆最新訂單
     async function buildOrdersMap(profiles){
       const map = {};
       const ids = profiles.map(p=>p.id).filter(Boolean);
 
-      // 1) 一次性 .in 查詢
       if(ids.length){
         try{
           const oRes = await supa
@@ -309,7 +303,7 @@
 
           if(!oRes.error && oRes.data){
             for(const o of oRes.data){
-              if(!map[o.buyer_id]) map[o.buyer_id] = o; // 第一筆就是 expire_at 最大
+              if(!map[o.buyer_id]) map[o.buyer_id] = o;
             }
           }
         }catch(e){
@@ -317,11 +311,7 @@
         }
       }
 
-      // 2) 對仍然沒有訂單的 user，再逐一補查 1 筆
-      const missing = profiles
-        .map(p=>p.id)
-        .filter(id => id && !map[id]);
-
+      const missing = profiles.map(p=>p.id).filter(id => id && !map[id]);
       for(const id of missing){
         try{
           const r = await supa
@@ -330,15 +320,11 @@
             .eq('buyer_id', id)
             .order('expire_at',{ascending:false})
             .limit(1);
-
-          if(!r.error && r.data && r.data.length){
-            map[id] = r.data[0];
-          }
+          if(!r.error && r.data && r.data.length) map[id] = r.data[0];
         }catch(e){
           console.warn('orders 單筆查詢錯誤', e);
         }
       }
-
       return map;
     }
 
@@ -347,100 +333,97 @@
       tbody.innerHTML = '<tr><td class="hint" colspan="8">載入中…</td></tr>';
 
       try{
-        // 1) profiles：帶出 expires_at，必要時當備用
         const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
-        const r = await supa
-          .from('profiles')
-          .select(cols)
-          .order('email',{ascending:true});
+        const r = await supa.from('profiles').select(cols);
 
         if(r.error){
-          tbody.innerHTML =
-            `<tr><td class="hint" colspan="8">讀取失敗：${r.error.message}</td></tr>`;
+          tbody.innerHTML = `<tr><td class="hint" colspan="8">讀取失敗：${r.error.message}</td></tr>`;
           return;
         }
         const profiles = r.data || [];
         if(!profiles.length){
-          tbody.innerHTML =
-            '<tr><td class="hint" colspan="8">目前沒有任何使用者</td></tr>';
+          tbody.innerHTML = '<tr><td class="hint" colspan="8">目前沒有任何使用者</td></tr>';
           return;
         }
 
-        // 2) 建立「每個 user 最新一筆訂單」的 map
         const latestByUser = await buildOrdersMap(profiles);
 
-        // 3) 搜尋（email / display_name）
         const q = ($('#q').value||'').trim().toLowerCase();
-        const rows = profiles.filter(x=>{
+        let rows = profiles.filter(x=>{
           if(!q) return true;
           return (x.email||'').toLowerCase().includes(q)
               || (x.display_name||'').toLowerCase().includes(q);
         });
 
         if(!rows.length){
-          tbody.innerHTML =
-            '<tr><td class="hint" colspan="8">沒有符合的資料</td></tr>';
+          tbody.innerHTML = '<tr><td class="hint" colspan="8">沒有符合的資料</td></tr>';
           return;
         }
 
         const now = new Date();
 
-        tbody.innerHTML = rows.map((x,idx)=>{
-          // 在線判斷：last_seen_at 10 分鐘內，或 last_sign_in_at 30 分鐘內
-          const seenOnline =
-            BW.isOnlineWithin(x.last_seen_at, 10);
+        rows = rows.map(x=>{
+          const seenOnline = BW.isOnlineWithin(x.last_seen_at, 10);
           let loginOnline = false;
           if(!seenOnline && x.last_sign_in_at){
             const lastLogin = new Date(x.last_sign_in_at);
             if(!isNaN(lastLogin)){
               const diffMs = now - lastLogin;
-              if(diffMs >= 0 && diffMs <= 30*60*1000){
-                loginOnline = true;
-              }
+              if(diffMs >= 0 && diffMs <= 30*60*1000) loginOnline = true;
             }
           }
           const online = seenOnline || loginOnline;
+          return { ...x, __online: online };
+        });
 
+        // 排序：管理員 → 使用中 → 最近活動 → Email
+        rows.sort((a,b)=>{
+          const aAdmin = a.is_admin ? 1 : 0, bAdmin = b.is_admin ? 1 : 0;
+          if(aAdmin !== bAdmin) return bAdmin - aAdmin;
+
+          const aOn = a.__online ? 1 : 0, bOn = b.__online ? 1 : 0;
+          if(aOn !== bOn) return bOn - aOn;
+
+          const aTs = new Date(a.last_seen_at || a.last_sign_in_at || 0).getTime() || 0;
+          const bTs = new Date(b.last_seen_at || b.last_sign_in_at || 0).getTime() || 0;
+          if(aTs !== bTs) return bTs - aTs;
+
+          return String(a.email||'').localeCompare(String(b.email||''));
+        });
+
+        tbody.innerHTML = rows.map((x,idx)=>{
+          const online = !!x.__online;
           const ord = latestByUser[x.id] || null;
 
           let expireText = '—';
           let statusHtml = '<span class="pill warn">未訂閱</span>';
 
-          // 4) 優先用 orders.expire_at
           if(ord && ord.expire_at){
             const exp   = new Date(ord.expire_at);
             const start = ord.created_at ? new Date(ord.created_at) : null;
 
-            const startStr =
-              (start && !isNaN(start)) ? fmtTW(start.toISOString()) : '—';
-            const endStr =
-              (!isNaN(exp)) ? fmtTW(exp.toISOString()) : '—';
+            const startStr = (start && !isNaN(start)) ? fmtTW(start.toISOString()) : '—';
+            const endStr   = (!isNaN(exp)) ? fmtTW(exp.toISOString()) : '—';
 
             expireText = endStr;
 
             if(!isNaN(exp)){
               if(exp > now){
-                statusHtml =
-                  `<span class="pill ok">有效（期間：${startStr} → ${endStr}）</span>`;
+                statusHtml = `<span class="pill ok">有效（期間：${startStr} → ${endStr}）</span>`;
               }else{
-                statusHtml =
-                  `<span class="pill warn">已到期（${endStr}）</span>`;
+                statusHtml = `<span class="pill warn">已到期（${endStr}）</span>`;
               }
             }
-          }
-          // 5) 如果 orders 查不到，最後退回 profiles.expires_at
-          else if(x.expires_at){
+          }else if(x.expires_at){
             const exp = new Date(x.expires_at);
             const endStr = !isNaN(exp) ? fmtTW(exp.toISOString()) : '—';
             expireText = endStr;
 
             if(!isNaN(exp)){
               if(exp > now){
-                statusHtml =
-                  `<span class="pill ok">有效（profiles.expires_at）</span>`;
+                statusHtml = `<span class="pill ok">有效（profiles.expires_at）</span>`;
               }else{
-                statusHtml =
-                  `<span class="pill warn">已到期（profiles：${endStr}）</span>`;
+                statusHtml = `<span class="pill warn">已到期（profiles：${endStr}）</span>`;
               }
             }
           }
@@ -458,17 +441,23 @@
             </tr>`;
         }).join('');
       }catch(e){
-        tbody.innerHTML =
-          `<tr><td class="hint" colspan="8">讀取失敗：${e.message||e}</td></tr>`;
+        tbody.innerHTML = `<tr><td class="hint" colspan="8">讀取失敗：${e.message||e}</td></tr>`;
       }
     }
 
     $('#btnRefresh').addEventListener('click', loadProfiles);
-    $('#q').addEventListener('input', loadProfiles);
+
+    // debounce：避免每打字就 hit DB
+    let t=null;
+    $('#q').addEventListener('input', ()=>{
+      clearTimeout(t);
+      t=setTimeout(loadProfiles, 250);
+    });
 
     loadProfiles();
   </script>
 </body>
 </html>
+
 
 
