@@ -177,7 +177,7 @@
           </div>
 
           <div class="row" style="justify-content:space-between">
-            <a id="forgot" href="#" style="font-size:13px">忘記密碼？</a>
+            <a id="forgot" href="#" style="font-size:13px">忘記密碼？</a><span style="display:inline-block;width:10px"></span><a id="resend" href="#" style="font-size:13px">重寄驗證信</a>
             <a id="openNext" href="#" style="font-size:13px">目前導回：<span id="nextLabel">/</span></a>
           </div>
 
@@ -329,7 +329,24 @@
     }
   }
 
-  async function signInWithEmail(){
+  
+  async function signInWithLine(){
+    if(!supabaseClient) return;
+    hideMsg();
+    const btn = $('btnLine');
+    if(btn) btn.disabled = true;
+    try{
+      await supabaseClient.auth.signInWithOAuth({
+        provider: 'line',
+        options: { redirectTo: location.origin + '/login.html' }
+      });
+    }catch(err){
+      console.error(err);
+      showMsg('LINE 登入失敗：' + (err?.message || err) + '（請確認 Supabase 已啟用 LINE Provider，並設定 Redirect URL）', 'err');
+      if(btn) btn.disabled = false;
+    }
+  }
+async function signInWithEmail(){
     if(!supabaseClient) return;
     hideMsg();
     const email = $('email').value.trim();
@@ -364,10 +381,20 @@
         password,
         options: { emailRedirectTo: location.origin + '/login.html' }
       });
-      if(error) throw error;
 
+      if(error){
+        const msg = String(error.message || error);
+        // 常見：已註冊（或已存在但尚未驗證）
+        if(/already registered/i.test(msg) || /User already registered/i.test(msg) || error.status === 422){
+          showMsg('此 Email 已註冊。請改用「登入」或點「忘記密碼」。若未收到驗證信，可點「重寄驗證信」。', 'err');
+          return;
+        }
+        throw error;
+      }
+
+      // 需要信箱驗證時：data.session 會是 null
       if(data?.user && !data?.session){
-        showMsg('註冊成功！請到信箱點驗證連結後，再回來登入。', 'ok');
+        showMsg('註冊成功！請到信箱點驗證連結後，再回來登入。若沒收到，請先看垃圾郵件，或點「重寄驗證信」。', 'ok');
       }else{
         showMsg('註冊成功，正在導回…', 'ok');
         location.replace(getNextUrl());
@@ -381,6 +408,7 @@
   }
 
   $('btnGoogle').addEventListener('click', signInWithGoogle);
+  $('btnLine')?.addEventListener('click', signInWithLine);
   $('btnLogin').addEventListener('click', signInWithEmail);
   $('btnSignup').addEventListener('click', signUpWithEmail);
 
@@ -397,6 +425,27 @@
       showMsg('寄送失敗：' + (err?.message || err), 'err');
     }
   });
+  $('resend')?.addEventListener('click', async (e)=>{
+    e.preventDefault();
+    if(!supabaseClient) return;
+    hideMsg();
+    const email = $('email').value.trim();
+    if(!email) return showMsg('請先輸入 Email，再點重寄驗證信。', 'err');
+    try{
+      // Supabase v2：resend signup confirmation
+      const { error } = await supabaseClient.auth.resend({
+        type: 'signup',
+        email,
+        options: { emailRedirectTo: location.origin + '/login.html' }
+      });
+      if(error) throw error;
+      showMsg('已發送驗證信（若仍收不到，請看垃圾郵件，或到 Supabase 設定 SMTP）。', 'ok');
+    }catch(err){
+      console.error(err);
+      showMsg('重寄失敗：' + (err?.message || err), 'err');
+    }
+  });
+
 
   if(supabaseClient){
     redirectIfLoggedIn();
@@ -410,3 +459,4 @@
   </script>
 </body>
 </html>
+
