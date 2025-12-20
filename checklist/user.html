@@ -170,6 +170,11 @@
       color:#c2410c;
       background:#fff7ed;
     }
+    .pill.gray{
+      border-color:#9ca3af;
+      color:#4b5563;
+      background:#f9fafb;
+    }
     .pill.online{
       border-color:var(--ok);
       color:var(--ok);
@@ -208,6 +213,7 @@
     }
   </style>
 
+  <!-- 載入 supa.js（會把 BW 掛到 window.BW） -->
   <script type="module" src="../supa.js?v=20251109g"></script>
 </head>
 <body>
@@ -236,8 +242,10 @@
         </div>
       </div>
 
-      <div class="meta" id="metaInfo">
-        資料來源：<b>public.profiles + public.orders（自動合併不漏人）</b>．台灣時區顯示．10 分鐘內視為「使用中」。
+      <div class="meta" id="metaLine">
+        資料來源：<b>public.profiles + public.orders</b>（自動合併不漏人）．
+        orders 欄位：<b>buyer_id</b>（主鍵）／<b>buyer_email</b>（fallback）．
+        台灣時區顯示．10 分鐘內視為「使用中」。
       </div>
 
       <div style="overflow-x:auto;">
@@ -287,132 +295,86 @@
     const pillOnline = online =>
       `<span class="pill ${online?'online':'offline'}">${online?'使用中':'離線'}</span>`;
 
-    const shortId = (id) => {
-      const s = String(id||'');
-      if(!s) return '';
-      return s.length <= 10 ? s : (s.slice(0,8) + '…');
-    };
-
-    function emailToName(email){
-      if(!email) return '';
-      const s = String(email);
-      return s.includes('@') ? s.split('@')[0] : s;
-    }
-
-    async function fetchLatestOrdersAll(){
-      // 1) try with buyer_email
-      let r = await supa
+    // 抓「每個人」最新訂閱（buyer_id 主鍵；buyer_email fallback）
+    async function loadOrdersLatest(){
+      const r = await supa
         .from('orders')
         .select('buyer_id, buyer_email, status, expire_at, period, created_at')
         .order('expire_at',{ascending:false});
 
-      if(!r.error) return { data: r.data || [], usedBuyerEmail: true };
+      if(r.error) throw new Error(r.error.message);
+      const data = r.data || [];
 
-      // 2) fallback without buyer_email
-      console.warn('[orders] buyer_email 不可用，fallback：', r.error?.message || r.error);
+      const byBuyerId = {};
+      const byEmail = {};
+      for(const o of data){
+        const id = o.buyer_id || null;
+        const em = (o.buyer_email || '').trim().toLowerCase();
 
-      r = await supa
-        .from('orders')
-        .select('buyer_id, status, expire_at, period, created_at')
-        .order('expire_at',{ascending:false});
-
-      return { data: r.data || [], usedBuyerEmail: false, error: r.error || null };
-    }
-
-    function buildLatestOrderMap(orders){
-      const map = {};
-      for(const o of (orders||[])){
-        const id = o.buyer_id;
-        if(!id) continue;
-        if(!map[id]) map[id] = o; // 已按 expire_at desc，第一筆當最新
+        if(id && !byBuyerId[id]) byBuyerId[id] = o;
+        if(em && !byEmail[em]) byEmail[em] = o;
       }
-      return map;
+      return { byBuyerId, byEmail };
     }
 
-    function isPaidLike(status){
-      const s = String(status||'').toLowerCase().trim();
-      // 你系統可能是 paid / success / succeeded / completed 之類
-      return ['paid','success','succeeded','completed','ok'].includes(s);
-    }
-
-    async function loadUsersMerged(){
+    async function loadProfiles(){
       const tbody = $('#usersTable tbody');
       tbody.innerHTML = '<tr><td class="hint" colspan="8">載入中…</td></tr>';
 
       try{
         const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
-        const pr = await supa.from('profiles').select(cols);
+        const r = await supa.from('profiles').select(cols);
 
-        if(pr.error){
-          tbody.innerHTML = `<tr><td class="hint" colspan="8">profiles 讀取失敗：${pr.error.message}</td></tr>`;
+        if(r.error){
+          tbody.innerHTML = `<tr><td class="hint" colspan="8">讀取失敗：${r.error.message}</td></tr>`;
           return;
         }
 
-        const profiles = pr.data || [];
-
-        const or = await fetchLatestOrdersAll();
-        let orders = or.data || [];
-
-        // ✅ 避免把失敗單也補進來（如果你想全部顯示，把這段刪掉）
-        orders = orders.filter(o => {
-          // 沒 expire_at 的先不算有效訂閱資料
-          if(!o?.buyer_id || !o?.expire_at) return false;
-          // status 不是 paid 類型就不補進 users（但 profiles 本來就會顯示）
-          return isPaidLike(o.status) || !o.status;
-        });
-
-        const latestById = buildLatestOrderMap(orders);
-
-        $('#metaInfo').innerHTML =
-          `資料來源：<b>public.profiles + public.orders（自動合併不漏人）</b>．` +
-          `orders 欄位：<b>${or.usedBuyerEmail ? 'buyer_email ✓' : 'buyer_email ✗（fallback）'}</b>．` +
-          `台灣時區顯示．10 分鐘內視為「使用中」。`;
-
-        const byId = {};
+        const profiles = (r.data || []);
+        const emailToProfile = {};
         for(const p of profiles){
-          if(p?.id) byId[p.id] = p;
+          const em = (p.email || '').trim().toLowerCase();
+          if(em) emailToProfile[em] = p;
         }
 
-        // 先放 profiles
-        const merged = profiles.map(p=>({ ...p, __from:'profiles' }));
+        const { byBuyerId, byEmail } = await loadOrdersLatest();
 
-        // ✅ orders-only：只補「profiles 沒有」的 buyer_id（去重）
-        const added = new Set();
-        for(const o of orders){
-          const id = o?.buyer_id;
-          if(!id) continue;
-          if(byId[id]) continue;
-          if(added.has(id)) continue;
+        // 1) profiles 主列表
+        const list = profiles.map(p=>{
+          const em = (p.email || '').trim().toLowerCase();
+          const ord = (p.id && byBuyerId[p.id]) || (em && byEmail[em]) || null;
+          return { kind:'profile', profile:p, order:ord };
+        });
 
-          added.add(id);
+        // 2) 補上「已付款但未建立帳號」：避免漏人，也不再顯示 unknown / ID:xxxx
+        for(const em in byEmail){
+          if(emailToProfile[em]) continue; // 已有 profile 不補
 
-          // email：有 buyer_email 用它；沒有就顯示 ID 方便追查
-          const email = (o.buyer_email || '').trim();
-          const showEmail = email || `ID:${shortId(id)}`;
+          const o = byEmail[em];
+          if(o?.buyer_id && profiles.some(p=>p.id === o.buyer_id)) continue; // 避免重複
 
-          merged.push({
-            id,
-            email: showEmail,
-            display_name: email ? emailToName(email) : '訂閱用戶',
-            is_admin: false,
-            is_paused: false,
-            last_sign_in_at: null,
-            last_seen_at: null,
-            expires_at: null,
-            __from: 'orders_only'
+          list.push({
+            kind:'orders_only',
+            profile:{
+              id: o?.buyer_id || null,
+              email: em,                 // ✅ 直接顯示 email
+              display_name: '訂閱用戶',   // ✅ 固定標記
+              is_admin:false,
+              last_sign_in_at:null,
+              last_seen_at:null,
+              expires_at:null
+            },
+            order:o
           });
         }
 
-        if(!merged.length){
-          tbody.innerHTML = '<tr><td class="hint" colspan="8">目前沒有任何資料</td></tr>';
-          return;
-        }
-
+        // 搜尋
         const q = ($('#q').value||'').trim().toLowerCase();
-        let rows = merged.filter(x=>{
+        let rows = list.filter(it=>{
+          const p = it.profile || {};
           if(!q) return true;
-          return (x.email||'').toLowerCase().includes(q)
-              || (x.display_name||'').toLowerCase().includes(q);
+          return String(p.email||'').toLowerCase().includes(q)
+              || String(p.display_name||'').toLowerCase().includes(q);
         });
 
         if(!rows.length){
@@ -422,33 +384,36 @@
 
         const now = new Date();
 
-        rows = rows.map(x=>{
-          const seenOnline = BW.isOnlineWithin(x.last_seen_at, 10);
-          let loginOnline = false;
-          if(!seenOnline && x.last_sign_in_at){
-            const lastLogin = new Date(x.last_sign_in_at);
-            if(!isNaN(lastLogin)){
-              const diffMs = now - lastLogin;
-              if(diffMs >= 0 && diffMs <= 30*60*1000) loginOnline = true;
+        // 在線判斷（orders-only 一律離線）
+        rows = rows.map(it=>{
+          const x = it.profile || {};
+          let online = false;
+          if(it.kind === 'profile'){
+            const seenOnline = BW.isOnlineWithin(x.last_seen_at, 10);
+            let loginOnline = false;
+            if(!seenOnline && x.last_sign_in_at){
+              const lastLogin = new Date(x.last_sign_in_at);
+              if(!isNaN(lastLogin)){
+                const diffMs = now - lastLogin;
+                if(diffMs >= 0 && diffMs <= 30*60*1000) loginOnline = true;
+              }
             }
+            online = seenOnline || loginOnline;
           }
-          const online = seenOnline || loginOnline;
-          return { ...x, __online: online };
+          return { ...it, __online: online };
         });
 
-        // 排序：管理員 → 使用中 → 是否有訂閱 → 最近活動 → email
-        rows.sort((a,b)=>{
+        // 排序：管理員 → 使用中 → 有訂閱 → 最近活動 → Email
+        rows.sort((A,B)=>{
+          const a=A.profile||{}, b=B.profile||{};
           const aAdmin = a.is_admin ? 1 : 0, bAdmin = b.is_admin ? 1 : 0;
           if(aAdmin !== bAdmin) return bAdmin - aAdmin;
 
-          const aOn = a.__online ? 1 : 0, bOn = b.__online ? 1 : 0;
+          const aOn = A.__online ? 1 : 0, bOn = B.__online ? 1 : 0;
           if(aOn !== bOn) return bOn - aOn;
 
-          const aOrd = latestById[a.id];
-          const bOrd = latestById[b.id];
-          const aExp = aOrd?.expire_at || a.expires_at || null;
-          const bExp = bOrd?.expire_at || b.expires_at || null;
-          const aHas = aExp ? 1 : 0, bHas = bExp ? 1 : 0;
+          const aHas = (A.order && A.order.expire_at) ? 1 : 0;
+          const bHas = (B.order && B.order.expire_at) ? 1 : 0;
           if(aHas !== bHas) return bHas - aHas;
 
           const aTs = new Date(a.last_seen_at || a.last_sign_in_at || 0).getTime() || 0;
@@ -458,12 +423,17 @@
           return String(a.email||'').localeCompare(String(b.email||''));
         });
 
-        tbody.innerHTML = rows.map((x,idx)=>{
-          const online = !!x.__online;
-          const ord = latestById[x.id] || null;
+        tbody.innerHTML = rows.map((it,idx)=>{
+          const x = it.profile || {};
+          const online = !!it.__online;
+          const ord = it.order || null;
 
           let expireText = '—';
           let statusHtml = '<span class="pill warn">未訂閱</span>';
+
+          if(it.kind === 'orders_only'){
+            statusHtml = '<span class="pill gray">已付款（未建立帳號）</span>';
+          }
 
           if(ord && ord.expire_at){
             const exp   = new Date(ord.expire_at);
@@ -495,14 +465,21 @@
             }
           }
 
+          const emailText = x.email || '';
+          const nameText = x.display_name || '';
+          const adminHtml = x.is_admin ? '<span class="pill pill-admin">管理員</span>' : '';
+          const lastLogin = fmtTW(x.last_sign_in_at) || '';
+          const lastSeen  = fmtTW(x.last_seen_at) || '';
+          const onlineHtml = (it.kind==='profile') ? (`${lastSeen} &nbsp; ${pillOnline(online)}`) : (`— &nbsp; ${pillOnline(false)}`);
+
           return `
             <tr>
               <td data-label="#">${idx+1}</td>
-              <td data-label="Email">${x.email||''}</td>
-              <td data-label="顯示名稱">${x.display_name||''}</td>
-              <td data-label="最後登入">${fmtTW(x.last_sign_in_at)||''}</td>
-              <td data-label="最近在線">${fmtTW(x.last_seen_at)||''} &nbsp; ${pillOnline(online)}</td>
-              <td data-label="管理員">${x.is_admin ? '<span class="pill pill-admin">管理員</span>' : ''}</td>
+              <td data-label="Email">${emailText}</td>
+              <td data-label="顯示名稱">${nameText}</td>
+              <td data-label="最後登入">${lastLogin}</td>
+              <td data-label="最近在線">${onlineHtml}</td>
+              <td data-label="管理員">${adminHtml}</td>
               <td data-label="狀態">${statusHtml}</td>
               <td data-label="到期日">${expireText}</td>
             </tr>`;
@@ -512,18 +489,20 @@
       }
     }
 
-    $('#btnRefresh').addEventListener('click', loadUsersMerged);
+    $('#btnRefresh').addEventListener('click', loadProfiles);
 
     let t=null;
     $('#q').addEventListener('input', ()=>{
       clearTimeout(t);
-      t=setTimeout(loadUsersMerged, 250);
+      t=setTimeout(loadProfiles, 250);
     });
 
-    loadUsersMerged();
+    loadProfiles();
   </script>
 </body>
 </html>
+
+
 
 
 
