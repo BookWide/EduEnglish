@@ -225,7 +225,6 @@
     <h1>BookWide Admin｜使用者清單</h1>
     <p class="sub">查看所有使用者登入紀錄、在線狀態與訂閱期限。</p>
 
-    <!-- 只保留「使用者清單」：其它分頁先拿掉，避免畫面干擾 -->
     <div class="tabs">
       <a class="tab active" href="user.html">使用者清單</a>
     </div>
@@ -238,8 +237,8 @@
         </div>
       </div>
 
-      <div class="meta">
-        資料表：<b>public.profiles + public.orders</b>．台灣時區顯示．10 分鐘內視為「使用中」。
+      <div class="meta" id="metaInfo">
+        資料來源：<b>public.profiles + public.orders（自動合併不漏人）</b>．台灣時區顯示．10 分鐘內視為「使用中」。
       </div>
 
       <div style="overflow-x:auto;">
@@ -289,67 +288,105 @@
     const pillOnline = online =>
       `<span class="pill ${online?'online':'offline'}">${online?'使用中':'離線'}</span>`;
 
-    async function buildOrdersMap(profiles){
+    function emailToName(email){
+      if(!email) return '';
+      const s = String(email);
+      return s.includes('@') ? s.split('@')[0] : s;
+    }
+
+    // 嘗試用 orders.buyer_email（若你 orders 沒這欄，會自動 fallback）
+    async function fetchLatestOrdersAll(){
+      // 1) try with buyer_email
+      let r = await supa
+        .from('orders')
+        .select('buyer_id, buyer_email, status, expire_at, period, created_at')
+        .order('expire_at',{ascending:false});
+
+      if(!r.error) return { data: r.data || [], usedBuyerEmail: true };
+
+      // 2) fallback without buyer_email
+      const msg = String(r.error?.message || '');
+      console.warn('[orders] buyer_email 不可用，fallback：', msg);
+
+      r = await supa
+        .from('orders')
+        .select('buyer_id, status, expire_at, period, created_at')
+        .order('expire_at',{ascending:false});
+
+      return { data: r.data || [], usedBuyerEmail: false, error: r.error || null };
+    }
+
+    function buildLatestOrderMap(orders){
       const map = {};
-      const ids = profiles.map(p=>p.id).filter(Boolean);
-
-      if(ids.length){
-        try{
-          const oRes = await supa
-            .from('orders')
-            .select('buyer_id, status, expire_at, period, created_at')
-            .in('buyer_id', ids)
-            .order('expire_at',{ascending:false});
-
-          if(!oRes.error && oRes.data){
-            for(const o of oRes.data){
-              if(!map[o.buyer_id]) map[o.buyer_id] = o;
-            }
-          }
-        }catch(e){
-          console.warn('orders IN 查詢錯誤', e);
-        }
-      }
-
-      const missing = profiles.map(p=>p.id).filter(id => id && !map[id]);
-      for(const id of missing){
-        try{
-          const r = await supa
-            .from('orders')
-            .select('buyer_id, status, expire_at, period, created_at')
-            .eq('buyer_id', id)
-            .order('expire_at',{ascending:false})
-            .limit(1);
-          if(!r.error && r.data && r.data.length) map[id] = r.data[0];
-        }catch(e){
-          console.warn('orders 單筆查詢錯誤', e);
-        }
+      for(const o of (orders||[])){
+        const id = o.buyer_id;
+        if(!id) continue;
+        if(!map[id]) map[id] = o; // 已按 expire_at desc 排序，第一筆就是最新
       }
       return map;
     }
 
-    async function loadProfiles(){
+    async function loadUsersMerged(){
       const tbody = $('#usersTable tbody');
       tbody.innerHTML = '<tr><td class="hint" colspan="8">載入中…</td></tr>';
 
       try{
         const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
-        const r = await supa.from('profiles').select(cols);
+        const pr = await supa.from('profiles').select(cols);
 
-        if(r.error){
-          tbody.innerHTML = `<tr><td class="hint" colspan="8">讀取失敗：${r.error.message}</td></tr>`;
-          return;
-        }
-        const profiles = r.data || [];
-        if(!profiles.length){
-          tbody.innerHTML = '<tr><td class="hint" colspan="8">目前沒有任何使用者</td></tr>';
+        if(pr.error){
+          tbody.innerHTML = `<tr><td class="hint" colspan="8">profiles 讀取失敗：${pr.error.message}</td></tr>`;
           return;
         }
 
-        const latestByUser = await buildOrdersMap(profiles);
+        const profiles = pr.data || [];
+
+        // orders（全表抓最新一筆 map；確保「有訂閱但沒 profiles」也會出現）
+        const or = await fetchLatestOrdersAll();
+        const orders = or.data || [];
+        const latestById = buildLatestOrderMap(orders);
+
+        // meta 提示（讓你知道 buyer_email 有沒有用上）
+        $('#metaInfo').innerHTML =
+          `資料來源：<b>public.profiles + public.orders（自動合併不漏人）</b>．` +
+          `orders 欄位：<b>${or.usedBuyerEmail ? 'buyer_email ✓' : 'buyer_email ✗（fallback）'}</b>．` +
+          `台灣時區顯示．10 分鐘內視為「使用中」。`;
+
+        // 建 profiles 索引
+        const byId = {};
+        for(const p of profiles){
+          if(p?.id) byId[p.id] = p;
+        }
+
+        // 合併清單（先放 profiles）
+        const merged = profiles.map(p=>({ ...p, __from:'profiles' }));
+
+        // 把「orders 有、profiles 沒」的補進來
+        // 需要 email 才有意義：優先 buyer_email
+        for(const o of orders){
+          if(!o?.buyer_id) continue;
+          if(byId[o.buyer_id]) continue; // profiles 已有
+          const email = (o.buyer_email || '').trim();
+          merged.push({
+            id: o.buyer_id,
+            email: email || '(unknown)',
+            display_name: email ? emailToName(email) : '訂閱用戶',
+            is_admin: false,
+            is_paused: false,
+            last_sign_in_at: null,
+            last_seen_at: null,
+            expires_at: null,
+            __from: 'orders_only'
+          });
+        }
+
+        if(!merged.length){
+          tbody.innerHTML = '<tr><td class="hint" colspan="8">目前沒有任何資料</td></tr>';
+          return;
+        }
 
         const q = ($('#q').value||'').trim().toLowerCase();
-        let rows = profiles.filter(x=>{
+        let rows = merged.filter(x=>{
           if(!q) return true;
           return (x.email||'').toLowerCase().includes(q)
               || (x.display_name||'').toLowerCase().includes(q);
@@ -376,13 +413,21 @@
           return { ...x, __online: online };
         });
 
-        // 排序：管理員 → 使用中 → 最近活動 → Email
+        // 排序：管理員 → 使用中 → 是否有有效訂閱 → 最近活動 → email
         rows.sort((a,b)=>{
           const aAdmin = a.is_admin ? 1 : 0, bAdmin = b.is_admin ? 1 : 0;
           if(aAdmin !== bAdmin) return bAdmin - aAdmin;
 
           const aOn = a.__online ? 1 : 0, bOn = b.__online ? 1 : 0;
           if(aOn !== bOn) return bOn - aOn;
+
+          // 有沒有訂閱（expire_at 或 profiles.expires_at）
+          const aOrd = latestById[a.id];
+          const bOrd = latestById[b.id];
+          const aExp = aOrd?.expire_at || a.expires_at || null;
+          const bExp = bOrd?.expire_at || b.expires_at || null;
+          const aHas = aExp ? 1 : 0, bHas = bExp ? 1 : 0;
+          if(aHas !== bHas) return bHas - aHas;
 
           const aTs = new Date(a.last_seen_at || a.last_sign_in_at || 0).getTime() || 0;
           const bTs = new Date(b.last_seen_at || b.last_sign_in_at || 0).getTime() || 0;
@@ -393,7 +438,7 @@
 
         tbody.innerHTML = rows.map((x,idx)=>{
           const online = !!x.__online;
-          const ord = latestByUser[x.id] || null;
+          const ord = latestById[x.id] || null;
 
           let expireText = '—';
           let statusHtml = '<span class="pill warn">未訂閱</span>';
@@ -428,11 +473,15 @@
             }
           }
 
+          // 顯示來源（不影響 UI，只有你 debug 用；你若不要，我也可刪掉）
+          const name = x.display_name || (x.email ? emailToName(x.email) : '');
+          const showName = name;
+
           return `
             <tr>
               <td data-label="#">${idx+1}</td>
               <td data-label="Email">${x.email||''}</td>
-              <td data-label="顯示名稱">${x.display_name||''}</td>
+              <td data-label="顯示名稱">${showName||''}</td>
               <td data-label="最後登入">${fmtTW(x.last_sign_in_at)||''}</td>
               <td data-label="最近在線">${fmtTW(x.last_seen_at)||''} &nbsp; ${pillOnline(online)}</td>
               <td data-label="管理員">${x.is_admin ? '<span class="pill pill-admin">管理員</span>' : ''}</td>
@@ -445,19 +494,20 @@
       }
     }
 
-    $('#btnRefresh').addEventListener('click', loadProfiles);
+    $('#btnRefresh').addEventListener('click', loadUsersMerged);
 
-    // debounce：避免每打字就 hit DB
     let t=null;
     $('#q').addEventListener('input', ()=>{
       clearTimeout(t);
-      t=setTimeout(loadProfiles, 250);
+      t=setTimeout(loadUsersMerged, 250);
     });
 
-    loadProfiles();
+    loadUsersMerged();
   </script>
 </body>
 </html>
+
+
 
 
 
