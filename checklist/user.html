@@ -121,7 +121,7 @@
       font-size:12px;
       color:var(--muted);
       margin-bottom:10px;
-      line-height:1.6;
+      line-height:1.5;
     }
     .meta b{color:#374151;}
     table{
@@ -191,7 +191,6 @@
       color:var(--muted);
     }
     .admin-info b{color:#111827;}
-
     @media (max-width:720px){
       thead{display:none;}
       table,tbody,tr,td{display:block;width:100%;}
@@ -217,13 +216,18 @@
 <body>
   <div class="wrap">
     <div class="topbar">
-      <a class="back" href="../admin.html"><span>←</span> 回上頁</a>
-      <div class="admin-info">管理員：<b id="adminEmail">讀取中…</b></div>
+      <a class="back" href="../admin.html">
+        <span>←</span> 回上頁
+      </a>
+      <div class="admin-info">
+        管理員：<b id="adminEmail">讀取中…</b>
+      </div>
     </div>
 
     <h1>BookWide Admin｜使用者清單</h1>
     <p class="sub">查看所有使用者登入紀錄、在線狀態與訂閱期限。</p>
 
+    <!-- 只保留「使用者清單」 -->
     <div class="tabs">
       <a class="tab active" href="user.html">使用者清單</a>
     </div>
@@ -236,10 +240,9 @@
         </div>
       </div>
 
-      <div class="meta">
-        資料來源：<b>public.profiles + public.orders</b>（自動合併不漏人）<br>
-        合併鍵：<b>orders.buyer_id</b>（⚠️ 你的 orders 沒有 buyer_email 欄位，所以不再做 buyer_email 容錯）<br>
-        台灣時區顯示．10 分鐘內視為「使用中」。
+      <div class="meta" id="metaText">
+        資料來源：<b>public.profiles</b>（使用者主檔）＋ <b>public.orders</b>（訂閱狀態補充）。<br/>
+        合併鍵：<b>orders.buyer_id = profiles.id</b>（不再產生 orders-only/unknown）。台灣時區顯示．10 分鐘內視為「使用中」。
       </div>
 
       <div style="overflow-x:auto;">
@@ -279,130 +282,74 @@
     const supa = BW.supa;
     const $  = (q,root=document)=>root.querySelector(q);
 
-    const fmtTW = (ts) => !ts ? '' :
-      new Date(ts).toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false});
+    const fmtTW = ts => {
+      if(!ts) return '';
+      const d = new Date(ts);
+      if(isNaN(d)) return '';
+      return d.toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false});
+    };
 
+    // 顯示管理員 Email
     try{
       const { data:{user} } = await supa.auth.getUser();
       if(user?.email) $('#adminEmail').textContent = user.email;
-    }catch(_){}
+      else $('#adminEmail').textContent = '—';
+    }catch(_){
+      $('#adminEmail').textContent = '—';
+    }
 
     const pillOnline = online =>
       `<span class="pill ${online?'online':'offline'}">${online?'使用中':'離線'}</span>`;
 
-    // 取 profiles 內所有人 + orders-only（profiles 沒這個 id 的 buyer）
-    async function getProfilesAndOrdersOnly(){
-      // 1) profiles
-      const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
-      const pRes = await supa.from('profiles').select(cols);
-      if(pRes.error) throw new Error(pRes.error.message);
+    // 只取「每個 user 最新一筆（expire_at 最大）」的訂單
+    async function buildOrdersMapByBuyerId(profileIds){
+      const map = {};
+      if(!profileIds.length) return map;
 
-      const profiles = (pRes.data || []).filter(x=>x && x.id);
-
-      // 2) orders（取近期足夠多筆，讓 orders-only 不漏）
-      //    這裡用 expire_at desc；若你有超大量訂單可再調大 limit
-      const oRes = await supa
+      // 一次 IN 查詢（標準做法）
+      const r = await supa
         .from('orders')
         .select('buyer_id, status, expire_at, period, created_at')
-        .order('expire_at',{ascending:false})
-        .limit(500);
+        .in('buyer_id', profileIds)
+        .order('expire_at',{ascending:false});
 
-      if(oRes.error) throw new Error(oRes.error.message);
-
-      const orders = oRes.data || [];
-
-      // buyer_id -> latest order（以 expire_at 最新為準）
-      const latestOrderByBuyer = {};
-      for(const o of orders){
-        if(!o?.buyer_id) continue;
-        if(!latestOrderByBuyer[o.buyer_id]) latestOrderByBuyer[o.buyer_id] = o;
+      if(r.error){
+        console.warn('orders 讀取失敗', r.error);
+        return map;
       }
 
-      // 3) 找出 orders-only：buyer_id 不在 profiles
-      const profileIdSet = new Set(profiles.map(p=>p.id));
-      const ordersOnlyIds = Object.keys(latestOrderByBuyer).filter(id => !profileIdSet.has(id));
-
-      const ordersOnlyProfiles = ordersOnlyIds.map(id => ({
-        id,
-        email: `ID:${String(id).slice(0,8)}…`,
-        display_name: '訂閱用戶',
-        is_admin: false,
-        is_paused: false,
-        last_sign_in_at: null,
-        last_seen_at: null,
-        expires_at: null,
-        __orders_only: true
-      }));
-
-      return { profiles: profiles.concat(ordersOnlyProfiles), latestOrderByBuyer };
-    }
-
-    function computeOnline(x){
-      const now = new Date();
-
-      const seenOnline = BW.isOnlineWithin(x.last_seen_at, 10);
-      let loginOnline = false;
-
-      if(!seenOnline && x.last_sign_in_at){
-        const lastLogin = new Date(x.last_sign_in_at);
-        if(!isNaN(lastLogin)){
-          const diffMs = now - lastLogin;
-          if(diffMs >= 0 && diffMs <= 30*60*1000) loginOnline = true;
-        }
+      for(const o of (r.data||[])){
+        // 因為已 order by expire_at desc，所以第一個就是最新
+        if(o?.buyer_id && !map[o.buyer_id]) map[o.buyer_id] = o;
       }
-      return (seenOnline || loginOnline);
+      return map;
     }
 
-    function renderStatusAndExpire(x, ord){
-      const now = new Date();
-      let expireText = '—';
-      let statusHtml = '<span class="pill warn">未訂閱</span>';
-
-      if(ord && ord.expire_at){
-        const exp = new Date(ord.expire_at);
-        const start = ord.created_at ? new Date(ord.created_at) : null;
-
-        const startStr = (start && !isNaN(start)) ? fmtTW(start.toISOString()) : '—';
-        const endStr = (!isNaN(exp)) ? fmtTW(exp.toISOString()) : '—';
-
-        expireText = endStr;
-
-        if(!isNaN(exp)){
-          if(exp > now){
-            statusHtml = `<span class="pill ok">有效（期間：${startStr} → ${endStr}）</span>`;
-          }else{
-            statusHtml = `<span class="pill warn">已到期（${endStr}）</span>`;
-          }
-        }
-      }else if(x.expires_at){
-        const exp = new Date(x.expires_at);
-        const endStr = !isNaN(exp) ? fmtTW(exp.toISOString()) : '—';
-        expireText = endStr;
-
-        if(!isNaN(exp)){
-          if(exp > now){
-            statusHtml = `<span class="pill ok">有效（profiles.expires_at）</span>`;
-          }else{
-            statusHtml = `<span class="pill warn">已到期（profiles：${endStr}）</span>`;
-          }
-        }
-      }
-
-      return { expireText, statusHtml };
-    }
-
-    async function loadUsers(){
+    async function loadProfiles(){
       const tbody = $('#usersTable tbody');
       tbody.innerHTML = '<tr><td class="hint" colspan="8">載入中…</td></tr>';
 
       try{
-        const { profiles, latestOrderByBuyer } = await getProfilesAndOrdersOnly();
+        // ✅ 使用者主檔：只信 profiles（不再做 orders-only/unknown）
+        const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
+        const r = await supa.from('profiles').select(cols);
 
+        if(r.error){
+          tbody.innerHTML = `<tr><td class="hint" colspan="8">讀取失敗：${r.error.message}</td></tr>`;
+          return;
+        }
+
+        const profiles = (r.data || []).filter(p => p && p.id);
         if(!profiles.length){
           tbody.innerHTML = '<tr><td class="hint" colspan="8">目前沒有任何使用者</td></tr>';
           return;
         }
 
+        // 訂閱狀態補充（以 buyer_id 對 profiles.id）
+        const ids = profiles.map(p=>p.id);
+        const latestOrderByUser = await buildOrdersMapByBuyerId(ids);
+
+        // 搜尋
         const q = ($('#q').value||'').trim().toLowerCase();
         let rows = profiles.filter(x=>{
           if(!q) return true;
@@ -415,22 +362,29 @@
           return;
         }
 
-        // 計算在線
-        rows = rows.map(x => ({...x, __online: computeOnline(x)}));
+        // 在線判斷
+        const now = new Date();
+        rows = rows.map(x=>{
+          const seenOnline = BW.isOnlineWithin(x.last_seen_at, 10); // 10分鐘內 last_seen
+          let loginOnline = false;
+          if(!seenOnline && x.last_sign_in_at){
+            const lastLogin = new Date(x.last_sign_in_at);
+            if(!isNaN(lastLogin)){
+              const diffMs = now - lastLogin;
+              if(diffMs >= 0 && diffMs <= 30*60*1000) loginOnline = true; // 30分鐘內登入也算在線
+            }
+          }
+          const online = seenOnline || loginOnline;
+          return { ...x, __online: online };
+        });
 
-        // 排序：管理員 → 使用中 → 有效訂閱 → 最近活動 → Email
+        // 排序：管理員 → 使用中 → 最近活動 → Email
         rows.sort((a,b)=>{
           const aAdmin = a.is_admin ? 1 : 0, bAdmin = b.is_admin ? 1 : 0;
           if(aAdmin !== bAdmin) return bAdmin - aAdmin;
 
           const aOn = a.__online ? 1 : 0, bOn = b.__online ? 1 : 0;
           if(aOn !== bOn) return bOn - aOn;
-
-          const aOrd = latestOrderByBuyer[a.id];
-          const bOrd = latestOrderByBuyer[b.id];
-          const aExp = aOrd?.expire_at ? new Date(aOrd.expire_at).getTime() : 0;
-          const bExp = bOrd?.expire_at ? new Date(bOrd.expire_at).getTime() : 0;
-          if(aExp !== bExp) return bExp - aExp;
 
           const aTs = new Date(a.last_seen_at || a.last_sign_in_at || 0).getTime() || 0;
           const bTs = new Date(b.last_seen_at || b.last_sign_in_at || 0).getTime() || 0;
@@ -440,16 +394,49 @@
         });
 
         tbody.innerHTML = rows.map((x,idx)=>{
-          const ord = latestOrderByBuyer[x.id] || null;
-          const { expireText, statusHtml } = renderStatusAndExpire(x, ord);
+          const online = !!x.__online;
+          const ord = latestOrderByUser[x.id] || null;
+
+          let expireText = '—';
+          let statusHtml = '<span class="pill warn">未訂閱</span>';
+
+          if(ord && ord.expire_at){
+            const exp = new Date(ord.expire_at);
+            const start = ord.created_at ? new Date(ord.created_at) : null;
+
+            const startStr = (start && !isNaN(start)) ? fmtTW(start.toISOString()) : '—';
+            const endStr   = (!isNaN(exp)) ? fmtTW(exp.toISOString()) : '—';
+            expireText = endStr;
+
+            if(!isNaN(exp)){
+              if(exp > now){
+                statusHtml = `<span class="pill ok">有效（期間：${startStr} → ${endStr}）</span>`;
+              }else{
+                statusHtml = `<span class="pill warn">已到期（${endStr}）</span>`;
+              }
+            }
+          }else if(x.expires_at){
+            // profiles.expires_at 作為備援顯示（如果你有用）
+            const exp = new Date(x.expires_at);
+            const endStr = !isNaN(exp) ? fmtTW(exp.toISOString()) : '—';
+            expireText = endStr;
+
+            if(!isNaN(exp)){
+              if(exp > now){
+                statusHtml = `<span class="pill ok">有效（profiles.expires_at）</span>`;
+              }else{
+                statusHtml = `<span class="pill warn">已到期（profiles：${endStr}）</span>`;
+              }
+            }
+          }
 
           return `
             <tr>
               <td data-label="#">${idx+1}</td>
-              <td data-label="Email">${x.email||''}${x.__orders_only ? ' <span class="pill">orders-only</span>' : ''}</td>
+              <td data-label="Email">${x.email||''}</td>
               <td data-label="顯示名稱">${x.display_name||''}</td>
               <td data-label="最後登入">${fmtTW(x.last_sign_in_at)||''}</td>
-              <td data-label="最近在線">${fmtTW(x.last_seen_at)||''} &nbsp; ${pillOnline(!!x.__online)}</td>
+              <td data-label="最近在線">${fmtTW(x.last_seen_at)||''} &nbsp; ${pillOnline(online)}</td>
               <td data-label="管理員">${x.is_admin ? '<span class="pill pill-admin">管理員</span>' : ''}</td>
               <td data-label="狀態">${statusHtml}</td>
               <td data-label="到期日">${expireText}</td>
@@ -461,18 +448,21 @@
       }
     }
 
-    $('#btnRefresh').addEventListener('click', loadUsers);
+    $('#btnRefresh').addEventListener('click', loadProfiles);
 
+    // debounce：避免每打字就重算
     let t=null;
     $('#q').addEventListener('input', ()=>{
       clearTimeout(t);
-      t=setTimeout(loadUsers, 250);
+      t=setTimeout(loadProfiles, 250);
     });
 
-    loadUsers();
+    loadProfiles();
   </script>
 </body>
 </html>
+
+
 
 
 
