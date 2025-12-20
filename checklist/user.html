@@ -208,7 +208,6 @@
     }
   </style>
 
-  <!-- 載入 supa.js（會把 BW 掛到 window.BW） -->
   <script type="module" src="../supa.js?v=20251109g"></script>
 </head>
 <body>
@@ -288,13 +287,18 @@
     const pillOnline = online =>
       `<span class="pill ${online?'online':'offline'}">${online?'使用中':'離線'}</span>`;
 
+    const shortId = (id) => {
+      const s = String(id||'');
+      if(!s) return '';
+      return s.length <= 10 ? s : (s.slice(0,8) + '…');
+    };
+
     function emailToName(email){
       if(!email) return '';
       const s = String(email);
       return s.includes('@') ? s.split('@')[0] : s;
     }
 
-    // 嘗試用 orders.buyer_email（若你 orders 沒這欄，會自動 fallback）
     async function fetchLatestOrdersAll(){
       // 1) try with buyer_email
       let r = await supa
@@ -305,8 +309,7 @@
       if(!r.error) return { data: r.data || [], usedBuyerEmail: true };
 
       // 2) fallback without buyer_email
-      const msg = String(r.error?.message || '');
-      console.warn('[orders] buyer_email 不可用，fallback：', msg);
+      console.warn('[orders] buyer_email 不可用，fallback：', r.error?.message || r.error);
 
       r = await supa
         .from('orders')
@@ -321,9 +324,15 @@
       for(const o of (orders||[])){
         const id = o.buyer_id;
         if(!id) continue;
-        if(!map[id]) map[id] = o; // 已按 expire_at desc 排序，第一筆就是最新
+        if(!map[id]) map[id] = o; // 已按 expire_at desc，第一筆當最新
       }
       return map;
+    }
+
+    function isPaidLike(status){
+      const s = String(status||'').toLowerCase().trim();
+      // 你系統可能是 paid / success / succeeded / completed 之類
+      return ['paid','success','succeeded','completed','ok'].includes(s);
     }
 
     async function loadUsersMerged(){
@@ -341,35 +350,49 @@
 
         const profiles = pr.data || [];
 
-        // orders（全表抓最新一筆 map；確保「有訂閱但沒 profiles」也會出現）
         const or = await fetchLatestOrdersAll();
-        const orders = or.data || [];
+        let orders = or.data || [];
+
+        // ✅ 避免把失敗單也補進來（如果你想全部顯示，把這段刪掉）
+        orders = orders.filter(o => {
+          // 沒 expire_at 的先不算有效訂閱資料
+          if(!o?.buyer_id || !o?.expire_at) return false;
+          // status 不是 paid 類型就不補進 users（但 profiles 本來就會顯示）
+          return isPaidLike(o.status) || !o.status;
+        });
+
         const latestById = buildLatestOrderMap(orders);
 
-        // meta 提示（讓你知道 buyer_email 有沒有用上）
         $('#metaInfo').innerHTML =
           `資料來源：<b>public.profiles + public.orders（自動合併不漏人）</b>．` +
           `orders 欄位：<b>${or.usedBuyerEmail ? 'buyer_email ✓' : 'buyer_email ✗（fallback）'}</b>．` +
           `台灣時區顯示．10 分鐘內視為「使用中」。`;
 
-        // 建 profiles 索引
         const byId = {};
         for(const p of profiles){
           if(p?.id) byId[p.id] = p;
         }
 
-        // 合併清單（先放 profiles）
+        // 先放 profiles
         const merged = profiles.map(p=>({ ...p, __from:'profiles' }));
 
-        // 把「orders 有、profiles 沒」的補進來
-        // 需要 email 才有意義：優先 buyer_email
+        // ✅ orders-only：只補「profiles 沒有」的 buyer_id（去重）
+        const added = new Set();
         for(const o of orders){
-          if(!o?.buyer_id) continue;
-          if(byId[o.buyer_id]) continue; // profiles 已有
+          const id = o?.buyer_id;
+          if(!id) continue;
+          if(byId[id]) continue;
+          if(added.has(id)) continue;
+
+          added.add(id);
+
+          // email：有 buyer_email 用它；沒有就顯示 ID 方便追查
           const email = (o.buyer_email || '').trim();
+          const showEmail = email || `ID:${shortId(id)}`;
+
           merged.push({
-            id: o.buyer_id,
-            email: email || '(unknown)',
+            id,
+            email: showEmail,
             display_name: email ? emailToName(email) : '訂閱用戶',
             is_admin: false,
             is_paused: false,
@@ -413,7 +436,7 @@
           return { ...x, __online: online };
         });
 
-        // 排序：管理員 → 使用中 → 是否有有效訂閱 → 最近活動 → email
+        // 排序：管理員 → 使用中 → 是否有訂閱 → 最近活動 → email
         rows.sort((a,b)=>{
           const aAdmin = a.is_admin ? 1 : 0, bAdmin = b.is_admin ? 1 : 0;
           if(aAdmin !== bAdmin) return bAdmin - aAdmin;
@@ -421,7 +444,6 @@
           const aOn = a.__online ? 1 : 0, bOn = b.__online ? 1 : 0;
           if(aOn !== bOn) return bOn - aOn;
 
-          // 有沒有訂閱（expire_at 或 profiles.expires_at）
           const aOrd = latestById[a.id];
           const bOrd = latestById[b.id];
           const aExp = aOrd?.expire_at || a.expires_at || null;
@@ -473,15 +495,11 @@
             }
           }
 
-          // 顯示來源（不影響 UI，只有你 debug 用；你若不要，我也可刪掉）
-          const name = x.display_name || (x.email ? emailToName(x.email) : '');
-          const showName = name;
-
           return `
             <tr>
               <td data-label="#">${idx+1}</td>
               <td data-label="Email">${x.email||''}</td>
-              <td data-label="顯示名稱">${showName||''}</td>
+              <td data-label="顯示名稱">${x.display_name||''}</td>
               <td data-label="最後登入">${fmtTW(x.last_sign_in_at)||''}</td>
               <td data-label="最近在線">${fmtTW(x.last_seen_at)||''} &nbsp; ${pillOnline(online)}</td>
               <td data-label="管理員">${x.is_admin ? '<span class="pill pill-admin">管理員</span>' : ''}</td>
@@ -506,6 +524,7 @@
   </script>
 </body>
 </html>
+
 
 
 
