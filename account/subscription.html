@@ -1,201 +1,82 @@
-<!doctype html>
-<html lang="zh-Hant">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>我的訂閱｜BookWide</title>
-
-  <!-- ✅ supabase-js v2：只會掛 window.supabase，不會宣告 supabase 變數 -->
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-
-  <style>
-    :root{
-      --bg:#f4f6fb;
-      --card:#fff;
-      --ink:#111827;
-      --muted:#6b7280;
-      --line:#e5e7eb;
-      --brand:#2563eb;
-      --radius:16px;
-      --shadow:0 10px 30px rgba(15,23,42,.08);
-    }
-    body{
-      margin:0;
-      font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;
-      background:var(--bg);
-      color:var(--ink);
-    }
-    .wrap{max-width:960px;margin:40px auto;padding:0 16px;}
-    h1{margin:0 0 24px 0;}
-    .card{
-      background:var(--card);
-      border-radius:var(--radius);
-      box-shadow:var(--shadow);
-      padding:20px;
-      margin-bottom:24px;
-    }
-    .muted{color:var(--muted);}
-    table{width:100%;border-collapse:collapse;margin-top:8px;}
-    th,td{padding:10px;border-bottom:1px solid var(--line);text-align:left;}
-    th{font-weight:600;color:#374151;}
-    .btn{
-      display:inline-block;
-      background:var(--brand);
-      color:#fff;
-      padding:10px 16px;
-      border-radius:10px;
-      text-decoration:none;
-      margin-top:12px;
-    }
-    .pill{
-      display:inline-block;
-      padding:2px 10px;
-      border:1px solid var(--line);
-      border-radius:999px;
-      font-size:12px;
-      color:#374151;
-      background:#fff;
-      margin-left:8px;
-    }
-    .ok{color:#065f46;font-weight:700;}
-    .bad{color:#b91c1c;font-weight:700;}
-    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;}
-    .tiny{font-size:12px;}
-  </style>
-</head>
-
-<body>
-  <div class="wrap">
-    <h1>我的訂閱</h1>
-
-    <div class="card">
-      <h3>目前訂閱 <span id="subStatus" class="pill">檢查中</span></h3>
-      <div id="currentSub" class="muted">讀取中…</div>
-    </div>
-
-    <div class="card">
-      <h3>歷史訂單</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>付款日期</th>
-            <th>方案</th>
-            <th>金額</th>
-          </tr>
-        </thead>
-        <tbody id="historyBody">
-          <tr><td colspan="3" class="muted">讀取中…</td></tr>
-        </tbody>
-      </table>
-      <div id="debug" class="muted tiny" style="margin-top:10px;"></div>
-    </div>
-
-    <a href="/pricing.html" class="btn">前往訂閱</a>
-  </div>
-
-<!-- ✅ 用 module 隔離作用域；且整份檔案「不宣告 supabase 變數」 -->
-<script type="module">
-const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
-
-async function waitSDK(ms = 4000){
-  const t0 = Date.now();
-  while (!window.supabase?.createClient){
-    if (Date.now() - t0 > ms) return false;
-    await new Promise(r => setTimeout(r, 30));
-  }
-  return true;
-}
-
-function fmtDate(v){
-  if (!v) return "-";
-  const d = new Date(v);
-  return isNaN(d.getTime()) ? "-" : d.toLocaleString();
-}
-
-function planTextFromRow(o){
-  const s = o?.status ? String(o.status) : "-";
-  const exp = o?.expire_at ? ("到期 " + fmtDate(o.expire_at)) : "無到期日";
-  return `${s}（${exp}）`;
-}
-
+<script>
 (async () => {
   const $current = document.getElementById("currentSub");
   const $history = document.getElementById("historyBody");
   const $status  = document.getElementById("subStatus");
   const $debug   = document.getElementById("debug");
 
-  if (!(await waitSDK(4000))){
+  // ✅ 1. 直接使用「全站已存在」的 supabase client
+  if (!window.supabase) {
     $status.textContent = "錯誤";
-    $current.innerHTML = `<div class="bad">supabase-js 未載入（CDN）</div>`;
-    $history.innerHTML = `<tr><td colspan="3" class="bad">SDK 未載入</td></tr>`;
+    $current.innerHTML = `<div class="bad">supabase client 不存在（全站 auth 未載入）</div>`;
     return;
   }
 
-  // ✅ 只用 sb，永遠不要用 supabase 當變數名
-  const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const sb = window.supabase; // ← 關鍵：不要 createClient
 
-  const { data: sessData } = await sb.auth.getSession();
-  const uid = sessData?.session?.user?.id;
+  // ✅ 2. 取登入者
+  const { data: authData, error: authErr } = await sb.auth.getUser();
+  const user = authData?.user;
 
-  if (!uid){
+  if (authErr || !user) {
     $status.textContent = "未登入";
     $current.innerHTML = `<div class="bad">尚未登入</div>`;
     $history.innerHTML = `<tr><td colspan="3" class="muted">請先登入</td></tr>`;
-    $debug.textContent = "";
     return;
   }
 
-  $debug.textContent = `auth uid: ${uid}`;
-
-  // ✅ 同時支援 buyer_id / user_id（你 DB 兩欄都有）
+  // ✅ 3. 直接查 orders（buyer_id / user_id 都放行）
   const { data: orders, error } = await sb
     .from("orders")
-    .select("id,status,paid_at,expire_at,user_id,buyer_id,referrer_id,referral_code")
-    .or(`buyer_id.eq.${uid},user_id.eq.${uid}`)
-    .order("paid_at", { ascending: false, nullsFirst: false });
+    .select("id,status,paid_at,expire_at,user_id,buyer_id")
+    .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+    .order("paid_at", { ascending: false });
 
-  if (error){
+  if (error) {
     $status.textContent = "錯誤";
     $current.innerHTML = `<div class="bad">${error.message}</div>`;
-    $history.innerHTML = `<tr><td colspan="3" class="bad">${error.message}</td></tr>`;
     return;
   }
 
-  if (!orders || orders.length === 0){
+  if (!orders || orders.length === 0) {
     $status.textContent = "無資料";
-    $current.innerHTML = `<div class="bad">找不到訂閱紀錄（RLS 或 UID 不匹配）</div>`;
-    $history.innerHTML = `<tr><td colspan="3" class="muted">沒有任何訂單</td></tr>`;
+    $current.innerHTML = `<div class="bad">找不到訂單</div>`;
+    $debug.textContent = `auth uid: ${user.id}`;
     return;
   }
 
+  // ✅ 4. 顯示最新訂閱
   const latest = orders[0];
-  const active = latest?.expire_at ? (new Date(latest.expire_at) > new Date()) : false;
+  const active = latest.expire_at
+    ? new Date(latest.expire_at) > new Date()
+    : true;
 
   $status.textContent = active ? "有效" : "已到期";
   $status.className = "pill " + (active ? "ok" : "bad");
 
+  const fmt = v => v ? new Date(v).toLocaleString() : "-";
+
   $current.innerHTML = `
     <div style="line-height:1.8">
-      <div>狀態：<span class="${active ? "ok":"bad"}">${latest.status || "-"}</span></div>
-      <div>付款日期：<span class="mono">${fmtDate(latest.paid_at)}</span></div>
-      <div>到期日期：<span class="mono">${fmtDate(latest.expire_at)}</span></div>
+      <div>狀態：<b>${latest.status}</b></div>
+      <div>付款：<span class="mono">${fmt(latest.paid_at)}</span></div>
+      <div>到期：<span class="mono">${fmt(latest.expire_at)}</span></div>
       <div class="muted tiny">訂單ID：<span class="mono">${latest.id}</span></div>
     </div>
   `;
 
   $history.innerHTML = orders.map(o => `
     <tr>
-      <td class="mono">${fmtDate(o.paid_at)}</td>
-      <td>${planTextFromRow(o)}</td>
-      <td class="muted">-</td>
+      <td class="mono">${fmt(o.paid_at)}</td>
+      <td>${o.status}</td>
+      <td>-</td>
     </tr>
   `).join("");
+
+  $debug.textContent = `auth uid: ${user.id}`;
 })();
 </script>
 
-</body>
-</html>
 
 
 
