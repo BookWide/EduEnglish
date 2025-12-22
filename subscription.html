@@ -108,10 +108,9 @@
       justify-content:space-between;
       align-items:center;
       margin-bottom:10px;
+      gap:10px;
     }
-    .card-header-row h2{
-      margin:0;
-    }
+    .card-header-row h2{ margin:0; }
 
     .btn-secondary{
       padding:4px 10px;
@@ -120,10 +119,9 @@
       background:#fff;
       font-size:13px;
       cursor:pointer;
+      white-space:nowrap;
     }
-    .btn-secondary:hover{
-      background:#f9fafb;
-    }
+    .btn-secondary:hover{ background:#f9fafb; }
 
     table{
       width:100%;
@@ -141,16 +139,15 @@
       font-weight:500;
       font-size:13px;
     }
-    td:last-child{
-      text-align:right;
-    }
-    .status-ok{
-      color:var(--ok);
-      font-weight:600;
-    }
-    .status-fail{
-      color:var(--exp);
-      font-weight:600;
+    td:last-child{ text-align:right; }
+    .status-ok{ color:var(--ok); font-weight:600; }
+    .status-fail{ color:var(--exp); font-weight:600; }
+
+    .tiny{
+      font-size:12px;
+      color:var(--muted);
+      margin-top:6px;
+      word-break:break-all;
     }
 
     footer{
@@ -160,18 +157,15 @@
       text-align:center;
     }
     footer a{color:var(--muted);}
+
     @media (max-width:640px){
       header{
         flex-direction:column;
         align-items:flex-start;
         gap:6px;
       }
-      header nav{
-        align-self:flex-end;
-      }
-      th,td{
-        font-size:13px;
-      }
+      header nav{ align-self:flex-end; }
+      th,td{ font-size:13px; }
     }
   </style>
 
@@ -181,6 +175,7 @@
     window.SB_ANON = window.SB_ANON || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
   </script>
 </head>
+
 <body>
   <div class="wrap">
     <header>
@@ -210,7 +205,7 @@
     <section class="card">
       <div class="card-header-row">
         <h2>歷史訂單</h2>
-        <div>
+        <div style="display:flex; gap:8px; align-items:center;">
           <button class="btn-secondary" type="button" data-refresh>重新整理</button>
         </div>
       </div>
@@ -263,29 +258,65 @@
       return fmt.format(d);
     };
 
-    // ✅ 固定含稅價（圖五基準）
-    const FIXED_GROSS_TWD = {
-      month: 1000,
-      half:  5400,
-      year:  9600
-    };
+    // ✅ 只顯示「真正付款金額」：優先順序如下
+    // 1) total (integer TWD)
+    // 2) subtotal (integer TWD)
+    // 3) total_cents / subtotal_cents / unit_price_cents (cents -> TWD)
+    // 4) unit_price * quantity - discount (全部以 TWD integer)
+    // 若全部都沒有/為 0 -> 顯示 0（不再用 FIXED_GROSS_TWD 亂套 9600）
+    function paidGrossTwdFromOrder(o){
+      const n = (v)=> (v === null || v === undefined) ? 0 : Number(v);
+
+      const total = n(o?.total);
+      if (Number.isFinite(total) && total > 0) return Math.round(total);
+
+      const subtotal = n(o?.subtotal);
+      if (Number.isFinite(subtotal) && subtotal > 0) return Math.round(subtotal);
+
+      const totalC = n(o?.total_cents);
+      if (Number.isFinite(totalC) && totalC > 0) return Math.round(totalC / 100);
+
+      const subC = n(o?.subtotal_cents);
+      if (Number.isFinite(subC) && subC > 0) return Math.round(subC / 100);
+
+      const unit = n(o?.unit_price);
+      const qty  = n(o?.quantity || 1);
+      const disc = n(o?.discount);
+      if (Number.isFinite(unit) && unit > 0){
+        const calc = unit * (qty || 1) - (disc || 0);
+        if (Number.isFinite(calc) && calc > 0) return Math.round(calc);
+      }
+
+      const unitC = n(o?.unit_price_cents);
+      if (Number.isFinite(unitC) && unitC > 0){
+        const calc = (unitC / 100) * (qty || 1) - (disc || 0);
+        if (Number.isFinite(calc) && calc > 0) return Math.round(calc);
+      }
+
+      return 0;
+    }
 
     // ✅ 由「含稅總額」反推未稅/稅額（5%）
     function splitTaxFromGrossTwd(grossTwd){
       const gross = Number(grossTwd || 0);
+      if (gross <= 0) return { net: 0, tax: 0, gross: 0 };
       const net = Math.round(gross / 1.05);
       const tax = gross - net;
       return { net, tax, gross };
     }
 
-    // ✅ 取得訂單「含稅總額（TWD）」：
-    // - 以 create-order 新規則：orders.subtotal_cents = 含稅總額（分）
-    // - 若舊單缺值，再用固定含稅價補
-    function grossTwdFromOrder(o){
-      const cents = Number(o?.subtotal_cents ?? o?.total_cents ?? 0);
-      if (Number.isFinite(cents) && cents > 0) return Math.round(cents / 100);
-      const p = String(o?.period || 'month');
-      return FIXED_GROSS_TWD[p] ?? 0;
+    function statusText(o){
+      // 你目前用 status=paid，保留；若未來改 pay_status 也能顯示
+      const s = String(o?.status || '').toLowerCase();
+      const ps = String(o?.pay_status || '').toLowerCase();
+      const final = s || ps || '—';
+      return final === 'paid' ? '已付款' : final;
+    }
+
+    function isPaid(o){
+      const s = String(o?.status || '').toLowerCase();
+      const ps = String(o?.pay_status || '').toLowerCase();
+      return s === 'paid' || ps === 'paid' || ps === 'success';
     }
 
     async function loadSubscriptions(){
@@ -305,13 +336,28 @@
         }
 
         // 2) 讀取此 user 的所有 orders
-        const { data:orders, error } = await supabase
+        // 你表裡有 buyer_id / buyer_user_id（兩個都可能出現）
+        // 這裡先用 buyer_id；若查不到，再用 buyer_user_id 再查一次（避免你 schema 改名造成空）
+        let orders = null;
+
+        const q1 = await supabase
           .from('orders')
           .select('*')
           .eq('buyer_id', user.id)
           .order('created_at',{ ascending:false });
 
-        if(error) throw error;
+        if(q1.error) throw q1.error;
+        orders = q1.data || [];
+
+        if(orders.length === 0){
+          const q2 = await supabase
+            .from('orders')
+            .select('*')
+            .eq('buyer_user_id', user.id)
+            .order('created_at',{ ascending:false });
+          if(q2.error) throw q2.error;
+          orders = q2.data || [];
+        }
 
         if(!orders || orders.length === 0){
           boxCurrent.textContent = '目前尚未訂閱任何方案。';
@@ -322,13 +368,12 @@
         // 3) 找出目前「使用中的」訂閱
         const now = new Date();
         let activeOrder = orders.find(o =>
-          o.status === 'paid' &&
+          isPaid(o) &&
           o.expire_at &&
           new Date(o.expire_at) > now
         );
-        // 若沒有 expire_at，就找最近一筆 paid 的
         if(!activeOrder){
-          activeOrder = orders.find(o => o.status === 'paid');
+          activeOrder = orders.find(o => isPaid(o));
         }
 
         if(activeOrder){
@@ -338,13 +383,11 @@
           let expiresAt = activeOrder.expire_at || null;
           if(!expiresAt && startsAt){
             const d = new Date(startsAt);
-            switch(activeOrder.period){
-              case 'year':
-                d.setFullYear(d.getFullYear()+1); break;
-              case 'half':
-                d.setMonth(d.getMonth()+6); break;
-              default:
-                d.setMonth(d.getMonth()+1); break;
+            const p = String(activeOrder.period || 'month');
+            switch(p){
+              case 'year': d.setFullYear(d.getFullYear()+1); break;
+              case 'half': d.setMonth(d.getMonth()+6); break;
+              default:     d.setMonth(d.getMonth()+1); break;
             }
             expiresAt = d.toISOString();
           }
@@ -353,13 +396,18 @@
             ? activeOrder.items.join(', ')
             : String(activeOrder.items || 'EduEnglish');
 
-          // ✅ 新規則：subtotal_cents = 含稅總額
-          const grossTwd = grossTwdFromOrder(activeOrder);
+          const grossTwd = paidGrossTwdFromOrder(activeOrder);
           const { net, tax, gross } = splitTaxFromGrossTwd(grossTwd);
 
           const ref = activeOrder.referral_code
             ? ` / 推薦碼：${activeOrder.referral_code}`
             : '';
+
+          const dbg = [
+            activeOrder.provider ? `provider=${activeOrder.provider}` : '',
+            activeOrder.merchant_trade_no ? `trade=${activeOrder.merchant_trade_no}` : '',
+            activeOrder.provider_order_id ? `provider_order_id=${activeOrder.provider_order_id}` : ''
+          ].filter(Boolean).join(' · ');
 
           boxCurrent.innerHTML = `
             <div class="current-main">
@@ -370,6 +418,7 @@
             <div style="margin-top:4px;">
               金額（含稅）：${currency(gross)}　未稅：${currency(net)}　稅額（5%）：${currency(tax)}${ref}
             </div>
+            ${dbg ? `<div class="tiny">Debug：${dbg}</div>` : ''}
           `;
         }else{
           boxCurrent.textContent = '目前尚未訂閱任何方案。';
@@ -382,7 +431,9 @@
             ? o.items.join(', ')
             : String(o.items || 'EduEnglish');
 
-          const grossTwd = grossTwdFromOrder(o);
+          const grossTwd = paidGrossTwdFromOrder(o);
+          const st = statusText(o);
+          const ok = (st === '已付款');
 
           const tr = document.createElement('tr');
           tr.innerHTML = `
@@ -390,8 +441,8 @@
             <td>${list}</td>
             <td>${o.period || 'month'}</td>
             <td>${currency(grossTwd)}</td>
-            <td class="${o.status === 'paid' ? 'status-ok' : (o.status ? 'status-fail' : '')}">
-              ${o.status === 'paid' ? '已付款' : (o.status || '—')}
+            <td class="${ok ? 'status-ok' : (st && st !== '—' ? 'status-fail' : '')}">
+              ${st}
             </td>
           `;
           tbody.appendChild(tr);
@@ -419,4 +470,5 @@
   </script>
 </body>
 </html>
+
 
