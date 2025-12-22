@@ -59,8 +59,10 @@
     .ok{color:#065f46;font-weight:700;}
     .bad{color:#b91c1c;font-weight:700;}
     .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;}
+    .tiny{font-size:12px;}
   </style>
 </head>
+
 <body>
   <div class="wrap">
     <h1>我的訂閱</h1>
@@ -84,52 +86,20 @@
           <tr><td colspan="3" class="muted">讀取中…</td></tr>
         </tbody>
       </table>
+      <div id="debug" class="muted tiny" style="margin-top:10px;"></div>
     </div>
 
     <a href="/pricing.html" class="btn">前往訂閱</a>
   </div>
 
 <script>
-/** ✅ 只改「程式」，不改你的外觀 **/
+/** ✅ 只修程式：確保 orders 一定抓得到（不選不存在欄位、不重複宣告） **/
 
 const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
-// ⚠️ supabase-js v2 會把 createClient 掛在 window.supabase
+// ✅ 變數名用 sb，避免跟 window.supabase 打架
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-function fmtMoneyFromRow(o){
-  // 你表裡可能是 total / amount / subtotal / total_cents 其中之一
-  const raw =
-    (typeof o.total_cents === "number" ? o.total_cents :
-     typeof o.amount_cents === "number" ? o.amount_cents :
-     typeof o.amount === "number" ? o.amount :
-     typeof o.total === "number" ? o.total :
-     typeof o.subtotal === "number" ? o.subtotal : 0);
-
-  // 常見：你是用「分」存（例如 1000 元 => 100000）或直接存 1000
-  // 這裡做保守判斷：>= 100000 視為分；否則視為元
-  const isCents = raw >= 100000;
-  const ntd = isCents ? (raw/100) : raw;
-
-  return "NT$ " + Number(ntd).toLocaleString();
-}
-
-function fmtItems(o){
-  const it = o.items;
-  if (!it) return "-";
-  if (Array.isArray(it)) return it.join(", ");
-  // 有些會存成字串 '["story","music"]' 或 'story,music'
-  try {
-    const parsed = JSON.parse(it);
-    if (Array.isArray(parsed)) return parsed.join(", ");
-  } catch(e){}
-  return String(it);
-}
-
-function fmtPeriod(o){
-  return o.period || o.plan || o.period_text || "-";
-}
 
 function fmtDate(v){
   if (!v) return "-";
@@ -138,10 +108,26 @@ function fmtDate(v){
   return d.toLocaleString();
 }
 
+// 你的 orders 表（依截圖）目前沒有金額/方案欄位：先用 status + expire_at 顯示
+function planTextFromRow(o){
+  const s = o?.status ? String(o.status) : "-";
+  const exp = o?.expire_at ? ("到期 " + fmtDate(o.expire_at)) : "無到期日";
+  return `${s}（${exp}）`;
+}
+
 (async () => {
   const $current = document.getElementById("currentSub");
   const $history = document.getElementById("historyBody");
   const $status = document.getElementById("subStatus");
+  const $debug = document.getElementById("debug");
+
+  // 0) SDK 檢查
+  if (!window.supabase) {
+    $status.textContent = "錯誤";
+    $current.innerHTML = `<div class="bad">supabase-js 載入失敗</div>`;
+    $history.innerHTML = `<tr><td colspan="3" class="bad">SDK 未載入</td></tr>`;
+    return;
+  }
 
   // 1) 取登入者
   const { data: authData, error: authErr } = await sb.auth.getUser();
@@ -149,48 +135,76 @@ function fmtDate(v){
 
   if (authErr || !user) {
     $status.textContent = "未登入";
-    $current.textContent = "尚未登入";
+    $current.innerHTML = `<div class="bad">尚未登入</div>`;
     $history.innerHTML = `<tr><td colspan="3" class="muted">請先登入</td></tr>`;
+    $debug.textContent = "";
     return;
   }
 
-  // 2) 查 orders（重點：不要卡 status='paid'，改用 paid_at not null）
-  //    並且 user_id / buyer_id 兩個欄位都要嘗試
-  let orders = [];
-  let lastErr = null;
+  // 2) 查 orders（只選你表裡一定存在的欄位，避免整個查詢爆掉）
+  const SELECT_COLS = "id,status,paid_at,expire_at,buyer_id,referrer_id,referral_code";
 
-  // 先用 user_id
-  {
-    const { data, error } = await sb
-      .from("orders")
-      .select("id,user_id,buyer_id,items,period,paid_at,expire_at,total,subtotal,amount,total_cents,amount_cents,created_at")
-      .eq("user_id", user.id)
-      .not("paid_at", "is", null)
-      .order("paid_at", { ascending: false });
+  const { data: orders, error: ordersErr } = await sb
+    .from("orders")
+    .select(SELECT_COLS)
+    .eq("buyer_id", user.id)
+    .order("paid_at", { ascending: false });
 
-    if (!error && data?.length) orders = data;
-    if (error) lastErr = error;
+  // Debug（你要看就看，不想看就刪）
+  console.log("auth uid =", user.id);
+  console.log("orders data =", orders);
+  console.log("orders error =", ordersErr);
+
+  if (ordersErr) {
+    $status.textContent = "錯誤";
+    $current.innerHTML = `<div class="bad">讀取失敗：${ordersErr.message}</div>`;
+    $history.innerHTML = `<tr><td colspan="3" class="bad">${ordersErr.message}</td></tr>`;
+    $debug.textContent = `auth uid: ${user.id}`;
+    return;
   }
 
-  // 再補 buyer_id（避免你實際寫的是 buyer_id）
-  if (orders.length === 0) {
-    const { data, error } = await sb
-      .from("orders")
-      .select("id,user_id,buyer_id,items,period,paid_at,expire_at,total,subtotal,amount,total_cents,amount_cents,created_at")
-      .eq("buyer_id", user.id)
-      .not("paid_at", "is", null)
-      .order("paid_at", { ascending: false });
-
-    if (!error && data?.length) orders = data;
-    if (error) lastErr = error;
-  }
-
-  if (orders.length === 0) {
-    // 顯示更明確的錯誤，別再「容錯」騙自己
+  if (!orders || orders.length === 0) {
     $status.textContent = "無資料";
-    $current.innerHTML =
-      `<div class="bad">尚無訂閱紀錄</div>
-      
+    $current.innerHTML = `<div class="bad">尚無訂閱紀錄</div>`;
+    $history.innerHTML = `<tr><td colspan="3" class="muted">沒有任何訂單</td></tr>`;
+    $debug.textContent = `auth uid: ${user.id}`;
+    return;
+  }
+
+  // 3) 目前訂閱（取第一筆最新 paid_at）
+  const latest = orders[0];
+  const active = latest?.expire_at ? (new Date(latest.expire_at) > new Date()) : true;
+
+  $status.textContent = active ? "有效" : "已到期";
+  $status.className = "pill " + (active ? "ok" : "bad");
+
+  $current.innerHTML = `
+    <div style="line-height:1.8">
+      <div>狀態：<span class="${active ? "ok" : "bad"}">${latest.status || "-"}</span></div>
+      <div>付款日期：<span class="mono">${fmtDate(latest.paid_at)}</span></div>
+      <div>到期日期：<span class="mono">${fmtDate(latest.expire_at)}</span></div>
+      <div class="muted tiny">訂單ID：<span class="mono">${latest.id}</span></div>
+    </div>
+  `;
+
+  // 4) 歷史訂單表
+  $history.innerHTML = orders.map(o => {
+    return `
+      <tr>
+        <td class="mono">${fmtDate(o.paid_at)}</td>
+        <td>${planTextFromRow(o)}</td>
+        <td class="muted">-</td>
+      </tr>
+    `;
+  }).join("");
+
+  $debug.textContent = `auth uid: ${user.id}`;
+
+})();
+</script>
+</body>
+</html>
+
 
 
 
