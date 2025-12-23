@@ -29,17 +29,19 @@
     .muted{color:var(--muted)}
     .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
     .k{color:var(--muted);min-width:90px}
-    .v{font-weight:700}
+    .v{font-weight:800}
     .plans{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px}
     .plan{border:1px solid var(--line);border-radius:14px;padding:12px 14px;background:#fff;cursor:pointer;min-width:180px}
     .plan.active{border-color:var(--brand);box-shadow:0 0 0 3px rgba(37,99,235,.12)}
-    .price{font-weight:800;font-size:18px;margin-top:4px}
+    .price{font-weight:900;font-size:18px;margin-top:4px}
     .hr{height:1px;background:var(--line);margin:14px 0}
     .msg{margin-top:10px;padding:10px 12px;border-radius:12px;border:1px solid var(--line);background:#fff;white-space:pre-wrap;word-break:break-word}
     .msg.ok{border-color:rgba(6,95,70,.25);background:rgba(6,95,70,.06);color:var(--ok)}
     .msg.err{border-color:rgba(185,28,28,.25);background:rgba(185,28,28,.06);color:var(--danger)}
     .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;font-size:12px;white-space:pre-wrap;word-break:break-word}
     footer{padding:30px 0;color:var(--muted);text-align:center}
+    .badge{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:6px 10px;background:#fff}
+    .badge.ok{border-color:rgba(6,95,70,.25);background:rgba(6,95,70,.06);color:var(--ok)}
   </style>
 </head>
 
@@ -64,23 +66,35 @@
           <div class="k">課程：</div>
           <div class="v" id="topicsText">-</div>
         </div>
+
         <div class="row" style="margin-top:8px">
           <div class="k">方案：</div>
           <div class="v" id="planText">-</div>
         </div>
 
+        <div class="row" style="margin-top:8px">
+          <div class="k">推薦碼：</div>
+          <div class="v" id="refText">-</div>
+        </div>
+
+        <div class="row" style="margin-top:8px">
+          <div class="k">金額：</div>
+          <div class="v" id="amountText">-</div>
+          <div id="discountBadge" class="badge ok" style="display:none">已套用 9 折</div>
+        </div>
+
         <div class="plans" id="plans">
           <div class="plan" data-plan="month">
             <div class="muted">月方案</div>
-            <div class="price">NT$ 1,000</div>
+            <div class="price" id="pMonth">NT$ 1,000</div>
           </div>
           <div class="plan" data-plan="semi">
             <div class="muted">半年方案</div>
-            <div class="price">NT$ 5,400</div>
+            <div class="price" id="pSemi">NT$ 5,400</div>
           </div>
           <div class="plan" data-plan="year">
             <div class="muted">一年方案</div>
-            <div class="price">NT$ 9,600</div>
+            <div class="price" id="pYear">NT$ 9,600</div>
           </div>
         </div>
 
@@ -96,11 +110,11 @@
       </section>
 
       <section class="card">
-        <div style="font-weight:800;margin-bottom:8px">說明</div>
+        <div style="font-weight:900;margin-bottom:8px">說明</div>
         <div class="muted">
-          • 本頁只呼叫 <b>create-ecpay-order</b>。<br/>
-          • create-ecpay-order：先 insert orders(pending) → 回傳可自動送出的 html（form）→ 轉到綠界。<br/>
-          • 付款完成後：綠界呼叫 <b>ecpay-return</b> → 把該筆 orders 改 paid、寫入 expire_at → upsert subscriptions。<br/>
+          • 本頁呼叫 <b>create-ecpay-order</b>。<br/>
+          • 會把 <b>referral_code</b> 與 <b>amount_cents</b>（折扣後）送到後端，後端要用此金額產生綠界表單。<br/>
+          • 付款完成後：綠界呼叫 <b>ecpay-return</b> → orders 改 paid、寫入 expire_at → upsert subscriptions。<br/>
         </div>
       </section>
     </div>
@@ -109,7 +123,6 @@
   </main>
 
 <script>
-  // ====== 你只要確認這兩個 ======
   const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
   const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
   const FN_CREATE_ECPAY_ORDER = `${SUPABASE_URL}/functions/v1/create-ecpay-order`;
@@ -140,21 +153,45 @@
       .filter(Boolean);
 
     const plan = (u.searchParams.get("plan") || "month").trim();
-    return { topics, plan };
+    const ref  = (u.searchParams.get("ref") || "").trim();
+    return { topics, plan, ref };
+  }
+
+  function safeTopicsFallback(arr){
+    if (Array.isArray(arr) && arr.length) return arr;
+    return ["story","music","movie","news","pro"];
   }
 
   function normPlan(p){
     const s = String(p||"").toLowerCase().trim();
-    if (s === "semi" || s === "half" || s === "6m") return "semi";
-    if (s === "year" || s === "y" || s === "12m") return "year";
+    if (["semi","half","6m","halfyear","half-year"].includes(s)) return "semi";
+    if (["year","yearly","y","12m"].includes(s)) return "year";
     return "month";
   }
 
   function planToPeriod(plan){
-    // 後端接受 month/half/year
     if (plan === "semi") return "half";
     if (plan === "year") return "year";
     return "month";
+  }
+
+  // ✅ 價格（元） -> 轉 cents（分）
+  const PRICE_NTD = { month: 1000, semi: 5400, year: 9600 };
+
+  // ✅ 推薦折扣：有 ref 才打 9 折（自推折扣要不要擋，後端再擋）
+  function hasReferral(ref){
+    return !!(ref && ref.length >= 3);
+  }
+  function calcPayNtd(plan, ref){
+    const base = PRICE_NTD[plan] ?? PRICE_NTD.month;
+    if (!hasReferral(ref)) return { base, pay: base, rate: 1 };
+    return { base, pay: Math.round(base * 0.9), rate: 0.9 };
+  }
+  function ntdToCents(ntd){
+    return Math.round(Number(ntd || 0) * 100);
+  }
+  function fmtNTD(n){
+    return "NT$ " + Number(n||0).toLocaleString("en-US");
   }
 
   function setActivePlan(plan){
@@ -162,6 +199,18 @@
       el.classList.toggle("active", el.dataset.plan === plan);
     });
     $("planText").textContent = plan === "semi" ? "半年方案" : plan === "year" ? "一年方案" : "月方案";
+  }
+
+  function updateAmountUI(plan, ref){
+    const r = calcPayNtd(plan, ref);
+    const badge = $("discountBadge");
+    if (hasReferral(ref)){
+      badge.style.display = "inline-flex";
+      $("amountText").textContent = `${fmtNTD(r.pay)}（原價 ${fmtNTD(r.base)}）`;
+    } else {
+      badge.style.display = "none";
+      $("amountText").textContent = fmtNTD(r.base);
+    }
   }
 
   async function refreshUser(){
@@ -172,21 +221,24 @@
     return user;
   }
 
-  function safeTopicsFallback(arr){
-    if (Array.isArray(arr) && arr.length) return arr;
-    return ["story","music","movie","news","pro"];
+  async function getAccessToken(){
+    const { data } = await sb.auth.getSession();
+    const token = data?.session?.access_token;
+    return token || "";
   }
 
-  async function callCreateEcpayOrder(payload){
+  async function callCreateEcpayOrder(payload, token){
     const res = await fetch(FN_CREATE_ECPAY_ORDER, {
       method: "POST",
-      headers: { "Content-Type":"application/json" },
+      headers: {
+        "Content-Type":"application/json",
+        "Authorization": "Bearer " + token, // ✅ 必帶
+      },
       body: JSON.stringify(payload),
     });
 
     const json = await res.json().catch(()=> ({}));
 
-    // 讓你看得懂：把後端 detail 顯示出來
     if (!res.ok || !json?.ok) {
       const msg = (json?.message || "create-ecpay-order failed");
       const detail = (json?.detail ? ("\n" + String(json.detail)) : "");
@@ -196,8 +248,6 @@
   }
 
   function submitReturnedHtml(html){
-    // 後端回來的是完整 html（包含自動 submit form）
-    // 直接覆寫當前頁，瀏覽器會自動送出到綠界
     document.open();
     document.write(html);
     document.close();
@@ -208,9 +258,12 @@
       const q = parseQuery();
       const topics = safeTopicsFallback(q.topics);
       const plan = normPlan(q.plan);
+      const ref = q.ref;
 
       $("topicsText").textContent = topics.join(", ");
+      $("refText").textContent = ref ? ref : "（無）";
       setActivePlan(plan);
+      updateAmountUI(plan, ref);
 
       $("plans").addEventListener("click", (e)=>{
         const el = e.target.closest(".plan");
@@ -220,6 +273,7 @@
         u.searchParams.set("plan", p);
         history.replaceState({}, "", u.toString());
         setActivePlan(p);
+        updateAmountUI(p, (new URL(location.href)).searchParams.get("ref") || "");
       });
 
       const user = await refreshUser();
@@ -240,19 +294,34 @@
           const plan2 = normPlan(q2.plan);
           const period = planToPeriod(plan2);
 
+          const ref2 = q2.ref || "";
+          const price = calcPayNtd(plan2, ref2);
+          const amount_cents = ntdToCents(price.pay);       // ✅ 折扣後
+          const original_cents = ntdToCents(price.base);    // ✅ 原價（給你紀錄用）
+
+          const token = await getAccessToken();
+          if (!token) throw new Error("Missing Authorization Bearer token");
+
           const payload = {
+            // ✅ 後端用 JWT 取 user，不用相信前端 user_id，但你要存也可
             user_id: user.id,
             email: user.email,
-            period,      // month/half/year
+
+            period,          // month/half/year
             items: topics2,
+
+            // ✅ 推薦/折扣：讓後端產生綠界金額時用
+            referral_code: ref2,
+            amount_cents,
+            original_cents,
+            discount_rate: price.rate,  // 1 或 0.9
           };
 
           showDbg({ step:"calling create-ecpay-order", endpoint: FN_CREATE_ECPAY_ORDER, payload });
 
-          const out = await callCreateEcpayOrder(payload);
+          const out = await callCreateEcpayOrder(payload, token);
 
-          // out.html 是後端產生的自動送出表單
-          showDbg({ ok:true, order_id: out.order_id, merchant_trade_no: out.merchant_trade_no });
+          showDbg({ ok:true, order_id: out.order_id, merchant_trade_no: out.merchant_trade_no, amount_cents });
 
           submitReturnedHtml(out.html);
 
@@ -272,6 +341,7 @@
 </script>
 </body>
 </html>
+
 
 
 
