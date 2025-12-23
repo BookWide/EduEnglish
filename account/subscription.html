@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>我的訂閱｜BookWide</title>
 
-  <!-- supabase-js v2（提供 window.supabase） -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
   <style>
@@ -155,7 +154,6 @@
 const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
-/** ✅ 避免「supabase 已宣告」：永遠只用區域變數 sb，不宣告 supabase */
 async function waitSupabase(ms = 4000){
   const start = Date.now();
   while(!window.supabase){
@@ -170,21 +168,42 @@ function fmtDate(v){
   const d = new Date(v);
   return isNaN(d.getTime()) ? "-" : d.toLocaleString();
 }
-function moneyNTDFromRow(o){
-  // 你表裡常見：total_cents(int4) 或 unit_price*quantity
-  let cents = null;
 
-  if (o && typeof o.total_cents === "number") cents = o.total_cents;
-  else if (o && typeof o.unit_price === "number") {
-    const q = (typeof o.quantity === "number" && o.quantity>0) ? o.quantity : 1;
-    cents = o.unit_price * q;
+/**
+ * ✅ 這裡是關鍵修正：
+ * - total / subtotal：視為「元」
+ * - total_cents / unit_price：視為「分」
+ */
+function moneyNTDFromRow(o){
+  if(!o) return "-";
+
+  // 1) total（元）
+  if (typeof o.total === "number" && o.total > 0) {
+    return "NT$ " + Math.round(o.total).toLocaleString("en-US");
   }
 
-  if (cents == null) return "-";
-  // 你的資料是「分」(cents) -> 顯示 NT$ 元
-  const ntd = Math.round(cents / 100);
-  return "NT$ " + ntd.toLocaleString("en-US");
+  // 2) subtotal（元）
+  if (typeof o.subtotal === "number" && o.subtotal > 0) {
+    return "NT$ " + Math.round(o.subtotal).toLocaleString("en-US");
+  }
+
+  // 3) total_cents（分）
+  if (typeof o.total_cents === "number" && o.total_cents > 0) {
+    const ntd = Math.round(o.total_cents / 100);
+    return "NT$ " + ntd.toLocaleString("en-US");
+  }
+
+  // 4) unit_price*quantity（分）
+  if (typeof o.unit_price === "number" && o.unit_price > 0) {
+    const q = (typeof o.quantity === "number" && o.quantity>0) ? o.quantity : 1;
+    const cents = o.unit_price * q;
+    const ntd = Math.round(cents / 100);
+    return "NT$ " + ntd.toLocaleString("en-US");
+  }
+
+  return "NT$ 0";
 }
+
 function planTextFromRow(o){
   const s = o?.status ? String(o.status) : "-";
   const exp = o?.expire_at ? ("到期 " + fmtDate(o.expire_at)) : "無到期日";
@@ -192,7 +211,7 @@ function planTextFromRow(o){
 }
 function isActiveByExpire(o){
   if(!o) return false;
-  if(!o.expire_at) return true; // 沒有到期日：視為有效
+  if(!o.expire_at) return true;
   const exp = new Date(o.expire_at);
   return !isNaN(exp.getTime()) && exp > new Date();
 }
@@ -204,7 +223,6 @@ function daysLeft(expire_at){
   return Math.ceil(diff / 86400000);
 }
 
-// top buttons
 $("btnHome").onclick = () => location.href = "/index.html";
 $("btnBack").onclick = () => {
   if (history.length > 1) history.back();
@@ -233,7 +251,6 @@ $("btnBack").onclick = () => {
 
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  // 1) 使用者
   const { data: authData, error: authErr } = await sb.auth.getUser();
   const user = authData?.user;
 
@@ -243,7 +260,7 @@ $("btnBack").onclick = () => {
     $status.className = "pill bad";
     $current.innerHTML = `<div style="color:var(--bad);font-weight:900;">尚未登入</div>`;
     $history.innerHTML = `<tr><td colspan="3" class="muted">請先登入</td></tr>`;
-    $trial.style.display = "inline-flex"; // 未登入也可試看
+    $trial.style.display = "inline-flex";
     $debug.textContent = "";
     return;
   }
@@ -253,11 +270,10 @@ $("btnBack").onclick = () => {
   $who.textContent = `${email} · ${uidShort}`;
   $debug.textContent = `auth uid: ${user.id}`;
 
-  // 2) 抓 orders：同時支援 buyer_id / user_id（你資料庫兩欄都存在）
-  //    ✅ 也避免 paid_at 為 null 時被你過濾掉看不到（但 paid 才算有效）
+  // ✅ 這裡多抓 total/subtotal
   const { data: orders, error: ordersErr } = await sb
     .from("orders")
-    .select("id,status,paid_at,expire_at,buyer_id,user_id,referrer_id,referral_code,total_cents,unit_price,quantity,items,period")
+    .select("id,status,paid_at,expire_at,buyer_id,user_id,referrer_id,referral_code,total,total_cents,subtotal,unit_price,quantity,items,period")
     .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
     .order("paid_at", { ascending: false, nullsFirst: false });
 
@@ -280,8 +296,6 @@ $("btnBack").onclick = () => {
     return;
   }
 
-  // 3) 找「最新有效訂閱」：status=paid 且 expire_at 未到期（或無 expire_at）
-  //    若都沒有，就 fallback 用最新一筆顯示（但狀態標成無效/無資料）
   const paidList = list.filter(o => String(o.status||"").toLowerCase() === "paid");
   const activePaid = paidList.find(o => isActiveByExpire(o)) || null;
   const latest = activePaid || list[0];
@@ -291,7 +305,6 @@ $("btnBack").onclick = () => {
   $status.textContent = active ? "有效" : "無資料";
   $status.className = "pill " + (active ? "ok" : "neu");
 
-  // 右側資訊（含金額/下單帳號）
   const amt = moneyNTDFromRow(latest);
   const buyerEmail = email;
 
@@ -311,7 +324,6 @@ $("btnBack").onclick = () => {
     </div>
   `;
 
-  // 4) 避免重複訂閱：只要目前有有效訂閱，就鎖定前往訂閱、顯示提醒、隱藏試看
   if(active){
     const leftDays = daysLeft(latest.expire_at);
     $avoidDup.style.display = "block";
@@ -329,14 +341,12 @@ $("btnBack").onclick = () => {
     $trial.style.display = "none";
     $locked.style.display = "inline-flex";
   } else {
-    // 沒有效訂閱 -> 可以去訂閱 + 顯示免費試看
     $trial.style.display = "inline-flex";
     $goPricing.style.display = "inline-flex";
     $locked.style.display = "none";
     $avoidDup.style.display = "none";
   }
 
-  // 5) 歷史訂單：只顯示 paid（商用視角）
   const history = paidList.length ? paidList : list;
 
   $history.innerHTML = history.map(o => `
@@ -351,6 +361,7 @@ $("btnBack").onclick = () => {
 </script>
 </body>
 </html>
+
 
 
 
