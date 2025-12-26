@@ -164,7 +164,11 @@
   const SUPABASE_URL = window.SUPABASE_URL || "YOUR_SUPABASE_URL";
   const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || "YOUR_SUPABASE_ANON_KEY";
 
-  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  // ✅✅✅ 重要：避免 BFCache / 快取導致「回來不更新」
+  const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    global: { fetch: (url, options={}) => fetch(url, { ...options, cache: "no-store" }) }
+  });
 
   const $ = (id)=>document.getElementById(id);
 
@@ -178,8 +182,11 @@
     if (!iso) return "-";
     const d = new Date(iso);
     if (isNaN(d.getTime())) return "-";
-    // 你表是 timestamptz（UTC），這邊用台灣時間顯示
-    return d.toLocaleString("zh-TW", { timeZone:"Asia/Taipei", year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit" });
+    return d.toLocaleString("zh-TW", {
+      timeZone:"Asia/Taipei",
+      year:"numeric", month:"2-digit", day:"2-digit",
+      hour:"2-digit", minute:"2-digit", second:"2-digit"
+    });
   }
 
   function statusText(s){
@@ -188,11 +195,8 @@
     return "pending";
   }
 
-  // 你 orders 表可能有：subtotal_cents / total_cents / total_cents
   function pickAmountCents(o){
-    const cand = [
-      o.subtotal_cents, o.total_cents, o.amount_cents, o.total, o.amount
-    ];
+    const cand = [o.subtotal_cents, o.total_cents, o.amount_cents, o.total, o.amount];
     for (const c of cand){
       const n = Number(c);
       if (Number.isFinite(n) && n > 0) return n;
@@ -200,17 +204,46 @@
     return 0;
   }
 
-  // ✅ 你現在缺日期：用 paid_at 沒有就用 created_at（這不是容錯亂猜，是用你表裡真的存在的時間）
   function pickPaidDate(o){
     return o.paid_at || o.payment_at || o.paidAt || o.created_at || o.createdAt || null;
   }
 
-  async function main(){
+  // ✅ UI: current tag 只顯示 2 種：有效/無資料（你原本「無資料」我保留）
+  function setCurrentTag(hasData, isPaid){
+    if (!hasData){
+      $("tagCurrent").textContent = "無資料";
+      return;
+    }
+    $("tagCurrent").textContent = isPaid ? "有效" : "無資料";
+  }
+
+  // ✅✅✅ 核心：BFCache 回來、切回分頁、focus 都自動重抓
+  function hookAutoRefresh(loadFn){
+    let t = null;
+    const run = () => {
+      clearTimeout(t);
+      t = setTimeout(() => loadFn(true), 120);
+    };
+
+    window.addEventListener("pageshow", () => run());          // BFCache
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) run(); });
+    window.addEventListener("focus", run);
+
+    const sp = new URLSearchParams(location.search);
+    if (sp.get("refresh")==="1" || sp.get("paid")==="1") run();
+  }
+
+  async function main(force){
+    $("errCurrent").style.display = "none";
+    $("errHist").style.display = "none";
+    $("tagCurrent").textContent = force ? "更新中" : "載入中";
+    $("histWrap").textContent = "載入中...";
+
     // 1) user
     const { data: { user }, error: userErr } = await sb.auth.getUser();
     if (userErr || !user){
       $("who").textContent = "未登入";
-      $("tagCurrent").textContent = "無資料";
+      setCurrentTag(false, false);
       $("curStatus").textContent = "-";
       $("histWrap").textContent = "請先登入後查看訂單。";
       return;
@@ -221,7 +254,6 @@
     $("who").textContent = `${email} · ${uidShort}`;
 
     // 2) load orders by user_id
-    // 你表確定有 user_id（從你截圖可見）
     const { data: orders, error: ordErr } = await sb
       .from("orders")
       .select("*")
@@ -231,15 +263,15 @@
 
     if (ordErr){
       $("errCurrent").style.display = "";
-      $("errCurrent").textContent = "讀取 orders 失敗：\n" + ordErr.message;
-      $("tagCurrent").textContent = "無資料";
+      $("errCurrent").textContent = "讀取 orders 失敗：\n" + (ordErr.message || String(ordErr));
+      setCurrentTag(false, false);
       $("histWrap").textContent = "—";
       return;
     }
 
     const list = Array.isArray(orders) ? orders : [];
     if (!list.length){
-      $("tagCurrent").textContent = "無資料";
+      setCurrentTag(false, false);
       $("curStatus").textContent = "-";
       $("curPaidAt").textContent = "-";
       $("curOrderId").textContent = "-";
@@ -253,7 +285,8 @@
     // 3) current = latest order
     const cur = list[0];
     const st = statusText(cur.status);
-    $("tagCurrent").textContent = "無資料"; // 保留你的 UI 標籤風格
+    setCurrentTag(true, st==="paid");
+
     $("curStatus").textContent = st;
     $("curStatus").className = "v status " + (st==="paid" ? "paid":"pending");
 
@@ -263,14 +296,11 @@
     const amtCents = pickAmountCents(cur);
     $("curAmount").textContent = amtCents ? fmtMoneyNTDFromCents(amtCents) : "NT$ 0";
 
-    // ✅ 付款日期：paid_at 沒有就用 created_at（你表一定有 created_at）
     const paidDate = pickPaidDate(cur);
     $("curPaidAt").textContent = fmtDateTW(paidDate);
 
-    // 到期：如果 orders.expire_at 有就顯示；沒有就先顯示 '-'
     $("curExpireAt").textContent = fmtDateTW(cur.expire_at);
 
-    // note
     const created = cur.created_at ? fmtDateTW(cur.created_at) : "-";
     $("noteCurrent").textContent = `auth uid: ${user.id}　｜　最後一筆下單時間：${created}`;
 
@@ -281,7 +311,6 @@
       const s = statusText(o.status);
       const cents = pickAmountCents(o);
       const money = cents ? fmtMoneyNTDFromCents(cents) : "NT$ 0";
-      const plan = (o.period || o.plan || (s==="paid" ? "paid":"pending")) + "（無到期日）";
       return `
         <tr>
           <td>${showDate}</td>
@@ -307,7 +336,10 @@
     `;
   }
 
-  main();
+  // 首次載入
+  main(false);
+  // ✅ 回來就刷新（解決你「要手動Enter」）
+  hookAutoRefresh(main);
 </script>
 </body>
 </html>
