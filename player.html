@@ -384,6 +384,12 @@ tr.speaking{
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+  // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
+  if (window.BW && typeof BW.startIdleLogout === 'function') {
+    BW.startIdleLogout(60, '/login.html?timeout=1');
+  }
+</script>
+<script>
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
   const SUPABASE_ANON_KEY =
@@ -397,160 +403,6 @@ tr.speaking{
 
   // 僅供 player.html 使用的 Supabase Client
   const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-  // === BookWide：單裝置登入鎖（player 專用，不改版面） ===
-  // 目的：同一帳號同時只能有「1 台裝置」在播放頁使用（第二台進來會踢掉第一台）
-  // 需要 Supabase 資料表：public.session_locks（見下方 SQL）
-  (function(){
-    window.BW = window.BW || {};
-    const LOCK_TABLE = 'session_locks';
-    const HEARTBEAT_EVERY_MS = 15000;  // 心跳 15 秒
-    const CHECK_EVERY_MS     = 8000;   // 檢查 8 秒（快一點比較像「即時被踢」）
-    const STALE_MS           = 45000;  // 超過 45 秒視為斷線可覆蓋（避免關頁後卡死）
-
-    function getDeviceId(){
-      try{
-        const k='bw_device_id';
-        let id = localStorage.getItem(k);
-        if(!id){
-          id = (crypto?.randomUUID ? crypto.randomUUID() : ('dev_' + Math.random().toString(16).slice(2) + Date.now()));
-          localStorage.setItem(k, id);
-        }
-        return id;
-      }catch(_e){
-        return 'dev_' + Math.random().toString(16).slice(2) + Date.now();
-      }
-    }
-
-    function nowISO(){ return new Date().toISOString(); }
-
-    function showKicked(msg){
-      try{
-        // 用原本 alert 風格，避免改動版面
-        alert(msg || '你的帳號已在另一台裝置登入，本頁將自動登出。');
-      }catch(_e){}
-    }
-
-    async function safeSelectLock(client, userId){
-      try{
-        const { data, error } = await client.from(LOCK_TABLE).select('user_id, device_id, heartbeat_at').eq('user_id', userId).maybeSingle();
-        if(error) return null;
-        return data || null;
-      }catch(_e){
-        return null;
-      }
-    }
-
-    async function safeUpsertLock(client, userId, deviceId){
-      try{
-        // 直接 upsert；若另一台剛拿到鎖，本台也會覆蓋 -> 但隨後檢查會發現自己不是最新而被踢
-        const payload = { user_id: userId, device_id: deviceId, heartbeat_at: nowISO() };
-        const { error } = await client.from(LOCK_TABLE).upsert(payload, { onConflict: 'user_id' });
-        if(error) throw error;
-        return true;
-      }catch(e){
-        console.warn('[BW-lock] upsert failed (table/policy maybe missing):', e?.message || e);
-        return false;
-      }
-    }
-
-    async function safeHeartbeat(client, userId, deviceId){
-      try{
-        const payload = { device_id: deviceId, heartbeat_at: nowISO() };
-        const { error } = await client.from(LOCK_TABLE).update(payload).eq('user_id', userId).eq('device_id', deviceId);
-        if(error) throw error;
-        return true;
-      }catch(e){
-        // 如果被踢或 RLS 失敗，都會在這裡；交由輪詢判斷
-        return false;
-      }
-    }
-
-    // 對外：在 init 守門通過後呼叫，開始鎖 + 心跳 + 被踢偵測
-    BW.startSingleDeviceLock = async function(client, user, opts){
-      opts = opts || {};
-      if(!client || !user || !user.id) return;
-      const userId = user.id;
-      const deviceId = getDeviceId();
-
-      // 1) 先看目前鎖（若已被別台占用且還活著，就讓本台拿鎖，然後另一台會被踢）
-      //    這樣「後進者」會成為新主控，更符合你要的效果。
-      await safeUpsertLock(client, userId, deviceId);
-
-      let stopped = false;
-      const stop = ()=>{ stopped = true; };
-
-      // 2) 定時心跳：只有「持有鎖」的那台才會 update 成功
-      const hbTimer = setInterval(()=>{ if(!stopped) safeHeartbeat(client, userId, deviceId); }, HEARTBEAT_EVERY_MS);
-
-      // 3) 定時檢查：發現鎖不屬於自己 → 被踢
-      const ckTimer = setInterval(async ()=>{
-        if(stopped) return;
-        const row = await safeSelectLock(client, userId);
-        if(!row) return; // 表不存在或 RLS 擋住：就不做單裝置限制
-        const theirs = row.device_id || '';
-        const hbAt = row.heartbeat_at ? new Date(row.heartbeat_at).getTime() : 0;
-        const stale = hbAt && (Date.now() - hbAt > STALE_MS);
-
-        // 如果資料很舊，代表上一台可能已關頁 -> 本台再次 upsert 取回鎖（避免卡死）
-        if(stale){
-          await safeUpsertLock(client, userId, deviceId);
-          return;
-        }
-
-        if(theirs && theirs !== deviceId){
-          stop();
-          clearInterval(hbTimer);
-          clearInterval(ckTimer);
-          showKicked('⚠️ 你的帳號已在另一台裝置登入，此頁將自動回首頁。');
-
-          try{ await client.auth.signOut(); }catch(_e){}
-          const next = location.pathname + location.search;
-          location.href = (ROOT_BASE || '') + '/index.html?denied=kick&next=' + encodeURIComponent(next);
-        }
-      }, CHECK_EVERY_MS);
-
-      // 4) 關頁 / 刷新：不強制刪 lock（避免不同瀏覽器/手機 onbeforeunload 不可靠）
-      //    只靠心跳過期（STALE_MS）自動釋放即可。
-    };
-  })();
-  // === End BookWide：單裝置登入鎖 ===
-
-
-  // === BookWide：閒置自動登出（統一用 BW.startIdleLogout） ===
-  window.BW = window.BW || {};
-  // minutes: 閒置分鐘數；redirect: 登出後導向；client: 指定 supabase client（player 用 playerSupa）
-  BW.startIdleLogout = BW.startIdleLogout || function(minutes = 60, redirect, client){
-    try{
-      const EVENTS = ['click','keydown','scroll','touchstart','mousemove'];
-      let last = Date.now();
-      const touch = ()=>{ last = Date.now(); };
-      EVENTS.forEach(evt => window.addEventListener(evt, touch, {passive:true}));
-
-      const tick = async ()=>{
-        const diffMin = (Date.now() - last) / 60000;
-        if(diffMin < minutes) return;
-        try{
-          const c = client || window.supa;
-          if(c && c.auth) await c.auth.signOut();
-        }catch(_e){}
-        try{ alert(`已自動登出（超過 ${minutes} 分鐘未操作）`); }catch(_e){}
-        if(redirect){
-          location.href = redirect;
-        }else{
-          location.reload();
-        }
-      };
-      setInterval(tick, 60000);
-    }catch(e){
-      console.warn('BW.startIdleLogout failed:', e);
-    }
-  };
-
-  // player.html：用 60 分鐘（避免上課看到一半被踢出），導向登入頁
-  BW.startIdleLogout(60, (ROOT_BASE + '/index.html?denied=signin&timeout=1&next=' + encodeURIComponent(location.pathname + location.search)), playerSupa);
-  // === End BW.startIdleLogout ===
-
 
   async function bwPlayerGetUser() {
     try {
@@ -587,7 +439,7 @@ tr.speaking{
   async function supaGetUser() {
     return await bwPlayerGetUser();
   }
-
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 </head>
 <body>
@@ -1661,17 +1513,7 @@ async function speakText(text, lang){
     }
   }
 
-  
-  // 2.5️⃣ 單裝置限制：取得 lock + 開始心跳（不改版面）
-  try{
-    if(window.BW && typeof BW.startSingleDeviceLock === 'function' && typeof playerSupa !== 'undefined' && user){
-      await BW.startSingleDeviceLock(playerSupa, user);
-    }
-  }catch(e){
-    console.warn('[BW-player] single-device lock failed:', e);
-  }
-
-// 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
+  // 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
   let validUntil = null;
   if (!isPreview && user) {
     try {
@@ -1745,7 +1587,7 @@ async function speakText(text, lang){
     console.warn('[BW-player] init error:', e);
   }
 })();
-
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 
   <!-- 播放進度寫入 watch_logs（供學習控制台使用） --> <!-- V20251124-fixed by ChatGPT -->
@@ -1883,11 +1725,12 @@ async function speakText(text, lang){
     });
   }
 })();
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 
 // PRO 模式：讀取 index-pro.json，並在「字幕」分頁顯示完整課程章節清單
 
 // JP 模式：讀取 index-jp.json，並在「字幕」分頁顯示日文文法清單
-
+async 
 async function loadJpOutline(){
   try{
     const url = `${BASE}/data/jp/index-jp.json?v=${vnow}`;
@@ -2043,6 +1886,102 @@ async function loadProOutline(){
 </body>
 </html>
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<!-- ================= BookWide TRIAL FINAL PATCH v20251227 ================= -->
+<script>
+/* FINAL POLICY:
+ * - MUST login
+ * - ONLY movie/goingbackhome can preview
+ * - preview ends -> redirect to pricing with next
+ */
+
+(async function BW_TRIAL_FINAL(){
+  try{
+    const params = new URLSearchParams(location.search);
+    const isPreview = params.get('preview') === '1';
+    const cat = params.get('cat');
+    const slug = params.get('slug');
+
+    const PREVIEW_ALLOW =
+      isPreview &&
+      cat === 'movie' &&
+      slug === 'goingbackhome';
+
+    let user = null;
+    try{
+      if (typeof bwPlayerGetUser === 'function'){
+        user = await bwPlayerGetUser();
+      }
+    }catch(e){}
+
+    // must login
+    if (!user){
+      const next = location.pathname + location.search;
+      const url = new URL((window.ROOT_BASE||'') + '/index.html', location.origin);
+      url.searchParams.set('denied','signin');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
+    }
+
+    // subscription gate (skip only when PREVIEW_ALLOW)
+    if (!PREVIEW_ALLOW && typeof window.__bw_subscription_checked === 'undefined'){
+      window.__bw_subscription_checked = true;
+      // let original logic run (do nothing here)
+    }
+
+    // mark trial
+    if (PREVIEW_ALLOW){
+      const badge = document.getElementById('userNameBadge');
+      if (badge) badge.textContent = (user.email||'user') + ' · 試看中';
+    }
+
+    // trial end redirect
+    const TRIAL_LIMIT_SECONDS = 180;
+    function goPricing(){
+      const u = new URL(location.href);
+      u.searchParams.delete('preview');
+      const next = u.pathname + '?' + u.searchParams.toString();
+      const p = new URL((window.ROOT_BASE||'') + '/pricing.html', location.origin);
+      p.searchParams.set('denied','trial_end');
+      p.searchParams.set('next', next);
+      location.href = p.toString();
+    }
+
+    const v = document.querySelector('video');
+    if (PREVIEW_ALLOW && v){
+      let fired=false;
+      v.addEventListener('timeupdate',()=>{
+        if (fired) return;
+        if (v.currentTime >= TRIAL_LIMIT_SECONDS){
+          fired=true;
+          try{v.pause();}catch(e){}
+          goPricing();
+        }
+      });
+    }
+
+  }catch(e){
+    console.warn('[BW_TRIAL_FINAL]', e);
+  }
+})();
+</script>
+<!-- ================= /BookWide TRIAL FINAL PATCH ================= -->
 
 
 
