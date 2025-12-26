@@ -56,6 +56,14 @@
     .sumBig{font-size:40px;font-weight:900;letter-spacing:.5px}
     .err{margin-top:14px;border:1px solid rgba(185,28,28,.25);background:#fff5f5;color:var(--danger);
       padding:12px 14px;border-radius:14px;display:none;white-space:pre-wrap}
+
+    .badge{
+      display:inline-flex;align-items:center;gap:8px;
+      padding:8px 10px;border-radius:999px;
+      border:1px solid var(--line);background:#fff;
+      font-size:13px;font-weight:800;color:var(--muted);
+      margin-top:10px;
+    }
   </style>
 </head>
 
@@ -106,8 +114,9 @@
       <div class="field">
         <div style="font-weight:800;margin-bottom:8px">推薦碼（選填）</div>
         <input id="referralCode" placeholder="輸入推薦碼（例如 62754）" />
+        <div class="badge" id="refHint" style="display:none;">推薦碼：已帶入</div>
         <div class="help">
-          有推薦碼：會帶入後端計算折扣與分潤（referrals 表：code → referrer_user_id）。<br/>
+          有推薦碼：會帶入後端計算折扣與分潤（referrals 表：code → owner_id / referrer_user_id）。<br/>
           付款後由 ecpay-return 回寫 orders（paid/expire_at…），subscription.html 會自動顯示。
         </div>
       </div>
@@ -152,6 +161,7 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 let plan = "month";
 const PRICE = { month: 1000, half: 5400, year: 9600 };
+const DISCOUNT_RATE = 0.10; // ✅ 前端顯示用（真實仍以 CEO 計算為準）
 
 function $(id){ return document.getElementById(id); }
 function fmt(n){ return "NT$ " + Number(n||0).toLocaleString(); }
@@ -160,32 +170,64 @@ function showErr(msg){
   b.style.display = msg ? "block" : "none";
   b.textContent = msg || "";
 }
+
+/* ================= summary ================= */
+
+function computeSummary(){
+  const base = PRICE[plan] || 0;
+  const ref = ($("referralCode").value || "").trim();
+  const disc = ref ? Math.round(base * DISCOUNT_RATE) : 0;
+  const pay = Math.max(0, base - disc);
+
+  $("sumPay").innerText = fmt(pay);
+  $("sumBase").innerText = fmt(base);
+  $("sumDisc").innerText = fmt(disc);
+  $("sumPeriod").innerText = plan;
+}
+
 function setPlan(p){
   plan = p;
   document.querySelectorAll(".plan").forEach(el=>{
     el.classList.toggle("active", el.dataset.plan === p);
   });
-  $("sumPay").innerText = fmt(PRICE[p]);
-  $("sumBase").innerText = fmt(PRICE[p]);
-  $("sumDisc").innerText = fmt(0);
-  $("sumPeriod").innerText = p;
+  computeSummary();
 }
 
 /* ================= init UI from URL ================= */
 
 (function initFromUrl(){
   const u = new URL(location.href);
+
+  // topics
   const topics = (u.searchParams.get("topics") || "").replace(/%2C/g,",");
   $("topicsText").innerText = topics || "—";
 
+  // plan
   const p = (u.searchParams.get("plan") || "month").toLowerCase();
   setPlan(["month","half","year"].includes(p) ? p : "month");
+
+  // ✅ auto referral code from URL: ref / referral / code
+  const ref =
+    (u.searchParams.get("ref") || "").trim() ||
+    (u.searchParams.get("referral") || "").trim() ||
+    (u.searchParams.get("code") || "").trim();
+
+  if (ref){
+    $("referralCode").value = ref;
+    $("refHint").style.display = "inline-flex";
+  }
+  computeSummary();
 })();
 
 document.querySelectorAll(".plan").forEach(el=>{
   el.addEventListener("click", ()=>{
     setPlan(el.dataset.plan);
   });
+});
+
+$("referralCode").addEventListener("input", ()=>{
+  $("refHint").style.display = ($("referralCode").value || "").trim() ? "inline-flex" : "none";
+  computeSummary();
 });
 
 $("resetBtn").addEventListener("click", ()=>location.reload());
@@ -233,19 +275,41 @@ $("payBtn").addEventListener("click", async ()=>{
       return;
     }
 
-    const ref = ($("referralCode").value || "").trim();
+    const ref = ($("referralCode").value || "").trim() || null;
 
-    // 3) call create-ecpay-order (固定這支，不碰 create-order)
+    // topics
+    const topics = $("topicsText").innerText || "";
+
+    // ✅ base amount（CEO 也可以自己照 period 算；我這裡多送一份避免你 CEO 版本差異）
+    const amount = PRICE[plan] || 0;
+
+    // 3) call create-ecpay-order
     const resp = await fetch(SUPABASE_URL + "/functions/v1/create-ecpay-order", {
       method: "POST",
       headers:{
         "Content-Type":"application/json",
+        "apikey": SUPABASE_ANON_KEY,
         "Authorization":"Bearer " + session.access_token
       },
       body: JSON.stringify({
+        // 兼容你不同版本的 CEO 欄位
         user_id: user.id,
+        buyer_user_id: user.id,
+        buyer_id: user.id,
+        buyer_userid: user.id,
+
+        email: user.email || null,
+        email_to: user.email || null,
+
         period: plan,
-        referral_code: ref || null
+        plan: plan,
+
+        amount: amount,
+        topics: topics,
+
+        referral_code: ref,
+        ref_code: ref,
+        ref: ref
       })
     });
 
@@ -263,16 +327,23 @@ $("payBtn").addEventListener("click", async ()=>{
       return;
     }
 
-    if (!data?.html){
-      showErr("付款建立失敗：回傳缺少 html 欄位：\n" + text);
+    // 你 CEO 可能回 html 或 params；優先吃 html（你原本就是這樣）
+    if (data?.html){
+      const w = window.open("", "_self");
+      w.document.write(data.html);
+      w.document.close();
+      return;
+    }
+
+    // 若你 CEO 回 params（可選）
+    if (data?.params){
+      showErr("CEO 回傳 params 不是 html。你 CEO 要回傳 html 才能自動送綠界。\n" + JSON.stringify(data.params, null, 2));
       $("payBtn").disabled = false;
       return;
     }
 
-    // 4) auto submit to ECPay
-    const w = window.open("", "_self");
-    w.document.write(data.html);
-    w.document.close();
+    showErr("付款建立失敗：回傳內容格式不符（缺 html/params）：\n" + text);
+    $("payBtn").disabled = false;
 
   }catch(e){
     showErr("付款建立失敗：" + String(e?.message || e));
@@ -282,6 +353,8 @@ $("payBtn").addEventListener("click", async ()=>{
 </script>
 </body>
 </html>
+
+
 
 
 
