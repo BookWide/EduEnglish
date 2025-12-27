@@ -376,46 +376,118 @@ const main = async () => {
       const tbody = $('#usersTable tbody');
       tbody.innerHTML = '<tr><td class="hint" colspan="9">載入中…</td></tr>';
 
-      // ✅ v20251227-stable: 優先走 RPC（SERVER 端彙總，避免 orders RLS 導致抓不到訂單）
-      // 需要你在 SQL Editor 建立 public.admin_users_overview() SECURITY DEFINER（下方我有給完整 SQL）
-      let profiles = null;
-      let latestOrderByUser = {};
       try{
-        const vr = await supa.rpc('admin_users_overview');
-        if(vr.error) throw vr.error;
-        profiles = (vr.data || []).filter(p => p && p.id);
-        // RPC 已經算好 expires_at + expire_source
-      }catch(e){
-        console.warn('admin_users_overview RPC 不可用，fallback profiles+orders：', e?.message || e);
+        // ✅ R6: 優先走 RPC（後端彙總，避免前端因 RLS 讀不到 orders 而顯示錯誤到期）
+        let profiles = null;
+        let latestOrderByUser = {};
+        let rpcMode = false;
 
-        const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
-        const r = await supa.from('profiles').select(cols);
+        try{
+          const vr = await supa.rpc('admin_users_overview');
+          if(vr.error) throw vr.error;
+          profiles = (vr.data || []).filter(p => p && p.id);
+          rpcMode = true;
+        }catch(e){
+          console.warn('[user] admin_users_overview RPC not available, fallback profiles+orders:', e?.message || e);
+          const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
+          const r = await supa.from('profiles').select(cols);
+          if(r.error) throw r.error;
+          profiles = (r.data || []).filter(p => p && p.id);
+          const ids0 = profiles.map(p=>p.id);
+          latestOrderByUser = await buildOrdersMapByBuyerId(ids0);
+        }
 
-        if(r.error){
-          tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：${r.error.message}</td></tr>`;
+        if(!profiles || !profiles.length){
+          tbody.innerHTML = '<tr><td class="hint" colspan="9">目前沒有任何使用者</td></tr>';
           return;
         }
 
-        profiles = (r.data || []).filter(p => p && p.id);
+        const ids = profiles.map(p=>p.id);
+        const deviceByUser = await buildDeviceMap(ids);
+
+        const q = ($('#q').value||'').trim().toLowerCase();
+        let rows = profiles.filter(x=>{
+          if(!q) return true;
+          return (x.email||'').toLowerCase().includes(q)
+              || (x.display_name||'').toLowerCase().includes(q);
+        });
+
+        // enrich
+        const now = new Date();
+        rows = rows.map(x=>{
+          const dev = deviceByUser[String(x.id)] || { activeCount:0, totalCount:0 };
+          const online = dev.activeCount>0;
+          return { ...x, __online: online, __dev: dev };
+        });
+
+        // sort：admin > online > last seen/login > email
+        rows.sort((a,b)=>{
+          const aAdmin = a.is_admin ? 1 : 0, bAdmin = b.is_admin ? 1 : 0;
+          if(aAdmin !== bAdmin) return bAdmin - aAdmin;
+          const aOn = a.__online ? 1 : 0, bOn = b.__online ? 1 : 0;
+          if(aOn !== bOn) return bOn - aOn;
+          const aTs = new Date(a.last_seen_at || a.last_sign_in_at || 0).getTime() || 0;
+          const bTs = new Date(b.last_seen_at || b.last_sign_in_at || 0).getTime() || 0;
+          if(aTs !== bTs) return bTs - aTs;
+          return String(a.email||'').localeCompare(String(b.email||''));
+        });
+
+        const DEV_LIMIT = 2;
+
+        tbody.innerHTML = rows.map((x,idx)=>{
+          const online = !!x.__online;
+          const dev = x.__dev || { activeCount:0, totalCount:0 };
+
+          // expire: RPC 直接給 expires_at + expire_source；fallback 用 orders 覆蓋 profiles
+          let expireAt = x.expires_at ? new Date(x.expires_at) : null;
+          let expireSource = x.expire_source || 'profiles';
+          if(!rpcMode){
+            const last = latestOrderByUser[String(x.id)] || null;
+            const orderExpire = last?.expire_at ? new Date(last.expire_at) : null;
+            if(orderExpire && !isNaN(orderExpire)) { expireAt = orderExpire; expireSource = 'orders'; }
+          }
+
+          const expireText = expireAt && !isNaN(expireAt) ? fmtTW(expireAt.toISOString()) : '—';
+          const ok = expireAt && !isNaN(expireAt) && expireAt.getTime() > Date.now();
+
+          let statusHtml = '';
+          if(expireAt && !isNaN(expireAt)){
+            statusHtml = ok
+              ? `<span class="pill pill-ok">有效（${expireSource}）</span>`
+              : `<span class="pill pill-exp">已到期（${expireSource}：${expireText}）</span>`;
+          }else{
+            statusHtml = `<span class="pill pill-no">未訂閱</span>`;
+          }
+
+          const adminHtml = x.is_admin ? '<span class="pill pill-admin">管理員</span>' : '';
+          const devHtml = `<span class="pill pill-dev">${dev.activeCount}/${DEV_LIMIT}</span>`;
+
+          return `
+            <tr>
+              <td data-label="#">${idx+1}</td>
+              <td data-label="Email">${esc(x.email||'')}</td>
+              <td data-label="顯示名稱">${esc(x.display_name||'')}</td>
+              <td data-label="最後登入">${fmtTW(x.last_sign_in_at)||''}</td>
+              <td data-label="最近在線">${fmtTW(x.last_seen_at)||''} &nbsp; ${pillOnline(online)}</td>
+              <td data-label="裝置">${devHtml}</td>
+              <td data-label="管理員">${adminHtml}</td>
+              <td data-label="狀態">${statusHtml}</td>
+              <td data-label="到期日">${expireText}</td>
+            </tr>`;
+        }).join('');
+
+      }catch(e){
+        tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：${(e && e.message) ? e.message : String(e)}</td></tr>`;
+      }
+    }
+        const profiles = (r.data || []).filter(p => p && p.id);
         if(!profiles.length){
           tbody.innerHTML = '<tr><td class="hint" colspan="9">目前沒有任何使用者</td></tr>';
           return;
         }
 
         const ids = profiles.map(p=>p.id);
-        latestOrderByUser = await buildOrdersMapByBuyerId(ids);
-      }
-
-      if(!profiles || !profiles.length){
-        tbody.innerHTML = '<tr><td class="hint" colspan="9">目前沒有任何使用者</td></tr>';
-        return;
-      }
-
-      const ids = profiles.map(p=>p.id);
-if(r.error){
-          tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：${r.error.message}</td></tr>`;
-          return;
-        }
+        const latestOrderByUser = await buildOrdersMapByBuyerId(ids);
         const deviceByUser = await buildDeviceMap(ids);
 
         const q = ($('#q').value||'').trim().toLowerCase();
@@ -491,9 +563,9 @@ if(r.error){
 
             if(!isNaN(exp)){
               if(exp > now){
-                statusHtml = `<span class="pill ok">有效（${(x.expire_source||'profiles')}.expires_at）</span>`;
+                statusHtml = `<span class="pill ok">有效（profiles.expires_at）</span>`;
               }else{
-                statusHtml = `<span class="pill warn">已到期（${(x.expire_source||'profiles')}：${endStr}）</span>`;
+                statusHtml = `<span class="pill warn">已到期（profiles：${endStr}）</span>`;
               }
             }
           }
@@ -540,6 +612,22 @@ main().catch(err => {
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
