@@ -376,7 +376,18 @@ const main = async () => {
       const tbody = $('#usersTable tbody');
       tbody.innerHTML = '<tr><td class="hint" colspan="9">載入中…</td></tr>';
 
+      // ✅ v20251227-stable: 優先走 RPC（SERVER 端彙總，避免 orders RLS 導致抓不到訂單）
+      // 需要你在 SQL Editor 建立 public.admin_users_overview() SECURITY DEFINER（下方我有給完整 SQL）
+      let profiles = null;
+      let latestOrderByUser = {};
       try{
+        const vr = await supa.rpc('admin_users_overview');
+        if(vr.error) throw vr.error;
+        profiles = (vr.data || []).filter(p => p && p.id);
+        // RPC 已經算好 expires_at + expire_source
+      }catch(e){
+        console.warn('admin_users_overview RPC 不可用，fallback profiles+orders：', e?.message || e);
+
         const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
         const r = await supa.from('profiles').select(cols);
 
@@ -385,14 +396,26 @@ const main = async () => {
           return;
         }
 
-        const profiles = (r.data || []).filter(p => p && p.id);
+        profiles = (r.data || []).filter(p => p && p.id);
         if(!profiles.length){
           tbody.innerHTML = '<tr><td class="hint" colspan="9">目前沒有任何使用者</td></tr>';
           return;
         }
 
         const ids = profiles.map(p=>p.id);
-        const latestOrderByUser = await buildOrdersMapByBuyerId(ids);
+        latestOrderByUser = await buildOrdersMapByBuyerId(ids);
+      }
+
+      if(!profiles || !profiles.length){
+        tbody.innerHTML = '<tr><td class="hint" colspan="9">目前沒有任何使用者</td></tr>';
+        return;
+      }
+
+      const ids = profiles.map(p=>p.id);
+if(r.error){
+          tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：${r.error.message}</td></tr>`;
+          return;
+        }
         const deviceByUser = await buildDeviceMap(ids);
 
         const q = ($('#q').value||'').trim().toLowerCase();
@@ -468,9 +491,9 @@ const main = async () => {
 
             if(!isNaN(exp)){
               if(exp > now){
-                statusHtml = `<span class="pill ok">有效（profiles.expires_at）</span>`;
+                statusHtml = `<span class="pill ok">有效（${(x.expire_source||'profiles')}.expires_at）</span>`;
               }else{
-                statusHtml = `<span class="pill warn">已到期（profiles：${endStr}）</span>`;
+                statusHtml = `<span class="pill warn">已到期（${(x.expire_source||'profiles')}：${endStr}）</span>`;
               }
             }
           }
@@ -517,6 +540,21 @@ main().catch(err => {
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
