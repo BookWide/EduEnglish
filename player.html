@@ -322,7 +322,6 @@ tr.speaking{
 
 /* === V12 print override based on V7 (2025-11-14) === */
 @media print{
-  /* 1) 只保留右側內容，隱藏標頭與左側影片區 */
   header,.controls,.tabs,#btnExitFocus{display:none!important;}
   html,body{
     height:auto!important;
@@ -422,19 +421,24 @@ tr.speaking{
     }
   }
 
-  // ===== 單一裝置限制（重點）=====
+  // ===== 單一裝置限制：接管模式（新裝置登入會踢掉舊裝置）=====
   async function enforceSingleDevice(user) {
     if (!user) return true;
 
     const deviceId = getDeviceId();
 
-    const { data } = await playerSupa
+    const { data, error } = await playerSupa
       .from('device_sessions')
       .select('device_id')
       .eq('user_id', user.id)
       .maybeSingle();
 
-    // 第一次進來 → 記錄裝置
+    if (error) {
+      console.warn('[device] select error', error);
+      return true; // 讀不到先放行，避免卡死
+    }
+
+    // 第一次綁定
     if (!data) {
       await playerSupa.from('device_sessions').upsert({
         user_id: user.id,
@@ -444,21 +448,50 @@ tr.speaking{
       return true;
     }
 
-    // 不同裝置 → 擋
+    // 不同裝置：✅ 接管（更新成新裝置）
     if (data.device_id !== deviceId) {
-      alert('此帳號已在其他裝置使用，請先登出另一裝置');
-      await playerSupa.auth.signOut();
-      location.href = (ROOT_BASE || '') + '/index.html?denied=device';
-      return false;
+      await playerSupa.from('device_sessions').upsert({
+        user_id: user.id,
+        device_id: deviceId,
+        last_seen_at: new Date().toISOString(),
+      });
+      console.log('[device] takeover: old=', data.device_id, 'new=', deviceId);
+      return true;
     }
 
-    // 同裝置 → 更新心跳
+    // 同裝置：更新心跳
     await playerSupa
       .from('device_sessions')
       .update({ last_seen_at: new Date().toISOString() })
       .eq('user_id', user.id);
 
     return true;
+  }
+
+  // ===== 舊裝置自動下線：輪詢檢查是否被接管 =====
+  function startDeviceWatch(user, intervalMs = 15000) {
+    const myId = getDeviceId();
+
+    const tick = async () => {
+      try {
+        const { data } = await playerSupa
+          .from('device_sessions')
+          .select('device_id')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
+        if (data && data.device_id && data.device_id !== myId) {
+          alert('你的帳號已在另一裝置登入，本裝置將自動登出。');
+          try { await playerSupa.auth.signOut(); } catch {}
+          location.href = (ROOT_BASE || '') + '/index.html?denied=device_takeover';
+        }
+      } catch (e) {
+        console.warn('[device] watch error', e);
+      }
+    };
+
+    tick();
+    return setInterval(tick, intervalMs);
   }
 
   // ===== 播放器守門（含單裝置限制）=====
@@ -642,7 +675,6 @@ const esc=s=>String(s??'')
 
 const params=new URLSearchParams(location.search);
 const paramBase=params.get('base');
-// BASE：若網址帶 ?base= 則優先，其次依 ROOT_BASE（/EduEnglish 或空字串）
 const BASE = (paramBase!=null ? paramBase : ROOT_BASE);
 const cat =(params.get('cat')||'story').toLowerCase();
 let slug=params.get('slug')||'houyi';
@@ -660,29 +692,17 @@ const btnJpIndex = document.getElementById('btnJpIndex');
 
 // 只在文法類別（pro / jp）顯示 EN / JP 兩顆按鈕
 if(btnEnIndex){
-  if(cat==='pro' || cat==='jp'){
-    btnEnIndex.style.display='inline-flex';
-  }else{
-    btnEnIndex.style.display='none';
-  }
+  btnEnIndex.style.display=(cat==='pro'||cat==='jp')?'inline-flex':'none';
 }
 if(btnJpIndex){
-  if(cat==='pro' || cat==='jp'){
-    btnJpIndex.style.display='inline-flex';
-  }else{
-    btnJpIndex.style.display='none';
-  }
+  btnJpIndex.style.display=(cat==='pro'||cat==='jp')?'inline-flex':'none';
 }
-
-// EN 文法索引：切回英文 Grammar（cat=pro）
 if(btnEnIndex){
   btnEnIndex.addEventListener('click',()=>{
     const baseParam=paramBase?`&base=${encodeURIComponent(paramBase)}`:'';
     location.href=`player.html?cat=pro&slug=${encodeURIComponent(slug)}${baseParam}`;
   });
 }
-
-// JP 文法索引：切換到日文 Grammar（cat=jp）
 if(btnJpIndex){
   btnJpIndex.addEventListener('click',()=>{
     const baseParam=paramBase?`&base=${encodeURIComponent(paramBase)}`:'';
@@ -704,15 +724,14 @@ const speedRange=$('#speedRange'),speedVal=$('#speedVal');
 const paneSub=$('#pane-sub'),paneQuiz=$('#pane-quiz'),
       paneVocab=$('#pane-vocab'),paneAI=$('#pane-ai');
 
-let cues=[],offset=0,loopSentence=false;// PRO 課程：slug 對應 groupId / Level 的快取（未來守門用）
+let cues=[],offset=0,loopSentence=false;
 const proSlugToGroupId = {};
 function levelOfGroupId(groupId){
   if(!groupId) return 1;
-  if(groupId.startsWith('L1')) return 1; // L1A / L1B
-  if(groupId.startsWith('L2')) return 2; // L2A / L2B
-  return 3; // 其餘 L3-* 視為 Level 3
+  if(groupId.startsWith('L1')) return 1;
+  if(groupId.startsWith('L2')) return 2;
+  return 3;
 }
-// TODO: 未來若要依訂閱等級守門，可在這裡加入 userMaxLevel 判斷。
 let quizData=[],currentQuizCat='all';
 
 function setOffset(v){
@@ -735,27 +754,21 @@ async function loadVideo(){
     sources.push(url);
   }
 
-  // 基本 slug
   const slugMain = slug;
-  const slugNoPro = slug.replace(/^pro-/, '');   // 例如：pro-l1a-06-... → l1a-06-...
+  const slugNoPro = slug.replace(/^pro-/, '');
   const slugCandidates = [slugMain];
 
   if (cat === 'pro' && slugNoPro !== slugMain) {
     slugCandidates.push(slugNoPro);
   }
 
-  // 依序把所有可能路徑加入 sources
   slugCandidates.forEach(s => {
-    // Supabase：有分類、無分類兩種都試
     add(`${SUPA_VIDEOS_BASE}/${cat}/${s}.mp4`);
     add(`${SUPA_VIDEOS_BASE}/${s}.mp4`);
-
-    // 本站：有分類、無分類
     add(`${BASE}/videos/${cat}/${s}.mp4`);
     add(`${BASE}/videos/${s}.mp4`);
   });
 
-  // 只有非 PRO 類別才用 houyi 當最後備援
   if (cat !== 'pro') {
     add(`${BASE}/videos/story/houyi.mp4`);
   }
@@ -786,14 +799,11 @@ async function loadVideo(){
 
 /* ==== 字幕 ==== */
 async function loadCues(){
-  // PRO 模式：字幕分頁改為顯示 PRO 課程章節清單（由 index-pro.json 提供）
   if(cat==='pro'){
-    return loadProOutline();
+    return loadProOutline?.();
   }
-
-  // JP 模式：字幕分頁改為顯示日文文法索引（由 index-jp.json 提供）
   if(cat==='jp'){
-    return loadJpOutline();
+    return loadJpOutline?.();
   }
 
   cuesStatus.textContent='（字幕載入中…）';
@@ -814,7 +824,6 @@ async function loadCues(){
         </td>
       </tr>`).join('');
 
-    // 讀出來源網址（若有）
     let srcUrl='';
     if(Array.isArray(data) && data.length && data[0].source_url){
       srcUrl=data[0].source_url;
@@ -837,13 +846,11 @@ async function loadCues(){
     const tr=e.target.closest('tr'); if(!tr)return;
     const i=+tr.dataset.i;
 
-    // 點時間區塊：跟隨 + 影片跳轉
     if(e.target.closest('.cue-time')){
       seekTo(i,true);
       return;
     }
 
-    // 點文字：只用瀏覽器 TTS
     let lang='en-US',text='';
     if(e.target.closest('.ja-line')){lang='ja-JP';text=e.target.closest('.ja-line').textContent.trim();}
     else if(e.target.closest('.zh-line')){lang='zh-TW';text=e.target.closest('.zh-line').textContent.trim();}
@@ -897,14 +904,12 @@ function renderQuiz(cat){
     const explainZh = q.explanation_zh || q.explain_zh || q.explanation || '';
     const letters = ['A','B','C','D','E','F'];
 
-    // 依照 answer + options 推導正確選項（字母 + 文字）
     const norm = (s) => String(s || '').trim().toLowerCase();
     const hasOptions = Array.isArray(options) && options.length > 0;
     let correctLetter = '';
     let correctText   = '';
 
     if (answerRaw){
-      // 1) 直接是 A~F
       if (/^[A-F]$/i.test(answerRaw)){
         correctLetter = answerRaw.toUpperCase();
         const idx = letters.indexOf(correctLetter);
@@ -913,7 +918,6 @@ function renderQuiz(cat){
           correctText = (typeof opt === 'string') ? opt : (opt.text || '');
         }
       } else {
-        // 2) 數字 1~6 → A~F
         const num = parseInt(answerRaw, 10);
         if (!Number.isNaN(num) && num >= 1 && num <= letters.length){
           const idx = num - 1;
@@ -921,7 +925,6 @@ function renderQuiz(cat){
           const opt = options[idx];
           if (opt) correctText = (typeof opt === 'string') ? opt : (opt.text || '');
         } else if (hasOptions){
-          // 3) 文字 → 從 options 比對開頭或完整字串
           const target = norm(answerRaw);
           const optIndex = options.findIndex(opt => {
             const text = (typeof opt === 'string') ? opt : (opt.text || '');
@@ -938,7 +941,6 @@ function renderQuiz(cat){
       }
     }
 
-    // 答案三語顯示：優先使用 answer_en/zh/ja，若都沒有則退回正確選項文字
     const ansParts = [];
     if (ansEn) ansParts.push(esc(ansEn));
     if (ansZh) ansParts.push(esc(ansZh));
@@ -1001,7 +1003,6 @@ function setupQuizButtons(){
     });
   }
 
-  // 答案朗讀（EN / 中 / 日）
   const quizList = $('#quizList');
   if (quizList){
     quizList.addEventListener('click', e => {
@@ -1034,7 +1035,6 @@ function setupQuizButtons(){
     });
     $('#quizScore').textContent = `得分：${s} / ${t}`;
 
-    // 寫入 quiz_logs（供學習控制台統計）
     if (t > 0 && typeof playerSupa !== 'undefined' && typeof bwPlayerGetUser === 'function'){
       try{
         const user = await bwPlayerGetUser();
@@ -1422,9 +1422,7 @@ video.addEventListener('timeupdate',()=>{
 });
 
 /* ==== TTS (iOS-friendly) ==== */
-const TTS_CLOUD_ENDPOINT = window.BOOKWIDE_TTS_ENDPOINT || ""; 
-// 例：window.BOOKWIDE_TTS_ENDPOINT = "https://bookwide.net/api/tts"
-
+const TTS_CLOUD_ENDPOINT = window.BOOKWIDE_TTS_ENDPOINT || "";
 const __ttsAudio = new Audio();
 __ttsAudio.preload = "auto";
 
@@ -1464,7 +1462,7 @@ async function cloudTTS(text, lang){
       await __ttsAudio.play();
       return true;
     }
-  }catch(e){ /* ignore */ }
+  }catch(e){ }
   return false;
 }
 
@@ -1520,12 +1518,11 @@ async function speakText(text, lang){
 (async function init(){
   const params = new URLSearchParams(location.search);
   const previewParam = params.get('preview') === '1';
-  // ✅ Trial allow-list: only allow preview for movie/goingbackhome
   const isPreview = previewParam && (cat === 'movie') && (slug === 'goingbackhome');
 
   let user = null;
 
-  // 先載影片（避免守門導轉時看起來像卡住，且方便除錯）
+  // 先載影片（避免看起來像卡住，也方便除錯）
   try{ await loadVideo(); }catch(e){ console.warn('[loadVideo] error', e); }
 
   // 1️⃣ 取得登入使用者
@@ -1537,7 +1534,7 @@ async function speakText(text, lang){
     console.error('[BW-player] bwPlayerGetUser error', e);
   }
 
-  // 2️⃣ 若未登入：一律導回首頁（試看也必須先登入）
+  // 2️⃣ 若未登入：導回首頁（試看也必須先登入）
   if (!user) {
     const next = location.pathname + location.search;
     const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
@@ -1546,7 +1543,6 @@ async function speakText(text, lang){
     location.href = url.toString();
     return;
   } else {
-    // 顯示登入者 Email
     const email = user.email || (user.user && user.user.email) || '';
     if (email) {
       const badge = $('#userNameBadge');
@@ -1554,12 +1550,13 @@ async function speakText(text, lang){
     }
   }
 
-  // 2.5️⃣ 單裝置限制（登入後立刻執行）
+  // 2.5️⃣ 單裝置限制：接管 + 監看（舊裝置自動登出）
   try{
     const ok = await enforceSingleDevice(user);
     if(!ok) return;
+    startDeviceWatch(user, 15000);
   }catch(e){
-    console.error('[device] enforce error', e);
+    console.error('[device] enforce/watch error', e);
   }
 
   // 3️⃣ 已登入且非 preview：檢查 orders（status=paid 且未過期）
@@ -1574,7 +1571,6 @@ async function speakText(text, lang){
         .select('expire_at, items, buyer_id, user_id, status')
         .eq('status', 'paid')
         .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-        // JP 視同 pro
         .contains('items', [cat === 'jp' ? 'pro' : cat])
         .order('expire_at', { ascending: false })
         .limit(1)
@@ -1591,7 +1587,6 @@ async function speakText(text, lang){
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // 沒訂閱 → pricing
     if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1601,7 +1596,6 @@ async function speakText(text, lang){
       return;
     }
 
-    // 訂閱過期 → pricing
     if (validUntil.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1621,6 +1615,7 @@ async function speakText(text, lang){
 </script>
 </body>
 </html>
+
 
 
 
