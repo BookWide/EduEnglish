@@ -281,8 +281,6 @@
   </div>
 
   <script type="module">
-/* v20251227-fix: 包一層 main()，避免瀏覽器因為頂層 return/await 解析差異造成 Illegal return statement */
-const main = async () => {
     const ready = () => new Promise(r=>{
       if (window.BW && window.BW.supa) return r();
       const t=setInterval(()=>{
@@ -315,21 +313,96 @@ const main = async () => {
 
     const pillOnline = online =>
       `<span class="pill ${online?'online':'offline'}">${online?'使用中':'離線'}</span>`;
-
-    async function buildOrdersMapByBuyerId(profileIds){
+    async function buildOrdersMapByBuyerId(profileIds, emailsById){
+      // 回傳 map: userId -> 最佳訂閱單
       const map = {};
       if(!profileIds.length) return map;
 
-      const r = await supa
+      // 1) 先用 buyer_id 正規合併
+      const r1 = await supa
         .from('orders')
-        .select('buyer_id, status, expire_at, period, created_at')
+        .select('id, buyer_id, status, expire_at, period, created_at, email_to, total_cents')
         .in('buyer_id', profileIds)
-        .order('expire_at',{ascending:false});
+        .order('expire_at', { ascending:false });
 
-      if(r.error){
-        console.warn('orders 讀取失敗', r.error);
-        return map;
+      if(r1.error){
+        console.warn('orders(用 buyer_id) 讀取失敗', r1.error);
+      } else {
+        for(const o of (r1.data||[])){
+          if(!o?.buyer_id) continue;
+          // 先塞第一筆（expire_at 最大），後面會再用「最佳化挑選」覆蓋
+          if(!map[o.buyer_id]) map[o.buyer_id] = o;
+          else map[o.buyer_id] = pickBetterOrder(map[o.buyer_id], o);
+        }
       }
+
+      // 2) 補救：若 buyer_id 沒寫到（或寫錯），用 email_to 合併回 profiles.email
+      //    只補「目前 map 裡沒有的 userId」
+      const missingIds = profileIds.filter(id => !map[id]);
+      if(missingIds.length){
+        const emails = missingIds
+          .map(id => (emailsById?.[id] || '').trim().toLowerCase())
+          .filter(Boolean);
+
+        if(emails.length){
+          const r2 = await supa
+            .from('orders')
+            .select('id, buyer_id, status, expire_at, period, created_at, email_to, total_cents')
+            .in('email_to', emails)
+            .order('expire_at', { ascending:false });
+
+          if(r2.error){
+            console.warn('orders(用 email_to 補救) 讀取失敗', r2.error);
+          } else {
+            // 以 email_to 對回 userId
+            const emailToUserId = {};
+            for(const id of missingIds){
+              const em = (emailsById?.[id] || '').trim().toLowerCase();
+              if(em) emailToUserId[em] = id;
+            }
+
+            for(const o of (r2.data||[])){
+              const em = (o.email_to||'').trim().toLowerCase();
+              const uid = emailToUserId[em];
+              if(!uid) continue;
+              if(!map[uid]) map[uid] = o;
+              else map[uid] = pickBetterOrder(map[uid], o);
+            }
+          }
+        }
+      }
+
+      return map;
+
+      // ---- 規則：挑「有效中」> expire_at 較晚 > created_at 較新
+      function pickBetterOrder(a,b){
+        const now = new Date();
+        const aExp = a?.expire_at ? new Date(a.expire_at) : null;
+        const bExp = b?.expire_at ? new Date(b.expire_at) : null;
+
+        const aValid = aExp && !isNaN(aExp) && aExp > now && isPaidLike(a?.status);
+        const bValid = bExp && !isNaN(bExp) && bExp > now && isPaidLike(b?.status);
+
+        if(aValid && !bValid) return a;
+        if(!aValid && bValid) return b;
+
+        const aExpMs = (aExp && !isNaN(aExp)) ? aExp.getTime() : 0;
+        const bExpMs = (bExp && !isNaN(bExp)) ? bExp.getTime() : 0;
+        if(aExpMs !== bExpMs) return (bExpMs > aExpMs) ? b : a;
+
+        const aCr = a?.created_at ? new Date(a.created_at).getTime() : 0;
+        const bCr = b?.created_at ? new Date(b.created_at).getTime() : 0;
+        if(aCr !== bCr) return (bCr > aCr) ? b : a;
+
+        return a;
+      }
+
+      function isPaidLike(s){
+        const v = String(s||'').toLowerCase();
+        return v === 'paid' || v === 'active' || v === 'success';
+      }
+    }
+
 
       for(const o of (r.data||[])){
         if(o?.buyer_id && !map[o.buyer_id]) map[o.buyer_id] = o;
@@ -376,18 +449,7 @@ const main = async () => {
       const tbody = $('#usersTable tbody');
       tbody.innerHTML = '<tr><td class="hint" colspan="9">載入中…</td></tr>';
 
-      // ✅ v20251227-stable: 優先走 RPC（SERVER 端彙總，避免 orders RLS 導致抓不到訂單）
-      // 需要你在 SQL Editor 建立 public.admin_users_overview() SECURITY DEFINER（下方我有給完整 SQL）
-      let profiles = null;
-      let latestOrderByUser = {};
       try{
-        const vr = await supa.rpc('admin_users_overview');
-        if(vr.error) throw vr.error;
-        profiles = (vr.data || []).filter(p => p && p.id);
-        // RPC 已經算好 expires_at + expire_source
-      }catch(e){
-        console.warn('admin_users_overview RPC 不可用，fallback profiles+orders：', e?.message || e);
-
         const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
         const r = await supa.from('profiles').select(cols);
 
@@ -396,26 +458,15 @@ const main = async () => {
           return;
         }
 
-        profiles = (r.data || []).filter(p => p && p.id);
+        const profiles = (r.data || []).filter(p => p && p.id);
         if(!profiles.length){
           tbody.innerHTML = '<tr><td class="hint" colspan="9">目前沒有任何使用者</td></tr>';
           return;
         }
 
         const ids = profiles.map(p=>p.id);
-        latestOrderByUser = await buildOrdersMapByBuyerId(ids);
-      }
-
-      if(!profiles || !profiles.length){
-        tbody.innerHTML = '<tr><td class="hint" colspan="9">目前沒有任何使用者</td></tr>';
-        return;
-      }
-
-      const ids = profiles.map(p=>p.id);
-if(r.error){
-          tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：${r.error.message}</td></tr>`;
-          return;
-        }
+        const emailsById = Object.fromEntries(profiles.map(p => [p.id, p.email || '']));
+        const latestOrderByUser = await buildOrdersMapByBuyerId(ids, emailsById);
         const deviceByUser = await buildDeviceMap(ids);
 
         const q = ($('#q').value||'').trim().toLowerCase();
@@ -491,9 +542,9 @@ if(r.error){
 
             if(!isNaN(exp)){
               if(exp > now){
-                statusHtml = `<span class="pill ok">有效（${(x.expire_source||'profiles')}.expires_at）</span>`;
+                statusHtml = `<span class="pill ok">有效（profiles.expires_at）</span>`;
               }else{
-                statusHtml = `<span class="pill warn">已到期（${(x.expire_source||'profiles')}：${endStr}）</span>`;
+                statusHtml = `<span class="pill warn">已到期（profiles：${endStr}）</span>`;
               }
             }
           }
@@ -530,16 +581,35 @@ if(r.error){
       clearTimeout(t);
       t=setTimeout(loadProfiles, 250);
     });
-
     loadProfiles();
-  
-};
-main().catch(err => {
-  console.error('[BookWide] user.html main() failed:', err);
-});
-</script>
+
+    // ✅ 每 60 秒自動刷新（需要更快就改 30_000）
+    setInterval(()=>{
+      if(document.visibilityState === 'visible') loadProfiles();
+    }, 60_000);
+
+    // ✅ 切回分頁立即刷新
+    document.addEventListener('visibilitychange', ()=>{
+      if(document.visibilityState === 'visible') loadProfiles();
+    });
+  </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
