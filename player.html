@@ -199,7 +199,6 @@ tr.active{background:#173a6e;}
   color:#fff;
 }
 
-
 .cues-table{table-layout:fixed;}
 .cue-time{
   width:64px;
@@ -313,7 +312,6 @@ tr.speaking{
   .right{border:none;}
 }
 
-
 /* 桌機：右側內容可獨立捲動，底部大約與左側齊 */
 @media (min-width: 861px){
   .rightScroll{
@@ -377,18 +375,11 @@ tr.speaking{
   border-radius:10px;
   display:block;
 }
-
 </style>
 
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
-<!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script>
-  // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
-  if (window.BW && typeof BW.startIdleLogout === 'function') {
-    BW.startIdleLogout(60, '/login.html?timeout=1');
-  }
-</script>
+
 <script>
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
@@ -401,9 +392,25 @@ tr.speaking{
     location.hostname.includes('github.io')
   ) ? '/EduEnglish' : '';
 
-  // 僅供 player.html 使用的 Supabase Client
+  // 僅供 player.html 使用的 Supabase Client（只宣告一次！）
   const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+  // 若你有共用 BW（supa.js）且想閒置登出：安全呼叫（沒有 BW 也不會炸）
+  if (window.BW && typeof BW.startIdleLogout === 'function') {
+    BW.startIdleLogout(60, (ROOT_BASE||'') + '/login.html?timeout=1');
+  }
+
+  // ===== 單裝置用 device id =====
+  function getDeviceId() {
+    let id = localStorage.getItem('bw_device_id');
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem('bw_device_id', id);
+    }
+    return id;
+  }
+
+  // ===== 取得登入使用者 =====
   async function bwPlayerGetUser() {
     try {
       const { data, error } = await playerSupa.auth.getUser();
@@ -415,14 +422,58 @@ tr.speaking{
     }
   }
 
-  // 提供給舊程式使用的守門 / 取 user 函式
+  // ===== 單一裝置限制（重點）=====
+  async function enforceSingleDevice(user) {
+    if (!user) return true;
+
+    const deviceId = getDeviceId();
+
+    const { data } = await playerSupa
+      .from('device_sessions')
+      .select('device_id')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    // 第一次進來 → 記錄裝置
+    if (!data) {
+      await playerSupa.from('device_sessions').upsert({
+        user_id: user.id,
+        device_id: deviceId,
+        last_seen_at: new Date().toISOString(),
+      });
+      return true;
+    }
+
+    // 不同裝置 → 擋
+    if (data.device_id !== deviceId) {
+      alert('此帳號已在其他裝置使用，請先登出另一裝置');
+      await playerSupa.auth.signOut();
+      location.href = (ROOT_BASE || '') + '/index.html?denied=device';
+      return false;
+    }
+
+    // 同裝置 → 更新心跳
+    await playerSupa
+      .from('device_sessions')
+      .update({ last_seen_at: new Date().toISOString() })
+      .eq('user_id', user.id);
+
+    return true;
+  }
+
+  // ===== 播放器守門（含單裝置限制）=====
   async function ensureAuth(options = {}) {
     const redirect = options.redirect || (ROOT_BASE + '/index.html');
     const next =
       options.next || (location.pathname + location.search);
 
     const user = await bwPlayerGetUser();
-    if (user) return user;
+
+    if (user) {
+      const ok = await enforceSingleDevice(user);
+      if (!ok) return null;
+      return user;
+    }
 
     const url =
       redirect +
@@ -439,7 +490,6 @@ tr.speaking{
   async function supaGetUser() {
     return await bwPlayerGetUser();
   }
-  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 </head>
 <body>
@@ -640,7 +690,6 @@ if(btnJpIndex){
   });
 }
 
-
 /* 影片 & 控制 */
 const video=$('#player');
 const cuesBody=$('#cuesBody');
@@ -734,7 +783,6 @@ async function loadVideo(){
     }
   }, { passive: true });
 }
-
 
 /* ==== 字幕 ==== */
 async function loadCues(){
@@ -1134,7 +1182,6 @@ async function loadVocab(){
   }
 }
 
-
 /* ==== AI（三語示範 + 對應朗讀） ==== */
 async function loadAI(){
   const url=`${BASE}/data/${cat}/${slug}/ai-${slug}.json?v=${vnow}`;
@@ -1213,7 +1260,6 @@ async function loadAI(){
   }catch(e){console.warn(e);}
 }
 
-
 /* ==== AI 語音作答（瀏覽器語音辨識） ==== */
 (function(){
   const btnRec = $('#btnRec');
@@ -1266,6 +1312,7 @@ async function loadAI(){
     }
   });
 })();
+
 /* ==== 四個 tab 切換 + 手機右頁 focus ==== */
 function showTab(name){
   paneSub.style.display=(name==='sub')?'':'none';
@@ -1376,7 +1423,7 @@ video.addEventListener('timeupdate',()=>{
 
 /* ==== TTS (iOS-friendly) ==== */
 const TTS_CLOUD_ENDPOINT = window.BOOKWIDE_TTS_ENDPOINT || ""; 
-// 例：window.BOOKWIDE_TTS_ENDPOINT = "https://bookwide.net/api/tts"（你可用 Cloudflare Worker / Supabase Edge Function）
+// 例：window.BOOKWIDE_TTS_ENDPOINT = "https://bookwide.net/api/tts"
 
 const __ttsAudio = new Audio();
 __ttsAudio.preload = "auto";
@@ -1394,7 +1441,7 @@ async function cloudTTS(text, lang){
       headers: {"content-type":"application/json"},
       body: JSON.stringify({
         text,
-        lang,                 // "ja-JP" / "zh-TW" / "en-US"
+        lang,
         format: "mp3",
         cache: true
       })
@@ -1422,17 +1469,14 @@ async function cloudTTS(text, lang){
 }
 
 function pickVoice(lang){
-  // iOS/Chrome 的 voice 名稱不一致，這裡只做「盡量挑到」的策略
   try{
     const vs = speechSynthesis.getVoices();
     const target = (lang||"").toLowerCase();
     if(!vs || !vs.length) return null;
 
-    // 先找完全匹配
     let v = vs.find(x => (x.lang||"").toLowerCase() === target);
     if(v) return v;
 
-    // 再找同語系（ja / zh / en）
     const key = target.split("-")[0];
     v = vs.find(x => (x.lang||"").toLowerCase().startsWith(key));
     return v || null;
@@ -1442,8 +1486,6 @@ function pickVoice(lang){
 async function speakText(text, lang){
   if(!text) return;
 
-  // ✅ iPhone 日文常見問題：Web Speech 可能沒有 ja voice 或念起來像英文
-  // 解法：iOS + 日文 → 優先走雲端 MP3（若你有設 TTS_CLOUD_ENDPOINT）
   const target = (lang||"").toLowerCase();
   const preferCloud = isIOS() && target.startsWith("ja");
   if(preferCloud){
@@ -1451,7 +1493,6 @@ async function speakText(text, lang){
     if(ok) return;
   }
 
-  // 一般情況：先用 browser TTS（快、免錢）
   try{
     if (!("speechSynthesis" in window)) throw new Error("no speechSynthesis");
     speechSynthesis.cancel();
@@ -1464,7 +1505,6 @@ async function speakText(text, lang){
     const v = pickVoice(u.lang);
     if(v) u.voice = v;
 
-    // 若是 iOS 但沒有對應 voice，也嘗試走雲端（最後備援）
     if(isIOS() && !v && (target.startsWith("ja") || target.startsWith("zh"))){
       const ok = await cloudTTS(text, lang || "ja-JP");
       if(ok) return;
@@ -1472,11 +1512,9 @@ async function speakText(text, lang){
 
     speechSynthesis.speak(u);
   }catch(e){
-    // 最後備援：雲端（若有）
     await cloudTTS(text, lang || "en-US");
   }
 }
-
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
 (async function init(){
@@ -1487,7 +1525,10 @@ async function speakText(text, lang){
 
   let user = null;
 
-  // 1️⃣ 先用 player.html 專用的 bwPlayerGetUser() 取得登入使用者
+  // 先載影片（避免守門導轉時看起來像卡住，且方便除錯）
+  try{ await loadVideo(); }catch(e){ console.warn('[loadVideo] error', e); }
+
+  // 1️⃣ 取得登入使用者
   try {
     if (typeof bwPlayerGetUser === 'function') {
       user = await bwPlayerGetUser();
@@ -1513,32 +1554,36 @@ async function speakText(text, lang){
     }
   }
 
-  // 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
+  // 2.5️⃣ 單裝置限制（登入後立刻執行）
+  try{
+    const ok = await enforceSingleDevice(user);
+    if(!ok) return;
+  }catch(e){
+    console.error('[device] enforce error', e);
+  }
+
+  // 3️⃣ 已登入且非 preview：檢查 orders（status=paid 且未過期）
   let validUntil = null;
   if (!isPreview && user) {
     try {
-      if (typeof playerSupa !== 'undefined') {
-        const todayISO = new Date();
-        todayISO.setHours(0, 0, 0, 0);
+      const todayISO = new Date();
+      todayISO.setHours(0, 0, 0, 0);
 
-        const { data, error } = await playerSupa
-          .from('orders')
-          .select('expire_at, items, buyer_id, user_id, status')
-          .eq('status', 'paid')
-          .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-          // JP 類別視為與 Grammar / PRO 相同訂閱主題，因此實際用 pro 來查訂單
-          .contains('items', [cat === 'jp' ? 'pro' : cat])
-          .order('expire_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+      const { data, error } = await playerSupa
+        .from('orders')
+        .select('expire_at, items, buyer_id, user_id, status')
+        .eq('status', 'paid')
+        .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+        // JP 視同 pro
+        .contains('items', [cat === 'jp' ? 'pro' : cat])
+        .order('expire_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
 
-        if (!error && data && data.expire_at) {
-          validUntil = new Date(data.expire_at);
-        }
-        console.log('[BW-player] order expire_at raw =', data && data.expire_at, 'parsed =', validUntil);
-      } else {
-        console.warn('[BW-player] playerSupa not defined for subscription check');
+      if (!error && data && data.expire_at) {
+        validUntil = new Date(data.expire_at);
       }
+      console.log('[BW-player] order expire_at raw =', data && data.expire_at, 'parsed =', validUntil);
     } catch (e) {
       console.error('[BW-player] check subscription error', e);
     }
@@ -1546,7 +1591,7 @@ async function speakText(text, lang){
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // 沒訂閱（沒有任何有效訂單）也視為不通過，導回 pricing
+    // 沒訂閱 → pricing
     if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1556,7 +1601,7 @@ async function speakText(text, lang){
       return;
     }
 
-    // 訂閱已過期
+    // 訂閱過期 → pricing
     if (validUntil.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1567,325 +1612,15 @@ async function speakText(text, lang){
     }
   }
 
-  // 4️⃣ 守門通過後，初始化播放器 + 載入資料
-  try {
-    const saved = localStorage.getItem(`offset:${slug}`);
-    if (saved != null) setOffset(parseFloat(saved)); else setOffset(0);
-
-    const r = Number(speedRange.value) || 1;
-    video.playbackRate = r;
-    speedVal.textContent = `${r.toFixed(2)}x`;
-
-    await loadVideo();
-    await loadCues();
-    await loadQuiz();
-    await loadVocab();
-    await loadAI();
-
-    showTab('sub');
-  } catch (e) {
-    console.warn('[BW-player] init error:', e);
-  }
+  // 4️⃣ 其餘初始化：字幕/測驗/單字/AI
+  try{ await loadCues(); }catch(e){ console.warn('[loadCues] error', e); }
+  try{ await loadQuiz(); }catch(e){ console.warn('[loadQuiz] error', e); }
+  try{ await loadVocab(); }catch(e){ console.warn('[loadVocab] error', e); }
+  try{ await loadAI(); }catch(e){ console.warn('[loadAI] error', e); }
 })();
-  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
-
-  <!-- 播放進度寫入 watch_logs（供學習控制台使用） --> <!-- V20251124-fixed by ChatGPT -->
-<script>
-(function(){
-  // 需要前面已經建立好的 playerSupa / slug / <video id="player">
-  if (typeof playerSupa === 'undefined') return;
-  if (typeof slug === 'undefined') return;
-  const videoEl = document.getElementById('player');
-  if (!videoEl) return;
-
-  const urlParams = new URLSearchParams(location.search);
-  const needResume = urlParams.get('resume') === '1';
-
-  let userEmail = null;
-  let userId = null;
-  let currentLogId = null;
-  let resumePct = 0;
-  let lastSaveTs = 0;
-  const SAVE_GAP_MS = 5000; // 至多約 5 秒寫一次 DB
-
-  async function initWatchLog(){
-    try{
-      // 取得登入使用者
-      const { data: userData, error: userErr } = await playerSupa.auth.getUser();
-      if (userErr || !userData || !userData.user) return;
-
-      const user = userData.user;
-      userEmail = user.email || '';
-      userId = user.id;
-
-      // 找這個人 + 這支影片，最後一筆觀看紀錄
-      const { data: rows, error: logErr } = await playerSupa
-        .from('watch_logs')
-        .select('id, progress_pct, updated_at')
-        .eq('email', userEmail)
-        .eq('video_slug', slug)
-        .order('updated_at', { ascending: false })
-        .limit(1);
-
-      if (!logErr && rows && rows.length){
-        currentLogId = rows[0].id || null;
-        resumePct = rows[0].progress_pct || 0;
-      }
-
-      // 如果網址有 ?resume=1，而且有舊進度，就幫他跳到大約的位置
-      if (needResume && resumePct > 0){
-        const seekByPct = function(){
-          if (!videoEl.duration || !isFinite(videoEl.duration)) return;
-          const pct = Math.max(0, Math.min(99, resumePct));
-          const t = videoEl.duration * pct / 100;
-          if (t > 3){
-            try { videoEl.currentTime = t; } catch(e){}
-          }
-          videoEl.removeEventListener('loadedmetadata', seekByPct);
-        };
-        videoEl.addEventListener('loadedmetadata', seekByPct);
-      }
-
-      // 看片過程中定期寫進度
-      videoEl.addEventListener('timeupdate', handleTimeUpdate);
-      // 播完一律寫 100%
-      videoEl.addEventListener('ended', function(){ saveProgress(100); });
-
-    }catch(e){
-      console.error('watch_logs init error', e);
-    }
-  }
-
-  async function saveProgress(pct){
-    if (!userEmail) return;
-
-    pct = Math.round(Math.max(0, Math.min(100, pct)));
-    const payload = {
-      progress_pct: pct,
-      updated_at: new Date().toISOString()
-    };
-
-    const dur = videoEl && videoEl.duration && isFinite(videoEl.duration)
-      ? Math.round(videoEl.duration)
-      : null;
-    if (dur != null) payload.duration_sec = dur;
-
-    try{
-      if (currentLogId){
-        // 已有一筆紀錄 → update 那一筆
-        const { error } = await playerSupa
-          .from('watch_logs')
-          .update(payload)
-          .eq('id', currentLogId);
-        if (error) console.error('watch_logs update error', error);
-      }else{
-        // 第一次看片 → insert 新的一筆
-        const insertPayload = Object.assign({
-          email: userEmail,
-          user_id: userId,
-          video_slug: slug
-        }, payload);
-
-        const { data, error } = await playerSupa
-          .from('watch_logs')
-          .insert(insertPayload)
-          .select('id')
-          .single();
-
-        if (!error && data && data.id){
-          currentLogId = data.id;
-        }else if (error){
-          console.error('watch_logs insert error', error);
-        }
-      }
-    }catch(e){
-      console.error('watch_logs saveProgress exception', e);
-    }
-  }
-
-  function handleTimeUpdate(){
-    if (!videoEl || !videoEl.duration || !isFinite(videoEl.duration)) return;
-
-    const now = Date.now();
-    if (now - lastSaveTs < SAVE_GAP_MS) return; // 間隔太短就先略過
-    lastSaveTs = now;
-
-    const cur = videoEl.currentTime || 0;
-    const pct = (cur / videoEl.duration) * 100;
-    saveProgress(pct);
-  }
-
-  // 稍微延遲一下，讓前面的守門 / 其它程式先跑完
-  if (document.readyState === 'complete' || document.readyState === 'interactive'){
-    setTimeout(initWatchLog, 600);
-  }else{
-    document.addEventListener('DOMContentLoaded', function(){
-      setTimeout(initWatchLog, 600);
-    });
-  }
-})();
-  BW.startIdleLogout(30, '/login.html?timeout=1');
-
-// PRO 模式：讀取 index-pro.json，並在「字幕」分頁顯示完整課程章節清單
-
-// JP 模式：讀取 index-jp.json，並在「字幕」分頁顯示日文文法清單
-async 
-async function loadJpOutline(){
-  try{
-    const url = `${BASE}/data/jp/index-jp.json?v=${vnow}`;
-    const r = await fetch(url, {cache:'no-store'});
-    if(!r.ok) throw 0;
-    const raw = await r.json();
-
-    // 允許兩種格式：
-    // 1) 平面陣列：[ { jlpt_level, slug, title, no }, ... ]
-    // 2) 群組格式：[ { level/groupId, title/groupTitle, items:[...] }, ... ]
-    let lessons = [];
-    if (Array.isArray(raw)) {
-      lessons = raw;
-    } else if (Array.isArray(raw.items)) {
-      lessons = raw.items;
-    } else if (Array.isArray(raw.lessons)) {
-      lessons = raw.lessons;
-    } else if (Array.isArray(raw.groups)) {
-      raw.groups.forEach(g => {
-        (g.items || []).forEach(it => lessons.push(Object.assign({ jlpt_level: g.level || g.groupId || '' }, it)));
-      });
-    }
-
-    const rows = [];
-    let currentLevel = null;
-
-    lessons.forEach((item, idx) => {
-      const level = item.jlpt_level || item.level || '';
-      const slugVal = item.slug || item.jp_slug || '';
-      if (!slugVal) return;
-
-      // 每當 level 改變時插入一行群組標題
-      if (level && level !== currentLevel) {
-        currentLevel = level;
-        rows.push({
-          type: 'group',
-          label: `【${level}】`,
-          slug: null
-        });
-      }
-
-      rows.push({
-        type: 'lesson',
-        label: (item.no ? `${item.no} ` : '') + (item.title || ''),
-        slug: slugVal,
-        level
-      });
-    });
-
-    if (!rows.length) {
-      cuesStatus.textContent = '（日文文法索引沒有資料）';
-      cuesBody.innerHTML = '';
-      return;
-    }
-
-    cuesBody.innerHTML = rows.map(row => {
-      if (row.type === 'group') {
-        return `
-      <tr class="jp-group">
-        <td></td>
-        <td><strong>${esc(row.label)}</strong></td>
-      </tr>`;
-      } else {
-        const isCurrent = (row.slug === slug);
-        return `
-      <tr class="jp-lesson${isCurrent ? ' current' : ''}" data-slug="${row.slug}">
-        <td></td>
-        <td>${esc(row.label)}</td>
-      </tr>`;
-      }
-    }).join('');
-
-    cuesStatus.textContent = '（點選文法可切換章節）';
-
-    cuesBody.addEventListener('click', e => {
-      const tr = e.target.closest('.jp-lesson');
-      if (!tr) return;
-      const targetSlug = tr.getAttribute('data-slug');
-      if (!targetSlug || targetSlug === slug) return;
-      const baseParam = paramBase ? `&base=${encodeURIComponent(paramBase)}` : '';
-      location.href = `player.html?cat=jp&slug=${encodeURIComponent(targetSlug)}${baseParam}`;
-    });
-
-  } catch (e) {
-    console.error('loadJpOutline failed', e);
-    cuesStatus.textContent = '（日文文法索引載入失敗）';
-  }
-}
-async function loadProOutline(){
-  try{
-    const url=`${BASE}/data/pro/index-pro.json?v=${vnow}`;
-    const r=await fetch(url,{cache:'no-store'});
-    if(!r.ok) throw 0;
-    const groups=await r.json();
-
-    const rows=[];
-    // 展平成一個 rows 陣列，同時建 proSlugToGroupId 映射
-    groups.forEach(g=>{
-      const gid=g.groupId||'';
-      rows.push({type:'group',label:`【${gid}】${g.groupTitle||''}`,slug:null});
-
-      (g.items||[]).forEach(item=>{
-        const slug=item.slug;
-        if(slug){
-          proSlugToGroupId[slug]=gid;
-          rows.push({
-            type:'lesson',
-            label:`${item.no||''}. ${item.title||''}`,
-            slug:slug,
-            groupId:gid
-          });
-        }
-      });
-    });
-
-    // 渲染成表格：時間欄留白，文字欄顯示章節名；目前章節加底色
-    cuesBody.innerHTML=rows.map(row=>{
-      if(row.type==='group'){
-        return `
-      <tr class="pro-group">
-        <td></td>
-        <td><strong>${esc(row.label)}</strong></td>
-      </tr>`;
-      }else{
-        const isCurrent=(row.slug===slug);
-        return `
-      <tr class="pro-lesson${isCurrent?' current':''}" data-slug="${row.slug}">
-        <td></td>
-        <td>${esc(row.label)}</td>
-      </tr>`;
-      }
-    }).join('');
-
-    cuesStatus.textContent='（點選課程可切換章節）';
-
-    // 點擊事件：切換至指定章節
-    cuesBody.addEventListener('click',e=>{
-      const tr=e.target.closest('.pro-lesson');
-      if(!tr) return;
-      const targetSlug=tr.getAttribute('data-slug');
-      if(!targetSlug || targetSlug===slug) return;
-      const baseParam=paramBase?`&base=${encodeURIComponent(paramBase)}`:'';
-      location.href=`player.html?cat=pro&slug=${encodeURIComponent(targetSlug)}${baseParam}`;
-    });
-
-  }catch(e){
-    console.error('loadProOutline failed',e);
-    cuesStatus.textContent='（PRO 課程清單載入失敗）';
-  }
-}
-</script>
-
 </body>
 </html>
-
 
 
 
