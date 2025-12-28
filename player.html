@@ -1514,6 +1514,39 @@ async function speakText(text, lang){
   }
 }
 
+/* =========================
+   訂閱檢查：強容錯版本
+   - 不再依賴 items.contains
+   - 讀近期 paid 訂單，逐筆判斷 expire_at + items
+   ========================= */
+function normalizeItems(items){
+  if(!items) return [];
+  if(Array.isArray(items)) return items.map(x=>String(x).trim()).filter(Boolean);
+  if(typeof items === 'string'){
+    // 可能是 "story,music" 或 JSON 字串
+    try{
+      const j = JSON.parse(items);
+      return normalizeItems(j);
+    }catch{
+      return items.split(/[,\s]+/).map(x=>x.trim()).filter(Boolean);
+    }
+  }
+  if(typeof items === 'object'){
+    // 可能是 { story:true, music:true } 或 { items:[...] }
+    if(Array.isArray(items.items)) return normalizeItems(items.items);
+    return Object.keys(items).filter(k=>items[k]).map(k=>String(k).trim()).filter(Boolean);
+  }
+  return [];
+}
+function itemsAllowCat(itemsList, cat){
+  // jp 視為 pro
+  const want = (cat === 'jp') ? 'pro' : cat;
+  if(!want) return false;
+  if(!itemsList || !itemsList.length) return false;
+  const set = new Set(itemsList.map(x=>String(x).toLowerCase()));
+  return set.has('all') || set.has('*') || set.has(want.toLowerCase());
+}
+
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
 (async function init(){
   const params = new URLSearchParams(location.search);
@@ -1561,31 +1594,46 @@ async function speakText(text, lang){
 
   // 3️⃣ 已登入且非 preview：檢查 orders（status=paid 且未過期）
   let validUntil = null;
+
   if (!isPreview && user) {
     try {
-      const todayISO = new Date();
-      todayISO.setHours(0, 0, 0, 0);
-
       const { data, error } = await playerSupa
         .from('orders')
-        .select('expire_at, items, buyer_id, user_id, status')
+        .select('expire_at, items, buyer_id, user_id, status, created_at')
         .eq('status', 'paid')
         .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-        .contains('items', [cat === 'jp' ? 'pro' : cat])
         .order('expire_at', { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .limit(20);
 
-      if (!error && data && data.expire_at) {
-        validUntil = new Date(data.expire_at);
-      }
-      console.log('[BW-player] order expire_at raw =', data && data.expire_at, 'parsed =', validUntil);
+      if (error) throw error;
+
+      const today = new Date();
+      today.setHours(0,0,0,0);
+
+      let best = null;
+
+      (data || []).forEach(row=>{
+        const exp = row.expire_at ? new Date(row.expire_at) : null;
+        if(!(exp instanceof Date) || isNaN(exp.getTime())) return;
+        if(exp.getTime() < today.getTime()) return;
+
+        const itemsList = normalizeItems(row.items);
+        if(!itemsAllowCat(itemsList, cat)) return;
+
+        if(!best || exp.getTime() > best.getTime()){
+          best = exp;
+        }
+      });
+
+      validUntil = best;
+      console.log('[BW-player] subscription check => cat=', cat, 'validUntil=', validUntil);
+
     } catch (e) {
       console.error('[BW-player] check subscription error', e);
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today2 = new Date();
+    today2.setHours(0,0,0,0);
 
     if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
       const next = location.pathname + location.search;
@@ -1596,7 +1644,7 @@ async function speakText(text, lang){
       return;
     }
 
-    if (validUntil.getTime() < today.getTime()) {
+    if (validUntil.getTime() < today2.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
       url.searchParams.set('denied', 'expired');
@@ -1615,6 +1663,7 @@ async function speakText(text, lang){
 </script>
 </body>
 </html>
+
 
 
 
