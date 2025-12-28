@@ -1379,26 +1379,59 @@ setInterval(async ()=>{
       try{
         if(!user || !user.id) return;
         const deviceId = BW_getDeviceId();
-        // 讀現值
-        const sel = await supa.from('device_sessions').select('device_id').eq('user_id', user.id).maybeSingle();
+
+        // 讀現值（若表不存在或 RLS 擋，會直接略過）
+        const sel = await supa
+          .from('device_sessions')
+          .select('device_id')
+          .eq('user_id', user.id)
+          .maybeSingle();
+
         if(sel.error){
-          // 表不存在 / RLS 擋：略過
           console.warn('[BW] device_sessions select blocked:', sel.error.message||sel.error);
           return;
         }
+
         const cur = sel.data && sel.data.device_id;
+
+        // 沒有記錄：寫入本裝置
         if(!cur){
-          const ins = await supa.from('device_sessions').upsert({ user_id:user.id, device_id:deviceId, last_seen_at:new Date().toISOString() });
+          const ins = await supa.from('device_sessions').upsert({
+            user_id: user.id,
+            device_id: deviceId,
+            last_seen_at: new Date().toISOString()
+          });
           if(ins.error) console.warn('[BW] device_sessions upsert blocked:', ins.error.message||ins.error);
           return;
         }
+
+        // 已存在但不是本裝置：接管（新裝置登入會覆寫 device_id）
         if(cur !== deviceId){
-          // 新裝置接管：覆寫
-          const up = await supa.from('device_sessions').upsert({ user_id:user.id, device_id:deviceId, last_seen_at:new Date().toISOString() });
+          const up = await supa.from('device_sessions').upsert({
+            user_id: user.id,
+            device_id: deviceId,
+            last_seen_at: new Date().toISOString()
+          });
           if(up.error) console.warn('[BW] device_sessions takeover upsert blocked:', up.error.message||up.error);
         }else{
-          await supa.from('device_sessions').update({ last_seen_at:new Date().toISOString() }).eq('user_id', user.id);
+          // 同一裝置：更新 last_seen
+          const up2 = await supa
+            .from('device_sessions')
+            .update({ last_seen_at: new Date().toISOString() })
+            .eq('user_id', user.id);
+          if(up2.error) console.warn('[BW] device_sessions update blocked:', up2.error.message||up2.error);
         }
+
+        // 心跳：每 60 秒更新一次（避免閒置太久後被誤判）
+        if(window.__BW_HEARTBEAT_TIMER__) clearInterval(window.__BW_HEARTBEAT_TIMER__);
+        window.__BW_HEARTBEAT_TIMER__ = setInterval(async ()=>{
+          try{
+            await supa.from('device_sessions')
+              .update({ last_seen_at: new Date().toISOString() })
+              .eq('user_id', user.id);
+          }catch(_e){}
+        }, 60000);
+
       }catch(e){
         console.warn('[BW] enforceTakeover error:', e);
       }
@@ -1682,8 +1715,10 @@ setInterval(async ()=>{
 
       try {
         if (authMode === 'login') {
-          const { data, error } = await supa.auth.signInWithPassword({ email, password });
-          if (error) throw error;
+          const { data, error } = \1
+        // ✅ 單一裝置接管（email/pass）
+        try{ const { data } = await supa.auth.getSession(); const u=data.session?.user; if(u){ BW_enforceTakeover(u); BW_watchKicked(u);} }catch(_e){}
+if (error) throw error;
           await initAuthAndProfile();
           closeModal();
         } else {
@@ -1721,9 +1756,10 @@ setInterval(async ()=>{
       try {
         const { data } = await supa.auth.getSession();
         const user = data.session?.user ?? null;
-        await paintUser(user);
-
-        CURRENT_USER_IS_ADMIN = false;
+        \1
+        // ✅ 單一裝置登入：新裝置登入會接管並讓舊裝置自動登出（顯示提示）
+        try{ if(user){ BW_enforceTakeover(user); BW_watchKicked(user); } }catch(_e){}
+CURRENT_USER_IS_ADMIN = false;
         if (user) {
           const { data: profile, error } = await supa
             .from('profiles')
