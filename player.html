@@ -1641,6 +1641,54 @@ async function speakText(text, lang){
 
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
+
+async function bwShowGateErrorAndStop(payload){
+  try{
+    const mask = document.createElement('div');
+    mask.style.position='fixed';
+    mask.style.inset='0';
+    mask.style.background='rgba(0,0,0,.55)';
+    mask.style.zIndex='99998';
+    mask.style.display='flex';
+    mask.style.alignItems='center';
+    mask.style.justifyContent='center';
+    mask.innerHTML = `
+      <div style="width:min(760px,calc(100vw - 32px));background:#0f172a;border:1px solid rgba(148,163,184,.35);border-radius:16px;padding:18px;box-shadow:0 20px 60px rgba(0,0,0,.35)">
+        <div style="display:flex;align-items:center;gap:10px;font-weight:900;font-size:18px;margin-bottom:8px">⚠️ 播放權限檢查失敗</div>
+        <div style="color:#cbd5e1;line-height:1.6;margin-bottom:12px">
+          無法取得訂閱到期日（不同瀏覽器常見原因：RLS / token / storage / 網路攔截）。
+        </div>
+        <pre style="white-space:pre-wrap;background:#0b1220;border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:12px;max-height:260px;overflow:auto;color:#e6f0ff">${(JSON.stringify(payload,null,2) || '')}</pre>
+        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">
+          <button class="btn" id="bwGateReload">重新整理</button>
+          <button class="btn" id="bwGateRelogin">重新登入</button>
+          <button class="btn blue" id="bwGatePricing">前往訂閱方案</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(mask);
+
+    document.getElementById('bwGateReload').onclick = ()=>location.reload();
+    document.getElementById('bwGateRelogin').onclick = async ()=>{
+      try{ await playerSupa.auth.signOut(); }catch(_){}
+      const next = location.pathname + location.search;
+      const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
+      url.searchParams.set('denied','signin');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+    };
+    document.getElementById('bwGatePricing').onclick = ()=>{
+      const next = location.pathname + location.search;
+      const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+      url.searchParams.set('denied','noactive');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+    };
+  }catch(e){
+    console.error('[gate] show modal failed', e, payload);
+  }
+}
+
 (async function init(){
   const params = new URLSearchParams(location.search);
   const previewParam = params.get('preview') === '1';
@@ -1690,55 +1738,74 @@ async function speakText(text, lang){
     const today = new Date();
     today.setHours(0,0,0,0);
 
-    // (A) profiles.expires_at
-    try{
-      const { data, error } = await playerSupa
-        .from('profiles')
-        .select('expires_at,is_paused,is_suspended')
-        .eq('id', user.id)
-        .maybeSingle();
+    
+// (A) profiles.expires_at（主來源）
+const pRes = { where:'profiles', tried:['id','user_id'], error:null, data:null };
+try{
+  // 先用 id（常見 schema：profiles.id = auth.uid()）
+  let r1 = await playerSupa
+    .from('profiles')
+    .select('id,user_id,expires_at,is_paused,is_suspended')
+    .eq('id', user.id)
+    .maybeSingle();
 
-      if (!error && data && data.expires_at) {
-        validUntil = new Date(data.expires_at);
-      }
-      // 暫停/停權一律視為無效
-      if (!error && data && (data.is_paused || data.is_suspended)) {
-        validUntil = null;
-      }
-    }catch(e){
-      console.warn('[gate] profiles read error', e);
+  // 若查不到且沒有 error，再試 user_id（有些 schema：profiles.user_id = auth.uid()）
+  if(!r1.error && (!r1.data || (!r1.data.expires_at && r1.data.id==null && r1.data.user_id==null))){
+    const r2 = await playerSupa
+      .from('profiles')
+      .select('id,user_id,expires_at,is_paused,is_suspended')
+      .eq('user_id', user.id)
+      .maybeSingle();
+    r1 = r2;
+  }
+
+  pRes.data = r1.data;
+  pRes.error = r1.error ? (r1.error.message || r1.error) : null;
+
+  if (!pRes.error && pRes.data && pRes.data.expires_at) {
+    validUntil = new Date(pRes.data.expires_at);
+  }
+  // 暫停/停權一律視為無效
+  if (!pRes.error && pRes.data && (pRes.data.is_paused || pRes.data.is_suspended)) {
+    validUntil = null;
+  }
+}catch(e){
+  pRes.error = String(e);
+  console.warn('[gate] profiles read error', e);
+}
+
+
+// (B) fallback：orders.expire_at（只取最新一筆 paid/success）
+const oRes = { where:'orders', error:null, data:null };
+if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
+  try{
+    const { data, error } = await playerSupa
+      .from('orders')
+      .select('expire_at,status,plan,created_at')
+      .or('status.eq.paid,status.eq.success,status.eq.SUCCESS,status.eq.PAID')
+      .eq('user_id', user.id)
+      .order('expire_at', { ascending: false })
+      .limit(3);
+
+    oRes.data = data;
+    oRes.error = error ? (error.message || error) : null;
+
+    if (!oRes.error && Array.isArray(data) && data[0] && data[0].expire_at) {
+      validUntil = new Date(data[0].expire_at);
     }
+  }catch(e){
+    oRes.error = String(e);
+    console.warn('[gate] orders read error', e);
+  }
+}
 
-    // (B) fallback：orders.expire_at（只取最新一筆 paid/success）
-    if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
-      try{
-        const { data, error } = await playerSupa
-          .from('orders')
-          .select('expire_at,status')
-          .or('status.eq.paid,status.eq.success,status.eq.SUCCESS,status.eq.PAID')
-          .eq('user_id', user.id)
-          .order('expire_at', { ascending: false })
-          .limit(1);
+// 仍無法取得到期日：不要盲目導回（顯示診斷視窗）
+if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
+  await bwShowGateErrorAndStop({ profiles: pRes, orders: oRes, note:'no valid expires found' });
+  return;
+}
 
-        if (!error && Array.isArray(data) && data[0] && data[0].expire_at) {
-          validUntil = new Date(data[0].expire_at);
-        }
-      }catch(e){
-        console.warn('[gate] orders read error', e);
-      }
-    }
-
-    // 仍無法取得到期日：導回方案頁（帶 denied=noactive）
-    if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
-      const next = location.pathname + location.search;
-      const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-      url.searchParams.set('denied', 'noactive');
-      url.searchParams.set('next', next);
-      location.href = url.toString();
-      return;
-    }
-
-    // 已過期
+// 已過期
     if (validUntil.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -2067,6 +2134,22 @@ async function loadProOutline(){
 
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
