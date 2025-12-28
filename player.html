@@ -386,7 +386,7 @@ tr.speaking{
 <script>
   // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
   if (window.BW && typeof BW.startIdleLogout === 'function') {
-    BW.startIdleLogout(30, '/login.html?timeout=1');
+    BW.startIdleLogout(60, '/login.html?timeout=1');
   }
 </script>
 <script>
@@ -1513,89 +1513,82 @@ async function speakText(text, lang){
     }
   }
 
-  // 3️⃣ 已登入且非 preview：檢查訂閱（優先 orders，失敗回退 profiles.expires_at）
-//    ✅ 規則：必須有訂閱才放行；但「試用」(movie/goingbackhome&preview=1) 登入即可放行
-  let validUntil = null;
+  // 3️⃣ 試看放行（仍必須先登入）：僅 movie/goingbackhome&preview=1
+  if (isPreview) {
+    console.log('[BW-player] preview=1 allow-list hit, bypass subscription gate');
+  } else {
+    // 4️⃣ 訂閱守門（跨瀏覽器一致、容錯：不依賴 items/plan 欄位）
+    // 原則：
+    // - 先從 orders 找「最新有效 expire_at」（支援不同欄位/狀態）
+    // - orders 查不到再回退 profiles.expires_at
+    let validUntil = null;
 
-  if (!isPreview && user) {
     const today = new Date();
-    today.setHours(0,0,0,0);
+    today.setHours(0, 0, 0, 0);
 
-    // 3-1) 先查 orders（容錯：不同欄位/不同狀態/不同 items 型態）
+    const paidStatuses = ['paid','success','SUCCESS','PAID','ok','OK'];
+
+    async function tryOrders(queryMode){
+      // queryMode: 'both'|'user_id'|'buyer_id'
+      let q = playerSupa.from('orders').select('expire_at,status,created_at,user_id,buyer_id').in('status', paidStatuses);
+      if (queryMode === 'both'){
+        q = q.or(`user_id.eq.${user.id},buyer_id.eq.${user.id}`);
+      } else if (queryMode === 'user_id'){
+        q = q.eq('user_id', user.id);
+      } else {
+        q = q.eq('buyer_id', user.id);
+      }
+      // 取最近幾筆，自己挑最大 expire_at
+      const { data, error } = await q.order('expire_at', { ascending: false }).order('created_at', { ascending: false }).limit(10);
+      return { data, error };
+    }
+
     try {
       if (typeof playerSupa !== 'undefined') {
-        const topic = (cat === 'jp') ? 'pro' : cat;
+        let got = null;
 
-        const statusList = ['paid','PAID','success','SUCCESS','ok','OK'];
-
-        async function queryOrders(useContains){
-          let q = playerSupa
-            .from('orders')
-            .select('expire_at,status,items,buyer_id,user_id,created_at')
-            .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-            .in('status', statusList)
-            .order('expire_at', { ascending: false })
-            .limit(50);
-
-          if (useContains && topic) {
-            // items 若是 json array，contains 可用；若 items 不是 array/欄位不存在，會丟錯，外層會接住並降級
-            q = q.contains('items', [topic]);
-          }
-          return await q;
+        // 先用 user_id + buyer_id 都試（若資料表缺欄位會報錯，再降級）
+        let r = await tryOrders('both');
+        if (r.error && /buyer_id/i.test(String(r.error.message || r.error))) {
+          r = await tryOrders('user_id');
+        } else if (r.error && /user_id/i.test(String(r.error.message || r.error))) {
+          r = await tryOrders('buyer_id');
         }
 
-        let data = null, error = null;
-
-        // 先嘗試 contains（主題訂閱）
-        ({ data, error } = await queryOrders(true));
-
-        // 降級：contains 失敗或沒資料，就不加 contains（視為全站訂閱/舊資料結構）
-        if (error || !data || data.length === 0) {
-          ({ data, error } = await queryOrders(false));
-        }
-
-        if (!error && data && data.length) {
-          // 選出第一筆「expire_at 有效」且（若 items 是 array）符合 topic 的
-          for (const row of data) {
-            if (!row?.expire_at) continue;
-
-            const exp = new Date(row.expire_at);
-            if (Number.isNaN(exp.getTime())) continue;
-
-            // 若 items 是 array，就要求包含 topic；若 items 不是 array / 空，就放行（避免不同瀏覽器因資料型態差異全掛）
-            const items = row.items;
-            const okTopic = Array.isArray(items) ? (topic ? items.includes(topic) : true) : true;
-
-            if (okTopic) { validUntil = exp; break; }
+        if (!r.error && Array.isArray(r.data) && r.data.length){
+          // 找出最大 expire_at
+          for (const row of r.data){
+            const raw = row && row.expire_at;
+            if (!raw) continue;
+            const d = new Date(raw);
+            if (isNaN(d.getTime())) continue;
+            if (!got || d.getTime() > got.getTime()) got = d;
           }
         }
+
+        if (got){
+          validUntil = got;
+          console.log('[BW-player] orders validUntil =', validUntil.toISOString());
+        } else {
+          console.warn('[BW-player] orders no valid expire_at found, fallback to profiles.expires_at');
+          // profiles 回退
+          try {
+            const pr = await playerSupa.from('profiles').select('expires_at').eq('id', user.id).maybeSingle();
+            if (!pr.error && pr.data && pr.data.expires_at){
+              const d = new Date(pr.data.expires_at);
+              if (!isNaN(d.getTime())) validUntil = d;
+            }
+          } catch(e){}
+        }
+      } else {
+        console.warn('[BW-player] playerSupa not defined for subscription check');
       }
     } catch (e) {
-      console.warn('[BW-player] orders check failed -> fallback profiles', e);
+      console.error('[BW-player] check subscription error', e);
     }
 
-    // 3-2) orders 查不到就回退 profiles.expires_at（你現場最穩）
-    if (!validUntil) {
-      try {
-        if (typeof playerSupa !== 'undefined') {
-          const { data: p, error: perr } = await playerSupa
-            .from('profiles')
-            .select('expires_at')
-            .eq('id', user.id)
-            .maybeSingle();
-
-          if (!perr && p?.expires_at) {
-            const exp = new Date(p.expires_at);
-            if (!Number.isNaN(exp.getTime())) validUntil = exp;
-          }
-        }
-      } catch (e) {
-        console.warn('[BW-player] profiles fallback failed', e);
-      }
-    }
-
-    // 3-3) 最終判定：拿不到 or 過期 -> 導回 pricing
-    if (!validUntil) {
+    // 沒訂閱（沒有任何有效訂單）也視為不通過，導回 pricing
+    if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
       url.searchParams.set('denied', 'noactive');
@@ -1604,6 +1597,7 @@ async function speakText(text, lang){
       return;
     }
 
+    // 訂閱已過期
     if (validUntil.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1613,8 +1607,7 @@ async function speakText(text, lang){
       return;
     }
   }
-
-  // 4️⃣ 守門通過後，初始化播放器 + 載入資料
+// 4️⃣ 守門通過後，初始化播放器 + 載入資料
   try {
     const saved = localStorage.getItem(`offset:${slug}`);
     if (saved != null) setOffset(parseFloat(saved)); else setOffset(0);
@@ -1932,6 +1925,23 @@ async function loadProOutline(){
 
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
