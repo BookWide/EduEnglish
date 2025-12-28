@@ -378,53 +378,6 @@ tr.speaking{
   display:block;
 }
 
-
-/* ===== Device takeover modal ===== */
-#bwTakeoverMask{
-  position:fixed; inset:0;
-  background:rgba(0,0,0,.55);
-  display:none;
-  align-items:center;
-  justify-content:center;
-  z-index:99999;
-}
-#bwTakeoverBox{
-  width:min(560px, calc(100vw - 32px));
-  background:#0f172a;
-  border:1px solid rgba(148,163,184,.35);
-  border-radius:16px;
-  padding:18px 18px 14px;
-  box-shadow:0 20px 60px rgba(0,0,0,.35);
-  color:#e6f0ff;
-}
-#bwTakeoverBox .title{
-  display:flex; align-items:center; gap:10px;
-  font-weight:800; font-size:18px;
-  margin-bottom:8px;
-}
-#bwTakeoverBox .desc{
-  color:#cbd5e1;
-  line-height:1.6;
-  margin-bottom:12px;
-}
-#bwTakeoverBox .actions{
-  display:flex; gap:10px; justify-content:flex-end;
-  margin-top:10px;
-}
-#bwTakeoverBox .btn2{
-  background:#13233f;
-  border:1px solid #24446f;
-  border-radius:12px;
-  padding:8px 14px;
-  color:#fff;
-  cursor:pointer;
-  font-size:14px;
-}
-#bwTakeoverBox .btn2.blue{
-  background:#14335f;
-  border-color:#2c5aa3;
-}
-
 </style>
 
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
@@ -451,6 +404,64 @@ tr.speaking{
   // 僅供 player.html 使用的 Supabase Client
   const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+  // === Single-device takeover (soft kick via auth user_metadata) ===
+  const BW_DEVICE_KEY = 'bw_device_id_v1';
+  function bwGetDeviceId(){
+    let id = localStorage.getItem(BW_DEVICE_KEY);
+    if (!id){
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      id = Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join('');
+      localStorage.setItem(BW_DEVICE_KEY, id);
+    }
+    return id;
+  }
+  function bwDeviceLabel(){
+    try{
+      const ua = navigator.userAgent || '';
+      const plat = navigator.platform || '';
+      return `${plat} | ${ua.substring(0,80)}`;
+    }catch(e){ return 'unknown'; }
+  }
+  async function bwTakeoverNow(){
+    try{
+      const myId = bwGetDeviceId();
+      await playerSupa.auth.updateUser({ data: {
+        bw_device_id: myId,
+        bw_device_ts: Date.now(),
+        bw_device_label: bwDeviceLabel()
+      }});
+    }catch(e){ /* ignore */ }
+  }
+  function bwStartDeviceMonitor(){
+    const myId = bwGetDeviceId();
+    let notified = false;
+    setInterval(async ()=>{
+      try{
+        const { data } = await playerSupa.auth.getUser();
+        const u = data?.user;
+        if (!u) return;
+        const meta = u.user_metadata || {};
+        const active = meta.bw_device_id;
+        if (active && active !== myId){
+          if (!notified){
+            notified = true;
+            alert('⚠️ 你的帳號已在另一裝置登入，本裝置已自動登出。');
+          }
+          await playerSupa.auth.signOut();
+          const next = location.pathname + location.search;
+          const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
+          url.searchParams.set('denied','takeover');
+          url.searchParams.set('next', next);
+          location.href = url.toString();
+        }
+      }catch(e){ /* ignore */ }
+    }, 10000);
+  }
+  // === End single-device takeover ===
+
+
+
   async function bwPlayerGetUser() {
     try {
       const { data, error } = await playerSupa.auth.getUser();
@@ -462,121 +473,6 @@ tr.speaking{
     }
   }
 
-
-  // ===== 單裝置：新裝置接管 / 舊裝置自動登出（含提示）=====
-  function bwGetDeviceId(){
-    let id = localStorage.getItem('bw_device_id');
-    if(!id){
-      id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(16).slice(2));
-      localStorage.setItem('bw_device_id', id);
-    }
-    return id;
-  }
-
-  async function bwEnforceSingleDeviceTakeover(user){
-    if(!user) return true;
-    const deviceId = bwGetDeviceId();
-
-    const { data, error } = await playerSupa
-      .from('device_sessions')
-      .select('device_id')
-      .eq('user_id', user.id)
-      .maybeSingle();
-
-    if(error){
-      console.warn('[device] select error', error);
-      return true;
-    }
-
-    // 首次 / 沒資料：寫入
-    if(!data){
-      const { error: upErr } = await playerSupa.from('device_sessions').upsert({
-        user_id: user.id,
-        device_id: deviceId,
-        last_seen_at: new Date().toISOString(),
-      });
-      if(upErr) console.warn('[device] upsert error', upErr);
-      return true;
-    }
-
-    // 不同裝置：新裝置接管（覆寫 device_id）
-    if(data.device_id !== deviceId){
-      const { error: upErr } = await playerSupa.from('device_sessions').upsert({
-        user_id: user.id,
-        device_id: deviceId,
-        last_seen_at: new Date().toISOString(),
-      });
-      if(upErr) console.warn('[device] takeover upsert error', upErr);
-      return true;
-    }
-
-    // 同裝置：心跳
-    const { error: hbErr } = await playerSupa
-      .from('device_sessions')
-      .update({ last_seen_at: new Date().toISOString() })
-      .eq('user_id', user.id);
-    if(hbErr) console.warn('[device] heartbeat error', hbErr);
-
-    return true;
-  }
-
-  function bwStartDeviceWatch(user, intervalMs=15000){
-    const myId = bwGetDeviceId();
-    const tick = async ()=>{
-      try{
-        const { data } = await playerSupa
-          .from('device_sessions')
-          .select('device_id')
-          .eq('user_id', user.id)
-          .maybeSingle();
-        if(data && data.device_id && data.device_id !== myId){
-          bwShowTakeoverAndLogout();
-        }
-      }catch(e){
-        console.warn('[device] watch error', e);
-      }
-    };
-    tick();
-    return setInterval(tick, intervalMs);
-  }
-
-  let __bwTakeoverShown = false;
-
-  async function bwDoLogoutToHome(){
-    try{ await playerSupa.auth.signOut(); }catch(_){}
-    location.href = (ROOT_BASE||'') + '/index.html?denied=device_takeover';
-  }
-
-  function bwShowTakeoverAndLogout(){
-    if(__bwTakeoverShown) return;
-    __bwTakeoverShown = true;
-
-    const mask = document.getElementById('bwTakeoverMask');
-    const secEl = document.getElementById('bwTakeoverSec');
-    const btnLogout = document.getElementById('bwTakeoverLogout');
-
-    if(mask) mask.style.display = 'flex';
-
-    let sec = 3;
-    if(secEl) secEl.textContent = String(sec);
-
-    const timer = setInterval(()=>{
-      sec--;
-      if(secEl) secEl.textContent = String(Math.max(0, sec));
-      if(sec <= 0){
-        clearInterval(timer);
-        bwDoLogoutToHome();
-      }
-    }, 1000);
-
-    if(btnLogout){
-      btnLogout.onclick = ()=>{
-        clearInterval(timer);
-        bwDoLogoutToHome();
-      };
-    }
-  }
-
   // 提供給舊程式使用的守門 / 取 user 函式
   async function ensureAuth(options = {}) {
     const redirect = options.redirect || (ROOT_BASE + '/index.html');
@@ -584,7 +480,7 @@ tr.speaking{
       options.next || (location.pathname + location.search);
 
     const user = await bwPlayerGetUser();
-    if (user) return user;
+    if (user) { await bwTakeoverNow(); bwStartDeviceMonitor(); return user; }
 
     const url =
       redirect +
@@ -593,6 +489,59 @@ tr.speaking{
     window.location.href = url;
     return null;
   }
+
+
+  // 訂閱有效期：先查 orders（兼容不同欄位），失敗再回退 profiles.expires_at
+  async function bwGetValidUntil(user, cat){
+    const today = new Date(); today.setHours(0,0,0,0);
+
+    // 1) orders：嘗試多種欄位組合（避免不同環境 schema 不一致）
+    const tryOrders = async (selectCols, withItems=true) => {
+      let q = playerSupa.from('orders').select(selectCols);
+      q = q.eq('status','paid');
+      // user_id / buyer_id 二擇一（都試）
+      try { q = q.or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`); } catch(e){}
+      // items 可能不存在：存在就用 contains 過濾主題
+      if (withItems){
+        try { q = q.contains('items', [cat === 'jp' ? 'pro' : cat]); } catch(e){}
+      }
+      q = q.order('expire_at', { ascending:false }).limit(1);
+      const { data, error } = await q.maybeSingle();
+      if (error) throw error;
+      return data?.expire_at ? new Date(data.expire_at) : null;
+    };
+
+    try{
+      const d = await tryOrders('expire_at, items, buyer_id, user_id, status', true);
+      if (d instanceof Date && !isNaN(d.getTime())) return d;
+    }catch(e1){
+      try{
+        const d = await tryOrders('expire_at, buyer_id, user_id, status', false);
+        if (d instanceof Date && !isNaN(d.getTime())) return d;
+      }catch(e2){
+        // ignore -> fallback profiles
+      }
+    }
+
+    // 2) profiles：用 expires_at（你現有欄位）
+    try{
+      const { data: p, error: pe } = await playerSupa
+        .from('profiles')
+        .select('expires_at,is_paused,is_suspended')
+        .eq('id', user.id)
+        .maybeSingle();
+      if (!pe && p){
+        if (p.is_paused || p.is_suspended) return null;
+        if (p.expires_at){
+          const d = new Date(p.expires_at);
+          if (!isNaN(d.getTime())) return d;
+        }
+      }
+    }catch(e3){}
+
+    return null;
+  }
+
 
   async function getSessionUser() {
     return await bwPlayerGetUser();
@@ -1641,54 +1590,6 @@ async function speakText(text, lang){
 
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
-
-async function bwShowGateErrorAndStop(payload){
-  try{
-    const mask = document.createElement('div');
-    mask.style.position='fixed';
-    mask.style.inset='0';
-    mask.style.background='rgba(0,0,0,.55)';
-    mask.style.zIndex='99998';
-    mask.style.display='flex';
-    mask.style.alignItems='center';
-    mask.style.justifyContent='center';
-    mask.innerHTML = `
-      <div style="width:min(760px,calc(100vw - 32px));background:#0f172a;border:1px solid rgba(148,163,184,.35);border-radius:16px;padding:18px;box-shadow:0 20px 60px rgba(0,0,0,.35)">
-        <div style="display:flex;align-items:center;gap:10px;font-weight:900;font-size:18px;margin-bottom:8px">⚠️ 播放權限檢查失敗</div>
-        <div style="color:#cbd5e1;line-height:1.6;margin-bottom:12px">
-          無法取得訂閱到期日（不同瀏覽器常見原因：RLS / token / storage / 網路攔截）。
-        </div>
-        <pre style="white-space:pre-wrap;background:#0b1220;border:1px solid rgba(148,163,184,.25);border-radius:12px;padding:12px;max-height:260px;overflow:auto;color:#e6f0ff">${(JSON.stringify(payload,null,2) || '')}</pre>
-        <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:10px">
-          <button class="btn" id="bwGateReload">重新整理</button>
-          <button class="btn" id="bwGateRelogin">重新登入</button>
-          <button class="btn blue" id="bwGatePricing">前往訂閱方案</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(mask);
-
-    document.getElementById('bwGateReload').onclick = ()=>location.reload();
-    document.getElementById('bwGateRelogin').onclick = async ()=>{
-      try{ await playerSupa.auth.signOut(); }catch(_){}
-      const next = location.pathname + location.search;
-      const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
-      url.searchParams.set('denied','signin');
-      url.searchParams.set('next', next);
-      location.href = url.toString();
-    };
-    document.getElementById('bwGatePricing').onclick = ()=>{
-      const next = location.pathname + location.search;
-      const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-      url.searchParams.set('denied','noactive');
-      url.searchParams.set('next', next);
-      location.href = url.toString();
-    };
-  }catch(e){
-    console.error('[gate] show modal failed', e, payload);
-  }
-}
-
 (async function init(){
   const params = new URLSearchParams(location.search);
   const previewParam = params.get('preview') === '1';
@@ -1723,75 +1624,27 @@ async function bwShowGateErrorAndStop(payload){
     }
   }
 
-
-  // ✅ 單裝置限制：新裝置接管 / 舊裝置提示登出
-  try {
-    await bwEnforceSingleDeviceTakeover(user);
-    bwStartDeviceWatch(user, 15000);
-  } catch (e) {
-    console.warn('[device] enforce/watch error', e);
-  }
-
-  // 3️⃣ 已登入且非 preview：檢查訂閱（profiles.expires_at 為主；失敗才 fallback orders）
+  // 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
   let validUntil = null;
   if (!isPreview && user) {
+    // 訂閱檢查（orders → profiles.expires_at 回退）
+    validUntil = await bwGetValidUntil(user, cat);
+
     const today = new Date();
-    today.setHours(0,0,0,0);
 
-    
-// (A) profiles.expires_at（主來源：只用 profiles.id）
-const pRes = { where:'profiles', tried:['id'], error:null, data:null };
-try{
-  // 只選必要欄位，避免 schema 差異（例如沒有 is_paused / is_suspended）
-  const { data, error } = await playerSupa
-    .from('profiles')
-    .select('expires_at')
-    .eq('id', user.id)
-    .maybeSingle();
+    today.setHours(0, 0, 0, 0);
 
-  pRes.data = data;
-  pRes.error = error ? (error.message || error) : null;
-
-  if (!pRes.error && data && data.expires_at) {
-    validUntil = new Date(data.expires_at);
-  }
-}catch(e){
-  pRes.error = String(e);
-  console.warn('[gate] profiles read error', e);
-}
-
-
-// (B) fallback：orders.expire_at（只取最新一筆 paid/success）
-const oRes = { where:'orders', error:null, data:null };
-if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
-  try{
-    const { data, error } = await playerSupa
-      .from('orders')
-      .select('expire_at,status,created_at')
-      .or('status.eq.paid,status.eq.success,status.eq.SUCCESS,status.eq.PAID')
-      .eq('user_id', user.id)
-      .order('expire_at', { ascending: false })
-      .limit(3);
-
-    oRes.data = data;
-    oRes.error = error ? (error.message || error) : null;
-
-    if (!oRes.error && Array.isArray(data) && data[0] && data[0].expire_at) {
-      validUntil = new Date(data[0].expire_at);
+    // 沒訂閱（沒有任何有效訂單）也視為不通過，導回 pricing
+    if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
+      const next = location.pathname + location.search;
+      const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+      url.searchParams.set('denied', 'noactive');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
     }
-  }catch(e){
-    oRes.error = String(e);
-    console.warn('[gate] orders read error', e);
-  }
-}
 
-// 仍無法取得到期日：不要盲目導回（顯示診斷視窗）
-if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
-  await bwShowGateErrorAndStop({ profiles: pRes, orders: oRes, note:'no valid expires found' });
-  return;
-}
-
-// 已過期
+    // 訂閱已過期
     if (validUntil.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);

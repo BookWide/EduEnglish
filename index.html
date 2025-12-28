@@ -1321,6 +1321,65 @@ setInterval(async ()=>{
     const supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     window.supa = supa;
 
+    // === Single-device takeover (via auth user_metadata) ===
+    const BW_DEVICE_KEY = 'bw_device_id_v1';
+    function bwGetDeviceId(){
+      let id = localStorage.getItem(BW_DEVICE_KEY);
+      if (!id){
+        const bytes = new Uint8Array(16);
+        crypto.getRandomValues(bytes);
+        id = Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join('');
+        localStorage.setItem(BW_DEVICE_KEY, id);
+      }
+      return id;
+    }
+    function bwDeviceLabel(){
+      try{
+        const ua = navigator.userAgent || '';
+        const plat = navigator.platform || '';
+        return `${plat} | ${ua.substring(0,80)}`;
+      }catch(e){ return 'unknown'; }
+    }
+    async function bwTakeoverNow(user){
+      try{
+        const myId = bwGetDeviceId();
+        await supa.auth.updateUser({ data: {
+          bw_device_id: myId,
+          bw_device_ts: Date.now(),
+          bw_device_label: bwDeviceLabel()
+        }});
+      }catch(e){
+        console.warn('[BW] takeover updateUser failed', e);
+      }
+    }
+    async function bwStartDeviceMonitor(){
+      const myId = bwGetDeviceId();
+      let notified = false;
+      setInterval(async ()=>{
+        try{
+          const { data } = await supa.auth.getUser();
+          const u = data?.user;
+          if (!u) return;
+          const meta = u.user_metadata || {};
+          const active = meta.bw_device_id;
+          if (active && active !== myId){
+            if (!notified){
+              notified = true;
+              alert('⚠️ 你的帳號已在另一裝置登入，本裝置已自動登出。');
+            }
+            await supa.auth.signOut();
+            // 回到首頁（保留 30 分鐘自動登出功能：不要移除）
+            location.href = (ROOT_BASE || '') + '/index.html?denied=takeover';
+          }
+        }catch(e){
+          // ignore
+        }
+      }, 10000);
+    }
+    // === End single-device takeover ===
+
+
+
     // ✅ OAuth callback：如果網址帶 ?code=...，就兌換成 session（Google / 之後 FB/LINE/微信）
     (async () => {
       try{
@@ -1620,6 +1679,9 @@ setInterval(async ()=>{
         const { data } = await supa.auth.getSession();
         const user = data.session?.user ?? null;
         await paintUser(user);
+
+        // 新裝置登入：直接接管（會讓舊裝置在下一次檢查時自動登出）
+        if (user) { await bwTakeoverNow(user); await bwStartDeviceMonitor(); }
 
         CURRENT_USER_IS_ADMIN = false;
         if (user) {
