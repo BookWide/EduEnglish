@@ -378,6 +378,7 @@ tr.speaking{
   display:block;
 }
 
+
 /* ===== Device takeover modal ===== */
 #bwTakeoverMask{
   position:fixed; inset:0;
@@ -449,7 +450,20 @@ tr.speaking{
 
   // 僅供 player.html 使用的 Supabase Client
   const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-  // ===== 單裝置：新裝置接管 / 舊裝置自動登出 =====
+
+  async function bwPlayerGetUser() {
+    try {
+      const { data, error } = await playerSupa.auth.getUser();
+      if (error || !data || !data.user) return null;
+      return data.user;
+    } catch (err) {
+      console.error('[player-auth] getUser error', err);
+      return null;
+    }
+  }
+
+
+  // ===== 單裝置：新裝置接管 / 舊裝置自動登出（含提示）=====
   function bwGetDeviceId(){
     let id = localStorage.getItem('bw_device_id');
     if(!id){
@@ -463,7 +477,6 @@ tr.speaking{
     if(!user) return true;
     const deviceId = bwGetDeviceId();
 
-    // 讀取目前綁定的裝置
     const { data, error } = await playerSupa
       .from('device_sessions')
       .select('device_id')
@@ -472,10 +485,10 @@ tr.speaking{
 
     if(error){
       console.warn('[device] select error', error);
-      return true; // 讀不到先放行，避免卡死
+      return true;
     }
 
-    // 第一次：建立綁定
+    // 首次 / 沒資料：寫入
     if(!data){
       const { error: upErr } = await playerSupa.from('device_sessions').upsert({
         user_id: user.id,
@@ -486,7 +499,7 @@ tr.speaking{
       return true;
     }
 
-    // 不同裝置：✅ 接管（把 device_id 更新成新裝置）
+    // 不同裝置：新裝置接管（覆寫 device_id）
     if(data.device_id !== deviceId){
       const { error: upErr } = await playerSupa.from('device_sessions').upsert({
         user_id: user.id,
@@ -494,7 +507,6 @@ tr.speaking{
         last_seen_at: new Date().toISOString(),
       });
       if(upErr) console.warn('[device] takeover upsert error', upErr);
-      console.log('[device] takeover old=', data.device_id, 'new=', deviceId);
       return true;
     }
 
@@ -528,12 +540,10 @@ tr.speaking{
     return setInterval(tick, intervalMs);
   }
 
-
-    // ===== 舊裝置提示 + 倒數登出（避免 alert 被瀏覽器擋）=====
   let __bwTakeoverShown = false;
 
-  async function bwDoLogoutToHome() {
-    try { await playerSupa.auth.signOut(); } catch (_) {}
+  async function bwDoLogoutToHome(){
+    try{ await playerSupa.auth.signOut(); }catch(_){}
     location.href = (ROOT_BASE||'') + '/index.html?denied=device_takeover';
   }
 
@@ -543,7 +553,6 @@ tr.speaking{
 
     const mask = document.getElementById('bwTakeoverMask');
     const secEl = document.getElementById('bwTakeoverSec');
-    const btnStay = document.getElementById('bwTakeoverStay');
     const btnLogout = document.getElementById('bwTakeoverLogout');
 
     if(mask) mask.style.display = 'flex';
@@ -560,31 +569,11 @@ tr.speaking{
       }
     }, 1000);
 
-    if(btnStay){
-      btnStay.onclick = ()=>{ /* 只關閉提示也可以，但仍會倒數登出 */ };
-    }
     if(btnLogout){
       btnLogout.onclick = ()=>{
         clearInterval(timer);
         bwDoLogoutToHome();
       };
-    }
-  }
-
-async function bwPlayerGetUser() {
-    try {
-      // 先用 getSession 確認本機是否真的有 session（某些瀏覽器 getUser 會因 storage/refresh 問題回空）
-      const s = await playerSupa.auth.getSession();
-      const session = s?.data?.session || null;
-      if (!session || !session.user) return null;
-
-      // 再用 getUser 驗證 token
-      const { data, error } = await playerSupa.auth.getUser();
-      if (error || !data || !data.user) return session.user;
-      return data.user;
-    } catch (err) {
-      console.error('[player-auth] getUser/getSession error', err);
-      return null;
     }
   }
 
@@ -625,21 +614,6 @@ async function bwPlayerGetUser() {
     <span class="muted" id="userNameBadge"></span>
   </div>
 </header>
-
-
-
-<div id="gateOverlay" style="position:fixed;inset:0;display:none;z-index:99999;background:rgba(0,0,0,.6);backdrop-filter:blur(2px);">
-  <div style="max-width:520px;margin:8vh auto;background:#0f172a;border:1px solid #223b63;border-radius:16px;padding:18px 16px;color:#e6f0ff;box-shadow:0 20px 60px rgba(0,0,0,.5);">
-    <div style="font-size:18px;font-weight:800;margin-bottom:8px">⚠️ 播放權限檢查失敗</div>
-    <div id="gateMsg" style="line-height:1.6;color:#cbd5e1"></div>
-    <pre id="gateDebug" style="margin:10px 0 0;white-space:pre-wrap;word-break:break-word;background:#081427;border:1px solid #1d355a;border-radius:12px;padding:10px;font-size:12px;color:#9fb0c9;max-height:36vh;overflow:auto;"></pre>
-    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;justify-content:flex-end">
-      <button class="btn" id="btnGateReload">重新整理</button>
-      <button class="btn" id="btnGateReLogin">重新登入</button>
-      <button class="btn blue" id="btnGatePricing">前往訂閱方案</button>
-    </div>
-  </div>
-</div>
 
 <div class="wrap">
   <div id="track" class="layout">
@@ -1701,113 +1675,70 @@ async function speakText(text, lang){
     }
   }
 
-  // 2.5️⃣ 單裝置接管：新裝置登入會接管；舊裝置偵測到後自動登出
-  try{
-    if (typeof bwEnforceSingleDeviceTakeover === 'function') {
-      await bwEnforceSingleDeviceTakeover(user);
-      bwStartDeviceWatch(user, 15000);
-    }
-  }catch(e){
-    console.error('[device] enforce/watch error', e);
+
+  // ✅ 單裝置限制：新裝置接管 / 舊裝置提示登出
+  try {
+    await bwEnforceSingleDeviceTakeover(user);
+    bwStartDeviceWatch(user, 15000);
+  } catch (e) {
+    console.warn('[device] enforce/watch error', e);
   }
 
-  
-  // 3️⃣ 已登入且非 preview：檢查訂閱（優先 profiles.expires_at；失敗再退回 orders.expire_at）
+  // 3️⃣ 已登入且非 preview：檢查訂閱（profiles.expires_at 為主；失敗才 fallback orders）
   let validUntil = null;
-  let gateDebug = { where: null, error: null, data: null };
-  const gateOverlay = document.getElementById('gateOverlay');
-  const gateMsg = document.getElementById('gateMsg');
-  const gateDebugEl = document.getElementById('gateDebug');
-
-  function showGate(message, debugObj) {
-    try{
-      if (gateMsg) gateMsg.textContent = message || '權限檢查失敗';
-      if (gateDebugEl) gateDebugEl.textContent = JSON.stringify(debugObj || {}, null, 2);
-      if (gateOverlay) gateOverlay.style.display = 'block';
-      const next = location.pathname + location.search;
-      const btnReload = document.getElementById('btnGateReload');
-      const btnReLogin = document.getElementById('btnGateReLogin');
-      const btnPricing = document.getElementById('btnGatePricing');
-      if (btnReload) btnReload.onclick = () => location.reload();
-      if (btnReLogin) btnReLogin.onclick = async () => {
-        try{ await playerSupa.auth.signOut(); }catch(_){}
-        const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
-        url.searchParams.set('denied', 'signin');
-        url.searchParams.set('next', next);
-        location.href = url.toString();
-      };
-      if (btnPricing) btnPricing.onclick = () => {
-        const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-        url.searchParams.set('denied', 'noactive');
-        url.searchParams.set('next', next);
-        location.href = url.toString();
-      };
-    }catch(e){
-      console.warn('showGate error', e);
-    }
-  }
-
   if (!isPreview && user) {
-    // A) profiles.expires_at（你的 subscription.html / admin 都是用這個）
-    try {
-      gateDebug.where = 'profiles';
+    const today = new Date();
+    today.setHours(0,0,0,0);
+
+    // (A) profiles.expires_at
+    try{
       const { data, error } = await playerSupa
         .from('profiles')
         .select('expires_at,is_paused,is_suspended')
         .eq('id', user.id)
         .maybeSingle();
 
-      gateDebug.data = data;
-      if (error) {
-        gateDebug.error = { message: error.message, details: error.details, hint: error.hint, code: error.code, status: error.status };
-        throw error;
-      }
-
-      if (data && data.expires_at) {
+      if (!error && data && data.expires_at) {
         validUntil = new Date(data.expires_at);
       }
-      if (data && (data.is_paused || data.is_suspended)) {
+      // 暫停/停權一律視為無效
+      if (!error && data && (data.is_paused || data.is_suspended)) {
         validUntil = null;
       }
-    } catch (e) {
-      console.warn('[BW-player] profiles check failed, fallback to orders', e);
+    }catch(e){
+      console.warn('[gate] profiles read error', e);
     }
 
-    // B) fallback：orders.expire_at（避免 profiles RLS / 偶發讀不到造成誤判）
+    // (B) fallback：orders.expire_at（只取最新一筆 paid/success）
     if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
-      try {
-        gateDebug.where = 'orders';
+      try{
         const { data, error } = await playerSupa
           .from('orders')
-          .select('status,expire_at,created_at')
+          .select('expire_at,status')
+          .or('status.eq.paid,status.eq.success,status.eq.SUCCESS,status.eq.PAID')
           .eq('user_id', user.id)
-          .in('status', ['paid','active'])
-          .order('created_at', { ascending: false })
+          .order('expire_at', { ascending: false })
           .limit(1);
 
-        gateDebug.data = data;
-        if (error) {
-          gateDebug.error = { message: error.message, details: error.details, hint: error.hint, code: error.code, status: error.status };
-          throw error;
+        if (!error && Array.isArray(data) && data[0] && data[0].expire_at) {
+          validUntil = new Date(data[0].expire_at);
         }
-
-        const row = Array.isArray(data) ? data[0] : null;
-        if (row && row.expire_at) validUntil = new Date(row.expire_at);
-      } catch (e) {
-        console.warn('[BW-player] orders fallback failed', e);
+      }catch(e){
+        console.warn('[gate] orders read error', e);
       }
     }
 
-    // C) 判斷是否有效
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
+    // 仍無法取得到期日：導回方案頁（帶 denied=noactive）
     if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
-      // 如果兩邊都拿不到，又沒有明確的「未訂閱」訊號，先不要無限導回，改顯示錯誤讓你看得到原因
-      showGate('無法取得訂閱到期日（不同瀏覽器常見原因：RLS / token / storage / 網路攔截）。', gateDebug);
+      const next = location.pathname + location.search;
+      const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+      url.searchParams.set('denied', 'noactive');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
       return;
     }
 
+    // 已過期
     if (validUntil.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1818,7 +1749,7 @@ async function speakText(text, lang){
     }
   }
 
-// 4️⃣ 守門通過後，初始化播放器 + 載入資料
+  // 4️⃣ 守門通過後，初始化播放器 + 載入資料
   try {
     const saved = localStorage.getItem(`offset:${slug}`);
     if (saved != null) setOffset(parseFloat(saved)); else setOffset(0);
@@ -2134,21 +2065,23 @@ async function loadProOutline(){
 }
 </script>
 
-<div id="bwTakeoverMask">
-  <div id="bwTakeoverBox">
-    <div class="title">⚠️ 另一裝置已登入</div>
-    <div class="desc" id="bwTakeoverMsg">
-      你的帳號已在另一台裝置登入，本裝置將在 <b id="bwTakeoverSec">3</b> 秒後自動登出。
-    </div>
-    <div class="actions">
-      <button class="btn2" id="bwTakeoverStay">我知道了</button>
-      <button class="btn2 blue" id="bwTakeoverLogout">立即登出</button>
-    </div>
-  </div>
-</div>
-
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
