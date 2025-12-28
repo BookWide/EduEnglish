@@ -386,7 +386,7 @@ tr.speaking{
 <script>
   // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
   if (window.BW && typeof BW.startIdleLogout === 'function') {
-    BW.startIdleLogout(60, '/login.html?timeout=1');
+    BW.startIdleLogout(30, '/login.html?timeout=1');
   }
 </script>
 <script>
@@ -1481,7 +1481,9 @@ async function speakText(text, lang){
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
 (async function init(){
   const params = new URLSearchParams(location.search);
-  const isPreview = params.get('preview') === '1';
+  const previewParam = params.get('preview') === '1';
+  // ✅ Trial allow-list: only allow preview for movie/goingbackhome
+  const isPreview = previewParam && (cat === 'movie') && (slug === 'goingbackhome');
 
   let user = null;
 
@@ -1494,16 +1496,14 @@ async function speakText(text, lang){
     console.error('[BW-player] bwPlayerGetUser error', e);
   }
 
-  // 2️⃣ 若未登入：非 preview 一律導回首頁
+  // 2️⃣ 若未登入：一律導回首頁（試看也必須先登入）
   if (!user) {
-    if (!isPreview) {
-      const next = location.pathname + location.search;
-      const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
-      url.searchParams.set('denied', 'signin');
-      url.searchParams.set('next', next);
-      location.href = url.toString();
-      return;
-    }
+    const next = location.pathname + location.search;
+    const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
+    url.searchParams.set('denied', 'signin');
+    url.searchParams.set('next', next);
+    location.href = url.toString();
+    return;
   } else {
     // 顯示登入者 Email
     const email = user.email || (user.user && user.user.email) || '';
@@ -1513,41 +1513,89 @@ async function speakText(text, lang){
     }
   }
 
-  // 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
+  // 3️⃣ 已登入且非 preview：檢查訂閱（優先 orders，失敗回退 profiles.expires_at）
+//    ✅ 規則：必須有訂閱才放行；但「試用」(movie/goingbackhome&preview=1) 登入即可放行
   let validUntil = null;
+
   if (!isPreview && user) {
+    const today = new Date();
+    today.setHours(0,0,0,0);
+
+    // 3-1) 先查 orders（容錯：不同欄位/不同狀態/不同 items 型態）
     try {
       if (typeof playerSupa !== 'undefined') {
-        const todayISO = new Date();
-        todayISO.setHours(0, 0, 0, 0);
+        const topic = (cat === 'jp') ? 'pro' : cat;
 
-        const { data, error } = await playerSupa
-          .from('orders')
-          .select('expire_at, items, buyer_id, user_id, status')
-          .eq('status', 'paid')
-          .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-          // JP 類別視為與 Grammar / PRO 相同訂閱主題，因此實際用 pro 來查訂單
-          .contains('items', [cat === 'jp' ? 'pro' : cat])
-          .order('expire_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+        const statusList = ['paid','PAID','success','SUCCESS','ok','OK'];
 
-        if (!error && data && data.expire_at) {
-          validUntil = new Date(data.expire_at);
+        async function queryOrders(useContains){
+          let q = playerSupa
+            .from('orders')
+            .select('expire_at,status,items,buyer_id,user_id,created_at')
+            .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+            .in('status', statusList)
+            .order('expire_at', { ascending: false })
+            .limit(50);
+
+          if (useContains && topic) {
+            // items 若是 json array，contains 可用；若 items 不是 array/欄位不存在，會丟錯，外層會接住並降級
+            q = q.contains('items', [topic]);
+          }
+          return await q;
         }
-        console.log('[BW-player] order expire_at raw =', data && data.expire_at, 'parsed =', validUntil);
-      } else {
-        console.warn('[BW-player] playerSupa not defined for subscription check');
+
+        let data = null, error = null;
+
+        // 先嘗試 contains（主題訂閱）
+        ({ data, error } = await queryOrders(true));
+
+        // 降級：contains 失敗或沒資料，就不加 contains（視為全站訂閱/舊資料結構）
+        if (error || !data || data.length === 0) {
+          ({ data, error } = await queryOrders(false));
+        }
+
+        if (!error && data && data.length) {
+          // 選出第一筆「expire_at 有效」且（若 items 是 array）符合 topic 的
+          for (const row of data) {
+            if (!row?.expire_at) continue;
+
+            const exp = new Date(row.expire_at);
+            if (Number.isNaN(exp.getTime())) continue;
+
+            // 若 items 是 array，就要求包含 topic；若 items 不是 array / 空，就放行（避免不同瀏覽器因資料型態差異全掛）
+            const items = row.items;
+            const okTopic = Array.isArray(items) ? (topic ? items.includes(topic) : true) : true;
+
+            if (okTopic) { validUntil = exp; break; }
+          }
+        }
       }
     } catch (e) {
-      console.error('[BW-player] check subscription error', e);
+      console.warn('[BW-player] orders check failed -> fallback profiles', e);
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // 3-2) orders 查不到就回退 profiles.expires_at（你現場最穩）
+    if (!validUntil) {
+      try {
+        if (typeof playerSupa !== 'undefined') {
+          const { data: p, error: perr } = await playerSupa
+            .from('profiles')
+            .select('expires_at')
+            .eq('id', user.id)
+            .maybeSingle();
 
-    // 沒訂閱（沒有任何有效訂單）也視為不通過，導回 pricing
-    if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
+          if (!perr && p?.expires_at) {
+            const exp = new Date(p.expires_at);
+            if (!Number.isNaN(exp.getTime())) validUntil = exp;
+          }
+        }
+      } catch (e) {
+        console.warn('[BW-player] profiles fallback failed', e);
+      }
+    }
+
+    // 3-3) 最終判定：拿不到 or 過期 -> 導回 pricing
+    if (!validUntil) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
       url.searchParams.set('denied', 'noactive');
@@ -1556,7 +1604,6 @@ async function speakText(text, lang){
       return;
     }
 
-    // 訂閱已過期
     if (validUntil.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1885,6 +1932,23 @@ async function loadProOutline(){
 
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
