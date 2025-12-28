@@ -1,17 +1,18 @@
 // ====== BookWide Supabase Helper (merged export + global) ======
-// v20251228-device
-// - 保留原本功能
-// - 補：單一裝置登入（current_device_id）
-// - 舊裝置自動登出 + 提示旗標
+// v20251228-device-fix
+// - 修正 Invalid API key（把 SUPABASE_ANON_KEY 變成「純字串」）
+// - 保留：單一裝置登入（profiles.current_device_id）
+// - 保留：舊裝置自動登出 + 提示旗標
+// - 補齊：requireAdmin / isOnlineWithin（user.html 會用到）
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-// ---- Project keys (public anon) ----
-const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-const SUPABASE_ANON_KEY =
-  'const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do; // ← 你原本那串 그대로
+/* ========= Project (public anon) ========= */
+export const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+export const SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-// ---- Client (singleton) ----
+/* ========= Client (singleton) ========= */
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
     persistSession: true,
@@ -30,7 +31,6 @@ function getDeviceId() {
   return id;
 }
 
-// ---- Utilities ----
 export const BW = {
   supa: supabase,
 
@@ -39,19 +39,54 @@ export const BW = {
     return data?.user ?? null;
   },
 
+  /* ===== 管理員守門（user.html 會用到） ===== */
+  async requireAdmin(redirect = '/index.html?noadmin=1') {
+    const user = await this.getUser();
+    if (!user) {
+      location.href = '/index.html#login';
+      throw new Error('not logged in');
+    }
+    const r = await supabase
+      .from('profiles')
+      .select('is_admin')
+      .eq('id', user.id)
+      .maybeSingle();
+
+    if (r.error) {
+      console.warn('requireAdmin profiles read error', r.error);
+      location.href = redirect;
+      throw r.error;
+    }
+    if (!r.data?.is_admin) {
+      location.href = redirect;
+      throw new Error('not admin');
+    }
+    return true;
+  },
+
+  /* ===== 最近在線判斷（user.html 會用到） ===== */
+  isOnlineWithin(ts, minutes = 10) {
+    if (!ts) return false;
+    const d = new Date(ts);
+    if (isNaN(d)) return false;
+    return (Date.now() - d.getTime()) <= minutes * 60 * 1000;
+  },
+
   /* ===== 登入後呼叫：覆蓋目前裝置 ===== */
   async markCurrentDevice() {
     const user = await this.getUser();
     if (!user) return;
 
     const deviceId = getDeviceId();
-    await supabase
+    const r = await supabase
       .from('profiles')
       .update({
         current_device_id: deviceId,
         last_seen_at: new Date().toISOString(),
       })
       .eq('id', user.id);
+
+    if (r.error) console.warn('markCurrentDevice error', r.error);
   },
 
   /* ===== 心跳（含單一裝置檢查） ===== */
@@ -66,23 +101,30 @@ export const BW = {
         const user = await this.getUser();
         if (!user) return;
 
-        const { data } = await supabase
+        const r = await supabase
           .from('profiles')
           .select('current_device_id')
           .eq('id', user.id)
           .maybeSingle();
 
-        if (data?.current_device_id && data.current_device_id !== myDevice) {
+        if (r.error) {
+          console.warn('heartbeat profiles read error', r.error);
+          return;
+        }
+
+        if (r.data?.current_device_id && r.data.current_device_id !== myDevice) {
           // 被新裝置踢
           localStorage.setItem('bw_forced_logout', '1');
           await supabase.auth.signOut();
           return;
         }
 
-        await supabase
+        const u = await supabase
           .from('profiles')
           .update({ last_seen_at: new Date().toISOString() })
           .eq('id', user.id);
+
+        if (u.error) console.warn('heartbeat update error', u.error);
       } finally {
         running = false;
       }
@@ -92,7 +134,7 @@ export const BW = {
     return setInterval(beat, Math.max(1, minutes) * 60 * 1000);
   },
 
-  /* ===== 被踢提示（index 用） ===== */
+  /* ===== 被踢提示（index/login 用） ===== */
   popForcedLogoutHint() {
     if (localStorage.getItem('bw_forced_logout') === '1') {
       localStorage.removeItem('bw_forced_logout');
@@ -120,12 +162,22 @@ export const BW = {
   },
 };
 
-// ---- Legacy global ----
+/* ========= Legacy global ========= */
 if (typeof window !== 'undefined') {
   window.BW = window.BW || BW;
 }
 
-// ---- Auto heartbeat ----
+/* ========= Auth hooks =========
+   - 登入成功就寫入 current_device_id
+   - 有 session 就自動啟動心跳
+*/
+supabase.auth.onAuthStateChange(async (event, session) => {
+  if (event === 'SIGNED_IN' && session?.user) {
+    await BW.markCurrentDevice();
+    BW.startHeartbeat(2);
+  }
+});
+
 (async () => {
   const user = await BW.getUser();
   if (user) BW.startHeartbeat(2);
