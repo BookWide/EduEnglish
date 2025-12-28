@@ -487,11 +487,17 @@ tr.speaking{
 
   async function bwPlayerGetUser() {
     try {
+      // 先用 getSession 確認本機是否真的有 session（某些瀏覽器 getUser 會因 storage/refresh 問題回空）
+      const s = await playerSupa.auth.getSession();
+      const session = s?.data?.session || null;
+      if (!session || !session.user) return null;
+
+      // 再用 getUser 驗證 token
       const { data, error } = await playerSupa.auth.getUser();
-      if (error || !data || !data.user) return null;
+      if (error || !data || !data.user) return session.user;
       return data.user;
     } catch (err) {
-      console.error('[player-auth] getUser error', err);
+      console.error('[player-auth] getUser/getSession error', err);
       return null;
     }
   }
@@ -533,6 +539,21 @@ tr.speaking{
     <span class="muted" id="userNameBadge"></span>
   </div>
 </header>
+
+
+
+<div id="gateOverlay" style="position:fixed;inset:0;display:none;z-index:99999;background:rgba(0,0,0,.6);backdrop-filter:blur(2px);">
+  <div style="max-width:520px;margin:8vh auto;background:#0f172a;border:1px solid #223b63;border-radius:16px;padding:18px 16px;color:#e6f0ff;box-shadow:0 20px 60px rgba(0,0,0,.5);">
+    <div style="font-size:18px;font-weight:800;margin-bottom:8px">⚠️ 播放權限檢查失敗</div>
+    <div id="gateMsg" style="line-height:1.6;color:#cbd5e1"></div>
+    <pre id="gateDebug" style="margin:10px 0 0;white-space:pre-wrap;word-break:break-word;background:#081427;border:1px solid #1d355a;border-radius:12px;padding:10px;font-size:12px;color:#9fb0c9;max-height:36vh;overflow:auto;"></pre>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px;justify-content:flex-end">
+      <button class="btn" id="btnGateReload">重新整理</button>
+      <button class="btn" id="btnGateReLogin">重新登入</button>
+      <button class="btn blue" id="btnGatePricing">前往訂閱方案</button>
+    </div>
+  </div>
+</div>
 
 <div class="wrap">
   <div id="track" class="layout">
@@ -1604,53 +1625,103 @@ async function speakText(text, lang){
     console.error('[device] enforce/watch error', e);
   }
 
-  // 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
+  
+  // 3️⃣ 已登入且非 preview：檢查訂閱（優先 profiles.expires_at；失敗再退回 orders.expire_at）
   let validUntil = null;
+  let gateDebug = { where: null, error: null, data: null };
+  const gateOverlay = document.getElementById('gateOverlay');
+  const gateMsg = document.getElementById('gateMsg');
+  const gateDebugEl = document.getElementById('gateDebug');
+
+  function showGate(message, debugObj) {
+    try{
+      if (gateMsg) gateMsg.textContent = message || '權限檢查失敗';
+      if (gateDebugEl) gateDebugEl.textContent = JSON.stringify(debugObj || {}, null, 2);
+      if (gateOverlay) gateOverlay.style.display = 'block';
+      const next = location.pathname + location.search;
+      const btnReload = document.getElementById('btnGateReload');
+      const btnReLogin = document.getElementById('btnGateReLogin');
+      const btnPricing = document.getElementById('btnGatePricing');
+      if (btnReload) btnReload.onclick = () => location.reload();
+      if (btnReLogin) btnReLogin.onclick = async () => {
+        try{ await playerSupa.auth.signOut(); }catch(_){}
+        const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
+        url.searchParams.set('denied', 'signin');
+        url.searchParams.set('next', next);
+        location.href = url.toString();
+      };
+      if (btnPricing) btnPricing.onclick = () => {
+        const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+        url.searchParams.set('denied', 'noactive');
+        url.searchParams.set('next', next);
+        location.href = url.toString();
+      };
+    }catch(e){
+      console.warn('showGate error', e);
+    }
+  }
+
   if (!isPreview && user) {
+    // A) profiles.expires_at（你的 subscription.html / admin 都是用這個）
     try {
-      if (typeof playerSupa !== 'undefined') {
-        const todayISO = new Date();
-        todayISO.setHours(0, 0, 0, 0);
+      gateDebug.where = 'profiles';
+      const { data, error } = await playerSupa
+        .from('profiles')
+        .select('expires_at,is_paused,is_suspended')
+        .eq('id', user.id)
+        .maybeSingle();
 
-        const { data, error } = await playerSupa
-          .from('profiles')
-          .select('expires_at,is_paused,is_suspended')
-          .eq('id', user.id)
-          .maybeSingle();
+      gateDebug.data = data;
+      if (error) {
+        gateDebug.error = { message: error.message, details: error.details, hint: error.hint, code: error.code, status: error.status };
+        throw error;
+      }
 
-        if (error) throw error;
-
-        // profiles.expires_at：全站到期日（容錯支援字串/時間）
-        if (data && data.expires_at) {
-          validUntil = new Date(data.expires_at);
-        }
-
-        // 停權 / 暫停：直接視為無效
-        if (data && (data.is_paused || data.is_suspended)) {
-          validUntil = null;
-        }
-
-        console.log('[BW-player] profile expires_at raw =', data && data.expires_at, 'parsed =', validUntil);} else {
-        console.warn('[BW-player] playerSupa not defined for subscription check');
+      if (data && data.expires_at) {
+        validUntil = new Date(data.expires_at);
+      }
+      if (data && (data.is_paused || data.is_suspended)) {
+        validUntil = null;
       }
     } catch (e) {
-      console.error('[BW-player] check subscription error', e);
+      console.warn('[BW-player] profiles check failed, fallback to orders', e);
     }
 
+    // B) fallback：orders.expire_at（避免 profiles RLS / 偶發讀不到造成誤判）
+    if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
+      try {
+        gateDebug.where = 'orders';
+        const { data, error } = await playerSupa
+          .from('orders')
+          .select('status,expire_at,created_at')
+          .eq('user_id', user.id)
+          .in('status', ['paid','active'])
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        gateDebug.data = data;
+        if (error) {
+          gateDebug.error = { message: error.message, details: error.details, hint: error.hint, code: error.code, status: error.status };
+          throw error;
+        }
+
+        const row = Array.isArray(data) ? data[0] : null;
+        if (row && row.expire_at) validUntil = new Date(row.expire_at);
+      } catch (e) {
+        console.warn('[BW-player] orders fallback failed', e);
+      }
+    }
+
+    // C) 判斷是否有效
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // 沒訂閱（沒有任何有效訂單）也視為不通過，導回 pricing
     if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
-      const next = location.pathname + location.search;
-      const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-      url.searchParams.set('denied', 'noactive');
-      url.searchParams.set('next', next);
-      location.href = url.toString();
+      // 如果兩邊都拿不到，又沒有明確的「未訂閱」訊號，先不要無限導回，改顯示錯誤讓你看得到原因
+      showGate('無法取得訂閱到期日（不同瀏覽器常見原因：RLS / token / storage / 網路攔截）。', gateDebug);
       return;
     }
 
-    // 訂閱已過期
     if (validUntil.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1661,7 +1732,7 @@ async function speakText(text, lang){
     }
   }
 
-  // 4️⃣ 守門通過後，初始化播放器 + 載入資料
+// 4️⃣ 守門通過後，初始化播放器 + 載入資料
   try {
     const saved = localStorage.getItem(`offset:${slug}`);
     if (saved != null) setOffset(parseFloat(saved)); else setOffset(0);
