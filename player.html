@@ -404,64 +404,6 @@ tr.speaking{
   // 僅供 player.html 使用的 Supabase Client
   const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  // === Single-device takeover (soft kick via auth user_metadata) ===
-  const BW_DEVICE_KEY = 'bw_device_id_v1';
-  function bwGetDeviceId(){
-    let id = localStorage.getItem(BW_DEVICE_KEY);
-    if (!id){
-      const bytes = new Uint8Array(16);
-      crypto.getRandomValues(bytes);
-      id = Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join('');
-      localStorage.setItem(BW_DEVICE_KEY, id);
-    }
-    return id;
-  }
-  function bwDeviceLabel(){
-    try{
-      const ua = navigator.userAgent || '';
-      const plat = navigator.platform || '';
-      return `${plat} | ${ua.substring(0,80)}`;
-    }catch(e){ return 'unknown'; }
-  }
-  async function bwTakeoverNow(){
-    try{
-      const myId = bwGetDeviceId();
-      await playerSupa.auth.updateUser({ data: {
-        bw_device_id: myId,
-        bw_device_ts: Date.now(),
-        bw_device_label: bwDeviceLabel()
-      }});
-    }catch(e){ /* ignore */ }
-  }
-  function bwStartDeviceMonitor(){
-    const myId = bwGetDeviceId();
-    let notified = false;
-    setInterval(async ()=>{
-      try{
-        const { data } = await playerSupa.auth.getUser();
-        const u = data?.user;
-        if (!u) return;
-        const meta = u.user_metadata || {};
-        const active = meta.bw_device_id;
-        if (active && active !== myId){
-          if (!notified){
-            notified = true;
-            alert('⚠️ 你的帳號已在另一裝置登入，本裝置已自動登出。');
-          }
-          await playerSupa.auth.signOut();
-          const next = location.pathname + location.search;
-          const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
-          url.searchParams.set('denied','takeover');
-          url.searchParams.set('next', next);
-          location.href = url.toString();
-        }
-      }catch(e){ /* ignore */ }
-    }, 10000);
-  }
-  // === End single-device takeover ===
-
-
-
   async function bwPlayerGetUser() {
     try {
       const { data, error } = await playerSupa.auth.getUser();
@@ -480,7 +422,7 @@ tr.speaking{
       options.next || (location.pathname + location.search);
 
     const user = await bwPlayerGetUser();
-    if (user) { await bwTakeoverNow(); bwStartDeviceMonitor(); return user; }
+    if (user) return user;
 
     const url =
       redirect +
@@ -489,59 +431,6 @@ tr.speaking{
     window.location.href = url;
     return null;
   }
-
-
-  // 訂閱有效期：先查 orders（兼容不同欄位），失敗再回退 profiles.expires_at
-  async function bwGetValidUntil(user, cat){
-    const today = new Date(); today.setHours(0,0,0,0);
-
-    // 1) orders：嘗試多種欄位組合（避免不同環境 schema 不一致）
-    const tryOrders = async (selectCols, withItems=true) => {
-      let q = playerSupa.from('orders').select(selectCols);
-      q = q.eq('status','paid');
-      // user_id / buyer_id 二擇一（都試）
-      try { q = q.or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`); } catch(e){}
-      // items 可能不存在：存在就用 contains 過濾主題
-      if (withItems){
-        try { q = q.contains('items', [cat === 'jp' ? 'pro' : cat]); } catch(e){}
-      }
-      q = q.order('expire_at', { ascending:false }).limit(1);
-      const { data, error } = await q.maybeSingle();
-      if (error) throw error;
-      return data?.expire_at ? new Date(data.expire_at) : null;
-    };
-
-    try{
-      const d = await tryOrders('expire_at, items, buyer_id, user_id, status', true);
-      if (d instanceof Date && !isNaN(d.getTime())) return d;
-    }catch(e1){
-      try{
-        const d = await tryOrders('expire_at, buyer_id, user_id, status', false);
-        if (d instanceof Date && !isNaN(d.getTime())) return d;
-      }catch(e2){
-        // ignore -> fallback profiles
-      }
-    }
-
-    // 2) profiles：用 expires_at（你現有欄位）
-    try{
-      const { data: p, error: pe } = await playerSupa
-        .from('profiles')
-        .select('expires_at,is_paused,is_suspended')
-        .eq('id', user.id)
-        .maybeSingle();
-      if (!pe && p){
-        if (p.is_paused || p.is_suspended) return null;
-        if (p.expires_at){
-          const d = new Date(p.expires_at);
-          if (!isNaN(d.getTime())) return d;
-        }
-      }
-    }catch(e3){}
-
-    return null;
-  }
-
 
   async function getSessionUser() {
     return await bwPlayerGetUser();
@@ -1627,11 +1516,66 @@ async function speakText(text, lang){
   // 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
   let validUntil = null;
   if (!isPreview && user) {
-    // 訂閱檢查（orders → profiles.expires_at 回退）
-    validUntil = await bwGetValidUntil(user, cat);
+    try {
+      if (typeof playerSupa !== 'undefined') {
+        const todayISO = new Date();
+        todayISO.setHours(0, 0, 0, 0);
+
+        // 先用 orders 判斷（容錯：多種 status、不同欄位）
+        const itemKey = (cat === 'jp' ? 'pro' : cat);
+        let row = null;
+
+        // 1) 以 user.id 對 buyer_id / user_id
+        {
+          const q = await playerSupa
+            .from('orders')
+            .select('expire_at,status,buyer_id,user_id,items,created_at')
+            .in('status', ['paid','success','SUCCESS','PAID','SUCCESSFUL'])
+            .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+            .contains('items', [itemKey])
+            .order('expire_at', { ascending:false })
+            .limit(1)
+            .maybeSingle();
+          if (!q.error && q.data) row = q.data;
+        }
+
+        // 2) 若還找不到，嘗試用 buyer_email = user.email（若欄位不存在會自動略過）
+        if (!row && user.email) {
+          try{
+            const q2 = await playerSupa
+              .from('orders')
+              .select('expire_at,status,buyer_email,items,created_at')
+              .in('status', ['paid','success','SUCCESS','PAID','SUCCESSFUL'])
+              .eq('buyer_email', user.email)
+              .contains('items', [itemKey])
+              .order('expire_at', { ascending:false })
+              .limit(1)
+              .maybeSingle();
+            if (!q2.error && q2.data) row = q2.data;
+          }catch(e){}
+        }
+
+        if (row && row.expire_at) validUntil = new Date(row.expire_at);
+
+        // 3) orders 仍拿不到 → 回退 profiles.expires_at
+        if (!validUntil) {
+          const p = await playerSupa
+            .from('profiles')
+            .select('expires_at')
+            .eq('id', user.id)
+            .maybeSingle();
+          if (!p.error && p.data && p.data.expires_at) validUntil = new Date(p.data.expires_at);
+        }
+
+        console.log('[BW-player] validUntil =', validUntil, 'from orders/profiles');
+      } else {
+        console.warn('[BW-player] playerSupa not defined for subscription check');
+      }
+    } catch (e) {
+      console.error('[BW-player] check subscription error', e);
+    }
 
     const today = new Date();
-
     today.setHours(0, 0, 0, 0);
 
     // 沒訂閱（沒有任何有效訂單）也視為不通過，導回 pricing
