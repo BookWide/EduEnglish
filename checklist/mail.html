@@ -1,68 +1,123 @@
-/* ===== 補寄所有 MAIL_FAIL ===== */
-document.getElementById('btnResendFail').onclick = async ()=>{
-  if(!confirm('確定要補寄所有 MAIL_FAIL？')) return;
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Email 通知中心｜BookWide</title>
+
+  <style>
+    body{font-family:system-ui,-apple-system,"Noto Sans TC";background:#f4f6fb;margin:0}
+    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
+    h1{margin:0 0 8px}
+    .card{background:#fff;border-radius:14px;padding:16px;margin-top:16px}
+    table{width:100%;border-collapse:collapse;font-size:14px}
+    th,td{padding:8px;border-bottom:1px solid #e5e7eb}
+    th{text-align:left;background:#f9fafb}
+    .ok{color:#15803d;font-weight:700}
+    .fail{color:#b91c1c;font-weight:700}
+    button{padding:6px 12px;border-radius:8px;border:0;cursor:pointer}
+    .danger{background:#b91c1c;color:#fff}
+  </style>
+
+  <!-- 一定要載入 -->
+  <script type="module" src="../supa.js"></script>
+</head>
+
+<body>
+<div class="wrap">
+  <a href="../admin.html">← 回上頁</a>
+  <h1>Email 通知中心</h1>
+  <p>資料來源：<b>public.ecpay_callbacks</b>（MAIL_RESULT）</p>
+
+  <div class="card">
+    <button class="danger" id="btnClearFail">
+      清除所有 MAIL_FAIL
+    </button>
+  </div>
+
+  <div class="card">
+    <h3>最近寄信紀錄</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>時間</th>
+          <th>MerchantTradeNo</th>
+          <th>結果</th>
+          <th>To</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody id="rows">
+        <tr><td colspan="5">載入中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script type="module">
+/* ===== 關鍵：強制 admin ===== */
+const waitBW = () => new Promise(r=>{
+  const t=setInterval(()=>{
+    if(window.BW){clearInterval(t);r();}
+  },50);
+});
+await waitBW();
+await BW.requireAdmin();
+
+const supa = BW.supa;
+const tbody = document.getElementById('rows');
+
+/* ===== 載入資料 ===== */
+async function load(){
+  tbody.innerHTML='<tr><td colspan="5">載入中…</td></tr>';
 
   const { data, error } = await supa
     .from('ecpay_callbacks')
-    .select('merchant_trade_no')
+    .select('created_at, merchant_trade_no, rtn_code, parsed, raw_body')
     .eq('method','MAIL_RESULT')
-    .eq('rtn_code','MAIL_FAIL');
+    .order('created_at',{ascending:false})
+    .limit(50);
 
   if(error){
-    alert(error.message);
+    tbody.innerHTML=`<tr><td colspan="5">錯誤：${error.message}</td></tr>`;
     return;
   }
 
   if(!data.length){
-    alert('目前沒有 MAIL_FAIL');
+    tbody.innerHTML='<tr><td colspan="5">沒有資料</td></tr>';
     return;
   }
 
-  for(const r of data){
-    await fetch(
-      `${SUPABASE_URL}/functions/v1/admin-resend-email`,
-      {
-        method:'POST',
-        headers:{
-          'Content-Type':'application/json',
-          'Authorization':`Bearer ${BW.session()?.access_token}`
-        },
-        body: JSON.stringify({
-          merchant_trade_no: r.merchant_trade_no,
-          force: true
-        })
-      }
-    );
-  }
+  tbody.innerHTML=data.map(r=>{
+    const to = r.parsed?.to || '';
+    return `
+      <tr>
+        <td>${new Date(r.created_at).toLocaleString()}</td>
+        <td>${r.merchant_trade_no}</td>
+        <td class="${r.rtn_code==='MAIL_OK'?'ok':'fail'}">${r.rtn_code}</td>
+        <td>${to}</td>
+        <td>${r.raw_body||''}</td>
+      </tr>`;
+  }).join('');
+}
 
-  alert('補寄完成');
-  load();
-};
+/* ===== 清除 FAIL ===== */
+document.getElementById('btnClearFail').onclick = async ()=>{
+  if(!confirm('確定刪除所有 MAIL_FAIL？')) return;
 
-/* ===== 匯出 CSV ===== */
-document.getElementById('btnExportCSV').onclick = async ()=>{
-  const { data } = await supa
+  const { error } = await supa
     .from('ecpay_callbacks')
-    .select('*')
+    .delete()
     .eq('method','MAIL_RESULT')
-    .order('created_at',{ascending:false});
+    .eq('rtn_code','MAIL_FAIL');
 
-  if(!data?.length){
-    alert('沒有資料');
-    return;
-  }
-
-  const header = Object.keys(data[0]).join(',');
-  const rows = data.map(r =>
-    Object.values(r).map(v => `"${String(v||'').replace(/"/g,'""')}"`).join(',')
-  );
-
-  const csv = [header, ...rows].join('\n');
-  const blob = new Blob([csv],{type:'text/csv'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'mail_result.csv';
-  a.click();
+  if(error) alert(error.message);
+  else load();
 };
+
+load();
+</script>
+</body>
+</html>
 
 
