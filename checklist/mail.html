@@ -77,11 +77,7 @@ th{text-align:left;color:#4b5563;white-space:nowrap}
 .fail{background:#fff1f2;color:var(--fail)}
 .small{font-size:12px;color:var(--muted)}
 pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word}
-hr{border:0;border-top:1px solid var(--border);margin:12px 0}
 </style>
-
-<!-- ✅ 建議：直接吃你現成的登入狀態 & admin 檢查（不改其它檔） -->
-<script type="module" src="../supa.js?v=20251229-mail1"></script>
 </head>
 
 <body>
@@ -90,7 +86,6 @@ hr{border:0;border-top:1px solid var(--border);margin:12px 0}
   <h1>Email 通知中心</h1>
   <p class="sub">查詢付款成功信 / 補寄（補寄只透過 Edge Function）</p>
 
-  <!-- 查詢 / 補寄 -->
   <div class="card">
     <div class="row">
       <input id="mtn" placeholder="輸入 MerchantTradeNo（例：BW2512290828596）" />
@@ -100,27 +95,22 @@ hr{border:0;border-top:1px solid var(--border);margin:12px 0}
     </div>
 
     <div class="row" style="margin-top:10px;">
-      <!-- ✅ 你要的：一鍵補寄所有 FAIL -->
       <button class="danger" id="btnResendAllFail">補寄所有 MAIL_FAIL</button>
       <button class="ghost" id="btnExportCSV">匯出 CSV（最近 50 筆）</button>
-
-      <!-- ✅ 可選：固定 BCC 給自己（你要就打勾） -->
       <label class="small" style="display:flex;align-items:center;gap:6px;">
         <input type="checkbox" id="chkBcc" />
         BCC 一份到 pmktools@gmail.com
       </label>
     </div>
 
-    <p class="small">⚠️ 補寄會呼叫 Edge Function：<b>admin-resend-email</b>。查詢與列表則讀取 <b>ecpay_callbacks</b> 的 <b>MAIL_RESULT</b> 記錄。</p>
+    <div id="status" class="small" style="margin-top:10px;">初始化中…</div>
   </div>
 
-  <!-- 查詢結果 -->
   <div class="card">
     <h3 style="margin:0 0 8px;">查詢結果</h3>
     <div id="result" class="small">尚未查詢</div>
   </div>
 
-  <!-- 最近寄信紀錄 -->
   <div class="card">
     <div class="row" style="justify-content:space-between;">
       <h3 style="margin:0;">最近寄信紀錄（MAIL_RESULT）</h3>
@@ -144,23 +134,16 @@ hr{border:0;border-top:1px solid var(--border);margin:12px 0}
 </div>
 
 <script type="module">
-/**
- * ✅ 核心修正點
- * - 你之前 doQuery() 是用 Edge Function 回傳 logs，但你的 function 未必支援 action=query
- * - 所以改成：查詢/列表 一律直接查 ecpay_callbacks(method='MAIL_RESULT')
- * - 補寄才呼叫 admin-resend-email
- */
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-// ---- wait BW + supabase ready ----
-const ready = () => new Promise(r=>{
-  if (window.BW && window.BW.supa) return r();
-  const t=setInterval(()=>{
-    if (window.BW && window.BW.supa){ clearInterval(t); r(); }
-  },50);
+const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+const SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+
+const supa = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
 });
-await ready();
 
-const supa = window.BW.supa;
 const $ = q => document.querySelector(q);
 
 const fmt = (ts)=>{
@@ -169,15 +152,36 @@ const fmt = (ts)=>{
   if(isNaN(d)) return String(ts);
   return d.toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false});
 };
-
-function pill(ok){
-  return `<span class="pill ${ok?'ok':'fail'}">${ok?'MAIL_OK':'MAIL_FAIL'}</span>`;
-}
-
-function safeStr(v){
+const pill = ok => `<span class="pill ${ok?'ok':'fail'}">${ok?'MAIL_OK':'MAIL_FAIL'}</span>`;
+const safeStr = v => {
   if(v === null || v === undefined) return '';
   if(typeof v === 'object') return JSON.stringify(v);
   return String(v);
+};
+
+function setStatus(t){ $('#status').textContent = t; }
+function setError(t){ $('#status').innerHTML = `<span class="pill fail">ERROR</span> ${t}`; }
+
+async function mustAdmin(){
+  // 1) 必須登入
+  const u = await supa.auth.getUser();
+  const user = u?.data?.user;
+  if(!user){
+    setError('尚未登入（或被單裝置踢下線）。請先重新登入後再開此頁。');
+    throw new Error('not login');
+  }
+
+  // 2) 必須是 admin（profiles.is_admin）
+  const p = await supa.from('profiles').select('is_admin,email').eq('id', user.id).maybeSingle();
+  if(p.error){
+    setError('讀取 profiles 失敗：' + p.error.message);
+    throw p.error;
+  }
+  if(!p.data?.is_admin){
+    setError('你不是管理員（profiles.is_admin=false）');
+    throw new Error('not admin');
+  }
+  setStatus('管理員登入中：' + (p.data.email || user.email || ''));
 }
 
 /* ====== 讀最近 50 筆 MAIL_RESULT ====== */
@@ -185,7 +189,6 @@ async function loadRecent(){
   const tbody = $('#logs');
   tbody.innerHTML = `<tr><td colspan="5" class="small">載入中…</td></tr>`;
   try{
-    // ✅ 這張表就是你畫面上那個「MAIL_OK / MAIL_FAIL」來源
     const r = await supa
       .from('ecpay_callbacks')
       .select('created_at, merchant_trade_no, rtn_code, raw_body')
@@ -197,24 +200,15 @@ async function loadRecent(){
 
     const rows = (r.data || []).map(x=>{
       const ok = x.rtn_code === 'MAIL_OK';
-      let to = '';
-      let detail = '';
+      let to = '', detail = '';
       try{
         const parsed = typeof x.raw_body === 'string' ? JSON.parse(x.raw_body) : x.raw_body;
-        // 你 function 寫入 raw_body 可能是 { ok, to, detail, ... }
         to = parsed?.to || parsed?.toMain || '';
         detail = parsed?.detail || parsed?.message || safeStr(parsed);
       }catch(_){
         detail = safeStr(x.raw_body);
       }
-
-      return {
-        created_at: fmt(x.created_at),
-        merchant_trade_no: x.merchant_trade_no || '',
-        ok,
-        to,
-        detail
-      };
+      return { created_at: fmt(x.created_at), merchant_trade_no: x.merchant_trade_no||'', ok, to, detail };
     });
 
     renderLogs(rows);
@@ -231,8 +225,8 @@ function renderLogs(rows){
   }
   tbody.innerHTML = rows.map(r=>`
     <tr>
-      <td>${r.created_at||''}</td>
-      <td>${r.merchant_trade_no||''}</td>
+      <td>${r.created_at}</td>
+      <td>${r.merchant_trade_no}</td>
       <td>${pill(!!r.ok)}</td>
       <td>${r.to||''}</td>
       <td>${safeStr(r.detail||'')}</td>
@@ -240,14 +234,13 @@ function renderLogs(rows){
   `).join('');
 }
 
-/* ====== 查詢單筆（直接查表） ====== */
+/* ====== 查詢單筆 ====== */
 async function doQuery(){
   const mtn = $('#mtn').value.trim();
   if(!mtn) return alert('請輸入 MerchantTradeNo');
 
   $('#result').textContent = '查詢中…';
   try{
-    // 取最近一筆該 MTN 的 MAIL_RESULT
     const r = await supa
       .from('ecpay_callbacks')
       .select('created_at, merchant_trade_no, rtn_code, raw_body')
@@ -260,18 +253,16 @@ async function doQuery(){
 
     const list = r.data || [];
     if(!list.length){
-      $('#result').innerHTML = `<span class="pill fail">找不到紀錄</span> 這筆 MTN 目前沒有 MAIL_RESULT（可能尚未寄 / 尚未寫入）`;
+      $('#result').innerHTML = `${pill(false)} 找不到紀錄：這筆 MTN 沒有 MAIL_RESULT`;
       return;
     }
-
-    // 顯示 JSON（最新一筆）
     const latest = list[0];
     $('#result').innerHTML = `
       <div>${pill(latest.rtn_code === 'MAIL_OK')} <b>${latest.merchant_trade_no}</b>　<span class="small">${fmt(latest.created_at)}</span></div>
       <pre>${safeStr(latest.raw_body)}</pre>
     `;
 
-    // 同 MTN 的多筆也放到表格
+    // 同筆 MTN 的歷史也顯示
     const rows = list.map(x=>{
       let to='', detail='';
       try{
@@ -281,13 +272,7 @@ async function doQuery(){
       }catch(_){
         detail = safeStr(x.raw_body);
       }
-      return {
-        created_at: fmt(x.created_at),
-        merchant_trade_no: x.merchant_trade_no || '',
-        ok: x.rtn_code === 'MAIL_OK',
-        to,
-        detail
-      };
+      return { created_at: fmt(x.created_at), merchant_trade_no: x.merchant_trade_no||'', ok: x.rtn_code==='MAIL_OK', to, detail };
     });
     renderLogs(rows);
   }catch(e){
@@ -295,7 +280,7 @@ async function doQuery(){
   }
 }
 
-/* ====== 補寄單筆（呼叫 Edge Function） ====== */
+/* ====== 補寄單筆（Edge Function） ====== */
 async function doResendOne(){
   const mtn = $('#mtn').value.trim();
   if(!mtn) return alert('請輸入 MerchantTradeNo');
@@ -304,12 +289,10 @@ async function doResendOne(){
   const copyTo = $('#chkBcc').checked ? 'pmktools@gmail.com' : null;
 
   try{
-    // ✅ 你 function 目前已經能跑（你截圖有 MAIL_OK）
     const { data, error } = await supa.functions.invoke('admin-resend-email', {
       body: { merchant_trade_no: mtn, force: true, copy_to: copyTo }
     });
     if(error) throw error;
-
     alert('補寄已送出');
     console.log(data);
     await loadRecent();
@@ -318,13 +301,12 @@ async function doResendOne(){
   }
 }
 
-/* ====== 補寄所有 FAIL（讀表 -> 逐筆呼叫 function） ====== */
+/* ====== 補寄所有 FAIL（讀表 -> 逐筆呼叫） ====== */
 async function doResendAllFail(){
-  if(!confirm('確定要補寄所有 MAIL_FAIL？（會逐筆呼叫 admin-resend-email）')) return;
+  if(!confirm('確定要補寄所有 MAIL_FAIL？')) return;
 
   const copyTo = $('#chkBcc').checked ? 'pmktools@gmail.com' : null;
 
-  // 找出最近 200 筆內的 FAIL（你也可以把 limit 改大）
   const r = await supa
     .from('ecpay_callbacks')
     .select('merchant_trade_no, created_at')
@@ -334,7 +316,7 @@ async function doResendAllFail(){
     .limit(200);
 
   if(r.error){
-    alert('讀取 MAIL_FAIL 失敗：' + r.error.message);
+    alert('讀取 FAIL 失敗：' + r.error.message);
     return;
   }
 
@@ -342,20 +324,18 @@ async function doResendAllFail(){
   const seen = new Set();
   for(const x of (r.data||[])){
     const mtn = x.merchant_trade_no;
-    if(!mtn) continue;
-    if(seen.has(mtn)) continue;
+    if(!mtn || seen.has(mtn)) continue;
     seen.add(mtn);
     uniq.push(mtn);
   }
-
   if(!uniq.length){
     alert('目前沒有 MAIL_FAIL');
     return;
   }
 
   $('#result').innerHTML = `<span class="small">補寄中… 共 ${uniq.length} 筆</span>`;
+  let ok=0, fail=0;
 
-  let ok = 0, fail = 0;
   for(const mtn of uniq){
     try{
       const rr = await supa.functions.invoke('admin-resend-email', {
@@ -372,7 +352,7 @@ async function doResendAllFail(){
   await loadRecent();
 }
 
-/* ====== 匯出 CSV（最近 50 筆） ====== */
+/* ====== 匯出 CSV ====== */
 async function exportCSV(){
   const r = await supa
     .from('ecpay_callbacks')
@@ -397,8 +377,8 @@ async function exportCSV(){
     }
     return {
       created_at: fmt(x.created_at),
-      merchant_trade_no: x.merchant_trade_no || '',
-      result: x.rtn_code || '',
+      merchant_trade_no: x.merchant_trade_no||'',
+      result: x.rtn_code||'',
       to,
       detail
     };
@@ -422,26 +402,26 @@ async function exportCSV(){
   a.click();
 }
 
-/* ====== 綁事件 ====== */
+/* ====== 綁定事件 ====== */
 $('#btnQuery').addEventListener('click', doQuery);
 $('#btnResendOne').addEventListener('click', doResendOne);
 $('#btnReload').addEventListener('click', loadRecent);
 $('#btnResendAllFail').addEventListener('click', doResendAllFail);
 $('#btnExportCSV').addEventListener('click', exportCSV);
+$('#mtn').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doQuery(); });
 
-// Enter 直接查詢
-$('#mtn').addEventListener('keydown', (e)=>{
-  if(e.key === 'Enter') doQuery();
-});
-
-// ✅ 進頁面先確認 admin（你 BW.requireAdmin 已經在 supa.js 裡）
-try{ await window.BW.requireAdmin(); }catch(_){ /* BW 裡若已處理 redirect，就不用做事 */ }
-
-// ✅ 進頁面自動載入最近寄信紀錄
-loadRecent();
+/* ====== 啟動 ====== */
+try{
+  await mustAdmin();
+  await loadRecent();
+}catch(_){
+  // mustAdmin 已經把原因顯示到 status 了
+}
 </script>
+
 </body>
 </html>
+
 
 
 
