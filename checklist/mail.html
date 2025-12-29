@@ -1,40 +1,101 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Email 通知中心｜BookWide</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Email 通知中心｜BookWide</title>
 
-  <style>
-    body{font-family:system-ui,-apple-system,"Noto Sans TC";background:#f4f6fb;margin:0}
-    .wrap{max-width:1100px;margin:24px auto;padding:0 16px}
-    h1{margin:0 0 8px}
-    .card{background:#fff;border-radius:14px;padding:16px;margin-top:16px}
-    table{width:100%;border-collapse:collapse;font-size:14px}
-    th,td{padding:8px;border-bottom:1px solid #e5e7eb}
-    th{text-align:left;background:#f9fafb}
-    .ok{color:#15803d;font-weight:700}
-    .fail{color:#b91c1c;font-weight:700}
-    button{padding:6px 12px;border-radius:8px;border:0;cursor:pointer}
-    .danger{background:#b91c1c;color:#fff}
-  </style>
-
-  <!-- 一定要載入 -->
-  <script type="module" src="../supa.js"></script>
+<style>
+:root{
+  --bg:#f4f6fb;
+  --card:#fff;
+  --muted:#6b7280;
+  --border:#e5e7eb;
+  --brand:#2563eb;
+  --ok:#15803d;
+  --fail:#b91c1c;
+}
+body{
+  margin:0;
+  font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;
+  background:var(--bg);
+}
+.wrap{
+  max-width:1100px;
+  margin:24px auto;
+  padding:0 16px 40px;
+}
+h1{margin:0 0 6px}
+.sub{color:var(--muted);font-size:14px;margin-bottom:16px}
+.card{
+  background:var(--card);
+  border-radius:16px;
+  padding:16px;
+  box-shadow:0 10px 30px rgba(15,23,42,.08);
+  margin-bottom:16px;
+}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+input{
+  flex:1;
+  padding:10px 14px;
+  border-radius:999px;
+  border:1px solid var(--border);
+  font-size:14px;
+}
+button{
+  padding:10px 18px;
+  border-radius:999px;
+  border:0;
+  background:var(--brand);
+  color:#fff;
+  cursor:pointer;
+  font-size:14px;
+}
+table{
+  width:100%;
+  border-collapse:collapse;
+  font-size:14px;
+}
+th,td{
+  padding:8px 6px;
+  border-bottom:1px solid var(--border);
+}
+th{text-align:left;color:#4b5563}
+.pill{
+  padding:3px 10px;
+  border-radius:999px;
+  font-size:12px;
+  display:inline-block;
+}
+.ok{background:#ecfdf3;color:var(--ok)}
+.fail{background:#fff1f2;color:var(--fail)}
+.small{font-size:12px;color:var(--muted)}
+</style>
 </head>
 
 <body>
 <div class="wrap">
   <a href="../admin.html">← 回上頁</a>
   <h1>Email 通知中心</h1>
-  <p>資料來源：<b>public.ecpay_callbacks</b>（MAIL_RESULT）</p>
+  <p class="sub">查詢付款成功信 / 補寄（只透過 Edge Function）</p>
 
+  <!-- 查詢 -->
   <div class="card">
-    <button class="danger" id="btnClearFail">
-      清除所有 MAIL_FAIL
-    </button>
+    <div class="row">
+      <input id="mtn" placeholder="輸入 MerchantTradeNo（例：BW2512290828596）" />
+      <button onclick="doQuery()">查詢</button>
+      <button onclick="doResend()">強制補寄</button>
+    </div>
+    <p class="small">⚠️ 補寄會呼叫 Edge Function：admin-resend-email</p>
   </div>
 
+  <!-- 結果 -->
+  <div class="card">
+    <h3>查詢結果</h3>
+    <div id="result" class="small">尚未查詢</div>
+  </div>
+
+  <!-- 最近寄信紀錄 -->
   <div class="card">
     <h3>最近寄信紀錄</h3>
     <table>
@@ -47,77 +108,98 @@
           <th>Detail</th>
         </tr>
       </thead>
-      <tbody id="rows">
-        <tr><td colspan="5">載入中…</td></tr>
+      <tbody id="logs">
+        <tr><td colspan="5" class="small">尚未載入</td></tr>
       </tbody>
     </table>
   </div>
 </div>
 
 <script type="module">
-/* ===== 關鍵：強制 admin ===== */
-const waitBW = () => new Promise(r=>{
-  const t=setInterval(()=>{
-    if(window.BW){clearInterval(t);r();}
-  },50);
-});
-await waitBW();
-await BW.requireAdmin();
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-const supa = BW.supa;
-const tbody = document.getElementById('rows');
+const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+const SUPABASE_ANON_KEY =
+'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-/* ===== 載入資料 ===== */
-async function load(){
-  tbody.innerHTML='<tr><td colspan="5">載入中…</td></tr>';
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  const { data, error } = await supa
-    .from('ecpay_callbacks')
-    .select('created_at, merchant_trade_no, rtn_code, parsed, raw_body')
-    .eq('method','MAIL_RESULT')
-    .order('created_at',{ascending:false})
-    .limit(50);
+const $ = q => document.querySelector(q);
 
-  if(error){
-    tbody.innerHTML=`<tr><td colspan="5">錯誤：${error.message}</td></tr>`;
-    return;
-  }
-
-  if(!data.length){
-    tbody.innerHTML='<tr><td colspan="5">沒有資料</td></tr>';
-    return;
-  }
-
-  tbody.innerHTML=data.map(r=>{
-    const to = r.parsed?.to || '';
-    return `
-      <tr>
-        <td>${new Date(r.created_at).toLocaleString()}</td>
-        <td>${r.merchant_trade_no}</td>
-        <td class="${r.rtn_code==='MAIL_OK'?'ok':'fail'}">${r.rtn_code}</td>
-        <td>${to}</td>
-        <td>${r.raw_body||''}</td>
-      </tr>`;
-  }).join('');
+async function callFn(payload){
+  const { data, error } = await supabase.functions.invoke(
+    'admin-resend-email',
+    { body: payload }
+  );
+  if(error) throw error;
+  return data;
 }
 
-/* ===== 清除 FAIL ===== */
-document.getElementById('btnClearFail').onclick = async ()=>{
-  if(!confirm('確定刪除所有 MAIL_FAIL？')) return;
+window.doQuery = async () => {
+  const mtn = $('#mtn').value.trim();
+  if(!mtn) return alert('請輸入 MerchantTradeNo');
 
-  const { error } = await supa
-    .from('ecpay_callbacks')
-    .delete()
-    .eq('method','MAIL_RESULT')
-    .eq('rtn_code','MAIL_FAIL');
+  $('#result').textContent = '查詢中…';
 
-  if(error) alert(error.message);
-  else load();
+  try{
+    const data = await callFn({
+      action:'query',
+      merchant_trade_no:mtn
+    });
+
+    $('#result').innerHTML = `
+      <pre>${JSON.stringify(data,null,2)}</pre>
+    `;
+
+    renderLogs(data.logs || []);
+  }catch(e){
+    $('#result').innerHTML = `<span class="pill fail">查詢失敗</span> ${e.message}`;
+  }
 };
 
-load();
+window.doResend = async () => {
+  const mtn = $('#mtn').value.trim();
+  if(!mtn) return alert('請輸入 MerchantTradeNo');
+
+  if(!confirm('確定要強制補寄？')) return;
+
+  try{
+    const data = await callFn({
+      action:'resend',
+      merchant_trade_no:mtn,
+      force:true
+    });
+    alert('補寄已送出');
+    console.log(data);
+  }catch(e){
+    alert('補寄失敗：'+e.message);
+  }
+};
+
+function renderLogs(rows){
+  const tbody = $('#logs');
+  if(!rows.length){
+    tbody.innerHTML = '<tr><td colspan="5" class="small">沒有紀錄</td></tr>';
+    return;
+  }
+  tbody.innerHTML = rows.map(r=>`
+    <tr>
+      <td>${r.created_at||''}</td>
+      <td>${r.merchant_trade_no||''}</td>
+      <td>
+        <span class="pill ${r.ok?'ok':'fail'}">
+          ${r.ok?'MAIL_OK':'MAIL_FAIL'}
+        </span>
+      </td>
+      <td>${r.to||''}</td>
+      <td>${r.detail||''}</td>
+    </tr>
+  `).join('');
+}
 </script>
 </body>
 </html>
+
+
 
 
