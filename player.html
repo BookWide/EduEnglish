@@ -381,7 +381,13 @@ tr.speaking{
 </style>
 
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
+<!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
+  if (window.BW && typeof BW.startIdleLogout === 'function') {
+  }
+</script>
 <script>
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
@@ -407,67 +413,6 @@ tr.speaking{
       return null;
     }
   }
-
-
-/* ========= 單一裝置守門（player 內自帶，避免多台同時播放） ========= */
-function bwGetDeviceId(){
-  let id = localStorage.getItem('bw_device_id');
-  if (!id){
-    id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : ('dev_' + Math.random().toString(16).slice(2));
-    localStorage.setItem('bw_device_id', id);
-  }
-  return id;
-}
-
-async function bwClaimThisDevice(userId){
-  const deviceId = bwGetDeviceId();
-  try{
-    // 以「最後登入者為準」：進入 player 就把 current_device_id 佔為本機
-    const { error } = await playerSupa
-      .from('profiles')
-      .update({ current_device_id: deviceId, last_seen_at: new Date().toISOString() })
-      .eq('id', userId);
-    if (error) console.warn('[BW-player] claim device error', error);
-  }catch(e){
-    console.warn('[BW-player] claim device exception', e);
-  }
-  return deviceId;
-}
-
-function bwStartDeviceGuard(userId, myDeviceId, intervalSec = 20){
-  const tick = async () => {
-    try{
-      const { data, error } = await playerSupa
-        .from('profiles')
-        .select('current_device_id')
-        .eq('id', userId)
-        .maybeSingle();
-
-      if (error){
-        console.warn('[BW-player] device guard read error', error);
-        return;
-      }
-
-      const cur = data?.current_device_id || null;
-      if (cur && cur !== myDeviceId){
-        // 被另一裝置搶走 → 立刻登出並導回首頁（或 pricing）
-        try{ localStorage.setItem('bw_forced_logout','1'); }catch(_){}
-        try{ await playerSupa.auth.signOut(); }catch(_){}
-        const next = location.pathname + location.search;
-        const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
-        url.searchParams.set('denied', 'device');
-        url.searchParams.set('next', next);
-        location.href = url.toString();
-      }
-    }catch(e){
-      console.warn('[BW-player] device guard exception', e);
-    }
-  };
-
-  tick();
-  return setInterval(tick, Math.max(5, intervalSec) * 1000);
-}
-
 
   // 提供給舊程式使用的守門 / 取 user 函式
   async function ensureAuth(options = {}) {
@@ -1541,7 +1486,7 @@ async function speakText(text, lang){
   let user = null;
 
   // 1️⃣ 先用 player.html 專用的 bwPlayerGetUser() 取得登入使用者
-// ✅ 修正：剛進頁面時 auth session 可能還在就緒中，短暫重試避免「誤判未登入」
+// ✅ 修正：剛進頁面時 auth session 可能還在就緒中，短暫重試避免「秒踢」
 async function waitUser(maxMs = 1500, stepMs = 250){
   const t0 = Date.now();
   while (Date.now() - t0 < maxMs){
@@ -1557,6 +1502,7 @@ async function waitUser(maxMs = 1500, stepMs = 250){
   }
   return null;
 }
+
 user = await waitUser(1500, 250);
 
 // 2️⃣ 若未登入：一律導回首頁（試看也必須先登入）
@@ -1575,81 +1521,26 @@ user = await waitUser(1500, 250);
       if (badge) badge.textContent = email;
     }
   }
+// 3️⃣ 已登入且非 preview：用 profiles.expires_at 作為唯一訂閱權威（最穩，避免 orders/items 差異造成誤踢）
+if (!isPreview && user) {
+  try{
+    const { data: p, error: perr } = await playerSupa
+      .from('profiles')
+      .select('expires_at')
+      .eq('id', user.id)
+      .maybeSingle();
 
-  
-
-// ✅ 單一裝置：進入 player 立即佔用本機 device，並持續監控是否被其它裝置搶走
-let __bwMyDeviceId = null;
-try{
-  __bwMyDeviceId = await bwClaimThisDevice(user.id);
-  bwStartDeviceGuard(user.id, __bwMyDeviceId, 20);
-}catch(e){
-  console.warn('[BW-player] device guard setup error', e);
-}
-
-// 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
-  let validUntil = null;
-  if (!isPreview && user) {
-    try {
-      if (typeof playerSupa !== 'undefined') {
-        const todayISO = new Date();
-        todayISO.setHours(0, 0, 0, 0);
-
-        const { data: rows, error } = await playerSupa
-  .from('orders')
-  .select('expire_at, items, buyer_id, user_id, status')
-  .eq('status', 'paid')
-  .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-  .order('expire_at', { ascending: false })
-  .limit(10);
-
-if (error) {
-  console.warn('[BW-player] orders query error =', error);
-} else if (Array.isArray(rows) && rows.length) {
-  const want = (cat === 'jp') ? 'pro' : cat;
-  const now = Date.now();
-
-  const normList = (items) => {
-    try {
-      if (Array.isArray(items)) return items.map(String);
-      if (items && typeof items === 'object') return Object.values(items).map(String);
-      if (typeof items === 'string') {
-        const s = items.trim();
-        if ((s.startsWith('[') && s.endsWith(']')) || (s.startsWith('{') && s.endsWith('}'))) {
-          const v = JSON.parse(s);
-          return Array.isArray(v) ? v.map(String) : Object.values(v).map(String);
-        }
-        return s.split(/[\s,]+/).filter(Boolean);
-      }
-    } catch (e) {}
-    return [];
-  };
-
-  const match = rows.find(r => {
-    if (!r || !r.expire_at) return false;
-    const exp = new Date(r.expire_at).getTime();
-    if (!Number.isFinite(exp) || exp < now) return false;
-    const list = normList(r.items).map(x => String(x).toLowerCase().trim()).filter(Boolean);
-    if (list.includes('pro')) return true;
-    return list.includes(String(want).toLowerCase());
-  });
-
-  if (match) validUntil = new Date(match.expire_at);
-  console.log('[BW-player] orders rows =', rows.length, 'want =', want, 'validUntil =', validUntil);
-} else {
-  console.log('[BW-player] no paid orders rows');
-}} else {
-        console.warn('[BW-player] playerSupa not defined for subscription check');
-      }
-    } catch (e) {
-      console.error('[BW-player] check subscription error', e);
+    if (perr) {
+      console.warn('[BW-player] profiles expires_at read error =', perr);
     }
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // 沒訂閱（沒有任何有效訂單）也視為不通過，導回 pricing
-    if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
+    const exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
+
+    // 沒資料 / 讀不到 → 視為未啟用
+    if (!exp || isNaN(exp.getTime())) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
       url.searchParams.set('denied', 'noactive');
@@ -1658,8 +1549,8 @@ if (error) {
       return;
     }
 
-    // 訂閱已過期
-    if (validUntil.getTime() < today.getTime()) {
+    // 已過期
+    if (exp.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
       url.searchParams.set('denied', 'expired');
@@ -1667,9 +1558,20 @@ if (error) {
       location.href = url.toString();
       return;
     }
-  }
 
-  // 4️⃣ 守門通過後，初始化播放器 + 載入資料
+    console.log('[BW-player] allow by profiles.expires_at =', exp.toISOString());
+  }catch(e){
+    console.error('[BW-player] subscription check exception', e);
+    const next = location.pathname + location.search;
+    const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+    url.searchParams.set('denied', 'noactive');
+    url.searchParams.set('next', next);
+    location.href = url.toString();
+    return;
+  }
+}
+
+// 4️⃣ 守門通過後，初始化播放器 + 載入資料
   try {
     const saved = localStorage.getItem(`offset:${slug}`);
     if (saved != null) setOffset(parseFloat(saved)); else setOffset(0);
