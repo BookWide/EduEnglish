@@ -1513,36 +1513,77 @@ async function speakText(text, lang){
     }
   }
 
-  // 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
+  // 3️⃣ 已登入且非 preview：檢查訂閱（使用 playerSupa 查 orders，前端兼容 items 欄位型態）
   let validUntil = null;
   if (!isPreview && user) {
+    const wantCat = (cat === 'jp' ? 'pro' : cat);
     try {
       if (typeof playerSupa !== 'undefined') {
-        const todayISO = new Date();
-        todayISO.setHours(0, 0, 0, 0);
-
-        const { data, error } = await playerSupa
+        // 取最近幾筆 paid 訂單，不在 DB 端用 .contains 避免 items 型態/大小寫造成誤判
+        const { data: rows, error } = await playerSupa
           .from('orders')
           .select('expire_at, items, buyer_id, user_id, status')
           .eq('status', 'paid')
           .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-          // JP 類別視為與 Grammar / PRO 相同訂閱主題，因此實際用 pro 來查訂單
-          .contains('items', [cat === 'jp' ? 'pro' : cat])
           .order('expire_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+          .limit(10);
 
-        if (!error && data && data.expire_at) {
-          validUntil = new Date(data.expire_at);
+        if (error) {
+          console.warn('[BW-player] orders query error:', error.message || error);
+        } else if (Array.isArray(rows) && rows.length) {
+          const normalizeItems = (items) => {
+            // items 可能是：陣列 / 字串 / JSON 物件 / null
+            if (!items) return [];
+            if (Array.isArray(items)) return items.map(x => (''+x).toLowerCase());
+            if (typeof items === 'string') {
+              // 可能是 "story,music" 或 JSON 字串
+              try {
+                const parsed = JSON.parse(items);
+                return normalizeItems(parsed);
+              } catch (_) {
+                return items.split(/[,\s]+/).filter(Boolean).map(x => x.toLowerCase());
+              }
+            }
+            if (typeof items === 'object') {
+              // 可能是 {story:true,...} 或 {items:[...]} 或單純 key set
+              if (Array.isArray(items.items)) return normalizeItems(items.items);
+              return Object.keys(items).map(k => k.toLowerCase());
+            }
+            return [];
+          };
+
+          for (const r of rows) {
+            const its = normalizeItems(r.items);
+            const ok = its.includes(String(wantCat).toLowerCase()) || its.includes('pro') && wantCat === 'pro';
+            if (!ok) continue;
+            if (r.expire_at) {
+              const d = new Date(r.expire_at);
+              if (!isNaN(d.getTime())) { validUntil = d; break; }
+            }
+          }
+
+          // 若 items 無法對上，但使用者確實有 paid 訂單：用最新 expire_at 當 fallback，避免誤判彈出
+          if (!validUntil) {
+            const r0 = rows.find(r => r && r.expire_at);
+            if (r0 && r0.expire_at) {
+              const d0 = new Date(r0.expire_at);
+              if (!isNaN(d0.getTime())) {
+                validUntil = d0;
+                console.warn('[BW-player] items mismatch; fallback to latest expire_at =', r0.expire_at);
+              }
+            }
+          }
+
+          console.log('[BW-player] validUntil =', validUntil, 'wantCat =', wantCat, 'rows =', rows.length);
+        } else {
+          console.warn('[BW-player] no paid orders rows');
         }
-        console.log('[BW-player] order expire_at raw =', data && data.expire_at, 'parsed =', validUntil);
       } else {
         console.warn('[BW-player] playerSupa not defined for subscription check');
       }
     } catch (e) {
       console.error('[BW-player] check subscription error', e);
     }
-
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
