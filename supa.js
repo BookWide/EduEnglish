@@ -30,6 +30,12 @@ function getDeviceId() {
 export const BW = {
   supa: supabase,
 
+  // global signOut (cleaner across tabs/devices) with fallback
+  async _signOutGlobal() {
+    try { await supabase.auth.signOut({ scope: 'global' }); }
+    catch(_){ try { await BW._signOutGlobal(); } catch(__){} }
+  },
+
   async getUser() {
     const { data } = await supabase.auth.getUser();
     return data?.user ?? null;
@@ -82,9 +88,17 @@ export const BW = {
     if (r.error) console.warn('markCurrentDevice error', r.error);
   },
 
-  startHeartbeat(minutes = 2) {
-    let running = false;
+  startHeartbeat(minutes = 0.25, opts = {}) {
+    // Stable guard:
+    // - last-login-wins: we try to claim device on load
+    // - never "instant-kick" on a single mismatch read
+    // - only kick when we *cannot* reclaim twice in a row AND reclaim is not blocked
     const myDevice = getDeviceId();
+    const intervalMs = Math.max(5, minutes * 60) * 1000;
+    const strikesKey = 'bw_device_strikes';
+    const maxStrikesToKick = 2;
+
+    let running = false;
 
     const beat = async () => {
       if (running) return;
@@ -93,6 +107,7 @@ export const BW = {
         const user = await this.getUser();
         if (!user) return;
 
+        // read current holder
         const r = await supabase
           .from('profiles')
           .select('current_device_id')
@@ -100,36 +115,69 @@ export const BW = {
           .maybeSingle();
 
         if (r.error) {
-          console.warn('heartbeat profiles read error', r.error);
+          console.warn('[BW] heartbeat profiles read error', r.error);
           return;
         }
 
-        if (r.data?.current_device_id && r.data.current_device_id !== myDevice) {
-          localStorage.setItem('bw_forced_logout', '1');
+        const cur = r.data?.current_device_id || null;
 
-          // ✅ Global sign-out (invalidate refresh token too)
-          try { await supabase.auth.signOut({ scope: 'global' }); }
-          catch (_) { try { await supabase.auth.signOut(); } catch (__){ } }
+        if (cur && cur !== myDevice) {
+          // try to reclaim (last-login-wins)
+          const strikes = parseInt(localStorage.getItem(strikesKey) || '0', 10);
 
-          // ✅ Redirect to login (avoid being bounced to pricing by player subscription check)
-          const next = encodeURIComponent(location.pathname + location.search);
-          location.href = `/login.html?kick=1&next=${next}`;
+          const claim = await supabase
+            .from('profiles')
+            .update({
+              current_device_id: myDevice,
+              last_seen_at: new Date().toISOString(),
+            })
+            .eq('id', user.id)
+            .select('current_device_id')
+            .maybeSingle();
+
+          if (claim.error) {
+            // If blocked (RLS) or transient error: do NOT kick (prevents "1-second kick" loop)
+            console.warn('[BW] heartbeat reclaim blocked', claim.error);
+            localStorage.setItem(strikesKey, String(Math.min(strikes + 1, 9)));
+            return;
+          }
+
+          if (claim.data?.current_device_id === myDevice) {
+            // reclaimed successfully
+            localStorage.removeItem(strikesKey);
+            return;
+          }
+
+          // not reclaimed
+          const nextStrikes = strikes + 1;
+          localStorage.setItem(strikesKey, String(Math.min(nextStrikes, 9)));
+
+          if (nextStrikes >= maxStrikesToKick) {
+            localStorage.setItem('bw_forced_logout', '1');
+            await BW._signOutGlobal();
+            // redirect to login to avoid being mis-sent to pricing(noactive)
+            const next = encodeURIComponent(location.pathname + location.search);
+            location.href = `/login.html?kick=1&next=${next}`;
+            return;
+          }
           return;
         }
 
+        // normal heartbeat update
         const u = await supabase
           .from('profiles')
           .update({ last_seen_at: new Date().toISOString() })
           .eq('id', user.id);
 
-        if (u.error) console.warn('heartbeat update error', u.error);
+        if (u.error) console.warn('[BW] heartbeat update error', u.error);
+        localStorage.removeItem(strikesKey);
       } finally {
         running = false;
       }
     };
 
     beat();
-    return setInterval(beat, Math.max(1, minutes) * 60 * 1000);
+    return setInterval(beat, intervalMs);
   },
 
   popForcedLogoutHint() {
@@ -146,8 +194,7 @@ export const BW = {
     const reset = () => {
       clearTimeout(timer);
       timer = setTimeout(async () => {
-        try { await supabase.auth.signOut({ scope: 'global' }); }
-        catch (_) { try { await supabase.auth.signOut(); } catch (__){ } }
+        await BW._signOutGlobal();
         location.href = redirect;
       }, ms);
     };
@@ -172,8 +219,12 @@ supabase.auth.onAuthStateChange(async (event, session) => {
 
 (async () => {
   const user = await BW.getUser();
-  if (user) BW.startHeartbeat(2);
+  if (!user) return;
+  // claim on page load (last-login-wins)
+  try { await BW.markCurrentDevice(); } catch(e) { console.warn('[BW] markCurrentDevice init error', e); }
+  BW.startHeartbeat(0.25);
 })();
+
 
 
 
