@@ -27,6 +27,12 @@ function getDeviceId() {
   return id;
 }
 
+async function BW_globalSignOut(){
+  try{ await supabase.auth.signOut({ scope:'global' }); }
+  catch(_){ try{ await BW_globalSignOut(); }catch(__){} }
+}
+
+
 export const BW = {
   supa: supabase,
 
@@ -106,7 +112,7 @@ export const BW = {
 
         if (r.data?.current_device_id && r.data.current_device_id !== myDevice) {
           localStorage.setItem('bw_forced_logout', '1');
-          await supabase.auth.signOut();
+          await BW_globalSignOut();
           return;
         }
 
@@ -139,7 +145,7 @@ export const BW = {
     const reset = () => {
       clearTimeout(timer);
       timer = setTimeout(async () => {
-        await supabase.auth.signOut();
+        await BW_globalSignOut();
         location.href = redirect;
       }, ms);
     };
@@ -164,7 +170,10 @@ supabase.auth.onAuthStateChange(async (event, session) => {
 
 (async () => {
   const user = await BW.getUser();
-  if (user) BW.startHeartbeat(2);
+  if (user) {
+    await BW.markCurrentDevice();
+    BW.startHeartbeat(2);
+  }
 })();
 
 
