@@ -383,11 +383,10 @@ tr.speaking{
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script type="module" src="./supa.js"></script>
 <script>
   // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
   if (window.BW && typeof BW.startIdleLogout === 'function') {
-  try{ if(window.BW && BW.startIdleLogout) BW.startIdleLogout(60, '/login.html?timeout=1'); }catch(_){}
+    BW.startIdleLogout(60, '/login.html?timeout=1');
   }
 </script>
 <script>
@@ -440,7 +439,7 @@ tr.speaking{
   async function supaGetUser() {
     return await bwPlayerGetUser();
   }
-  try{ if(window.BW && BW.startIdleLogout) BW.startIdleLogout(30, '/login.html?timeout=1'); }catch(_){}
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 </head>
 <body>
@@ -687,52 +686,83 @@ async function loadVideo(){
     sources.push(url);
   }
 
-  // 基本 slug
+  // slug candidates
   const slugMain = slug;
-  const slugNoPro = slug.replace(/^pro-/, '');   // 例如：pro-l1a-06-... → l1a-06-...
+  const slugNoPro = slug.replace(/^pro-/, '');
   const slugCandidates = [slugMain];
+  if (slugNoPro && slugNoPro !== slugMain) slugCandidates.push(slugNoPro);
 
-  if (cat === 'pro' && slugNoPro !== slugMain) {
-    slugCandidates.push(slugNoPro);
-  }
-
-  // 依序把所有可能路徑加入 sources
-  slugCandidates.forEach(s => {
-    // Supabase：有分類、無分類兩種都試
+  // collect possible urls
+  for (const s of slugCandidates){
     add(`${SUPA_VIDEOS_BASE}/${cat}/${s}.mp4`);
     add(`${SUPA_VIDEOS_BASE}/${s}.mp4`);
-
-    // 本站：有分類、無分類
     add(`${BASE}/videos/${cat}/${s}.mp4`);
     add(`${BASE}/videos/${s}.mp4`);
-  });
+  }
+  // ultimate fallback (known good)
+  add(`${BASE}/videos/story/houyi.mp4`);
 
-  // 只有非 PRO 類別才用 houyi 當最後備援
-  if (cat !== 'pro') {
-    add(`${BASE}/videos/story/houyi.mp4`);
+  // ---- helper: probe url without downloading whole file ----
+  async function probe(url){
+    try{
+      const ctrl = new AbortController();
+      const t = setTimeout(()=>ctrl.abort(), 4000);
+      const r = await fetch(url, {
+        method: 'GET',
+        headers: { 'Range': 'bytes=0-1' },
+        cache: 'no-store',
+        signal: ctrl.signal
+      });
+      clearTimeout(t);
+      // 206 Partial Content is ideal; 200 OK also acceptable
+      return (r.status === 206 || r.status === 200);
+    }catch(_){
+      return false;
+    }
   }
 
-  let i = 0;
-  function setSrc(k){
-    if (!sources[k]) return;
-    video.src = sources[k];
-    console.log('[Player] try video source', (k+1) + '/' + sources.length, sources[k]);
-  }
-
-  if (!sources.length) {
+  if (!sources.length){
     console.warn('[Player] 沒有任何影片來源可試');
     return;
   }
 
-  setSrc(0);
+  // show progress in UI
+  try{ cuesStatus.textContent = '（影片載入中…）'; }catch(_){}
 
+  // pick first reachable source
+  let picked = '';
+  for (const u of sources){
+    const ok = await probe(u);
+    console.log('[Player] probe', ok ? 'OK' : 'FAIL', u);
+    if (ok){ picked = u; break; }
+  }
+
+  if (!picked){
+    console.warn('[Player] 所有影片來源都探測失敗');
+    try{ cuesStatus.textContent = '（影片載入失敗：找不到可用 mp4）'; }catch(_){}
+    return;
+  }
+
+  // set source + load
+  video.src = picked;
+  video.load();
+  console.log('[Player] use video source', picked);
+  try{ cuesStatus.textContent = '（影片已設定來源）'; }catch(_){}
+
+  // if later errors, keep cycling
+  let i = sources.indexOf(picked);
   video.addEventListener('error', () => {
-    if (i < sources.length - 1) {
+    const err = video.error ? `code=${video.error.code}` : '';
+    console.warn('[Player] video error', err, 'current=', video.currentSrc || video.src);
+    while (i < sources.length - 1){
       i++;
-      setSrc(i);
-    } else {
-      console.warn('[Player] 所有影片來源都失敗了');
+      const next = sources[i];
+      video.src = next;
+      video.load();
+      console.log('[Player] try next video source', (i+1)+'/'+sources.length, next);
+      return;
     }
+    console.warn('[Player] 所有影片來源都失敗了');
   }, { passive: true });
 }
 
@@ -1588,7 +1618,7 @@ async function speakText(text, lang){
     console.warn('[BW-player] init error:', e);
   }
 })();
-  try{ if(window.BW && BW.startIdleLogout) BW.startIdleLogout(30, '/login.html?timeout=1'); }catch(_){}
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 
   <!-- 播放進度寫入 watch_logs（供學習控制台使用） --> <!-- V20251124-fixed by ChatGPT -->
@@ -1726,10 +1756,12 @@ async function speakText(text, lang){
     });
   }
 })();
-  try{ if(window.BW && BW.startIdleLogout) BW.startIdleLogout(30, '/login.html?timeout=1'); }catch(_){}
+  BW.startIdleLogout(30, '/login.html?timeout=1');
+
 // PRO 模式：讀取 index-pro.json，並在「字幕」分頁顯示完整課程章節清單
 
 // JP 模式：讀取 index-jp.json，並在「字幕」分頁顯示日文文法清單
+async 
 async function loadJpOutline(){
   try{
     const url = `${BASE}/data/jp/index-jp.json?v=${vnow}`;
