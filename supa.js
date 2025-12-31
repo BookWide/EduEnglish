@@ -27,12 +27,6 @@ function getDeviceId() {
   return id;
 }
 
-async function BW_globalSignOut(){
-  try{ await supabase.auth.signOut({ scope:'global' }); }
-  catch(_){ try{ await BW_globalSignOut(); }catch(__){} }
-}
-
-
 export const BW = {
   supa: supabase,
 
@@ -112,7 +106,7 @@ export const BW = {
 
         if (r.data?.current_device_id && r.data.current_device_id !== myDevice) {
           localStorage.setItem('bw_forced_logout', '1');
-          await BW_globalSignOut();
+          await supabase.auth.signOut();
           return;
         }
 
@@ -145,7 +139,7 @@ export const BW = {
     const reset = () => {
       clearTimeout(timer);
       timer = setTimeout(async () => {
-        await BW_globalSignOut();
+        await supabase.auth.signOut();
         location.href = redirect;
       }, ms);
     };
@@ -161,6 +155,77 @@ if (typeof window !== 'undefined') {
   window.BW = window.BW || BW;
 }
 
+
+/* ========= Atomic Device Lock Guard (global) =========
+ * v20251231-lock-safe
+ * - 全站單一裝置守門：DB 原子鎖 (bw_claim_device)
+ * - safeMode=true：RPC 失敗只記錄，不會踢人（先觀察穩定性）
+ * - 只有當 ok=false（另一裝置持有鎖）才會登出
+ */
+BW.claimDeviceLock = async function ({ ttlSeconds = 60 } = {}) {
+  const user = await BW.getUser();
+  if (!user) return { ok: true, skipped: true };
+
+  const deviceId = getDeviceId();
+  try {
+    const { data, error } = await supabase.rpc('bw_claim_device', {
+      p_device_id: deviceId,
+      p_ttl_seconds: ttlSeconds,
+    });
+    if (error) return { ok: false, rpc_error: true, error };
+
+    const row = Array.isArray(data) ? data[0] : data;
+    return { ok: !!row?.ok, row };
+  } catch (e) {
+    return { ok: false, rpc_error: true, error: e };
+  }
+};
+
+BW.startDeviceLockGuard = function ({
+  ttlSeconds = 60,
+  intervalSeconds = 15,
+  safeMode = true,
+} = {}) {
+  let timer = null;
+  let running = false;
+
+  const kick = async () => {
+    localStorage.setItem('bw_forced_logout', '1');
+    try { await supabase.auth.signOut({ scope: 'global' }); }
+    catch (_) { try { await supabase.auth.signOut(); } catch (__ ) {} }
+    location.href = '/login.html?kick=1';
+  };
+
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const user = await BW.getUser();
+      if (!user) return;
+
+      const res = await BW.claimDeviceLock({ ttlSeconds });
+
+      if (res.rpc_error) {
+        console.warn('[BW] device lock RPC error (safeMode=' + safeMode + '):', res.error);
+        if (!safeMode) await kick();
+        return;
+      }
+
+      if (!res.ok) {
+        console.warn('[BW] device lock denied -> kick');
+        await kick();
+      }
+    } finally {
+      running = false;
+    }
+  };
+
+  tick();
+  timer = setInterval(tick, Math.max(5, intervalSeconds) * 1000);
+  return () => { try { clearInterval(timer); } catch (_) {} };
+};
+
+
 supabase.auth.onAuthStateChange(async (event, session) => {
   if (event === 'SIGNED_IN' && session?.user) {
     await BW.markCurrentDevice();
@@ -170,10 +235,7 @@ supabase.auth.onAuthStateChange(async (event, session) => {
 
 (async () => {
   const user = await BW.getUser();
-  if (user) {
-    await BW.markCurrentDevice();
-    BW.startHeartbeat(2);
-  }
+  if (user) BW.startDeviceLockGuard({ ttlSeconds: 60, intervalSeconds: 15, safeMode: true });
 })();
 
 
@@ -183,3 +245,38 @@ supabase.auth.onAuthStateChange(async (event, session) => {
 
 
 
+
+
+const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      const user = await BW.getUser();
+      if (!user) return;
+
+      const res = await BW.claimDeviceLock({ ttlSeconds });
+
+      // RPC 錯誤：safeMode 只記錄，不踢人（避免誤傷）
+      if (res.rpc_error) {
+        console.warn('[BW] device lock RPC error (safeMode=' + safeMode + '):', res.error);
+        if (!safeMode) await kick();
+        return;
+      }
+
+      // ok=false：代表另一裝置持有鎖 -> 立刻踢
+      if (!res.ok) {
+        console.warn('[BW] device lock denied -> kick');
+        await kick();
+      }
+    } finally {
+      running = false;
+    }
+  };
+
+  // 立刻跑一次 + 定時續租
+  tick();
+  timer = setInterval(tick, Math.max(5, intervalSeconds) * 1000);
+
+  // 回傳 stop function（若你將來要停用）
+  return () => { try { clearInterval(timer); } catch (_) {} };
+};
