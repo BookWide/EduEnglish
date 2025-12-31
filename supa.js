@@ -104,11 +104,26 @@ export const BW = {
           return;
         }
 
-        if (r.data?.current_device_id && r.data.current_device_id !== myDevice) {
-          localStorage.setItem('bw_forced_logout', '1');
-          await supabase.auth.signOut();
+        const cur = r.data?.current_device_id || '';
+
+        // ✅ 如果 current_device_id 還沒寫（空值），先接管（補洞）
+        if (!cur) {
+          const take = await supabase
+            .from('profiles')
+            .update({ current_device_id: myDevice, last_seen_at: new Date().toISOString() })
+            .eq('id', user.id);
+          if (take.error) console.warn('heartbeat takeover write error', take.error);
           return;
         }
+
+        // ✅ 不是主裝置 → 立刻登出
+        if (cur !== myDevice) {
+          localStorage.setItem('bw_forced_logout', '1');
+          try { await supabase.auth.signOut({ scope: 'global' }); }
+          catch (_) { try { await supabase.auth.signOut(); } catch (__) {} }
+          return;
+        }
+
 
         const u = await supabase
           .from('profiles')
@@ -163,8 +178,16 @@ supabase.auth.onAuthStateChange(async (event, session) => {
 });
 
 (async () => {
-  const user = await BW.getUser();
-  if (user) BW.startHeartbeat(2);
+  try {
+    BW.popForcedLogoutHint();
+    const user = await BW.getUser();
+    if (user) {
+      await BW.markCurrentDevice();
+      BW.startHeartbeat(2);
+    }
+  } catch (e) {
+    console.warn('[BW] init guard failed', e);
+  }
 })();
 
 
