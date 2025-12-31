@@ -439,7 +439,7 @@ tr.speaking{
   async function supaGetUser() {
     return await bwPlayerGetUser();
   }
-  /*disabled duplicate*/ // BW.startIdleLogout(30, '/login.html?timeout=1');
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 </head>
 <body>
@@ -1482,19 +1482,6 @@ async function speakText(text, lang){
 (async function init(){
   const params = new URLSearchParams(location.search);
   const previewParam = params.get('preview') === '1';
-  // ✅ 若剛被單裝置守門踢出：改導回 login（避免誤判成 noactive）
-  const nextHere = location.pathname + location.search;
-  const kicked = (localStorage.getItem('bw_forced_logout') === '1') || (localStorage.getItem('bw_kick') === '1');
-  if (kicked) {
-    try { localStorage.removeItem('bw_forced_logout'); } catch(_) {}
-    try { localStorage.removeItem('bw_kick'); } catch(_) {}
-    const u = new URL((ROOT_BASE || '') + '/login.html', location.origin);
-    u.searchParams.set('kick', '1');
-    u.searchParams.set('next', nextHere);
-    location.replace(u.toString());
-    return;
-  }
-
   // ✅ Trial allow-list: only allow preview for movie/goingbackhome
   const isPreview = previewParam && (cat === 'movie') && (slug === 'goingbackhome');
 
@@ -1509,13 +1496,13 @@ async function speakText(text, lang){
     console.error('[BW-player] bwPlayerGetUser error', e);
   }
 
-  // 2️⃣ 若未登入：導回 login（避免被誤判成 noactive）
+  // 2️⃣ 若未登入：一律導回首頁（試看也必須先登入）
   if (!user) {
     const next = location.pathname + location.search;
-    const url = new URL((ROOT_BASE || '') + '/login.html', location.origin);
-    url.searchParams.set('next', next);
+    const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
     url.searchParams.set('denied', 'signin');
-    location.replace(url.toString());
+    url.searchParams.set('next', next);
+    location.href = url.toString();
     return;
   } else {
     // 顯示登入者 Email
@@ -1534,22 +1521,50 @@ async function speakText(text, lang){
         const todayISO = new Date();
         todayISO.setHours(0, 0, 0, 0);
 
-        const { data, error } = await playerSupa
-          .from('orders')
-          .select('expire_at, items, buyer_id, user_id, status')
-          .eq('status', 'paid')
-          .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-          // JP 類別視為與 Grammar / PRO 相同訂閱主題，因此實際用 pro 來查訂單
-          .contains('items', [cat === 'jp' ? 'pro' : cat])
-          .order('expire_at', { ascending: false })
-          .limit(1)
-          .maybeSingle();
+        const { data: rows, error } = await playerSupa
+  .from('orders')
+  .select('expire_at, items, buyer_id, user_id, status')
+  .eq('status', 'paid')
+  .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+  .order('expire_at', { ascending: false })
+  .limit(10);
 
-        if (!error && data && data.expire_at) {
-          validUntil = new Date(data.expire_at);
+if (error) {
+  console.warn('[BW-player] orders query error =', error);
+} else if (Array.isArray(rows) && rows.length) {
+  const want = (cat === 'jp') ? 'pro' : cat;
+  const now = Date.now();
+
+  const normList = (items) => {
+    try {
+      if (Array.isArray(items)) return items.map(String);
+      if (items && typeof items === 'object') return Object.values(items).map(String);
+      if (typeof items === 'string') {
+        const s = items.trim();
+        if ((s.startsWith('[') && s.endsWith(']')) || (s.startsWith('{') && s.endsWith('}'))) {
+          const v = JSON.parse(s);
+          return Array.isArray(v) ? v.map(String) : Object.values(v).map(String);
         }
-        console.log('[BW-player] order expire_at raw =', data && data.expire_at, 'parsed =', validUntil);
-      } else {
+        return s.split(/[\s,]+/).filter(Boolean);
+      }
+    } catch (e) {}
+    return [];
+  };
+
+  const match = rows.find(r => {
+    if (!r || !r.expire_at) return false;
+    const exp = new Date(r.expire_at).getTime();
+    if (!Number.isFinite(exp) || exp < now) return false;
+    const list = normList(r.items).map(x => String(x).toLowerCase().trim()).filter(Boolean);
+    if (list.includes('pro')) return true;
+    return list.includes(String(want).toLowerCase());
+  });
+
+  if (match) validUntil = new Date(match.expire_at);
+  console.log('[BW-player] orders rows =', rows.length, 'want =', want, 'validUntil =', validUntil);
+} else {
+  console.log('[BW-player] no paid orders rows');
+}} else {
         console.warn('[BW-player] playerSupa not defined for subscription check');
       }
     } catch (e) {
@@ -1600,7 +1615,7 @@ async function speakText(text, lang){
     console.warn('[BW-player] init error:', e);
   }
 })();
-  /*disabled duplicate*/ // BW.startIdleLogout(30, '/login.html?timeout=1');
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 
   <!-- 播放進度寫入 watch_logs（供學習控制台使用） --> <!-- V20251124-fixed by ChatGPT -->
@@ -1738,7 +1753,7 @@ async function speakText(text, lang){
     });
   }
 })();
-  /*disabled duplicate*/ // BW.startIdleLogout(30, '/login.html?timeout=1');
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 
 // PRO 模式：讀取 index-pro.json，並在「字幕」分頁顯示完整課程章節清單
 
