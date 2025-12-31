@@ -686,83 +686,52 @@ async function loadVideo(){
     sources.push(url);
   }
 
-  // slug candidates
+  // 基本 slug
   const slugMain = slug;
-  const slugNoPro = slug.replace(/^pro-/, '');
+  const slugNoPro = slug.replace(/^pro-/, '');   // 例如：pro-l1a-06-... → l1a-06-...
   const slugCandidates = [slugMain];
-  if (slugNoPro && slugNoPro !== slugMain) slugCandidates.push(slugNoPro);
 
-  // collect possible urls
-  for (const s of slugCandidates){
+  if (cat === 'pro' && slugNoPro !== slugMain) {
+    slugCandidates.push(slugNoPro);
+  }
+
+  // 依序把所有可能路徑加入 sources
+  slugCandidates.forEach(s => {
+    // Supabase：有分類、無分類兩種都試
     add(`${SUPA_VIDEOS_BASE}/${cat}/${s}.mp4`);
     add(`${SUPA_VIDEOS_BASE}/${s}.mp4`);
+
+    // 本站：有分類、無分類
     add(`${BASE}/videos/${cat}/${s}.mp4`);
     add(`${BASE}/videos/${s}.mp4`);
-  }
-  // ultimate fallback (known good)
-  add(`${BASE}/videos/story/houyi.mp4`);
+  });
 
-  // ---- helper: probe url without downloading whole file ----
-  async function probe(url){
-    try{
-      const ctrl = new AbortController();
-      const t = setTimeout(()=>ctrl.abort(), 4000);
-      const r = await fetch(url, {
-        method: 'GET',
-        headers: { 'Range': 'bytes=0-1' },
-        cache: 'no-store',
-        signal: ctrl.signal
-      });
-      clearTimeout(t);
-      // 206 Partial Content is ideal; 200 OK also acceptable
-      return (r.status === 206 || r.status === 200);
-    }catch(_){
-      return false;
-    }
+  // 只有非 PRO 類別才用 houyi 當最後備援
+  if (cat !== 'pro') {
+    add(`${BASE}/videos/story/houyi.mp4`);
   }
 
-  if (!sources.length){
+  let i = 0;
+  function setSrc(k){
+    if (!sources[k]) return;
+    video.src = sources[k];
+    console.log('[Player] try video source', (k+1) + '/' + sources.length, sources[k]);
+  }
+
+  if (!sources.length) {
     console.warn('[Player] 沒有任何影片來源可試');
     return;
   }
 
-  // show progress in UI
-  try{ cuesStatus.textContent = '（影片載入中…）'; }catch(_){}
+  setSrc(0);
 
-  // pick first reachable source
-  let picked = '';
-  for (const u of sources){
-    const ok = await probe(u);
-    console.log('[Player] probe', ok ? 'OK' : 'FAIL', u);
-    if (ok){ picked = u; break; }
-  }
-
-  if (!picked){
-    console.warn('[Player] 所有影片來源都探測失敗');
-    try{ cuesStatus.textContent = '（影片載入失敗：找不到可用 mp4）'; }catch(_){}
-    return;
-  }
-
-  // set source + load
-  video.src = picked;
-  video.load();
-  console.log('[Player] use video source', picked);
-  try{ cuesStatus.textContent = '（影片已設定來源）'; }catch(_){}
-
-  // if later errors, keep cycling
-  let i = sources.indexOf(picked);
   video.addEventListener('error', () => {
-    const err = video.error ? `code=${video.error.code}` : '';
-    console.warn('[Player] video error', err, 'current=', video.currentSrc || video.src);
-    while (i < sources.length - 1){
+    if (i < sources.length - 1) {
       i++;
-      const next = sources[i];
-      video.src = next;
-      video.load();
-      console.log('[Player] try next video source', (i+1)+'/'+sources.length, next);
-      return;
+      setSrc(i);
+    } else {
+      console.warn('[Player] 所有影片來源都失敗了');
     }
-    console.warn('[Player] 所有影片來源都失敗了');
   }, { passive: true });
 }
 
@@ -1514,7 +1483,14 @@ async function speakText(text, lang){
   const params = new URLSearchParams(location.search);
   const previewParam = params.get('preview') === '1';
   // ✅ Trial allow-list: only allow preview for movie/goingbackhome
-  const isPreview = previewParam && (cat === 'movie') && (slug === 'goingbackhome');
+  // ✅ Preview whitelist: allow these slugs to be watched without an active subscription
+const FREE_PREVIEW_SLUGS = new Set([
+  'goingbackhome', // movie preview
+  'houyi',         // story preview
+  'mid-autumn'     // story preview
+]);
+// preview=1 always forces preview; otherwise allow whitelist
+const isPreview = (previewParam === '1') || FREE_PREVIEW_SLUGS.has(slug);
 
   let user = null;
 
@@ -1563,6 +1539,7 @@ async function speakText(text, lang){
           .limit(1)
           .maybeSingle();
 
+        if (error) console.warn('[BW-player] orders query error:', error);
         if (!error && data && data.expire_at) {
           validUntil = new Date(data.expire_at);
         }
