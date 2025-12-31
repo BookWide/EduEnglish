@@ -1,25 +1,6 @@
 <!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
-<script>
-/* BookWide anti-cache (auto, one-time per build) */
-(function () {
-  const BUILD = "20251229a";
-  const K = "BW_BUILD";
-  try{
-    const old = localStorage.getItem(K);
-    if (old !== BUILD) {
-      localStorage.clear();
-      sessionStorage.clear();
-      localStorage.setItem(K, BUILD);
-      const url = new URL(location.href);
-      url.searchParams.set('v', BUILD);
-      location.replace(url.toString());
-      return;
-    }
-  }catch(e){}
-})();
-</script>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>BookWide 播放器（4 分頁 + 測驗四類）</title>
@@ -402,11 +383,9 @@ tr.speaking{
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script type="module" src="./supa.js?v=guard-20251231"></script>
 <script>
   // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
-  if (window.BW && typeof BW.startIdleLogout === 'function' && !window.__bw_idle_started) {
-    window.__bw_idle_started = 1;
+  if (window.BW && typeof BW.startIdleLogout === 'function') {
     BW.startIdleLogout(60, '/login.html?timeout=1');
   }
 </script>
@@ -460,7 +439,7 @@ tr.speaking{
   async function supaGetUser() {
     return await bwPlayerGetUser();
   }
-    // (disabled duplicate) BW.startIdleLogout(30, '/login.html?timeout=1');
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 </head>
 <body>
@@ -1534,79 +1513,38 @@ async function speakText(text, lang){
     }
   }
 
-  // 3️⃣ 試看放行（仍必須先登入）：僅 movie/goingbackhome&preview=1
-  if (isPreview) {
-    console.log('[BW-player] preview=1 allow-list hit, bypass subscription gate');
-  } else {
-    // 4️⃣ 訂閱守門（跨瀏覽器一致、容錯：不依賴 items/plan 欄位）
-    // 原則：
-    // - 先從 orders 找「最新有效 expire_at」（支援不同欄位/狀態）
-    // - orders 查不到再回退 profiles.expires_at
-    let validUntil = null;
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const paidStatuses = ['paid','success','SUCCESS','PAID','ok','OK'];
-
-    async function tryOrders(queryMode){
-      // queryMode: 'both'|'user_id'|'buyer_id'
-      let q = playerSupa.from('orders').select('expire_at,status,created_at,user_id,buyer_id').in('status', paidStatuses);
-      if (queryMode === 'both'){
-        q = q.or(`user_id.eq.${user.id},buyer_id.eq.${user.id}`);
-      } else if (queryMode === 'user_id'){
-        q = q.eq('user_id', user.id);
-      } else {
-        q = q.eq('buyer_id', user.id);
-      }
-      // 取最近幾筆，自己挑最大 expire_at
-      const { data, error } = await q.order('expire_at', { ascending: false }).order('created_at', { ascending: false }).limit(10);
-      return { data, error };
-    }
-
+  // 3️⃣ 已登入且非 preview：檢查 profiles.expires_at（使用 playerSupa）
+  let validUntil = null;
+  if (!isPreview && user) {
     try {
       if (typeof playerSupa !== 'undefined') {
-        let got = null;
+        const todayISO = new Date();
+        todayISO.setHours(0, 0, 0, 0);
 
-        // 先用 user_id + buyer_id 都試（若資料表缺欄位會報錯，再降級）
-        let r = await tryOrders('both');
-        if (r.error && /buyer_id/i.test(String(r.error.message || r.error))) {
-          r = await tryOrders('user_id');
-        } else if (r.error && /user_id/i.test(String(r.error.message || r.error))) {
-          r = await tryOrders('buyer_id');
-        }
+        const { data, error } = await playerSupa
+          .from('orders')
+          .select('expire_at, items, buyer_id, user_id, status')
+          .eq('status', 'paid')
+          .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+          // JP 類別視為與 Grammar / PRO 相同訂閱主題，因此實際用 pro 來查訂單
+          .contains('items', [cat === 'jp' ? 'pro' : cat])
+          .order('expire_at', { ascending: false })
+          .limit(1)
+          .maybeSingle();
 
-        if (!r.error && Array.isArray(r.data) && r.data.length){
-          // 找出最大 expire_at
-          for (const row of r.data){
-            const raw = row && row.expire_at;
-            if (!raw) continue;
-            const d = new Date(raw);
-            if (isNaN(d.getTime())) continue;
-            if (!got || d.getTime() > got.getTime()) got = d;
-          }
+        if (!error && data && data.expire_at) {
+          validUntil = new Date(data.expire_at);
         }
-
-        if (got){
-          validUntil = got;
-          console.log('[BW-player] orders validUntil =', validUntil.toISOString());
-        } else {
-          console.warn('[BW-player] orders no valid expire_at found, fallback to profiles.expires_at');
-          // profiles 回退
-          try {
-            const pr = await playerSupa.from('profiles').select('expires_at').eq('id', user.id).maybeSingle();
-            if (!pr.error && pr.data && pr.data.expires_at){
-              const d = new Date(pr.data.expires_at);
-              if (!isNaN(d.getTime())) validUntil = d;
-            }
-          } catch(e){}
-        }
+        console.log('[BW-player] order expire_at raw =', data && data.expire_at, 'parsed =', validUntil);
       } else {
         console.warn('[BW-player] playerSupa not defined for subscription check');
       }
     } catch (e) {
       console.error('[BW-player] check subscription error', e);
     }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
     // 沒訂閱（沒有任何有效訂單）也視為不通過，導回 pricing
     if (!(validUntil instanceof Date) || isNaN(validUntil.getTime())) {
@@ -1628,7 +1566,8 @@ async function speakText(text, lang){
       return;
     }
   }
-// 4️⃣ 守門通過後，初始化播放器 + 載入資料
+
+  // 4️⃣ 守門通過後，初始化播放器 + 載入資料
   try {
     const saved = localStorage.getItem(`offset:${slug}`);
     if (saved != null) setOffset(parseFloat(saved)); else setOffset(0);
@@ -1648,7 +1587,7 @@ async function speakText(text, lang){
     console.warn('[BW-player] init error:', e);
   }
 })();
-    // (disabled duplicate) BW.startIdleLogout(30, '/login.html?timeout=1');
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 </script>
 
   <!-- 播放進度寫入 watch_logs（供學習控制台使用） --> <!-- V20251124-fixed by ChatGPT -->
@@ -1786,7 +1725,7 @@ async function speakText(text, lang){
     });
   }
 })();
-    // (disabled duplicate) BW.startIdleLogout(30, '/login.html?timeout=1');
+  BW.startIdleLogout(30, '/login.html?timeout=1');
 
 // PRO 模式：讀取 index-pro.json，並在「字幕」分頁顯示完整課程章節清單
 
@@ -1946,124 +1885,6 @@ async function loadProOutline(){
 
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
