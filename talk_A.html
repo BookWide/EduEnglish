@@ -196,6 +196,113 @@
     // 使用你的 supa.js（ESM exports: supabase, BW）
     import { supabase, BW } from './supa.js';
 
+    // ===== 守門：需登入 + 訂閱有效（與 BookWide Player 同邏輯）=====
+    async function bwRequireTalkAccess(){
+      const next = encodeURIComponent(location.pathname + location.search);
+
+      // 1) 必須登入
+      const user = await BW.getUser();
+      if (!user){
+        // 回首頁登入（你現有登入入口）
+        location.href = `/index.html#login`;
+        throw new Error('BW_TALK_DENY_NOLOGIN');
+      }
+
+      // 2) 管理員放行（可選）
+      try{
+        const prof = await supabase.from('profiles').select('*').eq('id', user.id).maybeSingle();
+        const p = prof?.data || null;
+        if (p?.is_admin === true) return { user, is_admin:true, profile:p };
+
+        // 3) 從 profiles 裡找「到期日」欄位（用 select('*') 避免欄位不存在報錯）
+        const candKeys = [
+          'expires_at','expire_at','paid_until','subscription_expires_at','subscription_expiry',
+          'plan_expires_at','pro_expires_at','active_until'
+        ];
+        let exp = null;
+        for (const k of candKeys){
+          if (p && p[k]){
+            const d = new Date(p[k]);
+            if (!isNaN(d.getTime())) { exp = d; break; }
+          }
+        }
+        const now = new Date();
+        if (exp && exp.getTime() > now.getTime()){
+          return { user, is_admin:false, profile:p, expires_at:exp.toISOString() };
+        }
+      }catch(e){
+        console.warn('[talk] profiles check failed', e);
+      }
+
+      // 4) 退而求其次：嘗試 subscriptions / orders（容錯，不同欄位也能跑）
+      async function tryTable(table, userKey){
+        try{
+          const r = await supabase.from(table).select('*').eq(userKey, user.id).order('created_at', { ascending:false }).limit(1);
+          if (r.error) return null;
+          const row = (r.data && r.data[0]) ? r.data[0] : null;
+          return row;
+        }catch(_){ return null; }
+      }
+      function pickExpiry(row){
+        if (!row) return null;
+        const keys = ['expires_at','expire_at','paid_until','valid_until','end_at','end_date','expiry','expire_date'];
+        for (const k of keys){
+          if (row[k]){
+            const d = new Date(row[k]);
+            if (!isNaN(d.getTime())) return d;
+          }
+        }
+        return null;
+      }
+      function isPaid(row){
+        if (!row) return false;
+        const s = String(row.status || row.pay_status || row.state || '').toLowerCase();
+        return s === 'paid' || s === 'success' || s === 'succeeded' || s === 'ok';
+      }
+
+      // subscriptions
+      const sub = (await tryTable('subscriptions','user_id')) ||
+                  (await tryTable('subscriptions','uid')) ||
+                  (await tryTable('subscriptions','profile_id'));
+      const subExp = pickExpiry(sub);
+      if (subExp && subExp.getTime() > Date.now()){
+        return { user, is_admin:false, subscription:sub, expires_at:subExp.toISOString() };
+      }
+
+      // orders（需 paid + 未過期）
+      const ord = (await tryTable('orders','user_id')) ||
+                  (await tryTable('orders','uid')) ||
+                  (await tryTable('orders','profile_id'));
+      const ordExp = pickExpiry(ord);
+      if (isPaid(ord) && ordExp && ordExp.getTime() > Date.now()){
+        return { user, is_admin:false, order:ord, expires_at:ordExp.toISOString() };
+      }
+
+      // 5) 不通過 → 去 pricing
+      location.href = `/pricing.html?denied=noactive&next=${next}`;
+      throw new Error('BW_TALK_DENY_NOACTIVE');
+    }
+
+    // 進頁立刻守門
+    let BW_ACCESS = null;
+    try{
+      BW_ACCESS = await bwRequireTalkAccess();
+      // 顯示登入資訊
+      try{
+        const ut = document.getElementById('userText');
+        if (ut && BW_ACCESS?.user?.email){
+          const email = BW_ACCESS.user.email;
+          ut.textContent = email.length > 24 ? (email.slice(0,18) + '…') : email;
+        }
+      }catch(_){}
+
+    }catch(e){
+      // 已 redirect
+      console.warn(e);
+      return;
+    }
+
+
     const $ = (s, e=document) => e.querySelector(s);
     const chat = $('#chat');
     const statusEl = $('#status');
