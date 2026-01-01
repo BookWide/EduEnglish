@@ -384,66 +384,83 @@
       gateHint.style.display = 'none';
       readyBox.style.display = 'none';
 
-      const waitUser = async (maxMs=1500, stepMs=250) => {
-        const t0 = Date.now();
-        while (Date.now() - t0 < maxMs){
-          const u = await BW.getUser();
-          if (u) return u;
-          await new Promise(r=>setTimeout(r, stepMs));
-        }
-        return null;
-      };
+      const next = location.pathname + location.search;
 
-      currentUser = await waitUser(1500, 250);
+      // ✅ 以 Session 為準（最穩、也跟 player 一致）
+      const { data: { session } } = await supabase.auth.getSession();
+      currentUser = session?.user || null;
+
+      // 監聽登入狀態：若被你「單裝置守門」踢出，會立刻導回登入
+      if (!window.__bwTalkAuthSub){
+        window.__bwTalkAuthSub = supabase.auth.onAuthStateChange((event, s)=>{
+          const u = s?.user || null;
+          if (!u){
+            userPill.textContent = '未登入';
+            btnSignOut.style.display = 'none';
+            gateHint.style.display = 'block';
+            setStatus('已登出/被踢出 → 回首頁登入');
+            location.href = (ROOT_BASE || '') + '/index.html#login?next=' + encodeURIComponent(next);
+            return;
+          }
+          currentUser = u;
+          userPill.textContent = u.email || ('User ' + u.id.slice(0,6));
+          btnSignOut.style.display = '';
+        });
+      }
 
       if (!currentUser){
         userPill.textContent = '未登入';
         btnSignOut.style.display = 'none';
         gateHint.style.display = 'block';
         setStatus('未登入 → 回首頁登入');
-        const next = location.pathname + location.search;
         location.href = (ROOT_BASE || '') + '/index.html#login?next=' + encodeURIComponent(next);
         return false;
       }
 
+      // 顯示登入者
       userPill.textContent = currentUser.email || ('User ' + currentUser.id.slice(0,6));
       btnSignOut.style.display = '';
-      btnSignOut.onclick = async ()=>{ await supabase.auth.signOut(); location.href = (ROOT_BASE||'') + '/index.html'; };
+      btnSignOut.onclick = async ()=>{
+        await supabase.auth.signOut();
+        location.href = (ROOT_BASE || '') + '/index.html';
+      };
 
+      // 管理員放行（profiles.is_admin）
+      try{
+        const r = await supabase.from('profiles').select('is_admin').eq('id', currentUser.id).maybeSingle();
+        if (r?.data?.is_admin){
+          readyBox.style.display = 'block';
+          setStatus('管理員：已放行');
+          return true;
+        }
+      }catch(_){}
+
+      // 訂閱到期日（與你現行寫法一致：profiles.expires_at）
       const { data: p, error } = await supabase
         .from('profiles')
         .select('expires_at')
         .eq('id', currentUser.id)
         .maybeSingle();
 
-      if (error) console.warn('[talk] profiles read error', error);
-
-      const today = new Date(); today.setHours(0,0,0,0);
-      const exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
-
-      if (!exp || isNaN(exp.getTime())){
-        gateHint.style.display = 'block';
-        setStatus('無有效訂閱（profiles.expires_at 空）');
-        const next = location.pathname + location.search;
-        const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-        url.searchParams.set('denied', 'noactive');
-        url.searchParams.set('next', next);
-        location.href = url.toString();
-        return false;
+      if (error){
+        console.warn('profiles read error', error);
       }
-      if (exp.getTime() < today.getTime()){
-        const next = location.pathname + location.search;
-        const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-        url.searchParams.set('denied', 'expired');
-        url.searchParams.set('next', next);
-        location.href = url.toString();
+
+      const exp = p?.expires_at ? new Date(p.expires_at) : null;
+      const ok = exp && !isNaN(exp.getTime()) && exp.getTime() > Date.now();
+
+      if (!ok){
+        // 沒訂閱或已過期 → 去 pricing
+        const next2 = encodeURIComponent(location.pathname + location.search);
+        location.href = (ROOT_BASE || '') + '/pricing.html?denied=noactive&next=' + next2;
         return false;
       }
 
       readyBox.style.display = 'block';
-      setStatus('就緒');
+      setStatus('守門通過：可以開始口說練習');
       return true;
     }
+
 
     // Web Speech Recognition（Chrome 桌機通常支援）
     function initSpeech(){
