@@ -122,7 +122,6 @@
 </style>
 </head>
 <body>
-<div id="audioTip" style="display:none; position:fixed; left:50%; top:76px; transform:translateX(-50%); z-index:9999; padding:10px 14px; border-radius:999px; background:rgba(0,0,0,.55); border:1px solid rgba(255,255,255,.18); color:#fff; font-weight:800; backdrop-filter: blur(10px);">🔊 點一下畫面啟用音訊</div>
 <div id=\"__bw_ver\" style=\"position:fixed;left:12px;bottom:12px;z-index:99999;background:rgba(0,0,0,.6);color:#fff;padding:6px 10px;border-radius:10px;font:700 12px/1.2 system-ui;letter-spacing:.4px;\">Talk A v2026-01-02 NO-FAIL MODE</div>
 <script>console.log('Talk A v2026-01-02 NO-FAIL MODE loaded');</script>
   <div class="topbar">
@@ -358,76 +357,6 @@ function speak(text){
   }catch{}
 }
 
-/* ====== Teacher MP3 (Supabase Storage) ======
-   - URL: https://.../storage/v1/object/public/talk/teacher/{scenario}/line-XX.mp3
-   - If MP3 missing or blocked, fallback to browser TTS speak()
-   - Chrome autoplay policy: first sound must be triggered by a user gesture.
-*/
-const TALK_PUBLIC_BASE = 'https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/talk';
-let __teacherAudio = null;
-let __audioUnlocked = false;
-let __pendingPlay = null;
-
-function __teacherMp3Url(scenario, lineNo){
-  const pad = String(lineNo).padStart(2,'0');
-  return `${TALK_PUBLIC_BASE}/teacher/${scenario}/line-${pad}.mp3`;
-}
-
-function __showAudioTip(msg){
-  const el = document.getElementById('audioTip');
-  if (!el) return;
-  el.textContent = msg || '🔊 點一下畫面啟用音訊';
-  el.style.display = 'block';
-}
-function __hideAudioTip(){
-  const el = document.getElementById('audioTip');
-  if (!el) return;
-  el.style.display = 'none';
-}
-
-async function __ensureAudioUnlocked(){
-  if (__audioUnlocked) return true;
-  // We only unlock on user gesture (click/touch/keydown)
-  __showAudioTip('🔊 點一下畫面啟用音訊');
-  return false;
-}
-
-async function __tryPlayMp3(url){
-  if (!__teacherAudio) __teacherAudio = new Audio();
-  __teacherAudio.src = url;
-  __teacherAudio.currentTime = 0;
-  __teacherAudio.volume = 1;
-  await __teacherAudio.play(); // may throw if not unlocked
-}
-
-async function __playTeacherMp3OrTTS(text, scenario, lineNo){
-  const url = __teacherMp3Url(scenario, lineNo);
-
-  // If not unlocked yet, remember what we wanted to play and ask user to tap once.
-  if (!__audioUnlocked){
-    __pendingPlay = { text, scenario, lineNo };
-    __showAudioTip('🔊 點一下畫面啟用音訊');
-    return false;
-  }
-
-  try{
-    // Directly try playing MP3. If missing (404) it will fail; we handle that.
-    const res = await fetch(url, { method:'GET', cache:'no-store' });
-    if (!res.ok) throw new Error('mp3 missing');
-    // Use the real URL (avoid blob) for caching simplicity
-    await __tryPlayMp3(url);
-    __hideAudioTip();
-    return true;
-  }catch(e){
-    // Fallback to TTS (also requires unlock, but we are already unlocked here)
-    try{ speak(text); }catch{}
-    __hideAudioTip();
-    return false;
-  }
-}
-
-function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, (c)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
-
 function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, (c)=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
 
 function addMsg(who, html, avatarImg){
@@ -466,10 +395,10 @@ function startScenario(key){
   setProgress();
   const line=currentLine();
   addMsg('AI', `<div><b>${escapeHtml(line.teacher)}</b></div>${hintText(line)}<div class="splitBtns"><button class="btn ok" onclick="window.__replayTeacher()">老師朗讀</button></div>`, TEACHER_PNG);
-  (__playTeacherMp3OrTTS(line.teacher, scenarioKey, idx+1));
+  speak(line.teacher);
 }
 
-function replayTeacher(){ (__playTeacherMp3OrTTS(currentLine().teacher, scenarioKey, idx+1)); }
+function replayTeacher(){ speak(currentLine().teacher); }
 
 function ttsCorrect(){ speak(currentLine().expect); }
 async function copyCorrect(){ try{ await navigator.clipboard.writeText(currentLine().expect); }catch{} }
@@ -519,7 +448,7 @@ function nextLine(){
   setProgress();
   const line=currentLine();
   addMsg('AI', `<div><b>${escapeHtml(line.teacher)}</b></div>${hintText(line)}<div class="splitBtns"><button class="btn ok" onclick="window.__replayTeacher()">老師朗讀</button></div>`, TEACHER_PNG);
-  (__playTeacherMp3OrTTS(line.teacher, scenarioKey, idx+1));
+  speak(line.teacher);
 }
 
 function boot(){
@@ -559,23 +488,6 @@ function boot(){
   window.__ttsCorrect = ttsCorrect;
   window.__copyCorrect = copyCorrect;
   window.__replayTeacher = replayTeacher;
-
-  // ---- Audio unlock (Chrome autoplay policy) ----
-  const unlockOnce = async ()=>{
-    if (__audioUnlocked) return;
-    __audioUnlocked = true;
-    __hideAudioTip();
-    if (__pendingPlay){
-      const p = __pendingPlay; __pendingPlay=null;
-      try{ await __playTeacherMp3OrTTS(p.text, p.scenario, p.lineNo); }catch{}
-    }
-    document.removeEventListener('pointerdown', unlockOnce);
-    document.removeEventListener('keydown', unlockOnce);
-    document.removeEventListener('touchstart', unlockOnce);
-  };
-  document.addEventListener('pointerdown', unlockOnce, {once:false});
-  document.addEventListener('touchstart', unlockOnce, {once:false, passive:true});
-  document.addEventListener('keydown', unlockOnce, {once:false});
 
   startScenario(scenarioKey);
 }
