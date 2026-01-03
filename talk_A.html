@@ -317,7 +317,40 @@
     prefer.sort((a,b)=>rank(b)-rank(a));
     return prefer[0] || voices[0];
   }
-  function speakUser(text){
+  function pickFemaleEnVoice(){
+    const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
+    if(!voices || !voices.length) return null;
+    const prefer = voices.filter(v => /en[-_]?US/i.test(v.lang || ""));
+    const rank = (v) => {
+      const n = (v.name||"").toLowerCase();
+      const femaleHint = (n.includes("female") || n.includes("samantha") || n.includes("victoria") || n.includes("zira") || n.includes("jenny") || n.includes("aria"));
+      const maleHint = (n.includes("male") || n.includes("david") || n.includes("guy") || n.includes("alex") || n.includes("mark"));
+      return (femaleHint ? 100 : 0) + (!maleHint ? 10 : 0) + (v.default ? 5 : 0);
+    };
+    prefer.sort((a,b)=>rank(b)-rank(a));
+    return prefer[0] || voices[0];
+  }
+  function speakTeacher(text){
+    if(!text) return;
+    if(!window.speechSynthesis){
+      toast("此瀏覽器不支援朗讀（speechSynthesis）");
+      return;
+    }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "en-US";
+    u.rate = 0.98;
+    u.pitch = 1.06; // 稍微偏高，像女聲
+    const v = pickFemaleEnVoice();
+    if(v) u.voice = v;
+    try{
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+    }catch(e){}
+  }
+
+  // teacher voice mp3 fallback control
+  let TEACHER_AUDIO_MODE = "auto"; // auto | mp3 | tts
+function speakUser(text){
     if(!text) return;
     if(!window.speechSynthesis){
       toast("此瀏覽器不支援朗讀（speechSynthesis）");
@@ -520,16 +553,43 @@ const SCENARIOS = {
   const teacherAudio = new Audio();
   teacherAudio.preload = "auto";
   async function playTeacherMp3(){
-    const url = teacherMp3Url(state.scenario, state.idx+1);
+    const sc = SCENARIOS[state.scenario];
+    const lineNo = state.idx + 1;
+
+    // 先取「老師這一句」文字（TTS fallback 用）
+    const teacherText = (sc && sc.lines && sc.lines[state.idx]) ? sc.lines[state.idx].t : "";
+
+    // 若強制 TTS
+    if(TEACHER_AUDIO_MODE === "tts"){
+      speakTeacher(teacherText);
+      return;
+    }
+
+    const dir = (sc && sc.audioDir) ? sc.audioDir : state.scenario;
+    const url = `${PUBLIC_BASE}/${TALK_BUCKET}/${dir}/line-${String(lineNo).padStart(2,"0")}.mp3`;
+
+    // 若強制 mp3
+    if(TEACHER_AUDIO_MODE === "mp3"){
+      try{
+        const a = new Audio(url);
+        await a.play();
+        return;
+      }catch(e){
+        toast("老師 MP3 播放失敗，請確認 MP3 檔案是否存在");
+        return;
+      }
+    }
+
+    // auto：先試 MP3，失敗就改用 TTS（不會讓流程卡死）
     try{
-      const head = await fetch(url, {method:"HEAD", cache:"no-store"});
-      if(!head.ok) throw new Error("mp3_not_found");
-      teacherAudio.src = url;
-      teacherAudio.currentTime = 0;
-      await teacherAudio.play();
-      toast("播放老師 MP3 ✓");
+      const a = new Audio(url);
+      const p = a.play();
+      if(p && typeof p.then === "function") await p;
     }catch(e){
-      toast("找不到老師 MP3（請到 Admin 第12頁產生）");
+      // fallback to TTS
+      TEACHER_AUDIO_MODE = "tts";
+      toast("找不到老師 MP3，改用瀏覽器女聲朗讀（不影響使用）");
+      speakTeacher(teacherText);
     }
   }
 
