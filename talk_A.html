@@ -361,102 +361,6 @@
     return inter / uni;
   }
 
-
-  // ====== Semantic/Loose judge helpers (v2026-01-03) ======
-  function extractEnglishPhrases(s){
-    if(!s) return [];
-    const out = [];
-    const raw = String(s)
-      .replace(/[“”]/g,'"')
-      .replace(/[‘’]/g,"'")
-      .replace(/提示：/g,' ')
-      .replace(/Hint:/gi,' ')
-      .replace(/say\s+/gi,' ')
-      .replace(/repeat:\s*/gi,' ')
-      .replace(/跟讀：/g,' ')
-      .replace(/\s+/g,' ')
-      .trim();
-    raw.split(/[\/｜]| or /i).forEach(part=>{
-      const p = part.trim();
-      if(!p) return;
-      if(/[a-zA-Z]/.test(p)){
-        out.push(p.replace(/^[•\-\s]+/,'').trim());
-      }
-    });
-    const q = raw.match(/"([^"]{2,120})"/g);
-    if(q){
-      q.forEach(x=>{
-        const t = x.replace(/"/g,'').trim();
-        if(/[a-zA-Z]/.test(t)) out.push(t);
-      });
-    }
-    return [...new Set(out)];
-  }
-
-  function buildCandidates(expLine, teacherLineObj){
-    const cands = [];
-    if(expLine) cands.push(expLine);
-
-    if(expLine){
-      const noP = expLine.replace(/[.!?]+$/,'').trim();
-      if(noP && noP!==expLine) cands.push(noP);
-      const noComma = expLine.replace(/,/g,'').replace(/\s+/g,' ').trim();
-      if(noComma && noComma!==expLine) cands.push(noComma);
-    }
-
-    if(teacherLineObj){
-      cands.push(...extractEnglishPhrases(teacherLineObj.hint_en));
-      cands.push(...extractEnglishPhrases(teacherLineObj.hint_zh));
-    }
-
-    const more = [];
-    cands.forEach(x=>{
-      let t = String(x);
-      more.push(t);
-      more.push(t.replace(/\bIm\b/gi,"I'm"));
-      more.push(t.replace(/\bI am\b/gi,"I'm"));
-      more.push(t.replace(/\bI'm\b/gi,"I am"));
-    });
-
-    return [...new Set(more.map(s=>s.trim()).filter(Boolean))].slice(0, 12);
-  }
-
-  function tokenArray(s){
-    return norm(s).split(" ").filter(Boolean);
-  }
-
-  function coverageScore(user, cand){
-    const U = new Set(tokenArray(user));
-    const C = tokenArray(cand);
-    if(!C.length) return 0;
-    let hit = 0;
-    C.forEach(t=>{ if(U.has(t)) hit++; });
-    return hit / C.length;
-  }
-
-  function judgeLoose(userText, expLine, teacherLineObj){
-    const candidates = buildCandidates(expLine, teacherLineObj);
-    let best = {score:0, cov:0, cand: expLine || ""};
-
-    candidates.forEach(c=>{
-      const s = similarity(userText, c);
-      const cov = coverageScore(userText, c);
-      if(s > best.score || (Math.abs(s-best.score) < 0.02 && cov > best.cov)){
-        best = {score:s, cov, cand:c};
-      }
-    });
-
-    const userTokens = tokenArray(userText).length;
-    const candTokens = tokenArray(best.cand).length;
-
-    const pass =
-      (best.score >= 0.72) ||
-      (best.score >= 0.62 && best.cov >= 0.70 && userTokens >= 2) ||
-      (candTokens <= 3 && best.cov >= 0.85 && userTokens >= 2) ||
-      (best.cov >= 0.92 && userTokens >= 2);
-
-    return {pass, best, candidates};
-  }
   // --- teacher mp3 (public storage) ---
   const TALK_BUCKET = "talk";
   function teacherMp3Url(scenario, lineNo){
@@ -524,29 +428,19 @@
     $("resultCard").style.display = "block";
     $("userSaid").textContent = text;
 
-    const sc = SCENARIOS[state.scenario];
     const exp = expectedUserLine();
-    const teacherLineObj = sc.lines[state.idx] || null;
-
-    const judged = judgeLoose(text, exp, teacherLineObj);
-    const pass = judged.pass;
-    const score = judged.best.score;
+    const score = similarity(text, exp);
+    const pass = score >= 0.72;
 
     if(pass){
-      $("judgeHint").textContent = `👍 我聽到了！做得好。
-（最佳比對：${judged.best.cand}
-相似度：${score.toFixed(2)}｜覆蓋：${judged.best.cov.toFixed(2)}）`;
+      $("judgeHint").textContent = `👍 我聽到了！做得好。\n（相似度：${score.toFixed(2)}）`;
       state.idx = Math.min(state.idx+1, 9);
       renderTeacher();
       await playTeacherMp3();
     }else{
       $("judgeHint").textContent =
-        `❌ 還不太像。
-我聽到：${norm(text)}
-建議：${exp}
-（最佳相似度：${score.toFixed(2)}｜覆蓋：${judged.best.cov.toFixed(2)}）`;
+        `❌ 還不太像。\n我聽到：${norm(text)}\n建議：${exp}\n（相似度：${score.toFixed(2)}）`;
     }
-  }
   }
 
   // --- camera ---
