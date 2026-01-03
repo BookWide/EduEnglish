@@ -507,6 +507,17 @@ const SCENARIOS = {
     $("teacherAvatar").src = sc.teacherAvatar;
     $("teacherText").textContent = line.t;
     $("teacherHint").textContent = ($("hintLang").value==="zh" ? line.hint_zh : line.hint_en);
+
+// ★可用答案預覽：讓使用者不用先錯一次才知道怎回答（更像老師）
+try{
+  const cands = expectedCandidates();
+  const ex = cands.slice(0,3).map(a=>"• " + a).join("\n");
+  if(ex){
+    $("teacherHint").textContent += ($("hintLang").value==="zh"
+      ? "\n\n你可以回答：\n" + ex
+      : "\n\nYou can answer:\n" + ex);
+  }
+}catch(e){}
     $("timeNow").textContent = "下午" + nowHHMM();
     $("timeNow2").textContent = "下午" + nowHHMM();
 
@@ -546,7 +557,18 @@ const SCENARIOS = {
     const cands = expectedCandidates();
     const best = bestMatch(text, cands);
     const score = best.score;
-    const pass = score >= 0.72;
+
+// ★小放寬：短答（1~3詞）只要抓到關鍵詞就可以過（更像口說練習）
+let pass = score >= 0.72;
+if(!pass){
+  const exp0 = best.text || cands[0];
+  const U = tokenSet(text);
+  const E = tokenSet(exp0);
+  let inter = 0;
+  for(const t of E) if(U.has(t)) inter++;
+  const cover = E.size ? inter / E.size : 0;
+  if(U.size <= 3 && cover >= 0.70) pass = true;
+}
 
     if(pass){
       $("judgeHint").textContent = `👍 我聽到了！做得好。
@@ -556,20 +578,29 @@ const SCENARIOS = {
       await playTeacherMp3();
     }else{
       const exp = best.text || cands[0];
+
+      // ★更像真人老師：如果你其實是在「重複老師的問題」，直接提醒你要用回答句型
+      const sc = SCENARIOS[state.scenario];
+      const teacherLine = (sc && sc.lines && sc.lines[state.idx]) ? sc.lines[state.idx].t : "";
+      const qScore = teacherLine ? similarity(text, teacherLine) : 0;
+      if(qScore >= 0.62 && qScore > score + 0.10){
+        const ex2 = cands.slice(0,3).map(a=>"• " + a).join("\n");
+        $("judgeHint").textContent =
+          "⚠️ 你剛剛像是在重複「老師的問題」。\n" + "請直接用「回答句」回應。\n\n" + "可接受回答例：\n" + ex2 + "\n\n" + "（你剛才更像問題句，相似度：" + qScore.toFixed(2) + "）";
+        return;
+      }
+
       const miss = missingTokens(text, exp);
       let teachHint = "";
       if(miss.length){
         teachHint =
-          "你少說了關鍵字：
-" +
-          miss.slice(0, 8).map(w => "• " + w).join("
-");
+          "你少說了關鍵字：\n" +
+          miss.slice(0, 8).map(w => "• " + w).join("\n");
       }else{
         teachHint = "句型大致正確，試著更清楚地說一次。";
       }
 
-      const ex = cands.slice(0,4).map(a=>"• " + a).join("
-");
+      const ex = cands.slice(0,4).map(a=>"• " + a).join("\n");
       $("judgeHint").textContent =
         `❌ 還差一點。
 
