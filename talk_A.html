@@ -1428,8 +1428,48 @@ async function startListening(){
 async function boot(){
   UI.log.textContent = "";
   logLine("Loading index.json …");
+
+  // ---- normalize index shapes (object/scenes array/array/items) ----
+  function normalizeIndex(raw){
+    let scenes = [];
+    let def = "";
+    if(Array.isArray(raw)){
+      scenes = raw;
+    }else if(raw && Array.isArray(raw.scenes)){
+      scenes = raw.scenes;
+      def = raw.default || raw.def || "";
+    }else if(raw && Array.isArray(raw.items)){
+      scenes = raw.items;
+      def = raw.default || raw.def || "";
+    }else if(raw && typeof raw === "object"){
+      // try best-effort: accept {default, airport:{...}, ...}
+      def = raw.default || raw.def || "";
+      const keys = Object.keys(raw).filter(k=>!["default","def","meta","version"].includes(k));
+      if(keys.length){
+        scenes = keys.map(k=>{
+          const v = raw[k] || {};
+          return { key: v.key || v.id || k, title: v.title || v.name || k, level: v.level || v.cefr || "" };
+        });
+      }
+    }
+    // ensure items have key/title
+    scenes = (scenes||[]).map(s=>{
+      if(typeof s === "string") return { key:s, title:s, level:"" };
+      const key = s.key || s.id || s.scene || s.slug || "";
+      return {
+        key,
+        title: s.title || s.name || s.label || key,
+        level: s.level || s.cefr || s.rank || ""
+      };
+    }).filter(s=>!!s.key);
+
+    if(!def && scenes[0]) def = scenes[0].key;
+    return { default: def, scenes };
+  }
+
   try{
-    INDEX = await fetchJson(`${BASE}/index.json`);
+    const raw = await fetchJson(`${BASE}/index.json`);
+    INDEX = normalizeIndex(raw);
   }catch(e){
     // fallback if index.json missing
     INDEX = {
@@ -1445,28 +1485,46 @@ async function boot(){
     logLine("⚠️ 找不到 ./talk/index.json，已使用內建清單（請確認檔案路徑）。");
   }
 
+  // ---- build select ----
   UI.sceneSel.innerHTML = "";
   (INDEX.scenes||[]).forEach(s=>{
     const opt = document.createElement("option");
     opt.value = s.key;
-    opt.textContent = `${s.title} (${s.level})`;
+    opt.textContent = `${s.title}${s.level?` (${s.level})`:``}`;
     UI.sceneSel.appendChild(opt);
   });
 
+  // ---- pick initial scene robustly ----
   const qs = new URLSearchParams(location.search);
-  const key = qs.get("scene") || INDEX.default || (INDEX.scenes[0] && INDEX.scenes[0].key) || "coffee_shop";
+  let key = (qs.get("scene")||"").trim();
+
+  const keys = new Set((INDEX.scenes||[]).map(s=>s.key));
+  if(!key) key = (INDEX.default||"").trim();
+  if(!key || !keys.has(key)){
+    key = (INDEX.scenes[0] && INDEX.scenes[0].key) ? INDEX.scenes[0].key : "coffee_shop";
+  }
+
   UI.sceneSel.value = key;
 
-  UI.sceneSel.onchange = ()=> loadScene(UI.sceneSel.value);
+  UI.sceneSel.onchange = ()=>{
+    const v = (UI.sceneSel.value||"").trim();
+    if(v) loadScene(v);
+  };
 
   await loadScene(key);
 }
 
 async function loadScene(sceneKey){
+  sceneKey = (sceneKey||"").trim();
+  if(!sceneKey){
+    UI.log.textContent = "載入失敗：找不到情境 JSON\n請確認：/talk/index.json 內有 scenes，且每個 scene 都有 key。";
+    return;
+  }
   UI.log.textContent = "";
   metrics = { totalTurns:0, topicHits:0, userWords:0, approxPronOK:0, chat:[] };
   try{
-    SCRIPT = await fetchJson(`${BASE}/${sceneKey}.json`);
+    const file = sceneKey.endsWith(".json") ? sceneKey : `${sceneKey}.json`;
+    SCRIPT = await fetchJson(`${BASE}/${file}`);
     stepsById = Object.fromEntries((SCRIPT.steps||[]).map(s=>[s.id,s]));
     failCount = {};
     currentId = (SCRIPT.steps && SCRIPT.steps[0] && SCRIPT.steps[0].id) ? SCRIPT.steps[0].id : "";
