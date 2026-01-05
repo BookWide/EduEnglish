@@ -410,9 +410,12 @@
         <div class="zh" id="lineZH">（載入中…）</div>
       </div>
 
+      <div class="note" id="heardText" style="display:none">你說：—</div>
+
       <div class="controls">
         <div class="micRow">
           <button class="micBtn" id="btnMic">🎤 點我說（開始辨識）</button>
+          <button class="skipBtn" id="btnType">⌨️ 輸入</button>
           <button class="skipBtn" id="btnSkip">跳過</button>
         </div>
 
@@ -525,6 +528,32 @@
 
   function safeText(x){ return (x==null) ? "" : String(x); }
   function normalizeLower(s){ return safeText(s).trim().toLowerCase(); }
+
+  // --- Fuzzy match (for short phrases like "you too" -> "youtube") ---
+  function editDistance(a,b){
+    a = safeText(a); b = safeText(b);
+    const m=a.length,n=b.length;
+    const dp = Array.from({length:m+1},()=>Array(n+1).fill(0));
+    for(let i=0;i<=m;i++) dp[i][0]=i;
+    for(let j=0;j<=n;j++) dp[0][j]=j;
+    for(let i=1;i<=m;i++){
+      for(let j=1;j<=n;j++){
+        const cost = a[i-1]===b[j-1]?0:1;
+        dp[i][j]=Math.min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost);
+      }
+    }
+    return dp[m][n];
+  }
+  function similarity(a,b){
+    a = normalizeLower(a); b = normalizeLower(b);
+    if(!a || !b) return 0;
+    const dist = editDistance(a,b);
+    return 1 - dist / Math.max(a.length,b.length,1);
+  }
+  function isShortUtterance(s){
+    const t = normalizeLower(s);
+    return t.split(/\s+/).filter(Boolean).length <= 3 || t.length <= 10;
+  }
   function uniq(arr){ return Array.from(new Set(arr)); }
   function escapeHtml(str){
     return safeText(str)
@@ -535,60 +564,6 @@
       .replaceAll("'","&#39;");
   }
   function delay(ms){ return new Promise(r=>setTimeout(r,ms)); }
-
-
-// --- Conversation flow helpers (patch: smoother) ---
-const FILLERS = {
-  ok: ["Okay.", "Got it.", "Alright.", "Sure.", "Great."],
-  retry: ["Almost.", "Close.", "Not quite—try this:", "Try this:"],
-};
-function pick(arr){
-  try{ return arr[Math.floor(Math.random()*arr.length)] || ""; }
-  catch(_){ return ""; }
-}
-
-// Make lines less textbook / less "grading"
-function normalizeAiLine(s){
-  let t = safeText(s).trim();
-
-  // Remove explicit grading words at the start
-  t = t.replace(/^(great|good job|nice|perfect|excellent)\.\s+/i, "");
-  t = t.replace(/^alright\.\s+/i, "");
-
-  // Shorten common patterns
-  t = t.replace(/What size would you like\?/i, "What size?");
-  t = t.replace(/How would you like to pay\?\s*Cash or card\?/i, "Cash or card?");
-  t = t.replace(/Do you want it to go or for here\?/i, "To go or for here?");
-  t = t.replace(/Would you like sugar or milk\?/i, "Sugar or milk?");
-
-  // Keep it punchier if it has two questions
-  t = t.replace(/\?\s*(Small|Medium|Large)/i, "? $1");
-
-  return t;
-}
-
-// For retry, ask the question in a shorter way (avoid repeating full prompt)
-function shortQuestionFromStep(step){
-  const ai = normalizeAiLine(step?.ai || "");
-  // If the line already contains choices, keep it; otherwise keep just first sentence.
-  const parts = ai.split(/(?<=[\?\!\.])\s+/);
-  return (parts[0] || ai).trim();
-}
-
-async function speakWithBeats(text){
-  const t = safeText(text).trim();
-  if(!t) return false;
-
-  // Split into up to 2 short beats for more human cadence
-  const parts = t.split(/(?<=[\.!\?])\s+/).filter(Boolean);
-  if(parts.length <= 1) return await speakOrGate(t);
-
-  // Speak first two beats only (avoid being too slow)
-  await speakOrGate(parts[0]);
-  await delay(360);
-  return await speakOrGate(parts[1]);
-}
-
 
   // --- Bottom sheet ---
   function openSheet(html){
@@ -777,22 +752,61 @@ async function speakWithBeats(text){
       title_zh: raw.title_zh || raw.titleZh || meta.title_zh || "",
       title_en: raw.title_en || raw.titleEn || meta.title_en || id,
       level: raw.level || meta.level || "A1",
+      // role can be string or object {ai_name, ai_title}
       role: raw.role || meta.role || "teacher",
       avatar: raw.avatar || meta.avatar || "assets/avatars/teacher-blonde.jpg",
-      task: raw.task || raw.mission || raw.goal || "",
-      examples: raw.examples || raw.sample || raw.samples || [],
-      vocab: raw.vocab || raw.words || raw.keywords || [],
+      task: (raw.task || raw.mission || raw.goal || raw.meta?.missions?.[0]?.text || ""),
+      // examples can be array of strings or array of {en,zh}
+      examples: raw.examples || raw.sample || raw.samples || raw.meta?.examples || [],
+      vocab: raw.vocab || raw.words || raw.keywords || raw.meta?.key_vocab || [],
       translations: raw.translations || raw.translate || null,
-      review: raw.review || raw.comment || raw.feedback || null,
+      review: raw.review || raw.comment || raw.feedback || raw.feedback_tiers || null,
       steps: []
     };
 
+    // --- Support multiple schema variants ---
+    // Variant A: steps/dialogues/lines/conversation (legacy)
     let s = raw.steps || raw.dialogues || raw.lines || raw.conversation || null;
+
+    // Variant B: "dialogue": alternating AI/USER blocks with USER having hint_en/hint_zh
+    if(!s && Array.isArray(raw.dialogue)){
+      const arr = raw.dialogue;
+      const steps = [];
+      for(let i=0;i<arr.length;i++){
+        const it = arr[i] || {};
+        if((it.speaker||"").toUpperCase()==="AI"){
+          const aiText = it.en || it.text || "";
+          const zhText = it.zh || "";
+          // lookahead next USER hint for expected answer
+          const nxt = arr[i+1] || {};
+          let expectHint = "";
+          if((nxt.speaker||"").toUpperCase()==="USER"){
+            expectHint = nxt.hint_en || nxt.en || "";
+          }
+          steps.push({
+            ai: aiText,
+            zh: zhText,
+            // expectHint is used by evaluator (fuzzy), expect keyword list kept empty to be lenient
+            expect: [],
+            expectHint,
+            ok: "", // no explicit "ok" praise here; keep flow natural
+            retry: "", // let engine generate short retry
+            type: "step"
+          });
+        }
+      }
+      if(steps.length){
+        steps[steps.length-1].type = "end";
+        s = steps;
+      }
+    }
+
     if(Array.isArray(s)){
       out.steps = s.map((x, i)=>({
-        ai: x.ai || x.teacher || x.bot || x.text || "",
+        ai: x.ai || x.teacher || x.bot || x.text || x.en || "",
         zh: x.zh || x.tw || x.cn || x.translation_zh || "",
         expect: x.expect || x.keywords || x.must || [],
+        expectHint: x.expectHint || x.hint_en || "",
         ok: x.ok || x.ai_ok || x.next || "",
         retry: x.retry || x.ai_retry || x.hint || "",
         type: x.type || (i===s.length-1 ? "end":"step")
@@ -801,12 +815,14 @@ async function speakWithBeats(text){
       out.steps = fallbackScene(id).steps;
     }
 
+    // pad to at least 10 turns for consistent experience
     if(out.steps.length < 10){
       const pad = fallbackScene(id).steps;
       while(out.steps.length < 10 && pad[out.steps.length]){
         out.steps.push(pad[out.steps.length]);
       }
     }
+    // cap to 15
     if(out.steps.length > 15){
       out.steps = out.steps.slice(0, 15);
       out.steps[out.steps.length-1].type = "end";
@@ -850,10 +866,10 @@ async function speakWithBeats(text){
   function applyScene(scene){
     {
     const r = scene.role;
-    const roleTxt = (typeof r === "string") ? r
-      : (r && typeof r === "object") ? (r.label || r.name || r.title || r.role || "teacher")
-      : "teacher";
-    roleLabel.textContent = `AI · ${roleTxt}`;
+    let roleText = "teacher";
+    if(typeof r === "string") roleText = r;
+    else if(r && typeof r === "object") roleText = (r.ai_title || r.title || r.role || "teacher");
+    roleLabel.textContent = `AI · ${roleText}`;
   }
     sceneLabel.textContent = `${scene.title_zh}｜${scene.title_en} (${scene.level})`;
     avatarImg.src = BASE + scene.avatar.replace(/^\/+/,"");
@@ -874,7 +890,7 @@ async function speakWithBeats(text){
     stepIdx = 0;
 
     renderStep();
-    speakWithBeats(lineEN.textContent);
+    speakOrGate(lineEN.textContent);
 
     setQs("scene", scene.id);
   }
@@ -886,9 +902,9 @@ async function speakWithBeats(text){
       lineZH.textContent = "（載入中…）";
       return;
     }
-    lineEN.textContent = normalizeAiLine(s.ai);
+    lineEN.textContent = s.ai;
     lineZH.textContent = s.zh ? s.zh : "";
-    lastSpoken = lineEN.textContent;
+    lastSpoken = s.ai;
   }
 
   function isEnd(){
@@ -904,16 +920,31 @@ async function speakWithBeats(text){
     return ex.map(x=>String(x).toLowerCase()).filter(Boolean);
   }
 
-  function evaluateUser(text){
+    function evaluateUser(text){
     const t = normalizeLower(text);
 
-    // ✅ 開場招呼特例：第一句允許 Hi/Hello/Hey... 先過關，避免「一開始就被打槍」
+    // ✅ 開場招呼（第一輪）直接放行
     const GREETINGS = ["hi","hello","hey","good morning","good afternoon","good evening"];
-    if(stepIdx === 0 && GREETINGS.some(g => t === g || t.startsWith(g + " "))){
+    if(stepIdx === 0 && GREETINGS.some(g => t === g || t.startsWith(g+" "))){
       return { ok:true, reason:"greeting" };
     }
 
+    const s = steps[stepIdx] || {};
     const ex = getExpectList();
+
+    // ✅ 如果 JSON 有給「期待回答」(expectHint)，用模糊比對（更接近真實用法）
+    const hint = safeText(s.expectHint || "").trim();
+    if(hint){
+      const sim = similarity(t, hint);
+      // 對短句放寬
+      const th = isShortUtterance(hint) ? 0.55 : 0.68;
+      if(sim >= th) return { ok:true, reason:"hint_fuzzy", sim };
+      // 也允許命中 hint 的關鍵字（長度>=3）
+      const tokens = hint.toLowerCase().split(/[^a-z]+/).filter(w=>w.length>=3);
+      if(tokens.some(w => t.includes(w))) return { ok:true, reason:"hint_token" };
+    }
+
+    // ✅ 舊規則：expect 關鍵字命中
     if(ex.length === 0) return { ok:true, reason:"no_expect" };
     const hit = ex.some(k => t.includes(k));
     return { ok: hit, reason: hit ? "hit" : "miss", expect: ex };
@@ -922,6 +953,13 @@ async function speakWithBeats(text){
   async function handleUser(text){
     const userText = safeText(text).trim();
     if(!userText) return;
+
+    // show what ASR heard
+    const heard = $("heardText");
+    if(heard){
+      heard.style.display = "block";
+      heard.textContent = "你說：" + userText;
+    }
 
     savePhrase(userText);
 
@@ -934,32 +972,32 @@ async function speakWithBeats(text){
     }
 
     if(ev.ok){
-      // Move on without explicit "grading" to keep flow natural
+      if(s.ok){
+        lineEN.textContent = s.ok;
+        lineZH.textContent = "";
+        lastSpoken = s.ok;
+        await speakOrGate(s.ok);
+      }
       stepIdx = Math.min(stepIdx + 1, steps.length-1);
       renderStep();
-
-      // Speak next prompt with a light filler for natural cadence
-      const spoken = (pick(FILLERS.ok) + " " + lineEN.textContent).trim();
-      lastSpoken = spoken;
-      await speakWithBeats(spoken);
-
+      await speakOrGate(lineEN.textContent);
       if(isEnd()) await showReview();
     }else{
-      const hint = safeText(s.retry || (ev.expect?.length ? `Try including: ${ev.expect.slice(0,3).join(", ")}` : "Try again.")).trim();
-      const q = shortQuestionFromStep(s);
+      // ❌ 不要長篇教訓，也不要「提示後又把題目朗讀兩次」
+      // 只給一次短提示，然後把原題目留在畫面（要再聽就按「重播本句」）
+      let short = "";
+      if(s.retry) short = s.retry;
+      else if(ev.expect?.length) short = `Try: ${ev.expect.slice(0,2).join(" / ")}`;
+      else if(s.expectHint) short = `Try: ${safeText(s.expectHint).trim()}`;
+      else short = "Try a full sentence.";
 
-      // Show the (short) question on screen, and keep the hint as supporting text
-      lineEN.textContent = q || lineEN.textContent;
-      lineZH.textContent = hint ? `（提示：${hint}）` : "（再試一次：用更完整的句子回答）";
+      lineEN.textContent = short;
+      lineZH.textContent = "（再試一次：慢慢說也可以，或按 ⌨️ 直接輸入）";
+      lastSpoken = short;
+      await speakOrGate(short);
 
-      // Speak hint once, then ask again in a shorter way (no double repeating)
-      if(hint){
-        const spokenHint = (pick(FILLERS.retry) + " " + hint).trim();
-        await speakWithBeats(spokenHint);
-        await delay(220);
-      }
-      lastSpoken = lineEN.textContent;
-      await speakWithBeats(lineEN.textContent);
+      // restore the question on screen, but DON'T auto-speak again
+      renderStep();
     }
   }
 
@@ -1102,7 +1140,7 @@ async function speakWithBeats(text){
     sheetBody.querySelectorAll("[data-say]").forEach(el=>{
       el.addEventListener("click", ()=>{
         const s = el.getAttribute("data-say") || "";
-        speakWithBeats(s);
+        speakOrGate(s);
       });
     });
     const clear = sheetBody.querySelector("#clearSaved");
@@ -1115,14 +1153,24 @@ async function speakWithBeats(text){
     }
   }
 
-  btnReplay.addEventListener("click", ()=> speakWithBeats(lastSpoken || lineEN.textContent || ""));
+  btnReplay.addEventListener("click", ()=> speakOrGate(lastSpoken || lineEN.textContent || ""));
   btnSkip.addEventListener("click", async ()=>{
     if(isEnd()){ await showReview(); return; }
     stepIdx = Math.min(stepIdx + 1, steps.length-1);
     renderStep();
-    await speakWithBeats(lineEN.textContent);
+    await speakOrGate(lineEN.textContent);
     if(isEnd()) await showReview();
   });
+
+  const btnType = $("btnType");
+
+  if(btnType){
+    btnType.addEventListener("click", async ()=>{
+      audioEnabled = true;
+      const t = prompt("請輸入你要回答的英文（例如：You too / Thank you）：") || "";
+      await handleUser(t);
+    });
+  }
 
   btnMic.addEventListener("click", async ()=>{
     audioEnabled = true;
