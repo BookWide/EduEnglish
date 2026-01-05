@@ -726,12 +726,12 @@
         step("Hello! How can I help you today?", "你好！我可以怎麼幫你？", ["i'd like","i want","can i"], "Sure. Can you tell me more?", "Try: 'I'd like to check in.'"),
         step("Sure. Can you tell me more?", "好的，能多說一點嗎？", ["reservation","book","name"], "Thanks. May I see your ID?", "Say: 'I have a reservation.'"),
         step("May I see your ID, please?", "可以看一下你的證件嗎？", ["here","sure"], "Thank you. One moment.", "Say: 'Sure, here you are.'"),
-        step("Thank you. One moment, please.", "謝謝，請稍等。", ["okay","sure"], "All set. Here you go.", "Say: 'Okay.'"),
+        step("Thank you. One moment, please.", "謝謝，請稍等。", ["okay","sure"], "All set. Here you go.", "Try a short sentence."),
         step("All set. Here you go.", "好了，給你。", ["thank"], "You're welcome. Anything else?", "Say: 'Thank you.'"),
         step("Anything else you need?", "還需要什麼嗎？", ["no","that's all"], "Great. Have a nice day!", "Say: 'No, that's all.'"),
         step("Have a nice day!", "祝你有美好的一天！", ["you too","thanks"], "Thank you!", "Say: 'You too!'"),
         step("Before you go, can you repeat the key phrase?", "離開前，能再說一次關鍵句嗎？", ["i'd like"], "Perfect! Let's wrap up.", "Try: 'I'd like ...'"),
-        step("Perfect! Let's wrap up.", "很棒！我們收尾。", ["okay"], "Awesome. See you next time!", "Say: 'Okay.'"),
+        step("Perfect! Let's wrap up.", "很棒！我們收尾。", ["okay"], "Awesome. See you next time!", "Try a short sentence."),
         endStep("Awesome. See you next time!", "太棒了，下次見！")
       ];
     }
@@ -855,10 +855,40 @@
   }
 
   async function loadScene(id){
-    const url = BASE + "talk/" + id + ".json";
+    // ✅ Robust scene loader: try several common paths (online + local file)
+    const candidates = [
+      // same folder (for local testing: file:///.../talk_A.html?scene=xxx)
+      `${id}.json`,
+      `./${id}.json`,
+      // common site layouts
+      (BASE ? (BASE + "talk/" + id + ".json") : ("talk/" + id + ".json")),
+      (BASE ? (BASE + "data/talk/" + id + ".json") : ("data/talk/" + id + ".json")),
+      (BASE ? (BASE + "data/talks/" + id + ".json") : ("data/talks/" + id + ".json")),
+      (BASE ? (BASE + "data/" + id + ".json") : ("data/" + id + ".json")),
+      // root (https://bookwide.net/xxx.json)
+      (BASE ? (BASE + id + ".json") : (id + ".json"))
+    ];
+
     let raw = null;
-    try{ raw = await fetchJson(url); }
-    catch(e){ console.warn("Scene json missing, fallback:", e); raw = fallbackScene(id); }
+    let okUrl = null;
+
+    for(const url of candidates){
+      try{
+        raw = await fetchJson(url);
+        okUrl = url;
+        break;
+      }catch(e){
+        // keep trying
+      }
+    }
+
+    if(!raw){
+      console.warn("Scene json missing in all candidates, fallback:", id, candidates);
+      raw = fallbackScene(id);
+    }else{
+      console.log("Scene loaded:", id, okUrl);
+    }
+
     currentScene = normalizeSceneJson(raw, id);
     applyScene(currentScene);
   }
@@ -920,8 +950,18 @@
     return ex.map(x=>String(x).toLowerCase()).filter(Boolean);
   }
 
-    function evaluateUser(text){
+      function evaluateUser(text){
     const t = normalizeLower(text);
+
+    // ✅ 通用通行證（acknowledgement / filler）
+    // - 這類回應在真實對話裡是「承接用語」，不該卡關
+    const PASS_WORDS = [
+      "ok","okay","okey","okay.","ok.","yes","yeah","yep",
+      "thanks","thank you","thank you very much","thanks a lot"
+    ];
+    if (PASS_WORDS.some(p => t === p || t.startsWith(p + " "))) {
+      return { ok:true, reason:"pass_word" };
+    }
 
     // ✅ 開場招呼（第一輪）直接放行
     const GREETINGS = ["hi","hello","hey","good morning","good afternoon","good evening"];
@@ -965,6 +1005,15 @@
 
     const s = steps[stepIdx] || {};
     const ev = evaluateUser(userText);
+
+    // ✅ pass_word（OK/Okay/Thanks）直接前進一格，避免卡在「承接用語」
+    if(ev && ev.reason === "pass_word"){
+      stepIdx = Math.min(stepIdx + 1, steps.length - 1);
+      renderStep();
+      lastSpoken = lineEN.textContent;
+      await speakOrGate(lastSpoken);
+      return;
+    }
 
     if(isEnd()){
       await showReview();
