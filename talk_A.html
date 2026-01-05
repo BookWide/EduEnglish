@@ -536,6 +536,60 @@
   }
   function delay(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
+
+// --- Conversation flow helpers (patch: smoother) ---
+const FILLERS = {
+  ok: ["Okay.", "Got it.", "Alright.", "Sure.", "Great."],
+  retry: ["Almost.", "Close.", "Not quite—try this:", "Try this:"],
+};
+function pick(arr){
+  try{ return arr[Math.floor(Math.random()*arr.length)] || ""; }
+  catch(_){ return ""; }
+}
+
+// Make lines less textbook / less "grading"
+function normalizeAiLine(s){
+  let t = safeText(s).trim();
+
+  // Remove explicit grading words at the start
+  t = t.replace(/^(great|good job|nice|perfect|excellent)\.\s+/i, "");
+  t = t.replace(/^alright\.\s+/i, "");
+
+  // Shorten common patterns
+  t = t.replace(/What size would you like\?/i, "What size?");
+  t = t.replace(/How would you like to pay\?\s*Cash or card\?/i, "Cash or card?");
+  t = t.replace(/Do you want it to go or for here\?/i, "To go or for here?");
+  t = t.replace(/Would you like sugar or milk\?/i, "Sugar or milk?");
+
+  // Keep it punchier if it has two questions
+  t = t.replace(/\?\s*(Small|Medium|Large)/i, "? $1");
+
+  return t;
+}
+
+// For retry, ask the question in a shorter way (avoid repeating full prompt)
+function shortQuestionFromStep(step){
+  const ai = normalizeAiLine(step?.ai || "");
+  // If the line already contains choices, keep it; otherwise keep just first sentence.
+  const parts = ai.split(/(?<=[\?\!\.])\s+/);
+  return (parts[0] || ai).trim();
+}
+
+async function speakWithBeats(text){
+  const t = safeText(text).trim();
+  if(!t) return false;
+
+  // Split into up to 2 short beats for more human cadence
+  const parts = t.split(/(?<=[\.!\?])\s+/).filter(Boolean);
+  if(parts.length <= 1) return await speakOrGate(t);
+
+  // Speak first two beats only (avoid being too slow)
+  await speakOrGate(parts[0]);
+  await delay(360);
+  return await speakOrGate(parts[1]);
+}
+
+
   // --- Bottom sheet ---
   function openSheet(html){
     sheetBody.innerHTML = html;
@@ -814,7 +868,7 @@
     stepIdx = 0;
 
     renderStep();
-    speakOrGate(lineEN.textContent);
+    speakWithBeats(lineEN.textContent);
 
     setQs("scene", scene.id);
   }
@@ -826,9 +880,9 @@
       lineZH.textContent = "（載入中…）";
       return;
     }
-    lineEN.textContent = s.ai;
+    lineEN.textContent = normalizeAiLine(s.ai);
     lineZH.textContent = s.zh ? s.zh : "";
-    lastSpoken = s.ai;
+    lastSpoken = lineEN.textContent;
   }
 
   function isEnd(){
@@ -867,25 +921,32 @@
     }
 
     if(ev.ok){
-      if(s.ok){
-        lineEN.textContent = s.ok;
-        lineZH.textContent = "";
-        lastSpoken = s.ok;
-        await speakOrGate(s.ok);
-      }
+      // Move on without explicit "grading" to keep flow natural
       stepIdx = Math.min(stepIdx + 1, steps.length-1);
       renderStep();
-      await speakOrGate(lineEN.textContent);
+
+      // Speak next prompt with a light filler for natural cadence
+      const spoken = (pick(FILLERS.ok) + " " + lineEN.textContent).trim();
+      lastSpoken = spoken;
+      await speakWithBeats(spoken);
+
       if(isEnd()) await showReview();
     }else{
-      const msg = s.retry || (ev.expect?.length ? `Try including: ${ev.expect.slice(0,3).join(", ")}` : "Try again.");
-      lineEN.textContent = msg;
-      lineZH.textContent = "（再試一次：用更完整的句子回答）";
-      lastSpoken = msg;
-      await speakOrGate(msg);
-      renderStep();
-      await delay(200);
-      await speakOrGate(lineEN.textContent);
+      const hint = safeText(s.retry || (ev.expect?.length ? `Try including: ${ev.expect.slice(0,3).join(", ")}` : "Try again.")).trim();
+      const q = shortQuestionFromStep(s);
+
+      // Show the (short) question on screen, and keep the hint as supporting text
+      lineEN.textContent = q || lineEN.textContent;
+      lineZH.textContent = hint ? `（提示：${hint}）` : "（再試一次：用更完整的句子回答）";
+
+      // Speak hint once, then ask again in a shorter way (no double repeating)
+      if(hint){
+        const spokenHint = (pick(FILLERS.retry) + " " + hint).trim();
+        await speakWithBeats(spokenHint);
+        await delay(220);
+      }
+      lastSpoken = lineEN.textContent;
+      await speakWithBeats(lineEN.textContent);
     }
   }
 
@@ -1028,7 +1089,7 @@
     sheetBody.querySelectorAll("[data-say]").forEach(el=>{
       el.addEventListener("click", ()=>{
         const s = el.getAttribute("data-say") || "";
-        speakOrGate(s);
+        speakWithBeats(s);
       });
     });
     const clear = sheetBody.querySelector("#clearSaved");
@@ -1041,12 +1102,12 @@
     }
   }
 
-  btnReplay.addEventListener("click", ()=> speakOrGate(lastSpoken || lineEN.textContent || ""));
+  btnReplay.addEventListener("click", ()=> speakWithBeats(lastSpoken || lineEN.textContent || ""));
   btnSkip.addEventListener("click", async ()=>{
     if(isEnd()){ await showReview(); return; }
     stepIdx = Math.min(stepIdx + 1, steps.length-1);
     renderStep();
-    await speakOrGate(lineEN.textContent);
+    await speakWithBeats(lineEN.textContent);
     if(isEnd()) await showReview();
   });
 
