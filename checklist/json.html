@@ -458,7 +458,25 @@
           </div>
         </div>
 
-        <!-- 3. Prompt + JSON 預覽 -->
+        
+        <!-- 2.6 speaking -->
+        <div class="block">
+          <h3>2.6 AI 口語助教 speaking JSON（用 SRT 直接產生）</h3>
+          <div class="tagline">
+            不呼叫 GPT、不花 Token。先上傳並解析 SRT，再按下按鈕即可產生 <code id="nameSpeaking">speaking-.json</code>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btnSpeaking" type="button" onclick="handleGenerateSpeaking()">
+              用 SRT 產生 speaking JSON
+            </button>
+          </div>
+          <div class="status" id="status-speaking">尚未產生。</div>
+          <div class="btn-row">
+            <button class="btn btn-sm btn-ghost" id="downloadSpeaking" type="button" disabled>下載 speaking-*.json</button>
+          </div>
+        </div>
+
+<!-- 3. Prompt + JSON 預覽 -->
         <div class="block">
           <h3>3. GPT 提示詞與結果預覽</h3>
           <div class="tagline">只顯示最後一次呼叫 GPT 的 Prompt 與 JSON，避免畫面太長。</div>
@@ -485,22 +503,6 @@
           </div>
         </div>
       </section>
-        <section class="card" id="sec-speaking">
-          <h3>2.6 AI 口語助教 speaking JSON（用 SRT 直接產生）</h3>
-          <div class="hint">
-            不呼叫 GPT、不花 Token。先上傳並解析 SRT，再按下按鈕即可產生 <code>speaking-{slug}.json</code>。
-          </div>
-
-          <div class="row">
-            <button class="btn-primary" type="button" onclick="handleGenerate('speaking')">用 SRT 產生 speaking JSON</button>
-          </div>
-
-          <div class="row">
-            <button id="downloadSpeaking" class="btn" type="button" disabled>下載 speaking-{slug}.json</button>
-          </div>
-          <div id="status-speaking" class="status">尚未產生。</div>
-        </section>
-
     </main>
   </div>
 
@@ -509,8 +511,16 @@
   <script>
     const $ = (q) => document.querySelector(q);
 
+
+    // 防止 Promise 拋出 Object 造成 Console 紅字（仍會在 status 顯示）
+    window.addEventListener('unhandledrejection', (ev) => {
+      console.error('Unhandled rejection:', ev.reason);
+      // 避免在 Console 顯示 Uncaught (in promise) Object
+      ev.preventDefault();
+    });
+
     let srtSegments = [];
-    const savedJson = {cues:null,quiz:null,vocab:null,ai:null,index:null};
+    const savedJson = {cues:null,quiz:null,vocab:null,ai:null,index:null,speaking:null};
 
     const apiKeyInput = $('#apiKey');
     const toggleKeyBtn = $('#toggleKey');
@@ -543,8 +553,23 @@
       $('#nameVocab').textContent  = slug ? `vocab-${slug}.json` : 'vocab-.json';
       $('#nameAi').textContent     = slug ? `ai-${slug}.json`    : 'ai-.json';
       $('#nameIndex').textContent  = slug ? `index-${slug}.json` : 'index-.json';
+      const ns = document.getElementById('nameSpeaking');
+      if (ns) ns.textContent = slug ? `speaking-${slug}.json` : 'speaking-.json';
     }
     slugInput.addEventListener('input', updateFileNames);
+
+    // re-download speaking JSON
+    const dlSpeaking = document.getElementById('downloadSpeaking');
+    if (dlSpeaking){
+      dlSpeaking.addEventListener('click', ()=>{
+        const slug = (slugInput.value || '').trim();
+        if (!savedJson.speaking){ alert('尚未產生 speaking JSON。'); return; }
+        const fileName = getFileName('speaking', slug);
+        triggerDownload(JSON.stringify(savedJson.speaking,null,2), fileName);
+        showToast(`已下載 ${fileName}`);
+      });
+    }
+
     catSel.addEventListener('change', updateFileNames);
 
     function parseSrtText(raw){
@@ -585,15 +610,14 @@
       const hh = parseInt(m[1],10), mm = parseInt(m[2],10), ss = parseInt(m[3],10);
       return hh*3600 + mm*60 + ss;
     }
-
     function chunkSentence(en){
       const s = (en || '').trim();
       if (!s) return [];
       let parts = s.split(/(?<=[\.\?\!,:;])\s+/).filter(Boolean);
       if (parts.length <= 1){
-        const mm = s.match(/^(.*\b)(but|and|or|so|because|if|when|while)\b(.*)$/i);
-        if (mm && mm[1] && mm[3]){
-          parts = [ (mm[1] + mm[2]).trim(), mm[3].trim() ].filter(Boolean);
+        const m = s.match(/^(.*\b)(but|and|or|so|because|if|when|while)\b(.*)$/i);
+        if (m && m[1] && m[3]){
+          parts = [ (m[1] + m[2]).trim(), m[3].trim() ].filter(Boolean);
         }
       }
       if (parts.length > 4){
@@ -601,69 +625,60 @@
       }
       return parts;
     }
-
     function buildSpeakingJsonFromSrt(slug, category){
-      const source_url = ($('#sourceUrl').value || '').trim();
+      const srcInput = document.getElementById('videoSourceInput');
+      const source_url = srcInput ? (srcInput.value || '').trim() : '';
       const items = [];
-
       for (let i=0;i<srtSegments.length;i++){
         const seg = srtSegments[i];
         const t0 = timeToSec(seg.time);
         const t1 = (i < srtSegments.length-1) ? timeToSec(srtSegments[i+1].time) : (t0 + 4);
         const line_en = (seg.text || '').trim();
         if (!line_en) continue;
-
         const chunks = chunkSentence(line_en);
         items.push({
-          id: `l${String(items.length+1).padStart(3,'0')}`,
-          t0: Number(t0.toFixed(2)),
-          t1: Number(Math.max(t1, t0 + 0.8).toFixed(2)),
+          t0, t1,
           time: seg.time,
           line_en,
           coach: {
             goal: "Shadow (跟讀)",
             say: line_en,
-            chunks,
             hint: chunks.length ? ("Chunk it: " + chunks.join(" / ")) : "Shadow it once, then repeat slowly.",
             drill: ["shadow","repeat_slow","chunking"]
           }
         });
       }
-
       return { slug, category: category || "", source_url, lang: "en", mode: "srt", items };
     }
 
-    function handleGenerateSpeaking(){
+    async function handleGenerateSpeaking(){
       const slug = ($('#slug').value || '').trim();
       const cat  = catSel ? catSel.value : '';
+      if (!slug){ alert('請先填寫影片 slug。'); return; }
+      if (!srtSegments.length){ alert('請先上傳並解析 SRT 檔。'); return; }
+
       const statusEl = document.getElementById('status-speaking');
+      statusEl.textContent = '由 SRT 產生 speaking JSON 中…';
+      statusEl.className = 'status';
+
       try{
-        if (!slug) throw new Error('請先填寫影片 slug。');
-        if (!srtSegments.length) throw new Error('請先上傳並解析 SRT 檔。');
-
-        statusEl.textContent = '產生中…';
-        statusEl.className = 'status';
-
         const obj = buildSpeakingJsonFromSrt(slug, cat);
-        savedJson['speaking'] = obj;
-
+        savedJson.speaking = obj;
         const fileName = getFileName('speaking', slug);
         triggerDownload(JSON.stringify(obj,null,2), fileName);
-
-        document.getElementById('downloadSpeaking').disabled = false;
-        statusEl.textContent = `已完成並下載 ${fileName}（由 SRT 直接生成）。`;
+        const dl = document.getElementById('downloadSpeaking');
+        if (dl) dl.disabled = false;
+        statusEl.textContent = `已完成並下載 ${fileName}。`;
         statusEl.className = 'status ok';
-
-        $('#jsonPreview').value = JSON.stringify(obj,null,2);
+        document.getElementById('jsonPreview').value = JSON.stringify(obj,null,2);
         showToast(`已下載 ${fileName}`);
-      }catch(e){
-        console.error(e);
-        statusEl.textContent = `失敗：${e.message || e}`;
-        statusEl.className = 'status bad';
-        alert(e.message || String(e));
+      }catch(err){
+        console.error(err);
+        statusEl.textContent = `發生錯誤：${err.message || err}`;
+        statusEl.className = 'status err';
+        showToast('產生 speaking JSON 時發生錯誤');
       }
     }
-
 
     const srtFileInput = $('#srtFile');
     const srtPreview = $('#srtPreview');
@@ -856,28 +871,12 @@ title: ${title || slug}`;
     function getFileName(kind, slug){
       if (!slug) return `${kind}-.json`;
       if (kind === 'index') return `index-${slug}.json`;
-      if (kind === 'speaking') return `speaking-${slug}.json`;
       return `${kind}-${slug}.json`;
     }
 
-    
     async function handleGenerate(kind){
-      try{
-        if (kind === 'speaking'){ handleGenerateSpeaking(); return; }
-        await _handleGenerateCore(kind);
-      }catch(err){
-        console.error('[handleGenerate]', err);
-        const msg = err?.message || (typeof err === 'string' ? err : JSON.stringify(err));
-        const statusEl = document.getElementById(`status-${kind}`);
-        if (statusEl){
-          statusEl.textContent = `失敗：${msg}`;
-          statusEl.className = 'status bad';
-        }
-        alert(`產生 ${kind} 失敗：\n${msg}`);
-      }
-    }
+      if (kind === 'speaking') { await handleGenerateSpeaking(); return; }
 
-async function _handleGenerateCore(kind){
       const apiKey = ($('#apiKey').value || '').trim();
       const model  = $('#model').value;
       const slug   = ($('#slug').value || '').trim();
@@ -1005,19 +1004,7 @@ async function _handleGenerateCore(kind){
     setupDownloadButtons();
 
     let generatingAll = false;
-    
     async function handleGenerateAll(){
-      for (const kind of order){
-        try{
-          await handleGenerate(kind);
-        }catch(e){
-          console.error('[handleGenerateAll]', kind, e);
-          break;
-        }
-      }
-    }
-
-async function _handleGenerateAllCore(){
       if (generatingAll) return;
       const apiKey = ($('#apiKey').value || '').trim();
       const slug   = ($('#slug').value || '').trim();
@@ -1036,7 +1023,7 @@ async function _handleGenerateAllCore(){
       generatingAll = true;
       btnAll.textContent = '全部產生中…';
 
-      const order = ['cues','speaking','quiz','vocab','ai','index'];
+      const order = ['cues','quiz','vocab','ai','index','speaking'];
       for (const kind of order){
         const statusEl = document.getElementById(`status-${kind}`);
         statusEl.textContent = '排隊產生中…';
@@ -1078,116 +1065,9 @@ async function _handleGenerateAllCore(){
         toastEl.classList.remove('show');
       }, 2000);
     }
-  
-    /* ========= Remember OpenAI key (localStorage only) ========= */
-    (function(){
-      const LS_KEY = 'BW_OPENAI_API_KEY';
-      const keyEl = document.getElementById('apiKey');
-      if (!keyEl) return;
-
-      const saved = localStorage.getItem(LS_KEY);
-      if (saved && !keyEl.value) keyEl.value = saved;
-
-      keyEl.addEventListener('input', () => {
-        const v = (keyEl.value || '').trim();
-        if (!v) localStorage.removeItem(LS_KEY);
-        else localStorage.setItem(LS_KEY, v);
-      });
-
-      window.BW_CLEAR_OPENAI_KEY = () => {
-        localStorage.removeItem(LS_KEY);
-        keyEl.value = '';
-        showToast('已清除 OpenAI Key（只清本機）');
-        alert('已清除 OpenAI Key（只清本機瀏覽器）');
-      };
-    })();
-
-
-    /* ========= Global error guards ========= */
-    window.addEventListener('unhandledrejection', (e) => {
-      console.error('unhandledrejection', e.reason);
-      const msg = e?.reason?.message || (typeof e.reason === 'string' ? e.reason : JSON.stringify(e.reason || {}));
-      showToast('發生錯誤：' + msg);
-    });
-    window.addEventListener('error', (e) => {
-      console.error('window.error', e.error || e.message);
-    });
-
-</script>
+  </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
