@@ -140,25 +140,14 @@
       overflow:hidden;
     }
     .avatarImg{
-      width:50%;
-      height:50%;
+      width:62%;
+      height:62%;
       border-radius:18px;
       object-fit:cover;
       border:1px solid var(--line);
       background:#fff;
       box-shadow:0 10px 30px rgba(10,20,40,.10);
     }
-    .avatarVideo{
-      width:50%;
-      height:50%;
-      border-radius:999px;
-      border:10px solid #fff;
-      box-shadow:0 10px 30px rgba(10,20,40,.10);
-      object-fit:cover;
-      display:none;
-      background:transparent;
-    }
-
     .mouth{
       position:absolute;
       width:42px;height:22px;
@@ -381,7 +370,12 @@
       .micBtn{font-size:14px;padding:13px 14px}
       .skipBtn{padding:13px 14px}
     }
-  </style>
+  
+/* ===== Patch: 3 teachers video avatar (2026-01-06) ===== */
+video.avatarImg{object-fit:cover;}
+.avatarWrap{height:min(30vh,260px)!important;}
+body{overflow:hidden;}
+</style>
 </head>
 <body>
   <div class="app">
@@ -398,6 +392,11 @@
 
       <div class="scenario" title="選擇情境">
         <select id="sceneSelect"></select>
+          <select id="teacherSelect" class="chipSelect" title="選擇老師">
+            <option value="pineapple">Pineapple</option>
+            <option value="lychee">Lychee</option>
+            <option value="mermaid">Mermaid</option>
+          </select>
       </div>
 
       <button class="btn" id="btnReplay">重播本句</button>
@@ -411,8 +410,7 @@
 
       <div class="center">
         <div class="avatarWrap" id="avatarWrap">
-          <video class="avatarVideo" id="avatarVideo" playsinline muted preload="auto"></video>
-        <img class="avatarImg" id="avatarImg" alt="AI Avatar" />
+          <video class="avatarImg" id="avatarVid" alt="AI Avatar" / class="avatarImg" playsinline muted preload="metadata"></video>
           <div class="mouth" aria-hidden="true"></div>
         </div>
       </div>
@@ -474,11 +472,10 @@
 
   // --- DOM ---
   const sceneSelect = $("sceneSelect");
-  const teacherSelect = $("teacherSelect");
   const roleLabel = $("roleLabel");
   const sceneLabel = $("sceneLabel");
-  const avatarImg = $("avatarImg");
-  const avatarVideo = $("avatarVideo");
+  const avatarVid = $("avatarVid");
+    const teacherSelect = $("teacherSelect");
   const avatarWrap = $("avatarWrap");
   const lineEN = $("lineEN");
   const lineZH = $("lineZH");
@@ -486,6 +483,70 @@
   const btnMic = $("btnMic");
   const btnSkip = $("btnSkip");
   const dot = $("dot");
+
+    /* ===== Teachers (video avatars) ===== */
+    const TEACHERS = {
+      pineapple: { key:"pineapple", label:"Pineapple", video:"https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/avatars/Pineapple.mp4" },
+      lychee:    { key:"lychee",    label:"Lychee",    video:"https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/avatars/Lychee.mp4" },
+      mermaid:   { key:"mermaid",   label:"Mermaid",   video:"https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/avatars/mermaid.mp4" }
+    };
+
+    function normalizeTeacherKey(k){
+      k = (k||"").toString().toLowerCase().trim();
+      return TEACHERS[k] ? k : "pineapple";
+    }
+
+    let currentTeacherKey = normalizeTeacherKey(qs.get("teacher") || "pineapple");
+
+    // video setup
+    avatarVid.loop = false;
+    avatarVid.muted = true; // allow autoplay after user gesture; keep safe
+    avatarVid.playsInline = true;
+    avatarVid.setAttribute("playsinline","");
+    avatarVid.setAttribute("webkit-playsinline","");
+    avatarVid.preload = "metadata";
+
+    function resetAvatarToStart(){
+      try{
+        avatarVid.pause();
+        const seek0 = ()=>{ try{ avatarVid.currentTime = 0; avatarVid.pause(); }catch(e){} };
+        if(Number.isFinite(avatarVid.duration) && avatarVid.duration>0) seek0();
+        else avatarVid.addEventListener("loadedmetadata", seek0, { once:true });
+      }catch(e){}
+    }
+
+    function applyTeacher(){
+      const t = TEACHERS[currentTeacherKey] || TEACHERS.pineapple;
+      if(!teacherSelect) return;
+      teacherSelect.value = t.key;
+
+      // update pill label with scene role + teacher name
+      const role = (window.__sceneRole || "teacher");
+      roleLabel.textContent = `AI · ${role} · ${t.label}`;
+
+      const prev = avatarVid.getAttribute("data-src");
+      if(prev !== t.video){
+        avatarVid.src = t.video;
+        avatarVid.setAttribute("data-src", t.video);
+        avatarVid.load();
+      }
+      resetAvatarToStart();
+    }
+
+    async function startTalkVideo(){
+      try{
+        // rewind if ended
+        if(Number.isFinite(avatarVid.duration) && avatarVid.currentTime >= (avatarVid.duration-0.05)){
+          avatarVid.currentTime = 0;
+        }
+        const p = avatarVid.play();
+        if(p && typeof p.then==="function") await p;
+      }catch(e){}
+    }
+    function stopTalkVideo(){
+      try{ avatarVid.pause(); avatarVid.currentTime = 0; }catch(e){}
+    }
+
 
   const sheetMask = $("sheetMask");
   const sheet = $("sheet");
@@ -605,20 +666,22 @@
       u.onstart = ()=>{
         avatarWrap.classList.add("speaking");
         dot.classList.add("on");
+        startTalkVideo();
       };
       u.onend = ()=>{
         avatarWrap.classList.remove("speaking");
         dot.classList.remove("on");
+        stopTalkVideo();
         resolve(true);
       };
       u.onerror = ()=>{
         avatarWrap.classList.remove("speaking");
         dot.classList.remove("on");
+        stopTalkVideo();
         resolve(false);
       };
 
-      try{ try{ const v = pickVoiceForTeacher(); if(v) u.voice = v; }catch{}
-      speechSynthesis.speak(u); }
+      try{ speechSynthesis.speak(u); }
       catch(e){ resolve(false); }
     });
   }
@@ -674,135 +737,6 @@
 
   function fallbackScene(id){
     const meta = (indexData?.items || fallbackIndex().items).find(x=>x.id===id) || fallbackIndex().items[0];
-
-  // ===== Teachers (3 avatars in Supabase) =====
-  const TEACHERS = {
-    pineapple: {
-      id: "pineapple",
-      label: "Pineapple",
-      mp4: "https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/avatars/Pineapple.mp4",
-      voice: { lang: "en-US", preferGender: "female" },
-    },
-    lychee: {
-      id: "lychee",
-      label: "Lychee",
-      mp4: "https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/avatars/Lychee.mp4",
-      voice: { lang: "en-US", preferGender: "female" },
-    },
-    mermaid: {
-      id: "mermaid",
-      label: "Mermaid",
-      mp4: "https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/avatars/mermaid.mp4",
-      voice: { lang: "en-US", preferGender: "female" },
-    },
-  };
-
-  let currentTeacherId = "pineapple";
-
-  function getParam(name){
-    try { return new URL(location.href).searchParams.get(name); } catch { return null; }
-  }
-  function setParam(name, value){
-    try{
-      const u = new URL(location.href);
-      u.searchParams.set(name, value);
-      history.replaceState(null, "", u.toString());
-    }catch{}
-  }
-
-  function initTeacherSelect(){
-    if (!teacherSelect) return;
-    const ids = Object.keys(TEACHERS);
-    teacherSelect.innerHTML = ids.map(id => `<option value="${id}">老師：${TEACHERS[id].label}</option>`).join("");
-    teacherSelect.addEventListener("change", () => {
-      setTeacher(teacherSelect.value);
-    });
-  }
-
-  function setTeacher(id, {syncUrl=true} = {}){
-    const t = TEACHERS[id] || TEACHERS.pineapple;
-    currentTeacherId = t.id;
-
-    // update chip label (left pill)
-    if (roleLabel) roleLabel.textContent = `AI · ${t.label}`;
-    if (teacherSelect) teacherSelect.value = t.id;
-
-    // attach video avatar
-    if (avatarVideo){
-      // force reload even if same url
-      if (avatarVideo.src !== t.mp4) avatarVideo.src = t.mp4;
-      avatarVideo.loop = false;
-      avatarVideo.muted = true;
-      avatarVideo.playsInline = true;
-      avatarVideo.preload = "auto";
-
-      const onReady = () => {
-        try{
-          avatarVideo.currentTime = 0;
-          avatarVideo.pause();
-        }catch{}
-        avatarVideo.style.display = "block";
-        if (avatarImg) avatarImg.style.display = "none";
-      };
-      avatarVideo.addEventListener("loadeddata", onReady, { once:true });
-      avatarVideo.addEventListener("canplay", onReady, { once:true });
-
-      avatarVideo.addEventListener("ended", () => avatarTalkStop());
-      avatarVideo.addEventListener("error", () => {
-        // fallback to image (keep your existing avatarImg)
-        if (avatarImg){
-          avatarImg.style.display = "block";
-        }
-        avatarVideo.style.display = "none";
-      }, { once:true });
-    }
-
-    if (syncUrl) setParam("teacher", t.id);
-    return t;
-  }
-
-  function avatarTalkStart(){
-    if (!avatarVideo || avatarVideo.style.display === "none") return;
-    try{
-      avatarVideo.currentTime = 0;
-      avatarVideo.play().catch(()=>{});
-    }catch{}
-  }
-  function avatarTalkStop(){
-    if (!avatarVideo || avatarVideo.style.display === "none") return;
-    try{
-      avatarVideo.pause();
-      avatarVideo.currentTime = 0;
-    }catch{}
-  }
-
-  // ===== SpeechSynthesis voice mapping (per teacher; best-effort) =====
-  function listVoices(){
-    const vs = (speechSynthesis.getVoices && speechSynthesis.getVoices()) || [];
-    return vs.map(v => ({ name:v.name, lang:v.lang, local:v.localService }));
-  }
-  function pickVoiceForTeacher(){
-    const t = TEACHERS[currentTeacherId] || TEACHERS.pineapple;
-    const vs = (speechSynthesis.getVoices && speechSynthesis.getVoices()) || [];
-    if (!vs.length) return null;
-
-    const lang = (t.voice?.lang || "").toLowerCase();
-
-    // Try: exact best common female voices on Windows/Chrome/macOS
-    const femaleHints = ["samantha","jenny","zira","aria","google us english","female","woman"];
-    const hints = (t.voice?.preferGender === "female") ? femaleHints : [];
-
-    let v = vs.find(x => hints.some(h => (x.name||"").toLowerCase().includes(h)));
-    if (v) return v;
-
-    if (lang){
-      v = vs.find(x => (x.lang||"").toLowerCase().startsWith(lang));
-      if (v) return v;
-    }
-    v = vs.find(x => (x.lang||"").toLowerCase().startsWith("en"));
-    return v || null;
-  }
-
     const base = {
       id: meta.id,
       title_zh: meta.title_zh,
@@ -1252,17 +1186,13 @@
     location.href = guessHome;
   });
 
-  async async function boot(){
+  async function boot(){
     lineEN.textContent = "Loading…";
     lineZH.textContent = "（載入中…）";
     dot.classList.remove("on");
 
     await loadIndex();
     fillSelect();
-
-    initTeacherSelect();
-    const t0 = (qs("teacher") || "pineapple").toLowerCase();
-    setTeacher(t0, {syncUrl:false});
 
     const initial = qs("scene") || (indexData?.items?.[0]?.id) || "coffee_shop";
     sceneSelect.value = initial;
