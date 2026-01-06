@@ -440,6 +440,26 @@
           </div>
         </div>
 
+
+        <!-- 2.6 speaking -->
+        <div class="block">
+          <h3>2.6 AI 口語助教 speaking JSON（用 SRT 直接產生）</h3>
+          <div class="tagline">
+            輸出檔名：<code id="nameSpeaking">speaking-.json</code><br>
+            依 SRT 逐句產生「跟讀 / 分段 / 提示」資料，不會呼叫 GPT（不花 token）。
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" type="button" onclick="handleGenerate('speaking')">
+              用 SRT 產生 speaking JSON
+            </button>
+          </div>
+          <div class="status" id="status-speaking">尚未產生。</div>
+          <div class="btn-row">
+            <button class="btn btn-sm btn-ghost" id="downloadSpeaking" type="button" disabled>下載 speaking-*.json</button>
+            <span class="badge"><span>🎧</span><span>跟影片字幕逐句對齊</span></span>
+          </div>
+        </div>
+
         <!-- 2.5 index -->
         <div class="block">
           <h3>2.5 單支影片 index JSON</h3>
@@ -494,7 +514,7 @@
     const $ = (q) => document.querySelector(q);
 
     let srtSegments = [];
-    const savedJson = {cues:null,quiz:null,vocab:null,ai:null,index:null};
+    const savedJson = {cues:null,quiz:null,vocab:null,ai:null,speaking:null,index:null};
 
     const apiKeyInput = $('#apiKey');
     const toggleKeyBtn = $('#toggleKey');
@@ -526,6 +546,7 @@
       $('#nameQuiz').textContent   = slug ? `quiz-${slug}.json`  : 'quiz-.json';
       $('#nameVocab').textContent  = slug ? `vocab-${slug}.json` : 'vocab-.json';
       $('#nameAi').textContent     = slug ? `ai-${slug}.json`    : 'ai-.json';
+      $('#nameSpeaking').textContent = slug ? `speaking-${slug}.json` : 'speaking-.json';
       $('#nameIndex').textContent  = slug ? `index-${slug}.json` : 'index-.json';
     }
     slugInput.addEventListener('input', updateFileNames);
@@ -557,6 +578,68 @@
         }
       }
       if (buffer.time || buffer.text) push();
+
+
+    // ====== 2.6 speaking JSON (SRT -> speaking-{slug}.json) ======
+    function timeToSec(hms){
+      // "HH:MM:SS"
+      const m = (hms || '').trim().match(/^(\d{2}):(\d{2}):(\d{2})$/);
+      if (!m) return 0;
+      const hh = parseInt(m[1],10), mm = parseInt(m[2],10), ss = parseInt(m[3],10);
+      return hh*3600 + mm*60 + ss;
+    }
+    function chunkSentence(en){
+      // 粗分段：依標點或連接詞（保守，不亂改原句）
+      const s = (en || '').trim();
+      if (!s) return [];
+      // 先以主要標點切
+      let parts = s.split(/(?<=[\.\?\!,:;])\s+/).filter(Boolean);
+      if (parts.length <= 1){
+        // 再以常見連接詞切一次（保守，只切 1 次）
+        const m = s.match(/^(.*\b)(but|and|or|so|because|if|when|while)\b(.*)$/i);
+        if (m && m[1] && m[3]){
+          parts = [ (m[1] + m[2]).trim(), m[3].trim() ].filter(Boolean);
+        }
+      }
+      // 最多 4 段
+      if (parts.length > 4){
+        parts = [parts.slice(0,2).join(' '), parts.slice(2).join(' ')].filter(Boolean);
+      }
+      return parts;
+    }
+    function buildSpeakingJsonFromSrt(slug, category){
+      const srcInput = document.getElementById('videoSourceInput');
+      const source_url = srcInput ? (srcInput.value || '').trim() : '';
+      const items = [];
+      for (let i=0;i<srtSegments.length;i++){
+        const seg = srtSegments[i];
+        const t0 = timeToSec(seg.time);
+        const t1 = (i < srtSegments.length-1) ? timeToSec(srtSegments[i+1].time) : (t0 + 4);
+        const line_en = (seg.text || '').trim();
+        if (!line_en) continue;
+
+        const chunks = chunkSentence(line_en);
+        items.push({
+          t0, t1,
+          time: seg.time,
+          line_en,
+          coach: {
+            goal: "Shadow (跟讀)",
+            say: line_en,
+            hint: chunks.length ? ("Chunk it: " + chunks.join(" / ")) : "Shadow it once, then repeat slowly.",
+            drill: ["shadow","repeat_slow","chunking"]
+          }
+        });
+      }
+      return {
+        slug,
+        category: category || "",
+        source_url,
+        lang: "en",
+        mode: "srt",
+        items
+      };
+    }
 
       return segments;
     }
@@ -752,6 +835,7 @@ title: ${title || slug}`;
     function getFileName(kind, slug){
       if (!slug) return `${kind}-.json`;
       if (kind === 'index') return `index-${slug}.json`;
+      if (kind === 'speaking') return `speaking-${slug}.json`;
       return `${kind}-${slug}.json`;
     }
 
@@ -760,8 +844,30 @@ title: ${title || slug}`;
       const model  = $('#model').value;
       const slug   = ($('#slug').value || '').trim();
       const cat    = catSel ? catSel.value : '';
-      if (!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
+
       if (!slug){ alert('請先填寫影片 slug。'); return; }
+
+      // 2.6 speaking：只用 SRT 直接產生（不呼叫 GPT）
+      if (kind === 'speaking'){
+        if (!srtSegments.length){ alert('請先上傳並解析 SRT 檔。'); return; }
+        const obj = buildSpeakingJsonFromSrt(slug, cat);
+        savedJson.speaking = obj;
+        const fileName = getFileName('speaking', slug);
+        triggerDownload(JSON.stringify(obj,null,2), fileName);
+        const statusEl = document.getElementById('status-speaking');
+        if (statusEl){
+          statusEl.textContent = `已完成並下載 ${fileName}（SRT 逐句生成）。`;
+          statusEl.className = 'status ok';
+        }
+        const dl = document.getElementById('downloadSpeaking');
+        if (dl) dl.disabled = false;
+        document.getElementById('jsonPreview').value = JSON.stringify(obj,null,2);
+        $('#promptPreview').value = '[speaking] 由 SRT 直接生成（無 GPT Prompt）';
+        showToast(`已下載 ${fileName}`);
+        return;
+      }
+
+      if (!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
 
       // 沒有 SRT 的處理：
       // - 一般類別：禁止呼叫（避免 GPT 毫無依據亂編）
@@ -867,7 +973,7 @@ title: ${title || slug}`;
     }
 
     function setupDownloadButtons(){
-      ['cues','quiz','vocab','ai','index'].forEach(kind => {
+      ['cues','quiz','vocab','ai','speaking','index'].forEach(kind => {
         const btn = document.getElementById(`download${cap(kind)}`);
         if (!btn) return;
         btn.addEventListener('click', () => {
@@ -902,7 +1008,7 @@ title: ${title || slug}`;
       generatingAll = true;
       btnAll.textContent = '全部產生中…';
 
-      const order = ['cues','quiz','vocab','ai','index'];
+      const order = ['cues','quiz','vocab','ai','speaking','index'];
       for (const kind of order){
         const statusEl = document.getElementById(`status-${kind}`);
         statusEl.textContent = '排隊產生中…';
