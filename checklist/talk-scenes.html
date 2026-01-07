@@ -109,6 +109,33 @@
 
         <div class="ok" id="okBox"></div>
         <div class="err" id="errBox"></div>
+        <!-- ====== SRT 轉 Talk 對話（測試用） ====== -->
+        <div class="card" style="margin-top:14px">
+          <div class="h">SRT → 對話骨架（測試）</div>
+          <div class="sub">先把 SRT 丟進來，快速產生「場景 JSON 的 dialogue」，讓 talk_A 先跑起來。之後再去 JSON 產生器做 speaking-*.json。</div>
+
+          <div class="grid2" style="margin-top:10px">
+            <div>
+              <label class="lbl">SRT 檔</label>
+              <input id="srtFile" type="file" accept=".srt,.txt" />
+            </div>
+            <div>
+              <label class="lbl">生成模式</label>
+              <select id="srtMode">
+                <option value="ai_only">全部當 AI 台詞（最穩）</option>
+                <option value="ai_user_alt">AI / USER 交錯（跟讀用）</option>
+              </select>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
+            <button class="btn primary" id="btnSrtBuild">用 SRT 生成 dialogue</button>
+            <button class="btn" id="btnSrtPreview">預覽前 10 句</button>
+          </div>
+
+          <div class="hint" id="srtHint" style="margin-top:10px;display:none"></div>
+        </div>
+
       </div>
 
       <div class="card">
@@ -155,6 +182,70 @@
     s = s.replace(/[^a-z0-9_]/g,"");
     return s;
   }
+
+  /* ====== SRT helpers (for talk-scenes test) ====== */
+  function parseSrtToLines(srtText){
+    const raw = (srtText||"").replace(/\r/g,"").trim();
+    if(!raw) return [];
+    const blocks = raw.split(/\n\s*\n/);
+    const out = [];
+    for(const b of blocks){
+      const lines = b.split("\n").map(s=>s.trim()).filter(Boolean);
+      if(lines.length < 2) continue;
+      // typical: [idx], [time], [text...]
+      let timeLine = lines[1];
+      let textLines = lines.slice(2);
+      if(/-->\s*/.test(lines[0])){ // some SRT without numeric index
+        timeLine = lines[0];
+        textLines = lines.slice(1);
+      }
+      const m = timeLine.match(/(\d{2}:\d{2}:\d{2})[,\.]\d+\s*-->\s*(\d{2}:\d{2}:\d{2})[,\.]\d+/);
+      const t0 = m ? m[1] : "";
+      const t1 = m ? m[2] : "";
+      const text = textLines
+        .join(" ")
+        .replace(/<[^>]+>/g,"")
+        .replace(/\s+/g," ")
+        .trim();
+      if(!text) continue;
+      out.push({t0,t1,text});
+    }
+    return out;
+  }
+
+  function buildDialogueFromSrt(lines, mode){
+    const dlg = [];
+    // 固定先一個 AI 開場（穩）
+    dlg.push({ id:"a1", speaker:"AI", en:"Hi! Let's practice.", zh:"嗨！我們來練習吧。"});
+    let i = 0;
+    for(const ln of lines){
+      i++;
+      const aiId = "a" + (i+1);
+      dlg.push({ id: aiId, speaker:"AI", en: ln.text, zh: "" });
+      if(mode === "ai_user_alt"){
+        const uId = "u" + i;
+        dlg.push({
+          id: uId,
+          speaker:"USER",
+          hint_en: ln.text,
+          hint_zh: "跟讀： " + ln.text
+        });
+      }
+      if(dlg.length >= 60) break; // 防止 SRT 太長把頁面撐爆（先測試）
+    }
+    return dlg;
+  }
+
+  function showSrtHint(msg, ok=true){
+    const box = $("#srtHint");
+    if(!box) return;
+    box.style.display = "block";
+    box.style.background = ok ? "#ecfdf5" : "#fef2f2";
+    box.style.border = "1px solid " + (ok ? "#a7f3d0" : "#fecaca");
+    box.style.color = ok ? "#065f46" : "#991b1b";
+    box.textContent = msg;
+  }
+
 
   let index = { version: "2026-01-06", title: "Talk Scenarios", items: [] };
   let scenes = {};
@@ -347,7 +438,55 @@
   });
 
   syncIndexEditor();
-  renderList();
+  
+
+  /* ====== SRT → dialogue (UI) ====== */
+  $("#btnSrtPreview")?.addEventListener("click", async ()=>{
+    const f = $("#srtFile")?.files?.[0];
+    if(!f){ showSrtHint("請先選擇一個 .srt 檔", false); return; }
+    const txt = await f.text();
+    const lines = parseSrtToLines(txt);
+    if(!lines.length){ showSrtHint("讀不到 SRT 內容（可能格式不標準）", false); return; }
+    const preview = lines.slice(0,10).map((x,i)=>`${String(i+1).padStart(2,"0")}  ${x.t0||"--"}  ${x.text}`).join("\n");
+    showSrtHint("前 10 句：\n" + preview, true);
+  });
+
+  $("#btnSrtBuild")?.addEventListener("click", async ()=>{
+    const f = $("#srtFile")?.files?.[0];
+    if(!f){ showSrtHint("請先選擇一個 .srt 檔", false); return; }
+    const sid = state.selectedId;
+    if(!sid){ showSrtHint("請先在左邊清單選一個場景，再用 SRT 生成 dialogue", false); return; }
+
+    const txt = await f.text();
+    const lines = parseSrtToLines(txt);
+    if(!lines.length){ showSrtHint("讀不到 SRT 內容（可能格式不標準）", false); return; }
+
+    const mode = $("#srtMode")?.value || "ai_only";
+
+    // 以目前 editor 的 JSON 為主（避免你手動改的內容被覆蓋）
+    let obj;
+    try{
+      obj = JSON.parse($("#sceneEditor").value || "{}");
+    }catch(e){
+      obj = JSON.parse(JSON.stringify(state.scenes[sid] || {}));
+    }
+    if(!obj || typeof obj!=="object") obj = {};
+    if(!obj.id) obj.id = sid;
+
+    obj.dialogue = buildDialogueFromSrt(lines, mode);
+
+    // 方便你目測：丟 meta.examples
+    obj.meta = obj.meta || {};
+    obj.meta.examples = (lines.slice(0,3).map(x=>x.text));
+
+    state.scenes[sid] = obj;
+    $("#sceneEditor").value = JSON.stringify(obj, null, 2);
+
+    showSrtHint(`已用 SRT 生成 dialogue（${lines.length} 句，實際寫入最多 60 段）`, true);
+    toast("SRT 生成完成");
+  });
+
+renderList();
 </script>
 </body>
 </html>
