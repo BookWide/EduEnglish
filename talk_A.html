@@ -176,6 +176,27 @@
   text-decoration:none; font-weight:800;
 }
 #missionBox .btn:hover, #examplesBox .btn:hover{background:rgba(0,0,0,.03);}
+
+/* ===== 填空按鈕樣式（v20260107-fill）===== */
+.fillChoice{
+  border:1px solid rgba(0,0,0,.10);
+  background:var(--soft);
+  border-radius:999px;
+  padding:8px 10px;
+  cursor:pointer;
+  font-weight:800;
+  font-size:13px;
+}
+.fillChoice:hover{background:rgba(0,0,0,.03);}
+.fillSlot{
+  border:1px dashed rgba(0,0,0,.18);
+  background:#fff;
+  border-radius:999px;
+  padding:6px 10px;
+  font-weight:900;
+  font-size:13px;
+}
+
 </style>
 </head>
 <body>
@@ -219,6 +240,23 @@
           <button class="micBtn" id="btnMic">🎤 點我說（開始辨識）</button>
           <button class="skipBtn" id="btnType">⌨️ 輸入</button>
           <button class="skipBtn" id="btnSkip">跳過</button>
+        <!-- ===== 填空引導列（v20260107-fill）===== -->
+        <div id="fillBar" style="display:none;margin-top:6px;border:1px solid var(--line);border-radius:var(--radius);padding:10px;background:#fff;">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <div style="font-weight:900;font-size:13px;">填空提示</div>
+            <div class="tag" id="fillLevelTag" style="margin-left:auto;">A2</div>
+            <button class="btn" id="btnFillHide" type="button">隱藏</button>
+          </div>
+          <div id="fillMasked" style="margin-top:8px;font-size:16px;line-height:1.35;font-weight:900;letter-spacing:.2px;"></div>
+          <div id="fillSlots" style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;"></div>
+          <div id="fillChoices" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap;"></div>
+          <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <button class="micBtn" id="btnFillSubmit" type="button" style="padding:10px 14px;font-size:14px;flex:0 0 auto;box-shadow:none;">✅ 送出填好句</button>
+            <button class="skipBtn" id="btnFillReset" type="button" style="padding:10px 14px;">重來</button>
+            <div style="color:var(--muted);font-size:12px;">提示：先用「填空」完成一句，再改成你自己的說法。</div>
+          </div>
+        </div>
+
         </div>
 
         <div class="helperRow">
@@ -228,6 +266,12 @@
           <button class="helperBtn" id="btnSaved"><b>已儲存</b><small>單字句</small></button>
         </div>
 
+        <div id="hintTools" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+          <button class="btn" id="btnHintToggle" type="button">提示（展開）</button>
+          <button class="btn" id="btnHintSave" type="button">★ 收藏本句</button>
+          <button class="btn" id="btnHintClose" type="button">× 關閉提示</button>
+          <button class="btn" id="btnHintFill" type="button">🧩 填空引導</button>
+        </div>
         <div class="note" id="noteText">主頁保持在對話中；點「任務 / 範例 / 翻譯 / 已儲存」只會打開輔助小窗，不會中斷對話。</div>
       </div>
     </div>
@@ -409,12 +453,228 @@
 
   function showSoftHint(html, ms=2600){
     if(!softHint) return;
-    softHint.innerHTML = html;
+    softHint.innerHTML = toText(html);
     softHint.style.display = "block";
     clearTimeout(hintTimer);
     hintTimer = setTimeout(()=>{ softHint.style.display="none"; }, ms);
   }
   function hideSoftHint(){ if(softHint) softHint.style.display="none"; }
+
+
+  // ===== 防呆：任何 UI 顯示只吃字串，避免 [object Object] =====
+  function toText(v){
+    if(v == null) return "";
+    if(typeof v === "string") return v;
+    if(typeof v === "number" || typeof v === "boolean") return String(v);
+    if(typeof v === "object"){
+      return String(v.transcript || v.text || v.message || v.reason || "");
+    }
+    try{ return String(v); }catch(_){ return ""; }
+  }
+
+  // ===== 提示/收藏/關閉（v20260107-hints）=====
+  const LS_HINT_COLLAPSED = "BW_TALKA_HINT_COLLAPSED";
+  const LS_HINT_CLOSED_ONCE = "BW_TALKA_HINT_CLOSED_ONCE";
+  const LS_SAVED = "BW_TALKA_SAVED";
+
+  const btnHintToggle = $("btnHintToggle");
+  const btnHintSave   = $("btnHintSave");
+  const btnHintClose  = $("btnHintClose");
+  const btnHintFill   = $("btnHintFill");
+
+  let hintClosed = false;
+
+  function saveText(t){
+    const s = String(t||"").trim();
+    if(!s) return;
+    let arr = [];
+    try{ arr = JSON.parse(localStorage.getItem(LS_SAVED) || "[]"); }catch(_){ arr=[]; }
+    if(!Array.isArray(arr)) arr = [];
+    if(!arr.includes(s)) arr.unshift(s);
+    localStorage.setItem(LS_SAVED, JSON.stringify(arr.slice(0,200)));
+    showSoftHint(`<b>已收藏</b>：${s}`, 1600);
+  }
+
+  function getCurHint(){
+    const s = steps[idx] || {};
+    return String(s.hint||"").trim();
+  }
+
+  function applyHintUI(){
+    const collapsed = localStorage.getItem(LS_HINT_COLLAPSED) === "1";
+    if(btnHintToggle) btnHintToggle.textContent = collapsed ? "提示（展開）" : "提示（收起）";
+    if(hintClosed){
+      if(softHint) softHint.style.display = "none";
+      const fb = $("fillBar"); if(fb) fb.style.display="none";
+      return;
+    }
+    const fb = $("fillBar");
+    if(fb && collapsed) fb.style.display="none";
+  }
+
+  hintClosed = localStorage.getItem(LS_HINT_CLOSED_ONCE) === "1";
+  applyHintUI();
+
+  btnHintToggle && btnHintToggle.addEventListener("click", ()=>{
+    const collapsed = localStorage.getItem(LS_HINT_COLLAPSED) === "1";
+    localStorage.setItem(LS_HINT_COLLAPSED, collapsed ? "0" : "1");
+    const nowCollapsed = localStorage.getItem(LS_HINT_COLLAPSED) === "1";
+    if(!nowCollapsed){
+      const h = getCurHint();
+      if(h) showSoftHint(`參考回答（照讀也可以）：<b>${h}</b>`, 2200);
+    }
+    applyHintUI();
+  });
+
+  btnHintSave && btnHintSave.addEventListener("click", ()=>{
+    const h = getCurHint();
+    saveText(h || lineEN.textContent || "");
+  });
+
+  btnHintClose && btnHintClose.addEventListener("click", ()=>{
+    hintClosed = true;
+    localStorage.setItem(LS_HINT_CLOSED_ONCE, "1");
+    applyHintUI();
+    showSoftHint("已關閉提示（需要恢復可清除 localStorage 開關）", 1400);
+  });
+
+  // ===== 填空引導（v20260107-fill）=====
+  const fillBar = $("fillBar");
+  const btnFillHide = $("btnFillHide");
+  const btnFillSubmit = $("btnFillSubmit");
+  const btnFillReset = $("btnFillReset");
+  const fillMasked = $("fillMasked");
+  const fillSlots = $("fillSlots");
+  const fillChoices = $("fillChoices");
+  const fillLevelTag = $("fillLevelTag");
+
+  let fillTarget = "";
+  let fillWords = [];
+  let fillPicked = [];
+
+  function shuffle(a){
+    for(let i=a.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [a[i],a[j]]=[a[j],a[i]];
+    }
+    return a;
+  }
+
+  function buildFill(sentence){
+    const s = String(sentence||"").trim();
+    if(!s) return null;
+
+    const words = s.split(/[^A-Za-z0-9']+/).filter(w=>w.length>=3);
+    const ban = new Set(["please","hello","thanks","thank","sure","okay","ok","hi"]);
+    const candidates = words.filter(w=>!ban.has(w.toLowerCase()) && w.length>=4);
+
+    const pickN = Math.min(3, Math.max(2, Math.floor(s.length/28)));
+    const picked = [];
+    const pool = candidates.length ? candidates : words;
+    for(const w of pool){
+      if(picked.length>=pickN) break;
+      const lw = w.toLowerCase();
+      if(!picked.map(x=>x.toLowerCase()).includes(lw)) picked.push(w);
+    }
+    if(!picked.length) return null;
+
+    fillTarget = s;
+    fillWords = picked;
+    fillPicked = new Array(picked.length).fill("");
+
+    let masked = s;
+    picked.forEach((w)=>{
+      const re = new RegExp("\\b" + w.replace(/[.*+?^${}()|[\]\\]/g,"\\$&") + "\\b", "i");
+      masked = masked.replace(re, "____");
+    });
+
+    return { masked, picked };
+  }
+
+  function renderFill(){
+    if(!fillBar) return;
+    const collapsed = localStorage.getItem(LS_HINT_COLLAPSED) === "1";
+    if(hintClosed || collapsed){
+      fillBar.style.display = "none";
+      return;
+    }
+    fillBar.style.display = "block";
+
+    try{ fillLevelTag.textContent = (curScene && curScene.level) ? curScene.level : "A2"; }catch(_){}
+
+    const def = getCurHint() || "";
+    const built = buildFill(def);
+    if(!built){
+      fillMasked.textContent = "（本輪沒有可用的提示句）";
+      fillSlots.innerHTML = "";
+      fillChoices.innerHTML = "";
+      return;
+    }
+
+    fillMasked.textContent = built.masked;
+
+    fillSlots.innerHTML = "";
+    built.picked.forEach((_, i)=>{
+      const sp = document.createElement("span");
+      sp.className = "fillSlot";
+      sp.textContent = fillPicked[i] ? fillPicked[i] : `空格${i+1}`;
+      sp.style.cursor = "pointer";
+      sp.title = "點一下清除這格";
+      sp.addEventListener("click", ()=>{
+        fillPicked[i] = "";
+        renderFill();
+      });
+      fillSlots.appendChild(sp);
+    });
+
+    const extraPool = ["today","tomorrow","ticket","train","New","York","City","one-way","round-trip","afternoon","morning","cash","card","please","by","at","to"];
+    const choices = [...built.picked];
+    while(choices.length < built.picked.length + 2){
+      const x = extraPool[Math.floor(Math.random()*extraPool.length)];
+      if(!choices.includes(x)) choices.push(x);
+      if(choices.length > 10) break;
+    }
+    shuffle(choices);
+
+    fillChoices.innerHTML = "";
+    choices.forEach((w)=>{
+      const b = document.createElement("button");
+      b.type="button";
+      b.className="fillChoice";
+      b.textContent = w;
+      b.addEventListener("click", ()=>{
+        const k = fillPicked.findIndex(x=>!x);
+        if(k === -1) return;
+        fillPicked[k] = w;
+        renderFill();
+      });
+      fillChoices.appendChild(b);
+    });
+  }
+
+  btnHintFill && btnHintFill.addEventListener("click", ()=>{
+    localStorage.setItem(LS_HINT_COLLAPSED, "0");
+    applyHintUI();
+    renderFill();
+  });
+
+  btnFillHide && btnFillHide.addEventListener("click", ()=>{
+    if(fillBar) fillBar.style.display="none";
+  });
+
+  btnFillReset && btnFillReset.addEventListener("click", ()=>{
+    renderFill();
+  });
+
+  btnFillSubmit && btnFillSubmit.addEventListener("click", async ()=>{
+    if(!fillTarget) return;
+    let out = fillTarget;
+    for(const w of fillPicked){
+      if(!w){ showSoftHint("還沒填完喔～", 1400); return; }
+      out = out.replace("____", w);
+    }
+    await handleUser(out);
+  });
 
   // --- speech recognition ---
   const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -583,6 +843,7 @@ function render(){
     setAvatarState("idle");
     render();
     try{ await speakOrGate(lineEN.textContent); }catch(_){ }
+    try{ renderFill(); }catch(_){ }
     setQs("scene", curScene.id);
   }
 
@@ -598,6 +859,7 @@ function render(){
         idx++;
         render();
         await speakOrGate(lineEN.textContent);
+        try{ renderFill(); }catch(_){ }
       }else{
         showSoftHint("<b>完成！</b> 已結束。你可以切換情境繼續練。", 2200);
       }
