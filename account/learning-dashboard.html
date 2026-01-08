@@ -156,20 +156,6 @@
       color:#1e40af;
     }
 
-
-    /* 今日口說任務（Talk） */
-    .card-head{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      margin-bottom:10px;
-    }
-    .card-head .title{
-      font-size:16px;
-      font-weight:700;
-    }
-    .review-list{ margin-top:4px; }
-
     /* 繼續播放 */
     .continue-box{
       display:flex;
@@ -572,57 +558,62 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
   let videoIndexMap = {};
   let WEEKLY_INDEX = null;
 
+  // ====== safe html ======
+  function escapeHtml(str){
+    if(str === null || str === undefined) return "";
+    return String(str)
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;")
+      .replace(/'/g,"&#039;");
+  }
+
+
+
   function pickTodayTalkFromWeeklyIndex(weekly){
     try{
-      if(!weekly) return null;
-      const weeks = Array.isArray(weekly.weeks) ? weekly.weeks : [];
-      if(!weeks.length && Array.isArray(weekly.talks) && weekly.talks.length){
-        // fallback: global talks list
-        const t0 = weekly.talks[0];
-        if(!t0) return null;
+      const todayKey = new Date().toISOString().slice(0,10); // YYYY-MM-DD
+      const weeks = (weekly && weekly.weeks) ? weekly.weeks : [];
+      const tryExtract = (dayObj)=>{
+        if(!dayObj || typeof dayObj!=="object") return null;
+        const cand =
+          dayObj.talk ?? dayObj.speaking ?? dayObj.ai_speaking ?? dayObj.speaking_task ??
+          (dayObj.tasks ? (dayObj.tasks.talk ?? dayObj.tasks.speaking) : null);
+        if(!cand) return null;
+        const t = Array.isArray(cand) ? cand[0] : cand;
+        if(!t) return null;
+
+        if(typeof t === "string"){
+          return { scene: t, title: "Coffee Shop Speaking", level: "A1", trial: false, cover:"" };
+        }
         return {
-          scene: t0.scene || t0.slug || t0.id || "",
-          title: t0.title || t0.name || "AI Speaking",
-          level: t0.level || t0.cefr || "",
-          trial: !!(t0.trial || t0.is_trial || t0.free || t0.preview),
-          cover: t0.cover || t0.cover_url || t0.poster || t0.poster_url || t0.thumb || t0.image || ""
+          scene: t.scene || t.slug || t.id || t.key || "",
+          title: t.title || t.name || t.label || "AI Speaking",
+          level: t.level || t.cefr || t.difficulty || "",
+          trial: !!(t.trial || t.is_trial || t.free || t.preview),
+          cover: t.cover || t.cover_url || t.poster || t.poster_url || t.thumb || t.image || ""
         };
-      }
-
-      const weekIndex = (typeof getWeekIndex === "function") ? getWeekIndex() : 0;
-      const w = weeks.length ? weeks[(weekIndex % weeks.length + weeks.length) % weeks.length] : null;
-
-      let talks =
-        (w && (w.talks || w.talk)) ||
-        weekly.talks ||
-        [];
-
-      if(talks && !Array.isArray(talks) && typeof talks === "object"){
-        // allow map 형태 {mon:..., tue:...} / {0:...}
-        talks = Object.values(talks);
-      }
-      if(!Array.isArray(talks) || !talks.length) return null;
-
-      // Monday=0 ... Sunday=6 (更符合「週」規律)
-      const jsDay = new Date().getDay(); // Sun=0..Sat=6
-      const dayIndex = (jsDay + 6) % 7; // Mon=0..Sun=6
-      const pick = talks[dayIndex % talks.length] || talks[0];
-      if(!pick) return null;
-
-      if(typeof pick === "string"){
-        return { scene: pick, title: "AI Speaking", level: "", trial: false, cover: "" };
-      }
-
-      const scene = pick.scene || pick.slug || pick.id || pick.key || "";
-      if(!scene) return null;
-
-      return {
-        scene,
-        title: pick.title || pick.name || pick.label || "AI Speaking",
-        level: pick.level || pick.cefr || pick.difficulty || "",
-        trial: !!(pick.trial || pick.is_trial || pick.free || pick.preview),
-        cover: pick.cover || pick.cover_url || pick.poster || pick.poster_url || pick.thumb || pick.image || ""
       };
+
+      for(const w of weeks){
+        const days = w.days ?? w.day ?? w.items ?? w.schedule ?? null;
+        if(!days) continue;
+
+        if(Array.isArray(days)){
+          for(const d of days){
+            const dk = d.date || d.day || d.key;
+            if(dk === todayKey){
+              const got = tryExtract(d);
+              if(got && got.scene) return got;
+            }
+          }
+        }else if(typeof days === "object"){
+          const d = days[todayKey];
+          const got = tryExtract(d);
+          if(got && got.scene) return got;
+        }
+      }
     }catch(e){}
     return null;
   }
@@ -642,16 +633,16 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
     const title = task.title || "AI Speaking";
     const level = task.level ? String(task.level) : "";
     const cover = task.cover ? String(task.cover) : "";
-    const sub = (level ? level : "AI Speak") + (task.trial ? " · 試用" : "");
+    const sub = level ? `${level}${task.trial ? " · 試用" : ""}` : (task.trial ? "試用" : "");
 
     list.innerHTML = `
       <div class="review-item" data-jump="talk" data-scene="${encodeURIComponent(task.scene)}">
         <div class="review-thumb">
           ${cover ? `<img src="${cover}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:800;background:#eef2ff;color:#1d4ed8;">talk</div>`}
         </div>
-        <div class="review-info">
-          <div>${escapeHtml(title)}</div>
-          <small>${escapeHtml(sub)}</small>
+        <div class="review-meta">
+          <div class="t">${escapeHtml(title)}</div>
+          <div class="s">${escapeHtml(sub)}</div>
         </div>
       </div>
     `;
@@ -1299,7 +1290,7 @@ let todayReview = [];
     const el = e.target.closest("[data-jump='talk']");
     if(!el) return;
     const scene = decodeURIComponent(el.dataset.scene || "");
-    if(scene) window.location.href = `../talk.html?scene=${encodeURIComponent(scene)}`;
+    if(scene) window.location.href = `/talk.html?scene=${encodeURIComponent(scene)}`;
   });
 </script>
 </body>
