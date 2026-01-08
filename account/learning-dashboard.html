@@ -540,6 +540,41 @@
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+  // ===== Subscription gate (align with player.html) =====
+  async function bwGetProfileSub(userId){
+    try{
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('expires_at, sub_plan, sub_start, plan')
+        .eq('id', userId)
+        .maybeSingle();
+      if(error) throw error;
+      return data || null;
+    }catch(e){
+      console.warn('[BW] bwGetProfileSub failed', e);
+      return null;
+    }
+  }
+  function bwIsActive(expiresAt){
+    if(!expiresAt) return false;
+    const t = Date.parse(expiresAt);
+    return Number.isFinite(t) && t > Date.now();
+  }
+  function bwDerivePlan(startISO, expiresISO){
+    const s = Date.parse(startISO||'');
+    const e = Date.parse(expiresISO||'');
+    if(!Number.isFinite(s) || !Number.isFinite(e) || e<=s) return 'month';
+    const days = Math.round((e-s)/86400000);
+    if(days >= 300) return 'year';
+    if(days >= 150) return 'half';
+    return 'month';
+  }
+  function bwRedirectPricing(reason){
+    const next = encodeURIComponent(location.pathname + location.search + location.hash);
+    location.href = '../pricing.html?reason=' + encodeURIComponent(reason||'need_subscription') + '&next=' + next;
+  }
+
+
     // expose for debugging
   window.supabaseClient = supabase;
 const VIDEO_INDEX_URL = "../data/index-all.json";
@@ -596,43 +631,19 @@ function getUrlParams(){
 }
 
 function getSubscriptionContext(){
-  const params = getUrlParams();
-
-  // 1️⃣ 先看網址參數（方便測試：?plan=year&start=2025-01-15）
-  let plan  = params.plan || params.sub_plan || null;
-  let start = params.start || params.sub_start || null;
-
-  // 2️⃣ 再看 localStorage（和首頁 index.html 共用同一組 key）
-  if(!plan){
-    try{ plan = localStorage.getItem("bwSubPlan") || null; }catch(e){}
+    // 來源：login 後由 init() 寫入 localStorage（從 profiles.expires_at 判斷）
+    const plan = localStorage.getItem('bwSubPlan') || null;
+    const startDate = localStorage.getItem('bwSubStart') || new Date().toISOString().slice(0,10);
+    const expiresAt = localStorage.getItem('bwSubExpiresAt') || null;
+    return { plan, startDate, expiresAt };
   }
-  if(!start){
-    try{ start = localStorage.getItem("bwSubStart") || null; }catch(e){}
-  }
-
-  if(!plan || !PLAN_MAX_WEEKS[plan]){
-    plan = "month";
-  }
-
-  let startDate = null;
-  if(start){
-    const d = new Date(start);
-    if(!Number.isNaN(d.getTime())){
-      startDate = d;
-    }
-  }
-
-  if(!startDate){
-    const today = new Date();
-    startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  }
-
-  return { plan, startDate };
-}
 
 function getWeekIndex(){
-  const { plan, startDate } = getSubscriptionContext();
+  const { plan, startDate: startISO } = getSubscriptionContext();
+  let startDate = new Date(startISO);
   const today = new Date();
+
+  if(!Number.isFinite(startDate.getTime())) startDate = new Date();
 
   startDate.setHours(0,0,0,0);
   today.setHours(0,0,0,0);
@@ -1173,6 +1184,24 @@ async function loadWeeklyIndex(){
     const user = data.user;
     document.getElementById("userEmail").textContent = user.email || "";
     document.getElementById("userPill").style.display = "flex";
+
+    // ---- subscription check (same rule as player: profiles.expires_at) ----
+    const prof = await bwGetProfileSub(user.id);
+    const expiresAt = prof?.expires_at || null;
+    const active = bwIsActive(expiresAt);
+    if(!active){
+      // 未訂閱 / 已過期：導去 pricing（dashboard 不開放）
+      bwRedirectPricing(expiresAt ? 'expired' : 'need_subscription');
+      return;
+    }
+    // 同步到本機（讓既有 weekly / UI 邏輯沿用）
+    const subStart = (prof?.sub_start) ? String(prof.sub_start).slice(0,10)
+      : (localStorage.getItem('bwSubStart') || String(user.created_at||'').slice(0,10) || new Date().toISOString().slice(0,10));
+    const subPlan = (prof?.sub_plan || prof?.plan) ? String(prof.sub_plan || prof.plan)
+      : bwDerivePlan(subStart, expiresAt);
+    localStorage.setItem('bwSubStart', subStart);
+    localStorage.setItem('bwSubPlan', subPlan);
+    localStorage.setItem('bwSubExpiresAt', expiresAt);
 
     loadDashboard(user);
   }
