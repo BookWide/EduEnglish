@@ -969,44 +969,66 @@ const AVATAR_VIDEO_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/ob
     return false;
   }
 
-  // ✅ 內嵌情境索引 + 情境資料（file:// 也能跑，不用 fetch）
+  
+  // ✅ 情境索引：完全由 /talk/index.json 驅動（無 fallback）
+  // - 這份檔案是「唯一真相」，你新增/刪除/改名情境，只要改 /talk/index.json
+  // - 為避免 GitHub Pages 快取，會帶 cache-bust 參數
   let scenes = [];
+
+  function normalizeIndex(json){
+    // 支援：Array / {scenes:[...]} / {items:[...]}
+    const arr = Array.isArray(json) ? json
+      : (Array.isArray(json?.scenes) ? json.scenes
+      : (Array.isArray(json?.items) ? json.items
+      : null));
+    if (!arr) return [];
+    return arr.map(x => ({
+      id: String(x.id ?? x.slug ?? "").trim(),
+      title_zh: x.title_zh ?? x.titleZh ?? x.title_zh_tw ?? x.title ?? "",
+      title_en: x.title_en ?? x.titleEn ?? "",
+      level: x.level ?? x.cefr ?? "",
+      teacher_label: x.teacher_label ?? x.teacherLabel ?? x.role ?? "",
+      teacher_avatar: x.teacher_avatar ?? x.teacherAvatar ?? x.avatar ?? ""
+    })).filter(x => x.id);
+  }
+
   async function loadScenesIndex(){
     if (Array.isArray(scenes) && scenes.length) return scenes;
-    const candidates = [
-      "/talk/index.json",
-      "../talk/index.json",
-      "./talk/index.json",
-      "./index.json",
-    ];
-    for (const url of candidates){
-      try{
-        const u = url + (url.includes("?") ? "&" : "?") + "v=" + Date.now();
-        const r = await fetch(u, { cache: "no-store" });
-        if (!r.ok) continue;
-        const j = await r.json();
-        const arr = Array.isArray(j) ? j : (Array.isArray(j.scenes) ? j.scenes : (Array.isArray(j.items) ? j.items : null));
-        if (arr && arr.length){
-          scenes = arr.map(x => ({
-            id: String(x.id || x.slug || "").trim(),
-            title_zh: x.title_zh || x.titleZh || x.title_zh_tw || x.title || "",
-            title_en: x.title_en || x.titleEn || "",
-            level: x.level || x.cefr || "",
-            teacher_label: x.teacher_label || x.teacherLabel || x.role || "",
-            teacher_avatar: x.teacher_avatar || x.teacherAvatar || x.avatar || ""
-          })).filter(x => x.id);
-          return scenes;
-        }
-      }catch(_){}
+
+    // 允許測試：?index=/talk/index.preview.json
+    const override = qs("index");
+    const candidates = [];
+    if (override){
+      candidates.push(override.startsWith("/") ? override : ("/" + override));
     }
-    // fallback (至少保證能跑)
-    scenes = [
-      { id: "coffee_shop", title_zh: "買一杯咖啡", title_en: "Coffee Shop", level: "A1", teacher_label: "AI · Barista" },
-      { id: "hotel_checkin", title_zh: "飯店入住", title_en: "Hotel Check-in", level: "A1", teacher_label: "AI · Front Desk" },
-      { id: "speaking-one-way-ticket", title_zh: "單程票", title_en: "One-way Ticket", level: "A2", teacher_label: "AI · Ticket Clerk" },
-    ];
+    for (const u of INDEX_URLS) candidates.push(u);
+
+    let j = null;
+    let lastErr = null;
+
+    for (const path of candidates){
+      try{
+        const url = new URL(path, location.origin);
+        url.searchParams.set("v", String(Date.now()));
+        const r = await fetch(url.toString(), { cache: "no-store" });
+        if (!r.ok) throw new Error("Index fetch failed: " + r.status + " @ " + url.pathname);
+        j = await r.json();
+        lastErr = null;
+        break;
+      }catch(e){
+        lastErr = e;
+      }
+    }
+    if (!j) throw lastErr || new Error("Index fetch failed");
+
+    const arr = normalizeIndex(j);
+    if (!arr.length) throw new Error("Index empty or invalid schema");
+
+    scenes = arr;
     return scenes;
   }
+
+
 
 
   function fillSelect(){
@@ -1042,6 +1064,9 @@ const AVATAR_VIDEO_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/ob
 
   // ✅ 若 sceneDataCache 沒有，改用 fetch 讀取 /talk/*.json（可支援新增場景，不必每次改 talk_A.html）
   async function getSceneData(sceneId){
+    // 允許傳入 {id,...}
+    if (sceneId && typeof sceneId === "object") sceneId = sceneId.id || sceneId.slug || sceneId.file;
+
     if (!sceneId) throw new Error("Missing sceneId");
     // 1) cache
     if (sceneDataCache && sceneDataCache[sceneId]) return sceneDataCache[sceneId];
@@ -1230,7 +1255,25 @@ $("btnTranslate").addEventListener("click", ()=> {
   // ESC closes 任務/範例
   window.addEventListener('keydown', (e)=>{ if(e.key==='Escape'){ try{ missionBox.style.display='none'; examplesBox.style.display='none'; }catch(_){} }});
 
-  bootScenes();
+  loadScenesIndex()
+    .then(() => bootScenes())
+    .catch((err) => {
+      console.error('[TalkA] index.json error:', err);
+      try{
+        const box = document.createElement('div');
+        box.style.cssText = [
+          'position:fixed','left:12px','right:12px','bottom:12px','z-index:99999',
+          'background:#fff','border:1px solid #e5e7eb','border-radius:16px',
+          'padding:12px 14px','box-shadow:0 14px 40px rgba(0,0,0,.12)',
+          'font-size:14px','line-height:1.4','color:#0f172a'
+        ].join(';');
+        const hint = (location.origin + '/talk/index.json');
+        box.innerHTML = '❌ 無法讀取 /talk/index.json<br>'
+          + '<div style="color:#64748b;margin-top:4px">請確認檔案存在：' + hint + '</div>'
+          + '<div style="color:#64748b;margin-top:4px">錯誤：' + (err?.message || String(err)) + '</div>';
+        document.body.appendChild(box);
+      }catch(_){}
+    });
 })();
 </script>
 </body>
