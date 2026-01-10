@@ -267,44 +267,8 @@ body{padding-bottom:120px;} /* 避免被固定列蓋住 */
   .sceneVid{ max-height:160px !important; }
 }
 
-
-/* ==== Ultra compact overrides (mobile) ==== */
-@media (max-width: 520px){
-  .app{padding:8px 8px calc(8px + env(safe-area-inset-bottom)); gap:6px; max-width:980px}
-  .top{height:44px; padding:6px 8px}
-  .back{width:36px;height:36px}
-  .ttl{gap:1px}
-  .ttl b{font-size:14px; line-height:1.05}
-  .ttl .sub{font-size:11px; line-height:1.05}
-  .role{min-width:auto; padding:8px 10px; font-size:13px}
-  .sceneSelect{height:36px; font-size:12px; padding:0 10px}
-  .replay{height:36px; padding:0 12px; font-size:12px}
-  .who{padding:10px; gap:10px}
-  .av{width:54px;height:54px}
-  .whoText b{font-size:16px; line-height:1.05}
-  .whoText .meta{font-size:11px; line-height:1.05; margin-top:2px}
-  .line{padding:12px}
-  .line .en{font-size:22px; line-height:1.05}
-  .line .zh{font-size:12px; line-height:1.1; margin-top:4px}
-  .controls{gap:6px}
-  .bigMic{width:70px;height:70px}
-  .btn{height:38px; padding:0 12px; font-size:12px}
-  .mini{height:34px; padding:0 12px; font-size:12px}
-  .card{padding:12px}
-  .answerTitle{font-size:14px}
-  .aLine{font-size:18px; line-height:1.05}
-  .aHint{font-size:11px; line-height:1.1; margin-top:4px}
-  .chips{gap:6px; margin:6px 0}
-  .chip{height:30px; padding:0 10px; font-size:12px}
-  .input{height:42px; font-size:15px}
-  .sendRow{gap:8px}
-  .send{height:44px; font-size:14px}
-}
-/* hide any debug filename badges if present */
-.fileBadge,.jsonBadge,#jsonBadge,#fileBadge,#sceneFile,#sceneFileLabel{display:none!important;}
-
 </style>
-  <style id="bwGateHide">body{opacity:0;}</style>
+  <style id="bwGateHide"></style>
 <script>setTimeout(()=>{try{document.getElementById('bwGateHide')?.remove();}catch(e){}},3000);</script>
 
 <script>
@@ -455,14 +419,23 @@ body{padding-bottom:120px;} /* 避免被固定列蓋住 */
   <div id="missionBox" aria-label="任務" role="dialog"></div>
   <div id="examplesBox" aria-label="範例" role="dialog"></div>
 
-<script type="module">
+<script>
+(async()=>{
   /* ===== BookWide Talk Gate (same rule as player.html) =====
      - 必須先登入
      - 訂閱以 profiles.expires_at 為唯一權威（避免 orders/items 差異造成誤踢）
      - 可用 ?preview=1 進行內部測試（預設不開放外部）
   */
-  import { supabase as talkSupa, SUPABASE_URL } from "../supa.js";
-
+  // Try load supa.js when hosted (https). If it fails (file:// preview), run in offline mode.
+  let talkSupa = null;
+  let SUPABASE_URL = "";
+  try {
+    const mod = await import("../supa.js");
+    talkSupa = mod.supabase || mod.talkSupa || (mod.default && mod.default.supabase) || null;
+    SUPABASE_URL = mod.SUPABASE_URL || "";
+  } catch (e) {
+    console.warn("[Talk_A] supa.js not available (offline preview).", e);
+  }
   // expose for debugging / future learning-console scoring submit
   window.talkSupa = talkSupa;
 
@@ -471,6 +444,7 @@ body{padding-bottom:120px;} /* 避免被固定列蓋住 */
   const isPreview = paramsGate.get("preview") === "1";
 
   async function waitUser(maxMs = 1500, stepMs = 250){
+    if(!talkSupa) return null;
     const t0 = Date.now();
     while(Date.now() - t0 < maxMs){
       try{
@@ -483,6 +457,11 @@ body{padding-bottom:120px;} /* 避免被固定列蓋住 */
   }
 
   async function runGate(){
+    // Offline / file preview: skip auth gate so UI won't be blank.
+    if(!talkSupa || location.protocol === 'file:'){
+      document.getElementById('bwGateHide')?.remove();
+      return true;
+    }
     // 1) 必須登入（preview 也必須登入，與 player.html 一致）
     const user = await waitUser(1500, 250);
     if(!user){
@@ -679,40 +658,20 @@ const AVATAR_VIDEO_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/ob
   const gateBtn = $("gateBtn");
 
   function canSpeak(){ return ("speechSynthesis" in window) && ("SpeechSynthesisUtterance" in window); }
-  function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
-
-  async function speak(text){
+  function speak(text){
     const t = String(text||"").trim();
-    if(!t || !canSpeak()) return false;
+    if(!t || !canSpeak()) return Promise.resolve(false);
     lastSpoken = t;
-
-    // iOS/Safari: voices may not be ready until after a user gesture.
-    try{ speechSynthesis.getVoices(); }catch(_){}
-
     try{ speechSynthesis.cancel(); }catch(_){}
-    try{ speechSynthesis.resume(); }catch(_){}
-    await sleep(60);
-
-    return await new Promise((resolve)=>{
+    return new Promise((resolve)=>{
       const u = new SpeechSynthesisUtterance(t);
       u.lang = "en-US";
-
-      // Prefer an en-US voice if available
-      try{
-        const voices = speechSynthesis.getVoices?.() || [];
-        const v = voices.find(v=>/en-US/i.test(v.lang)) || voices.find(v=>/^en/i.test(v.lang));
-        if(v) u.voice = v;
-      }catch(_){}
-
-      u.onstart = ()=>{ try{ dot.classList.add("on"); }catch(_){} setSpeaking(true); };
-      u.onend   = ()=>{ try{ dot.classList.remove("on"); }catch(_){} setSpeaking(false); resolve(true); };
-      u.onerror = ()=>{ try{ dot.classList.remove("on"); }catch(_){} setSpeaking(false); resolve(false); };
-
-      try{ speechSynthesis.speak(u); }
-      catch(e){ setSpeaking(false); resolve(false); }
+      u.onstart = ()=>{ dot.classList.add("on"); setSpeaking(true); };
+      u.onend   = ()=>{ dot.classList.remove("on"); setSpeaking(false); resolve(true); };
+      u.onerror = ()=>{ dot.classList.remove("on"); setSpeaking(false); resolve(false); };
+      try{ speechSynthesis.speak(u); }catch(e){ resolve(false); }
     });
   }
-
   async function speakOrGate(text){
     const t = String(text||"").trim();
     if(!t) return false;
@@ -1305,6 +1264,8 @@ $("btnTranslate").addEventListener("click", ()=> {
         document.body.appendChild(box);
       }catch(_){}
     });
+})();
+
 })();
 </script>
 </body>
