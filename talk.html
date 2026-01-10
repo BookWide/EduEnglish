@@ -247,7 +247,7 @@ a{color:inherit}
 
     <div class="card fillCard" id="fillCard">
       <div class="fillHead">
-        <div class="h">填空提示</div>
+        <div class="h" id="fillTitle">你的回覆</div>
         <div class="badges">
           <span class="badge lev" id="levBadge">A1</span>
           <button class="badge" id="btnHideFill" type="button">隱藏</button>
@@ -337,6 +337,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   const btnSave = $("btnSave");
   const btnFill = $("btnFill");
   const fillCard = $("fillCard");
+  const fillTitle = $("fillTitle");
   const btnHideFill = $("btnHideFill");
   const fillEn = $("fillEn");
   const fillHint = $("fillHint");
@@ -349,6 +350,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   let indexData = null;               // {scenes:[]}
   let byWeek = new Map();             // weekNo -> scenes[]
   let unlockedWeek = 1;               // computed
+  let talkMode = "dialogue";          // "dialogue" or "shadow"
   let activeWeek = 1;
   let activeSceneId = null;
   let activeSceneTitle = "";
@@ -413,9 +415,11 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       : (raw && (raw.turns || raw.dialogue) ? (raw.turns || raw.dialogue) : []);
     return (arr||[]).map(t=>{
       if(!t) return null;
-      const en = (t.en ?? t.hint_en ?? t.english ?? t.text ?? '').toString().trim();
-      const zh = (t.zh ?? t.hint_zh ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
-      const role = (t.role ?? t.speaker ?? '').toString().trim() || 'AI';
+      const hasAI = !!(t.en || t.zh || t.english || t.text);
+      const hasUser = !t.en && (t.hint_en || t.hint_zh);
+      const en = (t.en ?? (hasUser ? t.hint_en : "") ?? t.english ?? t.text ?? '').toString().trim();
+      const zh = (t.zh ?? (hasUser ? t.hint_zh : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
+      const role = ((t.role ?? t.speaker ?? '').toString().trim()) || (hasUser ? "USER" : "AI");
       const level = (t.level ?? t.cefr ?? '').toString().trim() || 'A1';
       const hint = (t.hint ?? '').toString().trim();
       const fill = (t.fill ?? t.blank ?? '').toString();
@@ -433,25 +437,54 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   }
 
   function updateUI(){
+    // Dialogue mode: show AI line, and the input expects USER reply (next turn)
+    if(talkMode === "dialogue"){
+      // find current AI turn (at or after turnIdx)
+      let aiIdx = turnIdx;
+      while(aiIdx < turns.length && turns[aiIdx]?.role === "USER") aiIdx++;
+      if(aiIdx >= turns.length) aiIdx = Math.max(0, turns.length-1);
+      const ai = turns[aiIdx] || {en:"—",zh:"",level:"A1",role:"AI"};
+      const user = (turns[aiIdx+1] && turns[aiIdx+1].role==="USER") ? turns[aiIdx+1] : null;
+
+      lineEn.textContent = ai.en || "—";
+      lineZh.textContent = ai.zh ? ai.zh : " ";
+      levBadge.textContent = ai.level || "A1";
+
+      // Input card becomes "your reply"
+      fillTitle.textContent = "你的回覆";
+      fillEn.textContent = user?.en || "請輸入你的回覆…";
+      fillHint.textContent = "這是『對話模式』：AI 先說一句，換你回覆（可用麥克風或輸入）。";
+      // do not auto-clear while typing
+      // top labels
+      weekLabel.textContent = "W" + String(activeWeek);
+      scenePickLabel.textContent = activeSceneTitle ? activeSceneTitle : "選擇情境";
+      sceneTitle.textContent = activeSceneTitle ? activeSceneTitle : "載入中…";
+      const progMax = Math.max(1, Math.ceil(turns.length/2));
+      const progNow = Math.min(progMax, Math.floor(aiIdx/2)+1);
+      sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${progNow}/${progMax}`;
+      return;
+    }
+
+    // Shadow mode (跟讀/填空)
     const t = currentTurn();
     lineEn.textContent = t.en || "—";
     lineZh.textContent = t.zh ? t.zh : " ";
     levBadge.textContent = t.level || "A1";
 
-    // Fill guide
     const fillText = t.fill && t.fill.trim() ? t.fill : guessFillFromSentence(t.en);
+    fillTitle.textContent = "填空提示";
     fillEn.textContent = fillText || "Can I get a ____ , please?";
     fillHint.textContent = t.hint && t.hint.trim()
       ? t.hint
       : "先用「填空」完成一句，再改成你自己的說法。";
     if(!fillInput.value) fillInput.value = "";
 
-    // top labels
     weekLabel.textContent = "W" + String(activeWeek);
     scenePickLabel.textContent = activeSceneTitle ? activeSceneTitle : "選擇情境";
     sceneTitle.textContent = activeSceneTitle ? activeSceneTitle : "載入中…";
     sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${turnIdx+1}/${Math.max(1,turns.length)}`;
   }
+
 
   function guessFillFromSentence(en){
     if(!en) return "";
@@ -666,6 +699,9 @@ async function init(){
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
     activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;
 
+    // 模式：對話(dialogue) / 跟讀(shadow)
+    try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
+
     try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
     // load index.json
     try{
@@ -680,42 +716,94 @@ async function init(){
 
     // pick scene
     const params = new URLSearchParams(location.search);
-    const legacyScene = params.get("scene"); // e.g. coffee_shop
+    const legacyScene = (params.get("scene")||"").trim(); // e.g. airport / coffee_shop / w02.variation.airport
     const forcedScene = null;
 
     let firstId = null, firstTitle = null;
 
+    // scenes list from index.json
+    const allScenes = Array.isArray(indexData?.scenes) ? indexData.scenes : [];
+
+    function baseNameNoExt(p){
+      if(!p) return "";
+      const s = String(p).split("?")[0].split("#")[0];
+      const file = s.split("/").pop() || s;
+      return file.replace(/\.json$/i,"");
+    }
+    function resolveScene(param){
+      if(!param) return null;
+      const q = String(param).trim();
+
+      // 1) exact id match
+      let hit = allScenes.find(s => (s?.id||"") === q);
+      if(hit) return hit;
+
+      // 2) match file base name (w02.variation.airport) or last token (airport)
+      const qBase = q.replace(/\.json$/i,"");
+      const qTail = qBase.split(".").pop();
+
+      const candidates = [];
+      for(const s of allScenes){
+        const id = String(s?.id||"");
+        const fileBase = baseNameNoExt(s?.file||s?.url||""); // support either field
+        const idTail = id.split(".").pop();
+        if(!id) continue;
+
+        if(fileBase && fileBase === qBase) candidates.push(s);
+        else if(fileBase && fileBase.endsWith("." + qBase)) candidates.push(s);
+        else if(id === qBase) candidates.push(s);
+        else if(id.endsWith("." + qBase)) candidates.push(s);
+        else if(qTail && (idTail === qTail || fileBase.endsWith("." + qTail) || id.endsWith("." + qTail))) candidates.push(s);
+      }
+      if(candidates.length === 0) return null;
+
+      // prefer same week as activeWeek
+      const aw = Number(activeWeek||0);
+      let best = null;
+      let bestScore = -1;
+      for(const s of candidates){
+        const w = Number(s?.week||0);
+        const tr = String(s?.track||"");
+        const score =
+          (w === aw ? 1000 : 0) +
+          (w ? (100 - Math.abs(w - aw)) : 0) +
+          (tr==="core" ? 3 : tr==="variation" ? 2 : tr==="challenge" ? 1 : 0);
+        if(score > bestScore){ bestScore = score; best = s; }
+      }
+      return best || candidates[0];
+    }
+
     if(legacyScene){
-      // 兼容舊參數：?scene=airport  ->  對應到 index.json 內含 airport 的 id (例如 w02.variation.airport)
-      let mapped = null;
-      for(const list of byWeek.values()){
-        const hit = list.find(x => x.id === legacyScene || x.id.endsWith(`.${legacyScene}`) || x.id.includes(legacyScene));
-        if(hit){ mapped = hit; break; }
-      }
-      firstId = mapped ? mapped.id : legacyScene;
-      firstTitle = mapped ? mapped.title : legacyScene;
-    }else if(forcedScene){
-      firstId = forcedScene;
-      // try resolve title
-      for(const wkList of byWeek.values()){
-        const hit = wkList.find(x=>x.id===forcedScene);
-        if(hit){ firstTitle = hit.title; break; }
-      }
-      firstTitle = firstTitle || forcedScene;
-    }else{
-      const list = byWeek.get(activeWeek) || [];
-      if(list.length){
-        firstId = list[0].id; firstTitle = list[0].title;
+      const mapped = resolveScene(legacyScene);
+      if(mapped){
+        firstId = mapped.id;
+        firstTitle = mapped.title || mapped.id;
       }else{
-        // fallback: if no wxx scenes, pick first in index
-        const scenes = indexData?.scenes || [];
-        if(scenes[0]){
-          firstId = scenes[0].id; firstTitle = scenes[0].title || scenes[0].id;
-        }
+        // 如果找不到就不要硬跳到第一個（避免顯示錯情境）
+        turns = [{en:"Scene not found: "+legacyScene, zh:"找不到此情境（請確認 URL 參數或 index.json 是否包含）", level:"A1"}];
+        updateUI();
+        return;
+      }
+    }else if(forcedScene){
+      const mapped = resolveScene(forcedScene);
+      if(mapped){
+        firstId = mapped.id;
+        firstTitle = mapped.title || mapped.id;
+      }else{
+        firstId = forcedScene;
+        firstTitle = forcedScene;
+      }
+    }else{
+      // default: pick first in current active week; else first in index
+      let pick = allScenes.find(s => Number(s?.week||0) === Number(activeWeek||0));
+      if(!pick) pick = allScenes[0] || null;
+      if(pick){
+        firstId = pick.id; firstTitle = pick.title || pick.id;
       }
     }
 
-    if(!firstId){
+    // --- resolved ---
+if(!firstId){
       turns = [{en:"No scenes in index.json", zh:"請先把 w01..w08 的 JSON 與 talk/index.json 放在 /talk/ 目錄", level:"A1"}];
       updateUI();
       return;
@@ -759,24 +847,47 @@ async function init(){
   });
 
   btnSendFill.addEventListener("click", async ()=>{
-    const t = currentTurn();
+    if(talkMode === "dialogue"){
+      const said = (fillInput.value || "").trim();
+      if(!said){ showToast("請先輸入你的回覆"); return; }
+      await speak(said);
+      showToast("已送出 ✅");
+      // go to next AI turn (AI/USER 成對)
+      turnIdx = Math.min(turns.length-1, turnIdx + 2);
+      fillInput.value = "";
+      updateUI();
+      return;
+    }
+
     const blank = fillEn.textContent;
     const word = fillInput.value.trim();
     if(!word){ showToast("請先填入空格"); return; }
     const sentence = blank.replace("____", word);
     await speak(sentence);
     showToast("送出完成 ✅");
-    // after sending, go next
     setTimeout(()=>nextTurn(), 900);
   });
 
+
   btnType.addEventListener("click", ()=>{
+    if(talkMode === "dialogue"){
+      // default show suggested reply (next USER turn)
+      let aiIdx = turnIdx;
+      while(aiIdx < turns.length && turns[aiIdx]?.role === "USER") aiIdx++;
+      const user = (turns[aiIdx+1] && turns[aiIdx+1].role==="USER") ? turns[aiIdx+1] : null;
+      const ans = prompt("輸入你的回覆（會用 TTS 朗讀）", user?.en || "");
+      if(ans && ans.trim()){
+        fillInput.value = ans.trim();
+      }
+      return;
+    }
     const t = currentTurn();
     const ans = prompt("輸入你的句子（會用 TTS 朗讀）", t.en || "");
     if(ans && ans.trim()){
       speak(ans.trim());
     }
   });
+
 
   btnBack.addEventListener("click", ()=>{
     history.length>1 ? history.back() : (location.href = "./");
