@@ -450,10 +450,15 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       lineZh.textContent = ai.zh ? ai.zh : " ";
       levBadge.textContent = ai.level || "A1";
 
-      // Input card becomes "your reply"
+      // Input card becomes "your reply" (do NOT reveal the expected answer by default)
       fillTitle.textContent = "你的回覆";
-      fillEn.textContent = user?.en || "請輸入你的回覆…";
-      fillHint.textContent = "這是『對話模式』：AI 先說一句，換你回覆（可用麥克風或輸入）。";
+      const expected = (user?.en || "").trim();
+      // build cloze + options for low difficulty guidance
+      const cl = makeCloze(expected);
+      // default show cloze; user can press「提示」to reveal full expected answer temporarily
+      fillEn.textContent = expected ? (cl.cloze || "請輸入你的回覆…") : "請輸入你的回覆…";
+      renderFillOptions(cl);
+      fillHint.textContent = "對話模式：AI 先說一句，等你回覆（語音或輸入）才會進下一句。按「提示」可顯示完整建議句。";
       // do not auto-clear while typing
       // top labels
       weekLabel.textContent = "W" + String(activeWeek);
@@ -486,7 +491,111 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   }
 
 
-  function guessFillFromSentence(en){
+  
+  // ---- dialogue guidance: cloze + options (A2-ish by default) ----
+  function makeCloze(expectedEn){
+    const s = (expectedEn||"").trim();
+    if(!s) return {cloze:"", answer:"", options:[]};
+    // pick a target word: prefer numbers, then last content word
+    const tokens = s.replace(/[?!.]/g,"").split(/\s+/).filter(Boolean);
+    let target = "";
+    // number?
+    for(const tk of tokens){
+      if(/\d/.test(tk)){ target = tk; break; }
+    }
+    if(!target){
+      for(let i=tokens.length-1;i>=0;i--){
+        const tk = tokens[i].replace(/[^A-Za-z0-9'-]/g,"");
+        if(tk.length>=4 && !/^(this|that|with|have|your|what|where|when|could|would|please)$/i.test(tk)){
+          target = tokens[i];
+          break;
+        }
+      }
+    }
+    if(!target) target = tokens[Math.max(0, tokens.length-1)];
+
+    // build cloze
+    const esc = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const cloze = s.replace(new RegExp('\\b'+esc+'\\b'), '____');
+
+    // distractor pool (small + stable)
+    const pool = ["gate","terminal","passport","boarding","information","coffee","small","large","help","today","tomorrow","please","thanks","baggage","counter","check-in"];
+    const lower = target.toLowerCase();
+    const opts = [target];
+    for(const w of pool){
+      if(opts.length>=3) break;
+      if(w.toLowerCase()===lower) continue;
+      // keep similar type: if target is number, add numbers
+      if(/\d/.test(target)){
+        if(/\d/.test(w)) opts.push(w);
+      }else{
+        if(!/\d/.test(w)) opts.push(w);
+      }
+    }
+    // fallback for number
+    if(/\d/.test(target) && opts.length<3){
+      const n = parseInt(target.replace(/\D/g,""),10) || 12;
+      while(opts.length<3){
+        const cand = String(n + (opts.length===1?1:2));
+        if(!opts.includes(cand)) opts.push(cand);
+      }
+    }
+    return {cloze, answer: target, options: opts};
+  }
+
+  function ensureFillOpts(){
+    let el = document.getElementById("fillOpts");
+    if(!el){
+      el = document.createElement("div");
+      el.id = "fillOpts";
+      el.className = "fillOpts";
+      el.style.display = "flex";
+      el.style.flexWrap = "wrap";
+      el.style.gap = "10px";
+      el.style.marginTop = "10px";
+      // insert right after fillHint
+      fillHint.insertAdjacentElement("afterend", el);
+    }
+    return el;
+  }
+
+  function renderFillOptions(cl){
+    const el = ensureFillOpts();
+    el.innerHTML = "";
+    if(!cl || !cl.options || cl.options.length===0) return;
+    cl.options.forEach((opt)=>{
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "optBtn";
+      b.textContent = opt;
+      b.style.border = "1px solid var(--line)";
+      b.style.background = "#fff";
+      b.style.borderRadius = "999px";
+      b.style.padding = "10px 14px";
+      b.style.cursor = "pointer";
+      b.addEventListener("click", ()=>{
+        const expected = (currentExpectedEn()||"").trim();
+        if(!expected){ fillInput.value = opt; return; }
+        const cl2 = makeCloze(expected);
+        const completed = (cl2.cloze||"").includes("____")
+          ? cl2.cloze.replace("____", opt)
+          : expected;
+        fillInput.value = completed;
+        fillInput.focus();
+      });
+      el.appendChild(b);
+    });
+  }
+
+  function currentExpectedEn(){
+    if(talkMode!=="dialogue") return "";
+    // expected is the first USER turn right after current AI turn
+    const aiIdx = turnIdx;
+    const user = (turns[aiIdx+1] && turns[aiIdx+1].role==="USER") ? turns[aiIdx+1] : expectedAfter(aiIdx);
+    return (user && user.en) ? user.en : "";
+  }
+
+function guessFillFromSentence(en){
     if(!en) return "";
     // Simple heuristic: blank the longest noun-ish token or last content word
     const s = String(en).trim();
@@ -515,11 +624,29 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     try{ window.speechSynthesis.cancel(); }catch(e){}
   }
 
+  function isAI(t){ return !!t && (t.role||'AI') !== 'USER'; }
+  function nextAIIndex(from){
+    for(let i=from+1;i<turns.length;i++){
+      if(isAI(turns[i])) return i;
+    }
+    return -1;
+  }
+  function expectedAfter(aiIndex){
+    for(let i=aiIndex+1;i<turns.length;i++){
+      const t = turns[i];
+      if(!t) continue;
+      if(isAI(t)) break;
+      return t; // first user-like turn after AI
+    }
+    return null;
+  }
+
   function nextTurn(){
-    if(turnIdx < turns.length-1){
-      turnIdx++;
+    const ni = nextAIIndex(turnIdx);
+    if(ni >= 0){
+      turnIdx = ni;
       updateUI();
-      speak(currentTurn().en);
+      speak(currentTurn().en); // only speak AI turns
     }else{
       showToast("本情境完成 ✅");
     }
@@ -846,6 +973,21 @@ if(!firstId){
   btnSkip.addEventListener("click", ()=>nextTurn());
 
   btnHint.addEventListener("click", ()=>{
+    if(talkMode === "dialogue"){
+      const expected = (currentExpectedEn() || "").trim();
+      if(!expected){ showToast("本句沒有建議回覆"); return; }
+      // temporarily reveal the full expected sentence
+      fillEn.textContent = expected;
+      showToast("已顯示提示（完整句）");
+      // auto revert to cloze after 3 seconds
+      clearTimeout(window.__bwHintTimer);
+      window.__bwHintTimer = setTimeout(()=>{
+        const cl = makeCloze(expected);
+        fillEn.textContent = cl.cloze || expected;
+        renderFillOptions(cl);
+      }, 3000);
+      return;
+    }
     const t = currentTurn();
     showToast(t.hint && t.hint.trim() ? t.hint : "提示：先跟著唸一遍，再改成你自己的說法。");
   });
@@ -871,22 +1013,20 @@ if(!firstId){
     if(talkMode === "dialogue"){
       const said = (fillInput.value || "").trim();
       if(!said){ showToast("請先輸入你的回覆"); return; }
-      await speak(said);
-      showToast("已送出 ✅");
-      // go to next AI turn (AI/USER 成對)
-      turnIdx = Math.min(turns.length-1, turnIdx + 2);
+      // speak user's reply (optional)
+      try{ await speak(said); }catch(e){}
+      // clear input but keep the guidance panel
       fillInput.value = "";
-      updateUI();
+      showToast("已送出 ✅");
+      // advance to NEXT AI line (skip USER expected line)
+      nextTurn();
       return;
     }
-
-    const blank = fillEn.textContent;
-    const word = fillInput.value.trim();
-    if(!word){ showToast("請先填入空格"); return; }
-    const sentence = blank.replace("____", word);
-    await speak(sentence);
-    showToast("送出完成 ✅");
-    setTimeout(()=>nextTurn(), 900);
+    // non-dialogue (fill practice)
+    const said = (fillInput.value || "").trim();
+    if(!said){ showToast("請先填空"); return; }
+    await speak(said);
+    showToast("做得好 ✅");
   });
 
 
@@ -929,11 +1069,17 @@ if(!firstId){
     rec.maxAlternatives = 1;
     $("dotLive").style.background = "#ef4444";
     rec.onresult = (ev)=>{
-      const said = ev.results?.[0]?.[0]?.transcript || "";
+      const said = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) ? ev.results[0][0].transcript : "";
       $("dotLive").style.background = "#22c55e";
-      showToast("你說： " + said);
-      // simple progress rule: if user said something, move on
-      setTimeout(()=>nextTurn(), 750);
+      if(!said.trim()){
+        showToast("沒有聽清楚，請再說一次");
+        return;
+      }
+      // put into input and submit (dialogue mode)
+      fillInput.value = said.trim();
+      showToast("你說： " + said.trim());
+      // auto send -> advance to next AI
+      setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 350);
     };
     rec.onerror = ()=>{
       $("dotLive").style.background = "#22c55e";
