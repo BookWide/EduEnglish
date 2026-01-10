@@ -16,6 +16,7 @@ body{
   margin:0; font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;
   background:var(--bg); color:var(--ink);
   overscroll-behavior: none;
+  padding-bottom:18px;
 }
 a{color:inherit}
 .wrap{max-width:980px; margin:0 auto; padding:14px 14px 24px}
@@ -168,6 +169,28 @@ a{color:inherit}
   .fillInput{min-height:44px; font-size:14px}
   .chip{font-size:11px; padding:8px 10px}
 }
+.fileTag{display:inline-block; margin-left:10px; font-size:12px; color:var(--muted); max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+.bottomPanel{
+  position:sticky; bottom:10px; left:auto; transform:none;
+  width:100%;
+  margin-top:12px;
+  border:1px solid var(--line);
+  border-radius:var(--r2);
+  background:var(--card);
+  box-shadow:0 10px 28px rgba(10,20,40,.10);
+  padding:12px 14px;
+  z-index:5;
+}
+.bpRow{display:flex; gap:10px; align-items:flex-start;}
+.bpTitle{flex:0 0 auto; font-weight:800; font-size:13px; padding:4px 10px; border-radius:999px; background:var(--soft); color:var(--brand2);}
+.bpBody{flex:1 1 auto; font-size:13px; color:var(--ink); line-height:1.35; min-height:22px;}
+.bpLinks{margin-top:8px; display:flex; gap:10px; flex-wrap:wrap;}
+.bpLink{font-size:12px; color:var(--brand2); text-decoration:none; padding:6px 10px; border:1px solid var(--line); border-radius:999px; background:#fff;}
+.bpLink:hover{background:var(--soft);}
+@media (max-width:520px){
+  .fileTag{max-width:120px}
+  .bottomPanel{bottom:8px; padding:10px 12px; border-radius:16px;}
+}
 </style>
 </head>
 <body>
@@ -187,6 +210,7 @@ a{color:inherit}
         <span aria-hidden="true">▾</span>
       </button>
       <button class="smallBtn" id="btnReplay">重播</button>
+      <span class="fileTag" id="fileTag"></span>
     </div>
   </div>
 
@@ -240,6 +264,9 @@ a{color:inherit}
       </div>
     </div>
   </div>
+<div class="bottomPanel" id="bottomPanel" aria-label="任務與參考">
+  <div class="bpRow">
+    <div class="bpTitle">任務</div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -277,7 +304,13 @@ a{color:inherit}
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
   const LS_SAVED = "BW_TALK_SAVED_LINES";
-  const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
+    const fileTag = $("fileTag");
+  const missionText = $("missionText");
+  const lnkRole = $("lnkRole");
+  const lnkDialog = $("lnkDialog");
+  const lnkMeta = $("lnkMeta");
+  let currentSceneJson = null;
+const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const DAY = 24*60*60*1000;
   const MAX_WEEKS = 8; // MVP
@@ -482,6 +515,18 @@ a{color:inherit}
     ];
     try{
       activeScene = await fetchJsonAny(fallback);
+      currentSceneJson = activeScene;
+      if(fileTag) fileTag.textContent = (activeSceneId ? (activeSceneId + ".json") : "");
+      // 任務文字：優先 title_zh/title_en，其次用 scene / id
+      const tz = safeText(activeScene?.title_zh || activeScene?.titleZh || "");
+      const te = safeText(activeScene?.title_en || activeScene?.titleEn || "");
+      const sc = safeText(activeScene?.scene || "");
+      const lv = safeText(activeScene?.level || "");
+      const head = (tz || te) ? (tz || te) : (sc ? sc : activeSceneTitle);
+      const sub = (tz && te) ? te : (te || tz ? "" : "");
+      const extra = [lv?(" · "+lv):"", sc?(" · "+sc):""].join("");
+      if(missionText) missionText.innerHTML = "<b>"+escapeHtml(head)+"</b>" + (sub?(" <span class=\"sub\">"+escapeHtml(sub)+"</span>"):"") + (extra?(" <span class=\"sub\">"+escapeHtml(extra.trim())+"</span>"):"");
+
     }catch(e){
       showToast("找不到場景 JSON：" + id);
       turns = [{en:"Scene JSON not found.", zh:"找不到場景 JSON（請確認檔案放在 /talk/）", level:"A1"}];
@@ -561,7 +606,58 @@ a{color:inherit}
     return String(s||"").replace(/[&<>"]/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
   }
 
-  async function init(){
+  // bottom tiny links (reference)
+  function showModalHtml(title, inner){
+    modalBody.innerHTML = '<div style="font-weight:900; margin-bottom:10px">'+escapeHtml(title)+'</div>' + inner;
+    openModal();
+  }
+  function escapeHtml(s){
+    return String(s??"").replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+  function buildDialogueHtml(){
+    const d = (currentSceneJson && Array.isArray(currentSceneJson.dialogue)) ? currentSceneJson.dialogue : [];
+    if(!d.length) return '<div class="sub">（此情境沒有 dialogue）</div>';
+    return d.map((x,i)=>{
+      const who = escapeHtml(x.speaker||x.role||"");
+      const en = escapeHtml(x.en||"");
+      const zh = escapeHtml(x.zh||"");
+      return '<div style="padding:10px 0;border-bottom:1px solid var(--line)"><div style="font-weight:800">'+(i+1)+'. '+who+'</div><div>'+en+'</div><div class="sub" style="margin-top:4px">'+zh+'</div></div>';
+    }).join("");
+  }
+  function buildRoleHtml(){
+    const r = (currentSceneJson && currentSceneJson.role) ? currentSceneJson.role : {};
+    const aiName = escapeHtml(r.ai_name || "AI");
+    const aiRole = escapeHtml(r.ai_role || "");
+    const scene = escapeHtml(currentSceneJson?.scene || "");
+    const lvl = escapeHtml(currentSceneJson?.level || "");
+    return [
+      '<div style="display:grid; gap:8px">',
+      '<div><b>AI：</b>'+aiName+(aiRole?(' · '+aiRole):'')+'</div>',
+      scene ? ('<div><b>情境：</b>'+scene+'</div>') : '',
+      lvl ? ('<div><b>等級：</b>'+lvl+'</div>') : '',
+      '</div>'
+    ].join("");
+  }
+  function buildMetaHtml(){
+    const id = escapeHtml(currentSceneJson?.id || activeSceneId || "");
+    const track = escapeHtml(currentSceneJson?.track || "");
+    const week = escapeHtml(currentSceneJson?.week ?? "");
+    const modes = Array.isArray(currentSceneJson?.training_modes) ? currentSceneJson.training_modes.join(", ") : "";
+    return [
+      '<div style="display:grid; gap:8px">',
+      id?('<div><b>ID：</b>'+id+'</div>'):'',
+      week?('<div><b>Week：</b>'+week+'</div>'):'',
+      track?('<div><b>Track：</b>'+track+'</div>'):'',
+      modes?('<div><b>Modes：</b>'+escapeHtml(modes)+'</div>'):'',
+      '<div class="sub">（提示：右上會顯示目前載入的 JSON 檔名）</div>',
+      '</div>'
+    ].join("");
+  }
+  if(lnkRole) lnkRole.addEventListener("click",(e)=>{ e.preventDefault(); showModalHtml("主角", buildRoleHtml()); });
+  if(lnkDialog) lnkDialog.addEventListener("click",(e)=>{ e.preventDefault(); showModalHtml("範例對話", buildDialogueHtml()); });
+  if(lnkMeta) lnkMeta.addEventListener("click",(e)=>{ e.preventDefault(); showModalHtml("資訊", buildMetaHtml()); });
+
+async function init(){
     getOverrides();
     unlockedWeek = computeUnlockedWeek();
 
