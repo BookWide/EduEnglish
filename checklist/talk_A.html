@@ -63,7 +63,22 @@ a{color:inherit}
   .mic{width:64px;height:64px}
 }
 </style>
+
+<script>
+// ===== Global error guards (avoid Uncaught (in promise) Object) =====
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = e.reason instanceof Error ? (e.reason.stack || e.reason.message) : safeStr(e.reason);
+  console.error("UnhandledPromiseRejection:", e.reason);
+  if (window.showErr) window.showErr("Promise Error: " + reason);
+});
+window.addEventListener('error', (e) => {
+  console.error("RuntimeError:", e.message);
+  if (window.showErr) window.showErr("Runtime Error: " + e.message);
+});
+function safeStr(v){ try{ return (typeof v==='string')?v:JSON.stringify(v); } catch(_){ return String(v); } }
+</script>
 </head>
+
 <body>
 <div class="wrap" id="app">
   <div class="top">
@@ -256,7 +271,9 @@ a{color:inherit}
     lineIdx: 0,
     hideZh: false,
     recog: null,
-  };
+      clozeActive: false,
+    clozeText: '',
+};
 
   function showErr(msg) {
     const box = $("errBox");
@@ -270,7 +287,6 @@ a{color:inherit}
   }
 
   
-
 
 // ===== Cloze (填空引導) =====
 const BW_STOP_WORDS = new Set([
@@ -286,7 +302,6 @@ const BW_STOP_WORDS = new Set([
 ]);
 
 function bw_sceneFallbackSentence(){
-  // Use sceneSel value (works even if JSON/state not ready)
   const sid = (document.getElementById("sceneSel")?.value || "").toLowerCase();
   if (sid.includes("coffee")) return "What would you like to drink?";
   if (sid.includes("restaurant")) return "May I take your order?";
@@ -306,39 +321,31 @@ function bw_makeCloze(sentence, maxHoles=2){
   const s = (sentence || "").trim();
   if(!s) return { ok:false, cloze:"—", answer:"", msg:"沒有可用句子" };
 
-  // Keep spaces as tokens so formatting stays natural
-  const tokens = s.split(/(\s+)/);
-  const candidates = [];
+  const tokens = s.split(/(\s+)/); // keep spaces
+  const cands = [];
   for (let i=0;i<tokens.length;i++){
     const w = tokens[i];
     if(!w || /^\s+$/.test(w)) continue;
-
-    // Word with >=4 letters; allow apostrophe/hyphen
     const m = /^[A-Za-z][A-Za-z'\-]{3,}$/.exec(w);
     if(!m) continue;
-
     const low = w.toLowerCase();
     if (BW_STOP_WORDS.has(low)) continue;
-
-    const score = w.replace(/[^A-Za-z]/g,"").length; // prefer longer
-    candidates.push({i, w, score});
+    const score = w.replace(/[^A-Za-z]/g,"").length;
+    cands.push({i, w, score});
   }
 
-  if(!candidates.length){
-    // fallback: blank first word-like segment
-    const cloze = s.replace(/[A-Za-z][A-Za-z'\-]*/,"_____");
-    return { ok:true, cloze, answer:"", msg:"" };
+  if(!cands.length){
+    return { ok:true, cloze: s.replace(/[A-Za-z][A-Za-z'\-]*/,"_____"), answer:"", msg:"" };
   }
 
-  candidates.sort((a,b)=> (b.score-a.score) || (a.i-b.i));
-  const pick = candidates.slice(0, Math.max(1, Math.min(maxHoles, candidates.length)));
+  cands.sort((a,b)=> (b.score-a.score) || (a.i-b.i));
+  const pick = cands.slice(0, Math.max(1, Math.min(maxHoles, cands.length)));
 
   const answers = [];
   for (const p of pick){
     answers.push(tokens[p.i]);
     tokens[p.i] = "_____";
   }
-
   return { ok:true, cloze: tokens.join(""), answer: answers.join(" / "), msg:"" };
 }
 
@@ -350,10 +357,18 @@ function bw_applyCloze(){
     showErr("填空引導：" + r.msg);
     return;
   }
-  $("qText").textContent = r.cloze; // 顯示在「你的回覆」區
+  state.clozeActive = true;
+  state.clozeText = r.cloze;
+
+  $("qText").textContent = r.cloze; // ✅ 顯示在「你的回覆」區（qText）
   $("helpText").textContent = "填空引導：請完成空格後送出。" + (r.answer ? "（答案提示：" + r.answer + "）" : "");
   $("userInput").focus();
   $("qText").scrollIntoView({behavior:"smooth", block:"center"});
+}
+
+function bw_clearCloze(){
+  state.clozeActive = false;
+  state.clozeText = "";
 }
 
 function parseWeekFromId(id) {
@@ -447,13 +462,11 @@ function parseWeekFromId(id) {
     $("aiZh").textContent = state.hideZh ? "" : (aiZh || " ");
 
     const q = (line?.q || line?.question || line?.prompt || line?.user_en || line?.cloze || "—");
-    const curQ = $("qText").textContent || "";
-    if(curQ.includes("_____")) {
-      // keep cloze text until user submits or retries
+    if(state.clozeActive && state.clozeText){
+      $("qText").textContent = state.clozeText;
     } else {
       $("qText").textContent = q;
     }
-
 $("curJsonName").textContent = scene?.id ? (scene.id + ".json") : "—";
     clearErr();
   }
@@ -525,15 +538,14 @@ $("curJsonName").textContent = scene?.id ? (scene.id + ".json") : "—";
   $("btnBack").onclick = ()=> history.back();
   $("btnReplay").onclick = ()=> speak($("aiEn").textContent);
   $("btnFocus").onclick = ()=> $("userInput").focus();
-  $("btnSkip").onclick = ()=> nextLine();
+  $("btnSkip").onclick = ()=> { bw_clearCloze(); nextLine(); };
   $("btnHint").onclick = ()=> alert("提示（demo）：請看中文提示，或先用簡短句回覆。");
   $("btnSave").onclick = ()=> alert("收藏（demo）：管理版可之後接資料庫。");
   $("btnCloze").onclick = ()=> bw_applyCloze();
   $("btnHide").onclick = ()=> { state.hideZh = !state.hideZh; $("btnHide").textContent = state.hideZh ? "顯示" : "隱藏"; render(); };
-  $("btnSubmit").onclick = ()=> { $("qText").textContent = ""; nextLine(); };
-  $("btnRetry").onclick = ()=> { state.lineIdx = 0; $("userInput").value=""; $("qText").textContent=""; render(); };
-
-  $("sceneSel").onchange = (e)=> loadSceneById(e.target.value);
+  $("btnSubmit").onclick = ()=> { bw_clearCloze(); nextLine(); };
+  $("btnRetry").onclick = ()=> { bw_clearCloze(); state.lineIdx = 0; $("userInput").value=""; render(); };
+  $("sceneSel").onchange = (e)=> { bw_clearCloze(); loadSceneById(e.target.value); };
   $("btnAdmin").onclick = ()=> $("adminBox").classList.toggle("show");
 
   $("fileIndex").addEventListener("change", async (e)=> {
