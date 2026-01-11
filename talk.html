@@ -1,110 +1,6 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
-
-<!-- ================= BookWide Guard (Talk student) ================ -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script>
-  (function(){
-    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-    const SUPABASE_ANON_KEY =
-      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-
-    // Root base: github.io /EduEnglish, custom domain ''
-    const ROOT_BASE = (
-      location.pathname.startsWith('/EduEnglish') ||
-      location.hostname.includes('github.io')
-    ) ? '/EduEnglish' : '';
-
-    const talkSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-    async function bwGetUser(){
-      try{
-        const { data, error } = await talkSupa.auth.getUser();
-        if (error || !data || !data.user) return null;
-        return data.user;
-      }catch(e){
-        console.warn('[talk-auth] getUser error', e);
-        return null;
-      }
-    }
-
-    async function waitUser(maxMs=1500, stepMs=250){
-      const t0 = Date.now();
-      while(Date.now() - t0 < maxMs){
-        const u = await bwGetUser();
-        if(u) return u;
-        await new Promise(r=>setTimeout(r, stepMs));
-      }
-      return null;
-    }
-
-    // Expose for bottom init() gate
-    window.BW = window.BW || {};
-    window.BW.ensureTalkAccess = async function ensureTalkAccess(){
-      const next = location.pathname + location.search;
-
-      // 1) must login
-      const user = await waitUser(1500, 250);
-      if(!user){
-        const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
-        url.searchParams.set('denied','signin');
-        url.searchParams.set('next', next);
-        location.href = url.toString();
-        return false;
-      }
-
-      // 2) must have active subscription by profiles.expires_at (same rule as player)
-      try{
-        const { data: p, error: perr } = await talkSupa
-          .from('profiles')
-          .select('expires_at')
-          .eq('id', user.id)
-          .maybeSingle();
-
-        if(perr){
-          console.warn('[talk-auth] profiles.expires_at read error', perr);
-        }
-
-        const today = new Date();
-        today.setHours(0,0,0,0);
-
-        const exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
-
-        if(!exp || isNaN(exp.getTime())){
-          const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-          url.searchParams.set('denied','noactive');
-          url.searchParams.set('next', next);
-          location.href = url.toString();
-          return false;
-        }
-
-        if(exp.getTime() < today.getTime()){
-          const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-          url.searchParams.set('denied','expired');
-          url.searchParams.set('next', next);
-          location.href = url.toString();
-          return false;
-        }
-
-        // pass
-        window.BW.user = user;
-        window.BW.userEmail = user.email || '';
-        return true;
-
-      }catch(e){
-        console.error('[talk-auth] subscription check exception', e);
-        const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-        url.searchParams.set('denied','noactive');
-        url.searchParams.set('next', next);
-        location.href = url.toString();
-        return false;
-      }
-    };
-  })();
-</script>
-<!-- ================= End Guard ================= -->
-
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>Talk（每週口說）｜BookWide</title>
@@ -1034,6 +930,127 @@ body{line-height:1.1}
 .fileTag { display: none !important; }
 </style>
 
+
+<!-- Supabase JS（Talk 訂閱守門：同 player 規則） -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+/* ==== BW Talk Subscription Guard (from player) ==== */
+(async function(){
+  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+
+  const ROOT_BASE = (
+    location.pathname.startsWith('/EduEnglish') ||
+    location.hostname.includes('github.io')
+  ) ? '/EduEnglish' : '';
+
+  // expose for page scripts
+  window.ROOT_BASE = window.ROOT_BASE ?? ROOT_BASE;
+
+  const bwSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+  async function bwGetUser(){
+    try{
+      const { data, error } = await bwSupa.auth.getUser();
+      if (error || !data || !data.user) return null;
+      return data.user;
+    }catch(e){
+      console.warn('[BW-talk] getUser error', e);
+      return null;
+    }
+  }
+
+  async function waitUser(maxMs = 1500, stepMs = 250){
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs){
+      const u = await bwGetUser();
+      if (u) return u;
+      await new Promise(r => setTimeout(r, stepMs));
+    }
+    return null;
+  }
+
+  function gotoIndex(next){
+    const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
+    url.searchParams.set('denied', 'signin');
+    url.searchParams.set('next', next);
+    location.href = url.toString();
+  }
+
+  function gotoPricing(denied, next){
+    const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+    url.searchParams.set('denied', denied || 'noactive');
+    url.searchParams.set('next', next);
+    location.href = url.toString();
+  }
+
+  async function readExpiresAt(userId){
+    const { data: p, error: perr } = await bwSupa
+      .from('profiles')
+      .select('expires_at')
+      .eq('id', userId)
+      .maybeSingle();
+    return { p, perr };
+  }
+
+  async function ensureSubscribed(){
+    const next = location.pathname + location.search;
+
+    const user = await waitUser(1500, 250);
+    if (!user) {
+      gotoIndex(next);
+      return null;
+    }
+
+    // subscription check (same as player)
+    try{
+      let lastErr = null;
+      let p = null;
+
+      // retry a bit in case session/rls transient (avoid false "noactive")
+      for (let i=0;i<3;i++) {
+        const r = await readExpiresAt(user.id);
+        if (!r.perr) {
+          p = r.p;
+          lastErr = null;
+          break;
+        }
+        lastErr = r.perr;
+        await new Promise(res => setTimeout(res, 200));
+      }
+
+      if (lastErr) {
+        console.warn('[BW-talk] profiles expires_at read error =', lastErr);
+      }
+
+      const today = new Date();
+      today.setHours(0,0,0,0);
+
+      const exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
+
+      if (!exp || isNaN(exp.getTime())) {
+        gotoPricing('noactive', next);
+        return null;
+      }
+
+      if (exp.getTime() < today.getTime()) {
+        gotoPricing('expired', next);
+        return null;
+      }
+
+      console.log('[BW-talk] allow by profiles.expires_at =', exp.toISOString());
+      return user;
+    }catch(e){
+      console.error('[BW-talk] subscription check exception', e);
+      gotoPricing('noactive', next);
+      return null;
+    }
+  }
+
+  window.BW = window.BW || {};
+  window.BW.ensureSubscribed = ensureSubscribed;
+})();
+</script>
 </head>
 <body>
 <div class="wrap">
@@ -1948,7 +1965,10 @@ if(!firstId){
     if(mask.style.display==="flex" && inModal) return;
     // otherwise prevent overscroll
   }, {passive:true});
-  (async ()=>{ const ok = (window.BW && typeof BW.ensureTalkAccess==='function') ? await BW.ensureTalkAccess() : true; if(!ok) return; init(); })();
+
+  const __u = (window.BW && BW.ensureSubscribed) ? await BW.ensureSubscribed() : null;
+  if(!__u) return;
+  init();
 })();</script>
 </body>
 </html>
