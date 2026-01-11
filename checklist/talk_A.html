@@ -144,73 +144,346 @@ a{color:inherit}
   </div>
 </div>
 
+
 <script>
+// ===== Global error guards (avoid Uncaught (in promise) Object) =====
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = (e.reason instanceof Error) ? (e.reason.stack || e.reason.message) : safeStr(e.reason);
+  console.error("UnhandledPromiseRejection:", e.reason);
+  if (window.showErr) window.showErr("Promise Error: " + reason);
+});
+window.addEventListener('error', (e) => {
+  console.error("RuntimeError:", e.message);
+  if (window.showErr) window.showErr("Runtime Error: " + e.message);
+});
+function safeStr(v){ try{ return (typeof v==='string')?v:JSON.stringify(v); } catch(_){ return String(v); } }
+
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
   const el = {
     sceneSel: $('sceneSel'),
+    wkTag: $('wkTag'),
     btnReplay: $('btnReplay'),
+    btnBack: $('btnBack'),
     btnMic: $('btnMic'),
-    btnInput: $('btnInput'),
+    btnFocus: $('btnFocus'),
     btnSkip: $('btnSkip'),
     btnHint: $('btnHint'),
-    btnFav: $('btnFav'),
+    btnSave: $('btnSave'),
     btnCloze: $('btnCloze'),
-    btnSendCloze: $('btnSendCloze'),
-    btnReset: $('btnReset'),
-    aiAvatar: $('aiAvatar'),
-    sceneTitle: $('sceneTitle'),
-    sceneId: $('sceneId'),
-    aiEn: $('aiEn'),
-    aiZh: $('aiZh'),
-    aiCard: $('aiCard'),
     qText: $('qText'),
     userInput: $('userInput'),
-    chips: $('chips'),
-    levelPill: $('levelPill'),
+    btnSubmit: $('btnSubmit'),
+    btnRetry: $('btnRetry'),
+    aiEn: $('aiEn'),
+    aiZh: $('aiZh'),
+    sceneTitle: $('sceneTitle'),
+    sceneMeta: $('sceneMeta'),
+    lvlChip: $('lvlChip'),
+    errBox: $('errBox'),
+    teacherVideo: $('teacherVideo'),
     btnHide: $('btnHide'),
+    adminBox: $('adminBox'),
+    btnAdmin: $('btnAdmin'),
+    fileIndex: $('fileIndex'),
+    fileScene: $('fileScene'),
   };
 
   const state = {
     index: null,
     currentSceneId: null,
     scene: null,
-    currentUserHint: null,
-    cloze: null,
-    recognizing: false,
-    recog: null,
+    dialogue: [],
+    aiIdx: -1,
+    userIdx: -1,
+    lastUserText: '',
+    cloze: null, // {tmpl, answer, options[]}
   };
 
+  // ===== Paths (Talk A in /checklist/ , data in /talk/) =====
   const indexURL = new URL('../talk/index.json', location.href);
   const sceneURL = (id) => new URL(`../talk/${id}.json`, location.href);
 
-  function safeText(x){ return (x ?? '').toString(); }
-
-  function setLoading(msg){
-    const m = msg || 'Loading...';
-    if (el.sceneTitle) el.sceneTitle.textContent = m;
-    if (el.aiCard) el.aiCard.style.display = 'none';
-    if (el.aiEn) el.aiEn.textContent = '';
-    if (el.aiZh) el.aiZh.textContent = '';
+  // ===== UI helpers =====
+  window.showErr = (msg) => {
+    if (!el.errBox) return;
+    el.errBox.style.display = 'block';
+    el.errBox.textContent = msg || '';
+  };
+  function clearErr(){ if (el.errBox){ el.errBox.style.display='none'; el.errBox.textContent=''; } }
+  function setLoading(en='Loading...'){
+    if (el.aiEn) el.aiEn.textContent = en;
+    if (el.aiZh) el.aiZh.textContent = '讀取 index.json…';
+    if (el.sceneMeta) el.sceneMeta.textContent = '讀取 index.json…';
   }
+  function setMeta(msg){ if(el.sceneMeta) el.sceneMeta.textContent = msg || ''; }
+  function setTitle(msg){ if(el.sceneTitle) el.sceneTitle.textContent = msg || ''; }
 
   function pickLevelFromId(id){
-    const m = /^w(\d+)\.(core|variation|challenge)\./i.exec(id || '');
-    if (!m) return 'A1';
-    const t = m[2].toLowerCase();
-    return t === 'core' ? 'A1' : (t === 'variation' ? 'A2' : 'B1');
+    // deterministic A1/A2/B1 by week
+    const m = String(id||'').match(/^w(\d+)/i);
+    const w = m ? parseInt(m[1],10) : 1;
+    if (w<=2) return 'A1';
+    if (w<=4) return 'A2';
+    return 'B1';
+  }
+  function getInitialSceneId(){
+    const u = new URL(location.href);
+    return u.searchParams.get('scene') || u.searchParams.get('id') || '';
+  }
+  function setQueryScene(id){
+    const u = new URL(location.href);
+    u.searchParams.set('scene', id);
+    history.replaceState({}, '', u.toString());
   }
 
+  function normalizeDialogueItem(d){
+    // supports speaker/role and AI/USER
+    const sp = (d.speaker || d.role || d.who || '').toString().toUpperCase();
+    const isAI = sp === 'AI' || sp === 'BOT' || sp === 'ASSISTANT';
+    const isUSER = sp === 'USER' || sp === 'YOU' || sp === 'STUDENT';
+    const en = d.en || d.ai_en || d.text_en || d.text || '';
+    const zh = d.zh || d.ai_zh || d.text_zh || '';
+    const hint_en = d.hint_en || d.user_en || d.expected_reply || d.reply_en || '';
+    const hint_zh = d.hint_zh || d.user_zh || d.reply_zh || '';
+    return { raw:d, sp, isAI, isUSER, en, zh, hint_en, hint_zh };
+  }
+
+  function moveToNextPair(fromIdx){
+    // find next AI at/after fromIdx, then next USER after that
+    const arr = state.dialogue;
+    let ai=-1, user=-1;
+    for(let i=Math.max(0,fromIdx); i<arr.length; i++){
+      if(arr[i].isAI){ ai=i; break; }
+    }
+    if(ai>=0){
+      for(let i=ai+1; i<arr.length; i++){
+        if(arr[i].isUSER){ user=i; break; }
+        // tolerate multiple AI lines; user must be after AI
+      }
+    }
+    state.aiIdx = ai;
+    state.userIdx = user;
+    return {ai,user};
+  }
+
+  function renderCurrent(){
+    clearErr();
+    clearClozeUI();
+
+    const id = state.currentSceneId || '';
+    const lvl = pickLevelFromId(id);
+    if(el.lvlChip) el.lvlChip.textContent = lvl;
+
+    const m = String(id).match(/^w(\d+)\./i);
+    if(el.wkTag) el.wkTag.textContent = m ? ('W'+m[1]) : 'W?';
+
+    const sceneTitle = (state.index?.scenes?.find(s=>s.id===id)?.title) || state.scene?.title_en || state.scene?.scene || id;
+    setTitle(sceneTitle);
+
+    if(state.aiIdx>=0){
+      const a = state.dialogue[state.aiIdx];
+      if(el.aiEn) el.aiEn.textContent = a.en || '...';
+      if(el.aiZh) el.aiZh.textContent = a.zh || '';
+      setMeta(`本週：${state.scene?.week || m?.[1] || '?'}｜Track：${state.scene?.track || ''}｜${id}`);
+    }else{
+      if(el.aiEn) el.aiEn.textContent = '...';
+      if(el.aiZh) el.aiZh.textContent = '';
+      setMeta(`讀取場景：${id}`);
+    }
+
+    // your reply zone: show last submitted, otherwise dash
+    if(el.qText){
+      el.qText.textContent = state.lastUserText ? state.lastUserText : '—';
+    }
+  }
+
+  function renderHintToInput(){
+    if(state.userIdx<0) return showErr('此場景沒有 USER hint（dialogue 裡找不到 speaker=USER）。');
+    const u = state.dialogue[state.userIdx];
+    const full = u.hint_en || '';
+    if(!full) return showErr('此 USER 沒有 hint_en。');
+    el.userInput.value = full;
+    el.userInput.focus();
+  }
+
+  // ===== Cloze (deterministic, index-only source = hint_en) =====
+  const STOP = new Set(['a','an','the','to','of','in','on','at','for','and','or','but','is','am','are','was','were','be','been','being','i','you','he','she','it','we','they','me','my','your','him','her','us','them','this','that','these','those','please']);
+  function tokenizeWords(s){
+    // keep contractions, strip punctuation
+    return String(s||'')
+      .replace(/[“”]/g,'"')
+      .replace(/[‘’]/g,"'")
+      .replace(/[^A-Za-z0-9' ]+/g,' ')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+  function pickBlankWord(words){
+    // pick first non-stop word with length>=3, else fallback to middle
+    for(const w of words){
+      const lw = w.toLowerCase();
+      if(lw.length>=3 && !STOP.has(lw)) return w;
+    }
+    return words[Math.floor(words.length/2)] || '';
+  }
+  function uniqueLower(arr){
+    const out=[]; const seen=new Set();
+    for(const x of arr){
+      const k=String(x||'').toLowerCase();
+      if(!k || seen.has(k)) continue;
+      seen.add(k); out.push(x);
+    }
+    return out;
+  }
+  function buildClozeOptions(answer, fullSentence){
+    const pool = uniqueLower(tokenizeWords(fullSentence).filter(w=>w.toLowerCase()!==answer.toLowerCase()));
+    const extra = ['help','gate','terminal','passport','reservation','check','boarding','baggage','menu','order','coffee','hotel','room','key','receipt'];
+    const distractors = [];
+    for(const w of pool){
+      if(distractors.length>=2) break;
+      if(!STOP.has(w.toLowerCase())) distractors.push(w);
+    }
+    for(const w of extra){
+      if(distractors.length>=2) break;
+      if(w.toLowerCase()!==answer.toLowerCase() && !distractors.some(d=>d.toLowerCase()===w.toLowerCase())) distractors.push(w);
+    }
+    const opts = uniqueLower([answer, ...distractors]).slice(0,3);
+    // deterministic order: answer first then distractors
+    return opts;
+  }
+
+  function makeCloze(){
+    if(state.userIdx<0) return showErr('沒有可用的 USER hint，無法做填空引導。');
+    const u = state.dialogue[state.userIdx];
+    const full = u.hint_en || '';
+    if(!full) return showErr('此 USER 沒有 hint_en，無法做填空引導。');
+
+    const words = tokenizeWords(full);
+    if(words.length<3) return showErr('句子太短，無法做填空引導。');
+
+    const answer = pickBlankWord(words);
+    if(!answer) return showErr('找不到可挖空的字。');
+
+    // replace first occurrence (word boundary, case-insensitive) with ___
+    const re = new RegExp(`\\b${answer.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\b`, 'i');
+    const tmpl = full.replace(re, '___');
+
+    state.cloze = { tmpl, answer, options: buildClozeOptions(answer, full), full };
+    // Show template in qText immediately (your requirement)
+    state.lastUserText = tmpl;
+    if(el.qText) el.qText.textContent = tmpl;
+
+    renderClozeUI(state.cloze);
+  }
+
+  function renderClozeUI(c){
+    // Minimal chips UI: reuse "收藏" button area? We'll inject right under qText by using errBox as container? No.
+    // Create a small chips row dynamically under helpText (safe).
+    let box = document.getElementById('clozeBox');
+    if(!box){
+      box = document.createElement('div');
+      box.id = 'clozeBox';
+      box.style.display = 'flex';
+      box.style.gap = '8px';
+      box.style.flexWrap = 'wrap';
+      box.style.margin = '10px 0 2px';
+      // insert after qText
+      el.qText?.insertAdjacentElement('afterend', box);
+    }
+    box.innerHTML = '';
+    const opts = (c.options||[]).slice(0,3);
+    for(const opt of opts){
+      const b = document.createElement('button');
+      b.type='button';
+      b.textContent = opt;
+      b.style.border = '1px solid var(--line)';
+      b.style.background = '#fff';
+      b.style.borderRadius = '999px';
+      b.style.padding = '8px 12px';
+      b.style.fontWeight = '900';
+      b.style.cursor = 'pointer';
+      b.addEventListener('click', ()=>{
+        el.userInput.value = opt;
+        el.userInput.focus();
+      });
+      box.appendChild(b);
+    }
+    box.style.display = 'flex';
+  }
+  function clearClozeUI(){
+    state.cloze = null;
+    const box = document.getElementById('clozeBox');
+    if(box){ box.style.display='none'; box.innerHTML=''; }
+  }
+
+  function submitUser(){
+    clearErr();
+    const input = (el.userInput.value||'').trim();
+    if(!input){
+      showErr('請先輸入或用填空引導選字。');
+      return;
+    }
+    if(state.cloze){
+      // fill blank deterministically
+      const filled = state.cloze.tmpl.replace('___', input);
+      state.lastUserText = filled;
+      if(el.qText) el.qText.textContent = filled;
+    }else{
+      state.lastUserText = input;
+      if(el.qText) el.qText.textContent = input;
+    }
+    el.userInput.value = '';
+    clearClozeUI();
+
+    // advance to next AI/USER after current user
+    const nextFrom = (state.userIdx>=0) ? (state.userIdx+1) : (state.aiIdx>=0 ? state.aiIdx+1 : 0);
+    moveToNextPair(nextFrom);
+    renderCurrent();
+    speakCurrentAI();
+  }
+
+  function resetSceneProgress(){
+    state.lastUserText = '';
+    clearClozeUI();
+    moveToNextPair(0);
+    renderCurrent();
+    speakCurrentAI();
+  }
+
+  // ===== TTS =====
+  function speak(text){
+    try{
+      if(!text) return;
+      if(!('speechSynthesis' in window)) return;
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'en-US';
+      u.rate = 1;
+      window.speechSynthesis.speak(u);
+    }catch(err){
+      console.error(err);
+      showErr('TTS 失敗：' + (err.message||String(err)));
+    }
+  }
+  function speakCurrentAI(){
+    if(state.aiIdx<0) return;
+    const a = state.dialogue[state.aiIdx];
+    speak(a.en||'');
+  }
+
+  // ===== Loaders (MODE 1: only load selected scene json) =====
   async function loadIndex(){
     setLoading('Loading...');
     try{
       const res = await fetch(indexURL.toString(), {cache:'no-store'});
       if(!res.ok) throw new Error(`index.json HTTP ${res.status}`);
       const data = await res.json();
-      if(!data || !Array.isArray(data.scenes)) throw new Error('index.json format error');
+      if(!data || !Array.isArray(data.scenes)) throw new Error('index.json format error (need {scenes:[]})');
       state.index = data;
-      if (el.sceneSel){
+
+      if(el.sceneSel){
         el.sceneSel.innerHTML = '';
         for(const s of data.scenes){
           const opt = document.createElement('option');
@@ -219,266 +492,152 @@ a{color:inherit}
           el.sceneSel.appendChild(opt);
         }
       }
-      const qp = new URLSearchParams(location.search);
-      const qScene = qp.get('scene');
-      const initial = (qScene && data.scenes.some(s=>s.id===qScene)) ? qScene : data.scenes[0]?.id;
+
+      const initial = getInitialSceneId() || (data.scenes[0] && data.scenes[0].id);
       if(initial){
         if(el.sceneSel) el.sceneSel.value = initial;
         await loadScene(initial);
-      }else{
-        setLoading('No scenes in index.json');
+        return;
       }
+      setLoading('Loading... (沒有 scenes)');
     }catch(err){
       console.error(err);
-      // fallback: embedded index json (for local preview / fetch blocked)
-      try{
-        const embed = document.getElementById('EMBED_INDEX');
-        if(embed && embed.textContent && embed.textContent.trim()){
-          const data = JSON.parse(embed.textContent);
-          if(data && Array.isArray(data.scenes)){
-            state.index = data;
-            if (el.sceneSel){
-              el.sceneSel.innerHTML = '';
-              for(const s of data.scenes){
-                const opt = document.createElement('option');
-                opt.value = s.id;
-                opt.textContent = s.title || s.id;
-                el.sceneSel.appendChild(opt);
-              }
-            }
-            const initial = getInitialSceneId() || (data.scenes[0] && data.scenes[0].id);
-            if(initial){
-              if(el.sceneSel) el.sceneSel.value = initial;
-              await loadScene(initial);
-              return;
-            }
-          }
-        }
-      }catch(e2){
-        console.error('EMBED_INDEX parse failed', e2);
-      }
+      showErr('無法讀取 /talk/index.json：' + (err.message||String(err)));
       setLoading('Loading... (無法讀取 index.json)');
-      if (el.aiZh) el.aiZh.textContent = '';
     }
   }
 
   async function loadScene(id){
+    clearErr();
     state.currentSceneId = id;
-    state.scene = null;
-    state.currentUserHint = null;
-    state.cloze = null;
+    setQueryScene(id);
 
-    if(el.levelPill) el.levelPill.textContent = pickLevelFromId(id);
-    if(el.sceneId) el.sceneId.textContent = id;
+    if(el.lvlChip) el.lvlChip.textContent = pickLevelFromId(id);
+    if(el.sceneTitle) el.sceneTitle.textContent = (state.index?.scenes?.find(s=>s.id===id)?.title) || id;
 
-    const title = state.index?.scenes?.find(s=>s.id===id)?.title || id;
-    if(el.sceneTitle) el.sceneTitle.textContent = title;
+    if(el.aiEn) el.aiEn.textContent = 'Loading...';
+    if(el.aiZh) el.aiZh.textContent = `讀取 ${id}.json…`;
+    setMeta(`讀取 ${id}.json…`);
 
-    setLoading('Loading...');
     try{
       const res = await fetch(sceneURL(id).toString(), {cache:'no-store'});
       if(!res.ok) throw new Error(`${id}.json HTTP ${res.status}`);
       const data = await res.json();
-      if(!data || !Array.isArray(data.dialogue)) throw new Error('scene json format error');
+      if(!data) throw new Error('scene json empty');
+
+      const rawDlg = Array.isArray(data.dialogue) ? data.dialogue : (Array.isArray(data.lines) ? data.lines : []);
+      if(!Array.isArray(rawDlg) || rawDlg.length===0) throw new Error('scene json format error (need dialogue[])');
+
       state.scene = data;
+      state.dialogue = rawDlg.map(normalizeDialogueItem);
 
-      const firstAI = data.dialogue.find(d => (d.role||'').toUpperCase()==='AI');
-      if(firstAI){
-        el.aiEn.textContent = safeText(firstAI.en);
-        el.aiZh.textContent = safeText(firstAI.zh);
-      }else{
-        el.aiEn.textContent = '...';
-        el.aiZh.textContent = '';
-      }
-
-      state.currentUserHint = data.dialogue.find(d => (d.role||'').toUpperCase()==='USER') || null;
-      renderUserHint();
+      // MODE 1: only current scene loaded; reset pointer
+      state.lastUserText = '';
+      moveToNextPair(0);
+      renderCurrent();
+      speakCurrentAI();
     }catch(err){
       console.error(err);
-      setLoading(`Loading... (找不到 ${id}.json)`);
+      showErr(`讀取 ${id}.json 失敗：` + (err.message||String(err)));
+      if(el.aiEn) el.aiEn.textContent = 'Loading...';
       if(el.aiZh) el.aiZh.textContent = '';
+      setMeta(`讀取失敗：${id}.json`);
       clearClozeUI();
     }
   }
 
-  function clearChips(){
-    if(!el.chips) return;
-    el.chips.innerHTML = '';
-  }
-  function clearClozeUI(){
-    state.cloze = null;
-    clearChips();
-  }
-
-  function renderUserHint(){
-    const d = state.currentUserHint;
-    if(!d){
-      if(el.qText) el.qText.textContent = '—';
+  // ===== Wire UI =====
+  function initUI(){
+    if(el.sceneSel){
+      el.sceneSel.addEventListener('change', async()=>{ await loadScene(el.sceneSel.value); });
+    }
+    if(el.btnReplay) el.btnReplay.addEventListener('click', ()=> speakCurrentAI());
+    if(el.btnCloze) el.btnCloze.addEventListener('click', ()=> makeCloze());
+    if(el.btnHint) el.btnHint.addEventListener('click', ()=> renderHintToInput());
+    if(el.btnSkip) el.btnSkip.addEventListener('click', ()=>{
       clearClozeUI();
-      return;
+      const nextFrom = (state.userIdx>=0) ? (state.userIdx+1) : (state.aiIdx>=0 ? state.aiIdx+1 : 0);
+      moveToNextPair(nextFrom);
+      renderCurrent();
+      speakCurrentAI();
+    });
+    if(el.btnSubmit) el.btnSubmit.addEventListener('click', ()=> submitUser());
+    if(el.userInput){
+      el.userInput.addEventListener('keydown', (e)=>{
+        if(e.key==='Enter'){ e.preventDefault(); submitUser(); }
+      });
     }
-    if(el.qText) el.qText.textContent = safeText(d.hint_en || d.en || '');
-    clearClozeUI();
-  }
+    if(el.btnRetry) el.btnRetry.addEventListener('click', ()=> resetSceneProgress());
+    if(el.btnFocus) el.btnFocus.addEventListener('click', ()=> el.userInput?.focus());
+    if(el.btnBack) el.btnBack.addEventListener('click', ()=> history.back());
 
-  function hash32(str){
-    // FNV-1a 32bit
-    let h = 0x811c9dc5;
-    for(let i=0;i<str.length;i++){
-      h ^= str.charCodeAt(i);
-      h = (h + ((h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24))) >>> 0;
+    if(el.btnAdmin && el.adminBox){
+      el.btnAdmin.addEventListener('click', ()=>{
+        el.adminBox.classList.toggle('show');
+      });
     }
-    return h >>> 0;
-  }
-
-  const STOP = new Set(['the','a','an','to','of','and','or','is','are','am','i','you','me','my','your','please','could','can','would','will','it','in','on','at','for','with','this','that']);
-  function makeClozeFromSentence(s){
-    const raw = safeText(s).trim();
-    if(!raw) return null;
-
-    // 1) Tokenize (keep words with apostrophes)
-    const words = (raw.match(/[A-Za-z]+(?:'[A-Za-z]+)?/g) || []);
-    if(!words.length) return null;
-
-    // 2) Pick answer deterministically:
-    //    - first word that is NOT stopword and len>=3
-    //    - else first non-stopword len>=2
-    let answer = '';
-    for(const w of words){
-      const lw = w.toLowerCase();
-      if(lw.length>=3 && !STOP.has(lw)){ answer = w; break; }
-    }
-    if(!answer){
-      for(const w of words){
-        const lw = w.toLowerCase();
-        if(lw.length>=2 && !STOP.has(lw)){ answer = w; break; }
-      }
-    }
-    if(!answer) answer = words[0];
-
-    const blank = '___';
-    const reAns = new RegExp('\b' + answer.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '\b');
-    const text = raw.replace(reAns, blank);
-
-    // 3) Build options:
-    //    Prefer other non-stop words from the same sentence (deterministic order).
-    const opts = [];
-    const pushOpt = (w)=>{
-      const x = (w||'').trim();
-      if(!x) return;
-      if(opts.some(o=>o.toLowerCase()===x.toLowerCase())) return;
-      opts.push(x);
-    };
-    pushOpt(answer);
-
-    for(const w of words){
-      const lw = w.toLowerCase();
-      if(lw===answer.toLowerCase()) continue;
-      if(lw.length>=3 && !STOP.has(lw)) pushOpt(w);
-      if(opts.length>=3) break;
+    // hide
+    if(el.btnHide){
+      el.btnHide.addEventListener('click', ()=>{
+        const reply = document.querySelector('.reply');
+        if(!reply) return;
+        const on = reply.style.display !== 'none';
+        reply.style.display = on ? 'none' : '';
+      });
     }
 
-    // If still not enough, fill from a fixed pool but deterministic (no randomness)
-    const pool = ['help','gate','terminal','order','ticket','passport','reservation','table','check-in','boarding','taxi','luggage','coffee','receipt','menu','hotel','room','key','wifi'];
-    if(opts.length<3){
-      const seed = (state.currentSceneId||'') + '|' + raw + '|' + answer;
-      let h = hash32(seed);
-      for(let k=0;k<pool.length && opts.length<3;k++){
-        const idx = (h + k*7) % pool.length;
-        pushOpt(pool[idx]);
-      }
+    // Optional: offline upload for testing (Admin)
+    if(el.fileIndex){
+      el.fileIndex.addEventListener('change', async(e)=>{
+        const f = e.target.files && e.target.files[0];
+        if(!f) return;
+        try{
+          const text = await f.text();
+          const data = JSON.parse(text);
+          if(!Array.isArray(data.scenes)) throw new Error('index json must have scenes[]');
+          state.index = data;
+          // refill select
+          if(el.sceneSel){
+            el.sceneSel.innerHTML='';
+            for(const s of data.scenes){
+              const opt=document.createElement('option');
+              opt.value=s.id;
+              opt.textContent=s.title||s.id;
+              el.sceneSel.appendChild(opt);
+            }
+          }
+          const initial = (data.scenes[0] && data.scenes[0].id) || '';
+          if(initial){ el.sceneSel.value=initial; await loadScene(initial); }
+        }catch(err){
+          showErr('離線 index.json 解析失敗：'+(err.message||String(err)));
+        }
+      });
     }
-
-    // Ensure exactly 3 options (pad with answer if still short)
-    while(opts.length<3) pushOpt(answer);
-
-    return {text, answer, options: opts.slice(0,3)};
-  }
-
-  function renderCloze(){
-    const d = state.currentUserHint;
-    const base = safeText(d?.hint_en || d?.en || '');
-    const c = makeClozeFromSentence(base);
-    if(!c) return;
-    state.cloze = c;
-    if(el.qText) el.qText.textContent = c.text;
-    if(el.userInput) el.userInput.value = '';
-    if(el.chips){
-      el.chips.innerHTML = '';
-      for(const opt of c.options){
-        const b=document.createElement('button');
-        b.type='button';
-        b.className='chip';
-        b.textContent=opt;
-        b.addEventListener('click',()=>{ el.userInput.value = opt; el.userInput.focus(); });
-        el.chips.appendChild(b);
-      }
+    if(el.fileScene){
+      el.fileScene.addEventListener('change', async(e)=>{
+        const f = e.target.files && e.target.files[0];
+        if(!f) return;
+        try{
+          const text = await f.text();
+          const data = JSON.parse(text);
+          state.scene=data;
+          const rawDlg = Array.isArray(data.dialogue) ? data.dialogue : (Array.isArray(data.lines)?data.lines:[]);
+          state.dialogue = rawDlg.map(normalizeDialogueItem);
+          state.lastUserText='';
+          moveToNextPair(0);
+          renderCurrent();
+        }catch(err){
+          showErr('離線 scene.json 解析失敗：'+(err.message||String(err)));
+        }
+      });
     }
   }
 
-  function speak(text){
-    const t=safeText(text).trim();
-    if(!t) return;
-    try{
-      window.speechSynthesis.cancel();
-      const u=new SpeechSynthesisUtterance(t);
-      u.lang='en-US';
-      u.rate=1.0;
-      window.speechSynthesis.speak(u);
-    }catch(e){ console.warn(e); }
-  }
+  initUI();
+  loadIndex();
 
-  function setupSpeechRecognition(){
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if(!SR) return;
-    const r = new SR();
-    r.lang='en-US';
-    r.interimResults=true;
-    r.continuous=false;
-    r.onstart=()=>{ state.recognizing=true; el.btnMic?.classList.add('on'); };
-    r.onend=()=>{ state.recognizing=false; el.btnMic?.classList.remove('on'); };
-    r.onerror=(e)=>console.warn(e);
-    r.onresult=(ev)=>{
-      let txt='';
-      for(let i=ev.resultIndex;i<ev.results.length;i++){
-        txt += ev.results[i][0].transcript;
-      }
-      if(el.userInput) el.userInput.value = txt.trim();
-    };
-    state.recog=r;
-  }
-  function toggleRecog(){
-    if(!state.recog) return;
-    if(state.recognizing) state.recog.stop(); else state.recog.start();
-  }
-
-  function submitAnswer(){
-    const user = safeText(el.userInput?.value || '').trim();
-    if(!user) return;
-    let finalSentence = user;
-    if(state.cloze && state.cloze.text.includes('___') && /^\w[\w'-]*$/.test(user)){
-      finalSentence = state.cloze.text.replace('___', user);
-    }
-    if(el.qText) el.qText.textContent = finalSentence;
-    speak(finalSentence);
-  }
-
-  function wireUI(){
-    el.sceneSel?.addEventListener('change', async()=>{ await loadScene(el.sceneSel.value); });
-    el.btnReplay?.addEventListener('click', ()=> speak(el.aiEn?.textContent || ''));
-    el.btnMic?.addEventListener('click', toggleRecog);
-    el.btnCloze?.addEventListener('click', renderCloze);
-    el.btnSendCloze?.addEventListener('click', submitAnswer);
-    el.btnReset?.addEventListener('click', ()=>{ if(el.userInput) el.userInput.value=''; renderUserHint(); });
-    el.userInput?.addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ e.preventDefault(); submitAnswer(); } });
-  }
-
-  document.addEventListener('DOMContentLoaded', ()=>{
-    setupSpeechRecognition();
-    wireUI();
-    loadIndex();
-  });
 })();
 </script>
+
 </body>
 </html>
