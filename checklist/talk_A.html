@@ -263,7 +263,86 @@ function safeStr(v){ try{ return (typeof v==='string')?v:JSON.stringify(v); } ca
 
 <script>
 (() => {
+function safeAsync(fn){
+  return (...args)=> Promise.resolve().then(()=> fn(...args)).catch(e=>{
+    console.error(e);
+    try{ showErr((e && e.message) ? e.message : String(e)); }catch(_){}
+  });
+}
+
   const $ = (id)=>document.getElementById(id);
+
+// ===== TTS (robust) =====
+let bwVoices = [];
+function bwRefreshVoices(){
+  try { bwVoices = window.speechSynthesis.getVoices() || []; }
+  catch(_) { bwVoices = []; }
+}
+function bwPickVoice(langPrefix){
+  const lp = (langPrefix || "en").toLowerCase();
+  return bwVoices.find(v => (v.lang||"").toLowerCase().startsWith(lp)) || bwVoices[0] || null;
+}
+bwRefreshVoices();
+if ("speechSynthesis" in window) window.speechSynthesis.onvoiceschanged = bwRefreshVoices;
+
+let bwTtsUnlocked = false;
+function bwUnlockTTS(){
+  if (bwTtsUnlocked) return;
+  bwTtsUnlocked = true;
+  try{
+    // prime engine; some browsers require a gesture before any sound
+    const u = new SpeechSynthesisUtterance(" ");
+    u.volume = 0;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  }catch(_){}
+}
+// any user gesture unlocks
+window.addEventListener("pointerdown", bwUnlockTTS, { once:true, capture:true });
+
+function bwSpeak(text, lang="en-US"){
+  return new Promise((resolve, reject)=>{
+    try{
+      bwUnlockTTS();
+      if (!("speechSynthesis" in window)) throw new Error("SpeechSynthesis not supported");
+      const t = (text || "").trim();
+      if (!t || /^loading/i.test(t)) throw new Error("No text to speak");
+      bwRefreshVoices();
+
+      const u = new SpeechSynthesisUtterance(t);
+      u.lang = lang;
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      u.volume = 1.0;
+
+      const v = bwPickVoice(lang.split("-")[0]);
+      if (v) u.voice = v;
+
+      u.onend = ()=> resolve(true);
+      u.onerror = (ev)=> reject(ev?.error || new Error("TTS error"));
+
+      window.speechSynthesis.cancel();
+      window.speechSynthesis.speak(u);
+
+      // retry once if not speaking (voices not ready)
+      setTimeout(()=>{
+        try{
+          if (window.speechSynthesis.speaking) return;
+          bwRefreshVoices();
+          const v2 = bwPickVoice(lang.split("-")[0]);
+          if (v2) u.voice = v2;
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(u);
+        }catch(_){}
+      }, 200);
+    }catch(e){ reject(e); }
+  });
+}
+
+// keep compatibility: old speak() now uses bwSpeak with error shown on UI
+);
+}
+
   const state = {
     index: null,
     curScene: null,
@@ -500,15 +579,7 @@ $("curJsonName").textContent = scene?.id ? (scene.id + ".json") : "—";
     render();
   }
 
-  function speak(text) {
-    try {
-      if (!("speechSynthesis" in window)) return;
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = "en-US";
-      u.rate = 1.0;
-      window.speechSynthesis.speak(u);
-    } catch(_) {}
+  catch(_) {}
   }
 
   function setupRecog() {
@@ -537,7 +608,8 @@ $("curJsonName").textContent = scene?.id ? (scene.id + ".json") : "—";
 
   $("btnBack").onclick = ()=> history.back();
   $("btnReplay").onclick = ()=> speak($("aiEn").textContent);
-  $("btnFocus").onclick = ()=> $("userInput").focus();
+  $("aiEn").onclick = ()=> speak($("aiEn").textContent);
+$("btnFocus").onclick = ()=> $("userInput").focus();
   $("btnSkip").onclick = ()=> { bw_clearCloze(); nextLine(); };
   $("btnHint").onclick = ()=> alert("提示（demo）：請看中文提示，或先用簡短句回覆。");
   $("btnSave").onclick = ()=> alert("收藏（demo）：管理版可之後接資料庫。");
