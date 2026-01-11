@@ -1,47 +1,110 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
-<script type="module">
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-const SUPABASE_ANON_KEY = '你的_ANON_KEY';
+<!-- ================= BookWide Guard (Talk student) ================ -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  (function(){
+    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+    const SUPABASE_ANON_KEY =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    // Root base: github.io /EduEnglish, custom domain ''
+    const ROOT_BASE = (
+      location.pathname.startsWith('/EduEnglish') ||
+      location.hostname.includes('github.io')
+    ) ? '/EduEnglish' : '';
 
-(async () => {
-  // 1. 是否登入
-  const { data: { session } } = await supabase.auth.getSession();
-  if (!session) {
-    location.href = '/pricing.html';
-    return;
-  }
+    const talkSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  const user = session.user;
+    async function bwGetUser(){
+      try{
+        const { data, error } = await talkSupa.auth.getUser();
+        if (error || !data || !data.user) return null;
+        return data.user;
+      }catch(e){
+        console.warn('[talk-auth] getUser error', e);
+        return null;
+      }
+    }
 
-  // 2. 查訂閱狀態（你現有的 subscriptions / profiles 結構）
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('role, subscription_active')
-    .eq('id', user.id)
-    .single();
+    async function waitUser(maxMs=1500, stepMs=250){
+      const t0 = Date.now();
+      while(Date.now() - t0 < maxMs){
+        const u = await bwGetUser();
+        if(u) return u;
+        await new Promise(r=>setTimeout(r, stepMs));
+      }
+      return null;
+    }
 
-  // 3. Admin 不該進學員版
-  if (profile?.role === 'admin') {
-    location.href = '/checklist/talk_A.html';
-    return;
-  }
+    // Expose for bottom init() gate
+    window.BW = window.BW || {};
+    window.BW.ensureTalkAccess = async function ensureTalkAccess(){
+      const next = location.pathname + location.search;
 
-  // 4. 一般學員 → 必須訂閱
-  if (!profile?.subscription_active) {
-    location.href = '/pricing.html';
-    return;
-  }
+      // 1) must login
+      const user = await waitUser(1500, 250);
+      if(!user){
+        const url = new URL((ROOT_BASE || '') + '/index.html', location.origin);
+        url.searchParams.set('denied','signin');
+        url.searchParams.set('next', next);
+        location.href = url.toString();
+        return false;
+      }
 
-  // ✅ 訂閱學員 → 放行
-})();
+      // 2) must have active subscription by profiles.expires_at (same rule as player)
+      try{
+        const { data: p, error: perr } = await talkSupa
+          .from('profiles')
+          .select('expires_at')
+          .eq('id', user.id)
+          .maybeSingle();
+
+        if(perr){
+          console.warn('[talk-auth] profiles.expires_at read error', perr);
+        }
+
+        const today = new Date();
+        today.setHours(0,0,0,0);
+
+        const exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
+
+        if(!exp || isNaN(exp.getTime())){
+          const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+          url.searchParams.set('denied','noactive');
+          url.searchParams.set('next', next);
+          location.href = url.toString();
+          return false;
+        }
+
+        if(exp.getTime() < today.getTime()){
+          const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+          url.searchParams.set('denied','expired');
+          url.searchParams.set('next', next);
+          location.href = url.toString();
+          return false;
+        }
+
+        // pass
+        window.BW.user = user;
+        window.BW.userEmail = user.email || '';
+        return true;
+
+      }catch(e){
+        console.error('[talk-auth] subscription check exception', e);
+        const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+        url.searchParams.set('denied','noactive');
+        url.searchParams.set('next', next);
+        location.href = url.toString();
+        return false;
+      }
+    };
+  })();
 </script>
-  
+<!-- ================= End Guard ================= -->
+
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>Talk（每週口說）｜BookWide</title>
@@ -329,34 +392,6 @@ a{color:inherit}
 .taskItem{padding:10px !important; margin-bottom:8px !important;}
 .taskItem .k{font-size:14px !important; margin-bottom:4px !important;}
 .taskItem .v{font-size:12px !important; line-height:1.2 !important;}
-
-
-/* ====== PATCH v20260111-score-report ====== */
-.reportMask{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,.45);backdrop-filter:blur(6px);z-index:9999;padding:16px}
-.reportCard{width:min(520px,92vw);background:#fff;border-radius:26px;box-shadow:0 18px 60px rgba(0,0,0,.25);overflow:hidden}
-.reportTop{padding:18px 18px 10px;text-align:center;position:relative}
-.reportTop h2{margin:0;font-size:22px;letter-spacing:.5px}
-.reportClose{position:absolute;left:14px;top:14px;width:40px;height:40px;border-radius:999px;border:1px solid var(--line);background:#fff;font-size:20px;cursor:pointer}
-.stars{display:flex;gap:10px;justify-content:center;align-items:center;margin:14px 0 10px}
-.star{width:58px;height:58px;filter:drop-shadow(0 10px 18px rgba(0,0,0,.12))}
-.star.off{opacity:.28;filter:none}
-.bigGood{font-size:34px;font-weight:950;color:#22c55e;margin:0}
-.sceneName{margin:6px 0 0;font-size:18px;font-weight:900}
-.metrics{display:flex;gap:10px;justify-content:space-between;padding:14px 18px;border-top:1px solid var(--line)}
-.metric{flex:1;text-align:center}
-.metric b{display:block;font-size:36px;line-height:1;font-weight:950}
-.metric span{display:block;margin-top:6px;color:var(--muted);font-size:13px;font-weight:800}
-.radarBox{padding:10px 18px 0}
-.radarCard{background:#fff;border:1px solid var(--line);border-radius:22px;padding:14px;text-align:center}
-.radarCard b{display:block;font-size:44px;font-weight:950;margin:6px 0 0}
-.radarCard span{display:block;color:var(--muted);font-weight:800}
-.reportBtns{display:flex;gap:12px;padding:16px 18px 18px}
-.reportBtns button{flex:1;border-radius:18px;padding:14px 14px;font-size:18px;font-weight:950;cursor:pointer;border:1px solid var(--line);background:#fff}
-.reportBtns .primary{border:0;background:linear-gradient(180deg,var(--brand),var(--brand2));color:#fff;box-shadow:0 14px 24px rgba(11,102,255,.22)}
-.logBox{display:none;max-height:46vh;overflow:auto;padding:0 18px 14px}
-.logItem{border-top:1px solid var(--line);padding:12px 0}
-.logItem .who{font-weight:950}
-.logItem .txt{margin-top:4px;color:var(--ink)}
 
 </style>
 
@@ -1169,157 +1204,6 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   let turnIdx = 0;
   let lastTts = null;
 
-  // ====== PATCH v20260111-score-report : session scoring (learner) ======
-  const LS_REPORTS = "BW_TALK_REPORTS_V1";
-  let sessionLog = [];        // {ai, expected, said, usedMic, t}
-  let micUsedCount = 0;
-  let lastFromMic = false;
-  let wordsUsedSet = new Set();
-  let totalExpectedCount = 0;
-
-  function resetSessionScoreState(){
-    sessionLog = [];
-    micUsedCount = 0;
-    wordsUsedSet = new Set();
-    totalExpectedCount = countExpectedInTurns(turns);
-  }
-
-  function countExpectedInTurns(tArr){
-    let n=0;
-    for(let i=0;i<tArr.length-1;i++){
-      if(tArr[i]?.role==="AI" && tArr[i+1]?.role==="USER") n++;
-    }
-    return n || 0;
-  }
-
-  function tokenize(en){
-    return (en||"")
-      .toLowerCase()
-      .replace(/[^a-z0-9'\s]/g," ")
-      .split(/\s+/).filter(Boolean);
-  }
-  function jaccard(aTokens,bTokens){
-    const A=new Set(aTokens), B=new Set(bTokens);
-    if(A.size===0 && B.size===0) return 1;
-    if(A.size===0 || B.size===0) return 0;
-    let inter=0;
-    for(const t of A){ if(B.has(t)) inter++; }
-    const uni = A.size + B.size - inter;
-    return uni? (inter/uni) : 0;
-  }
-  function clamp01(x){ return Math.max(0, Math.min(1, x)); }
-
-  function calcReport(){
-    // completeness
-    const answered = sessionLog.filter(x=> (x.said||"").trim()).length;
-    const completeness = totalExpectedCount ? Math.round(100 * answered / totalExpectedCount) : 0;
-
-    // topic relevance (avg jaccard said vs expected)
-    let relSum=0, relN=0;
-    sessionLog.forEach(x=>{
-      const saidT = tokenize(x.said);
-      const expT  = tokenize(x.expected);
-      if(expT.length || saidT.length){
-        relSum += jaccard(saidT, expT);
-        relN++;
-      }
-    });
-    const topic = Math.round(100 * (relN? (relSum/relN) : 0));
-
-    // pronunciation (proxy): baseline 50, + mic use, + relevance
-    let pron = 50;
-    if(micUsedCount>0) pron += 20;
-    pron += Math.round(topic*0.1); // up to +10
-    pron = Math.max(0, Math.min(100, pron));
-
-    // words used
-    const wordsUsed = wordsUsedSet.size;
-
-    // overall score for stars
-    const wordScore = Math.max(0, Math.min(100, Math.round(wordsUsed>=80?100: (wordsUsed/80*100))));
-    const overall = Math.round((topic*0.35) + (pron*0.25) + (completeness*0.30) + (wordScore*0.10));
-
-    return {topic, pron, wordsUsed, completeness, overall, answered, totalExpectedCount};
-  }
-
-  function saveReportToLocal(report){
-    try{
-      const arr = JSON.parse(localStorage.getItem(LS_REPORTS) || "[]");
-      arr.unshift({
-        at: new Date().toISOString(),
-        sceneId: activeSceneId,
-        sceneTitle: activeSceneTitle,
-        week: activeWeek,
-        topic: report.topic,
-        pron: report.pron,
-        wordsUsed: report.wordsUsed,
-        completeness: report.completeness,
-        overall: report.overall
-      });
-      localStorage.setItem(LS_REPORTS, JSON.stringify(arr.slice(0,200)));
-    }catch(e){}
-  }
-
-  function setStars(overall){
-    const s1=$("star1"), s2=$("star2"), s3=$("star3");
-    const n = overall>=80 ? 3 : (overall>=60 ? 2 : 1);
-    [s1,s2,s3].forEach((el,i)=>{
-      if(!el) return;
-      if(i < n) el.classList.remove("off");
-      else el.classList.add("off");
-    });
-  }
-
-  function renderChatLog(){
-    const box = $("reportLog");
-    if(!box) return;
-    box.innerHTML = "";
-    // Build from sessionLog
-    sessionLog.forEach((x, i)=>{
-      const wrap = document.createElement("div");
-      wrap.className = "logItem";
-      wrap.innerHTML = `
-        <div class="who">AI：</div>
-        <div class="txt">${escapeHtml(x.ai||"")}</div>
-        <div class="who" style="margin-top:8px">你：</div>
-        <div class="txt">${escapeHtml(x.said||"")}</div>
-      `;
-      box.appendChild(wrap);
-    });
-  }
-
-  function showReport(){
-    const rep = calcReport();
-    saveReportToLocal(rep);
-
-    $("reportScene").textContent = activeSceneTitle || activeSceneId || "—";
-    $("mTopic").textContent = rep.topic;
-    $("mPron").textContent = rep.pron;
-    $("mWords").textContent = rep.wordsUsed;
-    $("mComplete").textContent = rep.completeness;
-
-    setStars(rep.overall);
-
-    // show
-    const mask = $("reportMask");
-    if(mask){
-      mask.style.display = "flex";
-      mask.setAttribute("aria-hidden","false");
-    }
-  }
-
-  function hideReport(){
-    const mask = $("reportMask");
-    if(mask){
-      mask.style.display = "none";
-      mask.setAttribute("aria-hidden","true");
-    }
-    // hide log
-    const box = $("reportLog");
-    if(box) box.style.display = "none";
-  }
-
-
   // -------- utils --------
   function showToast(msg){
     toastEl.textContent = msg;
@@ -1614,8 +1498,6 @@ function guessFillFromSentence(en){
       speak(currentTurn().en); // only speak AI turns
     }else{
       showToast("本情境完成 ✅");
-      // show learning report
-      showReport();
     }
   }
 
@@ -1658,7 +1540,6 @@ function guessFillFromSentence(en){
       showToast("找不到場景 JSON：" + id);
       turns = [{en:"Scene JSON not found.", zh:"找不到場景 JSON（請確認檔案放在 /talk/）", level:"A1"}];
       turnIdx = 0;
-      resetSessionScoreState();
       updateUI();
       return;
     }
@@ -1668,7 +1549,6 @@ function guessFillFromSentence(en){
       turns = [{en:"(No turns found in JSON)", zh:"JSON 沒有 turns/dialogue/lines/items 陣列", level: String(activeScene?.meta?.level || "A1")}];
     }
     turnIdx = 0;
-    resetSessionScoreState();
     fillInput.value = "";
     updateUI();
     // autoplay first line
@@ -1984,14 +1864,6 @@ if(!firstId){
       if(!said){ showToast("請先輸入你的回覆"); return; }
       // speak user's reply (optional)
       try{ await speak(said); }catch(e){}
-
-      // ====== PATCH v20260111-score-report: record this answer ======
-      const expected = (currentExpectedEn() || "").trim();
-      const aiLine = (currentTurn() && currentTurn().en) ? currentTurn().en : "";
-      sessionLog.push({ ai: aiLine, expected, said, usedMic: lastFromMic, t: Date.now() });
-      lastFromMic = false;
-      // collect words
-      tokenize(said).forEach(w=> wordsUsedSet.add(w));
       // clear input but keep the guidance panel
       fillInput.value = "";
       showToast("已送出 ✅");
@@ -2031,25 +1903,6 @@ if(!firstId){
     history.length>1 ? history.back() : (location.href = "./");
   });
 
-  // ====== PATCH v20260111-score-report: report UI handlers ======
-  try{
-    $("btnReportClose")?.addEventListener("click", hideReport);
-    $("btnReportContinue")?.addEventListener("click", hideReport);
-    $("btnReportLog")?.addEventListener("click", ()=>{
-      const box = $("reportLog");
-      if(!box) return;
-      if(box.style.display === "block"){ box.style.display = "none"; return; }
-      renderChatLog();
-      box.style.display = "block";
-      box.scrollTop = 0;
-    });
-    // click outside card to close
-    $("reportMask")?.addEventListener("click", (e)=>{
-      if(e.target && e.target.id === "reportMask") hideReport();
-    });
-  }catch(e){}
-
-
   // Speech recognition
   let rec = null;
   function startRec(){
@@ -2067,8 +1920,6 @@ if(!firstId){
     rec.onresult = (ev)=>{
       const said = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) ? ev.results[0][0].transcript : "";
       $("dotLive").style.background = "#22c55e";
-      micUsedCount++;
-      lastFromMic = true;
       if(!said.trim()){
         showToast("沒有聽清楚，請再說一次");
         return;
@@ -2097,46 +1948,7 @@ if(!firstId){
     if(mask.style.display==="flex" && inModal) return;
     // otherwise prevent overscroll
   }, {passive:true});
-
-  init();
+  (async ()=>{ const ok = (window.BW && typeof BW.ensureTalkAccess==='function') ? await BW.ensureTalkAccess() : true; if(!ok) return; init(); })();
 })();</script>
-
-<!-- ====== PATCH v20260111-score-report : learning report ====== -->
-<div class="reportMask" id="reportMask" aria-hidden="true">
-  <div class="reportCard">
-    <div class="reportTop">
-      <button class="reportClose" id="btnReportClose" aria-label="close">×</button>
-      <h2>學習報告</h2>
-      <div class="stars" aria-label="stars">
-        <svg class="star" id="star1" viewBox="0 0 24 24" fill="#fbbf24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.77 5.82 22 7 14.14 2 9.27l6.91-1.01z"/></svg>
-        <svg class="star" id="star2" viewBox="0 0 24 24" fill="#fbbf24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.77 5.82 22 7 14.14 2 9.27l6.91-1.01z"/></svg>
-        <svg class="star" id="star3" viewBox="0 0 24 24" fill="#fbbf24"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 22 12 18.77 5.82 22 7 14.14 2 9.27l6.91-1.01z"/></svg>
-      </div>
-      <p class="bigGood" id="reportGood">很棒!</p>
-      <div class="sceneName" id="reportScene">—</div>
-    </div>
-
-    <div class="metrics">
-      <div class="metric"><b id="mTopic">0</b><span>主題相關度</span></div>
-      <div class="metric"><b id="mPron">0</b><span>發音</span></div>
-      <div class="metric"><b id="mWords">0</b><span>使用的單字數</span></div>
-    </div>
-
-    <div class="radarBox">
-      <div class="radarCard">
-        <b id="mComplete">0</b>
-        <span>完整性</span>
-      </div>
-    </div>
-
-    <div class="logBox" id="reportLog"></div>
-
-    <div class="reportBtns">
-      <button id="btnReportLog">聊天記錄</button>
-      <button class="primary" id="btnReportContinue">繼續</button>
-    </div>
-  </div>
-</div>
-
 </body>
 </html>
