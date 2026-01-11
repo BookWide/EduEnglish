@@ -5,98 +5,85 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>Talk（每週口說）｜BookWide</title>
 
-<!-- ===== BookWide Guard (student: subscription required) ===== -->
+<!-- ===== BookWide Guard (Talk student: subscription required) ===== -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-(()=>{
-  try{
-    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+(function(){
+  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do'; // ✅ 單行字串
 
-    const ROOT_BASE = (
-      location.pathname.startsWith('/EduEnglish') ||
-      location.hostname.endsWith('github.io')
-    ) ? '/EduEnglish' : '';
+  // 根路徑：github.io 底下用 /EduEnglish，自訂網域 (bookwide.net) 用空字串
+  const ROOT_BASE = (
+    location.pathname.startsWith('/EduEnglish') ||
+    location.hostname.includes('github.io')
+  ) ? '/EduEnglish' : '';
 
-    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
-    });
+  const talkSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    async function waitUser(totalMs=1500, stepMs=250){
-      const t0 = Date.now();
-      while(Date.now()-t0 < totalMs){
-        try{
-          const { data } = await supabase.auth.getUser();
-          if (data && data.user) return data.user;
-        }catch(e){}
-        await new Promise(r=>setTimeout(r, stepMs));
-      }
-      return null;
-    }
+  async function getUser(){
+    try{
+      const { data, error } = await talkSupa.auth.getUser();
+      if (error || !data || !data.user) return null;
+      return data.user;
+    }catch(e){ return null; }
+  }
 
-    async function guard(){
+  (async ()=>{
+    try{
+      const user = await getUser();
       const next = location.pathname + location.search;
 
-      // 1) must be signed in
-      const user = await waitUser(1800, 250);
+      // 未登入 → 回首頁登入
       if(!user){
         const url = new URL((ROOT_BASE||'') + '/index.html', location.origin);
-        url.searchParams.set('denied','signin');
         url.searchParams.set('next', next);
-        location.href = url.toString();
+        location.replace(url.toString());
         return;
       }
 
-      // 2) must have active subscription (profiles.expires_at)
-      try{
-        const { data:p, error } = await supabase
-          .from('profiles')
-          .select('expires_at')
-          .eq('id', user.id)
-          .maybeSingle();
+      // 讀 profiles.expires_at 判斷訂閱
+      const { data: p, error: perr } = await talkSupa
+        .from('profiles')
+        .select('expires_at')
+        .eq('id', user.id)
+        .maybeSingle();
 
-        if(error) console.warn('[BW-talk] profiles expires_at read error =', error);
+      if(perr) console.warn('[BW-talk] profiles read error', perr);
 
-        const today = new Date();
-        today.setHours(0,0,0,0);
-
-        const exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
-
-        // no data / invalid date => noactive
-        if(!exp || isNaN(exp.getTime())){
-          const url = new URL((ROOT_BASE||'') + '/pricing.html', location.origin);
-          url.searchParams.set('denied','noactive');
-          url.searchParams.set('next', next);
-          location.href = url.toString();
-          return;
-        }
-
-        // expired
-        if(exp.getTime() < today.getTime()){
-          const url = new URL((ROOT_BASE||'') + '/pricing.html', location.origin);
-          url.searchParams.set('denied','expired');
-          url.searchParams.set('next', next);
-          location.href = url.toString();
-          return;
-        }
-
-        // allow
-        window.BW_USER = user;
-        window.BW_PROFILE = p || {};
-        console.log('[BW-talk] allow by profiles.expires_at =', exp.toISOString());
-      }catch(e){
-        console.error('[BW-talk] subscription check exception', e);
+      const expStr = p && p.expires_at ? String(p.expires_at) : '';
+      if(!expStr){
         const url = new URL((ROOT_BASE||'') + '/pricing.html', location.origin);
-        url.searchParams.set('denied','noactive');
+        url.searchParams.set('denied', 'nosub');
         url.searchParams.set('next', next);
-        location.href = url.toString();
+        location.replace(url.toString());
+        return;
       }
-    }
 
-    guard();
-  }catch(e){
-    console.error('[BW-talk] guard boot error', e);
-  }
+      const exp = new Date(expStr);
+      const today = new Date(); today.setHours(0,0,0,0);
+      exp.setHours(0,0,0,0);
+
+      if(Number.isNaN(exp.getTime()) || exp.getTime() < today.getTime()){
+        const url = new URL((ROOT_BASE||'') + '/pricing.html', location.origin);
+        url.searchParams.set('denied', 'expired');
+        url.searchParams.set('next', next);
+        location.replace(url.toString());
+        return;
+      }
+
+      console.log('[BW-talk] allow by profiles.expires_at =', exp.toISOString().slice(0,10));
+    }catch(e){
+      console.warn('[BW-talk] guard error', e);
+      // 守門本身出錯 → 送回 pricing（避免卡死）
+      try{
+        const next = location.pathname + location.search;
+        const url = new URL('/pricing.html', location.origin);
+        url.searchParams.set('denied', 'guard_error');
+        url.searchParams.set('next', next);
+        location.replace(url.toString());
+      }catch(_e){}
+    }
+  })();
 })();
 </script>
 
@@ -1052,7 +1039,7 @@ body{line-height:1.1}
     <div class="hero card">
       <div class="heroRow">
         <div class="avatar" aria-label="AI 老師頭像">
-          <video id="teacherVideo" class="teacherMedia" src="https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/avatars/talk.mp4" autoplay muted loop playsinline webkit-playsinline></video>
+          <video id="teacherVideo" class="teacherMedia" src="https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/avatars/talk.mp4" preload="auto" muted playsinline webkit-playsinline></video>
           <span class="dot" id="dotLive"></span>
         </div>
         <div class="heroText">
@@ -1183,11 +1170,21 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   const btnFillReset = $("btnFillReset");
   const btnBack = $("btnBack");
 
+  // Media refs
+  const teacherVideo = $("teacherVideo");
+  const dotLive = $("dotLive");
+  try{ if(teacherVideo){ teacherVideo.pause(); teacherVideo.currentTime = 0; } }catch(e){}
+
+
   // State
   let indexData = null;               // {scenes:[]}
   let byWeek = new Map();             // weekNo -> scenes[]
   let unlockedWeek = 1;               // computed
   let talkMode = "dialogue";          // "dialogue" or "shadow"
+  // ===== Session stats (for report) =====
+  let chatLog = []; // {role:'AI'|'YOU', text, ts}
+  let stats = { userWords:0, userTurns:0, expectedUserTurns:0, relevance:0, pronunciation:0, completeness:0, overall:0 };
+
   let activeWeek = 1;
   let activeSceneId = null;
   let activeSceneTitle = "";
@@ -1457,6 +1454,42 @@ function guessFillFromSentence(en){
       u.lang = "en-US";
       u.rate = 1.0;
       lastTts = text;
+
+      // ✅ teacher video: speak pulse (no loop)
+      try{
+        if(teacherVideo){
+          teacherVideo.pause();
+          try{ teacherVideo.currentTime = 0; }catch(e){}
+          const p = teacherVideo.play();
+          if(p && p.catch) p.catch(()=>{});
+        }
+        if(dotLive) dotLive.style.display = "";
+      }catch(e){}
+
+      return await new Promise((resolve)=>{
+        u.onend = ()=>{
+          try{
+            if(teacherVideo){
+              teacherVideo.pause();
+              try{ teacherVideo.currentTime = 0; }catch(e){}
+            }
+            if(dotLive) dotLive.style.display = "";
+          }catch(e){}
+          resolve();
+        };
+        u.onerror = ()=>{ try{ if(teacherVideo){ teacherVideo.pause(); teacherVideo.currentTime=0; } }catch(e){} resolve(); };
+        window.speechSynthesis.speak(u);
+      });
+    }catch(e){}
+  }
+
+  async function speakUser(text){
+    try{
+      if(!("speechSynthesis" in window)) return;
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = "en-US";
+      u.rate = 1.0;
       window.speechSynthesis.speak(u);
     }catch(e){}
   }
@@ -1482,14 +1515,135 @@ function guessFillFromSentence(en){
     return null;
   }
 
-  function nextTurn(){
+  
+  // ===== Report helpers =====
+  function nowIso(){ return new Date().toISOString(); }
+  function logAI(text){
+    if(!text) return;
+    chatLog.push({role:"AI", text:String(text), ts: nowIso()});
+  }
+  function logYou(text){
+    if(!text) return;
+    chatLog.push({role:"YOU", text:String(text), ts: nowIso()});
+  }
+  function tokenizeEN(s){
+    return String(s||"")
+      .toLowerCase()
+      .replace(/[^a-z0-9'\s]/g,' ')
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+  function calcReport(){
+    // completeness
+    stats.completeness = stats.expectedUserTurns ? Math.round(100 * stats.userTurns / stats.expectedUserTurns) : 0;
+
+    // topic relevance: overlap between user tokens and scene tokens
+    const sceneText = turns.map(t=> (t&&t.en)?t.en:"").join(" ");
+    const sceneTok = new Set(tokenizeEN(sceneText));
+    const userText = chatLog.filter(x=>x.role==="YOU").map(x=>x.text).join(" ");
+    const userTokArr = tokenizeEN(userText);
+    const userTok = new Set(userTokArr);
+    let overlap = 0;
+    userTok.forEach(w=>{ if(sceneTok.has(w)) overlap++; });
+    const denom = Math.max(1, Math.min(userTok.size, sceneTok.size));
+    stats.relevance = Math.max(0, Math.min(100, Math.round(100 * overlap / denom)));
+
+    // "pronunciation" proxy: % of alphabetic tokens (no audio analysis)
+    const alpha = userTokArr.filter(w=>/^[a-z']+$/.test(w)).length;
+    const total = Math.max(1, userTokArr.length);
+    stats.pronunciation = Math.max(0, Math.min(100, Math.round(100 * alpha / total)));
+
+    // overall
+    stats.overall = Math.round(stats.relevance*0.4 + stats.completeness*0.4 + stats.pronunciation*0.2);
+  }
+  function starsFor(score){
+    if(score>=85) return 3;
+    if(score>=65) return 2;
+    if(score>=40) return 1;
+    return 0;
+  }
+  function commentFor(score){
+    if(score>=85) return "很棒！內容貼題、句子完整，繼續保持。";
+    if(score>=65) return "不錯！再多用幾個關鍵字、句子再完整一點會更好。";
+    if(score>=40) return "有進步空間：試著用更完整的句子回覆，並多帶入本情境的關鍵字。";
+    return "先別灰心：跟著「填空引導」先完成一句，再逐步加長，你會越來越順。";
+  }
+  function buildChatHtml(){
+    const items = chatLog.map(x=>{
+      const who = x.role==="AI" ? "AI 老師" : "你";
+      const bg = x.role==="AI" ? "background:#f6f8fb" : "background:#eef2ff";
+      return `<div style="${bg}; border:1px solid #e5e7eb; border-radius:14px; padding:10px 12px; margin:8px 0">
+        <div style="font-weight:800; margin-bottom:6px">${who}</div>
+        <div style="white-space:pre-wrap; line-height:1.55">${escapeHtml(x.text)}</div>
+      </div>`;
+    }).join("");
+    return `<div style="max-height:50vh; overflow:auto; padding-right:4px">${items || "<div style='color:#64748b'>（沒有聊天記錄）</div>"}</div>`;
+  }
+  function showReport(){
+    calcReport();
+    const stars = starsFor(stats.overall);
+    const starHtml = [0,1,2].map(i=>{
+      const on = i < stars;
+      return `<span style="display:inline-block; width:62px; height:62px; margin:0 10px; border-radius:20px;
+        ${on?"background:linear-gradient(180deg,#ffd84a,#ffb200)":"background:#d1d5db"}; box-shadow:0 10px 22px rgba(15,23,42,.10)"></span>`;
+    }).join("");
+
+    const mission = escapeHtml(String(activeScene?.meta?.title || activeScene?.title || "本次口說"));
+    const inner = `
+      <div style="text-align:center; padding:8px 2px 2px">
+        <div style="font-size:20px; font-weight:900; margin:4px 0 10px">學習報告</div>
+        <div style="margin:8px 0 14px">${starHtml}</div>
+        <div style="font-size:40px; font-weight:900; color:#10b981; margin:0 0 6px">${escapeHtml(scoreLabel(stats.overall))}</div>
+        <div style="font-size:18px; font-weight:900; margin-bottom:8px">${mission}</div>
+        <div style="height:1px; background:#e5e7eb; margin:14px 0 16px"></div>
+
+        <div style="display:flex; justify-content:space-between; gap:12px; text-align:center">
+          <div style="flex:1"><div style="font-size:34px; font-weight:900">${stats.relevance}%</div><div style="color:#64748b">主題相關度</div></div>
+          <div style="flex:1"><div style="font-size:34px; font-weight:900">${stats.pronunciation}%</div><div style="color:#64748b">發音</div></div>
+          <div style="flex:1"><div style="font-size:34px; font-weight:900">${stats.userWords}</div><div style="color:#64748b">使用的單字數</div></div>
+        </div>
+
+        <div style="background:#fff; border:1px solid #e5e7eb; border-radius:18px; margin:16px 0 12px; padding:14px">
+          <div style="font-size:44px; font-weight:900; margin:0">${stats.completeness}</div>
+          <div style="color:#64748b; font-weight:800">完整性</div>
+          <div style="margin-top:10px; color:#0f172a; line-height:1.6">${escapeHtml(commentFor(stats.overall))}</div>
+        </div>
+
+        <div style="display:flex; gap:12px; margin-top:10px">
+          <button class="ghost" type="button" id="btnChatLog" style="flex:1; padding:14px 10px; border-radius:22px; font-weight:900">聊天記錄</button>
+          <button class="primary" type="button" id="btnContinue" style="flex:1; padding:14px 10px; border-radius:22px; font-weight:900">繼續</button>
+        </div>
+      </div>
+    `;
+    showModalHtml("學習報告", inner);
+
+    // hook buttons
+    setTimeout(()=>{
+      const b1 = document.getElementById("btnChatLog");
+      const b2 = document.getElementById("btnContinue");
+      if(b1) b1.onclick = ()=> showModalHtml("聊天記錄", buildChatHtml());
+      if(b2) b2.onclick = ()=> closeModal();
+    }, 0);
+  }
+  function scoreLabel(score){
+    if(score>=85) return "超棒！";
+    if(score>=65) return "很棒！";
+    if(score>=40) return "加油！";
+    return "再試一次！";
+  }
+
+function nextTurn(){
     const ni = nextAIIndex(turnIdx);
     if(ni >= 0){
       turnIdx = ni;
       updateUI();
-      speak(currentTurn().en); // only speak AI turns
+      const t = currentTurn();
+      logAI(t && t.en ? t.en : "");
+      speak(t && t.en ? t.en : ""); // only speak AI turns
     }else{
       showToast("本情境完成 ✅");
+      try{ stopSpeak(); }catch(e){}
+      try{ showReport(); }catch(e){}
     }
   }
 
@@ -1541,9 +1695,17 @@ function guessFillFromSentence(en){
       turns = [{en:"(No turns found in JSON)", zh:"JSON 沒有 turns/dialogue/lines/items 陣列", level: String(activeScene?.meta?.level || "A1")}];
     }
     turnIdx = 0;
+
+    // reset report stats
+    chatLog = [];
+    stats.userWords = 0;
+    stats.userTurns = 0;
+    stats.expectedUserTurns = turns.filter(t=>t && t.role==="USER").length;
+
     fillInput.value = "";
     updateUI();
     // autoplay first line
+    try{ logAI(currentTurn().en); }catch(e){}
     speak(currentTurn().en);
   }
 
@@ -1854,8 +2016,13 @@ if(!firstId){
     if(talkMode === "dialogue"){
       const said = (fillInput.value || "").trim();
       if(!said){ showToast("請先輸入你的回覆"); return; }
+
+      // log + stats
+      try{ logYou(said); }catch(e){}
+      try{ stats.userTurns += 1; }catch(e){}
+      try{ stats.userWords += tokenizeEN(said).length; }catch(e){}
       // speak user's reply (optional)
-      try{ await speak(said); }catch(e){}
+      try{ await speakUser(said); }catch(e){}
       // clear input but keep the guidance panel
       fillInput.value = "";
       showToast("已送出 ✅");
@@ -1866,7 +2033,7 @@ if(!firstId){
     // non-dialogue (fill practice)
     const said = (fillInput.value || "").trim();
     if(!said){ showToast("請先填空"); return; }
-    await speak(said);
+    await speakUser(said);
     showToast("做得好 ✅");
   });
 
