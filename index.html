@@ -67,6 +67,34 @@
       height: 100%;
       object-fit: cover;
     }
+    /* ===== Hero carousel dots ===== */
+    .hero-dots{
+      position:absolute;
+      left:0; right:0; bottom:10px;
+      display:flex;
+      justify-content:center;
+      gap:8px;
+      pointer-events:auto;
+      z-index:5;
+    }
+    .hero-dot{
+      width:8px; height:8px;
+      border-radius:999px;
+      background: rgba(255,255,255,.45);
+      box-shadow: 0 2px 8px rgba(0,0,0,.25);
+      border: 1px solid rgba(0,0,0,.08);
+      cursor:pointer;
+    }
+    .hero-dot[aria-current="true"]{
+      width:26px;
+      background: rgba(255,255,255,.92);
+    }
+    @media (max-width: 640px){
+      .hero-dots{ bottom:8px; }
+      .hero-dot{ width:7px; height:7px; }
+      .hero-dot[aria-current="true"]{ width:22px; }
+    }
+
     @media (max-width: 900px) {
       .hero-inner {
         flex-direction: column;
@@ -327,15 +355,6 @@
   flex:0 0 34px;
 }
 .oauth-hint{color:rgba(230,240,255,.72);font-size:12px;line-height:1.5;margin-top:10px}
-
-
-/* ===== Hero media: show full video (no crop) ===== */
-#homeHeroVideo, #homeHeroImage{
-  width:100%;
-  height:100%;
-  object-fit:contain !important;
-  background:#000;
-}
 
 </style>
 
@@ -732,11 +751,9 @@
         <!-- 左：影片 / 圖片區（50%） -->
         <div class="hero-media">
           <div class="hero-media-frame">
-            <video id="homeHeroVideo" controls preload="metadata" poster="assets/home-hero.jpg">
-              <!-- 預設首頁宣傳影片（若 hero-banner.json 存在會被覆寫） -->
-              <source src="assets/home-hero.mp4" type="video/mp4" />
-              您的瀏覽器不支援影片播放。
-            </video>
+            <img id="homeHeroImage" alt="" style="display:none" />
+              <video id="homeHeroVideo" preload="metadata" playsinline muted loop style="display:none"></video>
+              <div class="hero-dots" id="heroDots" aria-label="Hero banners"></div>
             <!-- 圖片型 Hero 會改用這張圖（預設隱藏） -->
             <img id="homeHeroImage" alt="BookWide Hero" style="display:none;" />
           </div>
@@ -783,7 +800,7 @@
       </div>
 
       <div class="search-box-wrapper">
-        <input id="searchInput" type="search" class="search-box" placeholder="搜尋標題、關鍵字…" />
+        <input id="searchInput" name="q" autocomplete="off" autocapitalize="off" spellcheck="false" type="search" class="search-box" placeholder="搜尋標題、關鍵字…" />
       </div>
 
       <div id="videoGrid" class="grid"></div>
@@ -885,55 +902,232 @@
     let VIDEO_ITEMS = [];
 
     async function loadHeroBanner() {
+      // 支援：
+      // - v1: {type,title,subtitle,media_url,poster_url,cta_text,cta_link}
+      // - v2: {version:2, interval_ms, ab_test:{enabled,variants}, banners:[...] }
+      // A/B：URL ?ab=A|B 其次 localStorage('bw_ab')，最後隨機或預設 A
+      const videoEl = document.getElementById("homeHeroVideo");
+      const imgEl   = document.getElementById("homeHeroImage");
+      const dotsEl  = document.getElementById("heroDots");
+      const titleEl = document.querySelector(".hero-title");
+      const subEl   = document.querySelector(".hero-sub");
+      const btnTry  = document.getElementById("btn-try-mid-autumn");
+
+      let slides = [];
+      let intervalMs = 6000;
+      let current = 0;
+      let timer = null;
+
+      const qs = new URLSearchParams(location.search);
+      function pickVariant(cfg){
+        const forced = (qs.get("ab") || "").toUpperCase();
+        if (forced === "A" || forced === "B") {
+          try { localStorage.setItem("bw_ab", forced); } catch(_){}
+          return forced;
+        }
+        let saved = "";
+        try { saved = (localStorage.getItem("bw_ab") || "").toUpperCase(); } catch(_){}
+        if (saved === "A" || saved === "B") return saved;
+
+        // 若 v2 指定 variants，隨機挑一個（預設 A）
+        const vars = (cfg?.ab_test?.variants && Array.isArray(cfg.ab_test.variants)) ? cfg.ab_test.variants : ["A","B"];
+        const pool = vars.map(v=>String(v).toUpperCase()).filter(v=>v==="A"||v==="B");
+        if (!pool.length) return "A";
+        const v = pool[Math.floor(Math.random()*pool.length)];
+        try { localStorage.setItem("bw_ab", v); } catch(_){}
+        return v;
+      }
+
+      function stopTimer(){
+        if (timer) { clearInterval(timer); timer = null; }
+      }
+
+      function setDots(){
+        if (!dotsEl) return;
+        dotsEl.innerHTML = "";
+        if (!slides || slides.length <= 1) {
+          dotsEl.style.display = "none";
+          return;
+        }
+        dotsEl.style.display = "flex";
+        slides.forEach((_, i) => {
+          const d = document.createElement("button");
+          d.className = "hero-dot";
+          d.type = "button";
+          d.setAttribute("aria-label", `slide ${i+1}`);
+          d.setAttribute("aria-current", i === current ? "true" : "false");
+          d.addEventListener("click", () => {
+            go(i, true);
+          });
+          dotsEl.appendChild(d);
+        });
+      }
+
+      function applySlide(s){
+        if (!s) return;
+        const type = (s.type || "image").toLowerCase();
+        if (s.title && titleEl) titleEl.textContent = s.title;
+        if (typeof s.subtitle === "string" && subEl) subEl.textContent = s.subtitle;
+
+        if (s.cta_text && btnTry) btnTry.textContent = s.cta_text;
+        if (s.cta_link) HERO_CTA_LINK = s.cta_link;
+
+        // media
+        if (type === "video") {
+          if (imgEl) { imgEl.style.display = "none"; imgEl.removeAttribute("src"); }
+          if (videoEl && s.media_url) {
+            videoEl.style.display = "block";
+            videoEl.muted = true;
+            videoEl.loop = true;
+            videoEl.playsInline = true;
+            videoEl.autoplay = true;
+            videoEl.controls = false;
+            if (s.poster_url) videoEl.poster = s.poster_url;
+
+            // 使用 <source> 讓 load() 正常刷新
+            let srcEl = videoEl.querySelector("source");
+            if (!srcEl) { srcEl = document.createElement("source"); videoEl.appendChild(srcEl); }
+            srcEl.src = s.media_url;
+            srcEl.type = "video/mp4";
+            videoEl.load();
+            // iOS/Safari 可能需要 play() 才會顯示第一幀
+            const p = videoEl.play?.();
+            if (p && p.catch) p.catch(()=>{});
+          }
+        } else { // image
+          if (videoEl) {
+            try { videoEl.pause?.(); } catch(_){}
+            videoEl.style.display = "none";
+            const srcEl = videoEl.querySelector("source");
+            if (srcEl) srcEl.removeAttribute("src");
+          }
+          if (imgEl && s.media_url) {
+            imgEl.src = s.media_url;
+            imgEl.style.display = "block";
+          }
+        }
+      }
+
+      function go(idx, userAction=false){
+        if (!slides.length) return;
+        current = (idx + slides.length) % slides.length;
+        applySlide(slides[current]);
+        setDots();
+        if (userAction) {
+          stopTimer();
+          if (slides.length > 1) timer = setInterval(()=>go(current+1), intervalMs);
+        }
+      }
+
+      function bindSwipe(){
+        const frame = document.querySelector(".hero-media-frame");
+        if (!frame) return;
+        let x0 = null;
+        frame.addEventListener("touchstart", (e)=>{
+          if (!slides || slides.length <= 1) return;
+          x0 = e.touches?.[0]?.clientX ?? null;
+        }, {passive:true});
+        frame.addEventListener("touchend", (e)=>{
+          if (!slides || slides.length <= 1) return;
+          if (x0 == null) return;
+          const x1 = e.changedTouches?.[0]?.clientX ?? null;
+          if (x1 == null) return;
+          const dx = x1 - x0;
+          if (Math.abs(dx) < 40) return;
+          if (dx < 0) go(current+1, true);
+          else go(current-1, true);
+          x0 = null;
+        }, {passive:true});
+      }
+
       try {
         const res = await fetch(HERO_JSON_URL, { cache: "no-store" });
-        if (!res.ok) return; // 找不到就用預設文案
+        if (!res.ok) return;
 
         const cfg = await res.json();
         if (!cfg || typeof cfg !== "object") return;
 
-        const type    = cfg.type || "video";
-        const titleEl = document.querySelector(".hero-title");
-        const subEl   = document.querySelector(".hero-sub");
-        const videoEl = document.getElementById("homeHeroVideo");
-        const imgEl   = document.getElementById("homeHeroImage");
-        const btnTry  = document.getElementById("btn-try-mid-autumn");
-
-        if (cfg.title && titleEl)    titleEl.textContent = cfg.title;
-        if (cfg.subtitle && subEl)   subEl.textContent   = cfg.subtitle;
-        if (cfg.cta_text && btnTry)  btnTry.textContent  = cfg.cta_text;
-        if (cfg.cta_link)            HERO_CTA_LINK       = cfg.cta_link;
-
-        // 媒體切換
-        if (type === "image") {
-          if (imgEl && cfg.media_url) {
-            imgEl.src = cfg.media_url;
-            imgEl.style.display = "block";
-          }
-          if (videoEl) {
-            videoEl.style.display = "none";
-            videoEl.pause?.();
-          }
-        } else { // 預設使用影片
-          if (videoEl && cfg.media_url) {
-            let srcEl = videoEl.querySelector("source");
-            if (!srcEl) {
-              srcEl = document.createElement("source");
-              videoEl.appendChild(srcEl);
-            }
-            srcEl.src = cfg.media_url;
-            // 類型先寫 mp4，若之後有需要再擴充
-            srcEl.type = "video/mp4";
-            videoEl.load();
-            videoEl.style.display = "block";
-          }
-          if (videoEl && cfg.poster_url) {
-            videoEl.poster = cfg.poster_url;
-          }
-          if (imgEl) {
-            imgEl.style.display = "none";
-          }
+        // v1
+        if (!cfg.version || cfg.version === 1) {
+          slides = [{
+            type: cfg.type || "video",
+            title: cfg.title || "",
+            subtitle: cfg.subtitle || "",
+            media_url: cfg.media_url || "",
+            poster_url: cfg.poster_url || "",
+            cta_text: cfg.cta_text || "",
+            cta_link: cfg.cta_link || ""
+          }];
+          intervalMs = 99999999;
+          go(0);
+          return;
         }
+
+        // v2
+        intervalMs = Number(cfg.interval_ms || 6000) || 6000;
+
+        const variant = (cfg.ab_test?.enabled === false) ? "" : pickVariant(cfg);
+
+        const all = Array.isArray(cfg.banners) ? cfg.banners : [];
+        const now = Date.now();
+
+        function inWindow(b){
+          const s = b.start_at ? Date.parse(b.start_at) : NaN;
+          const e = b.end_at   ? Date.parse(b.end_at)   : NaN;
+          if (!isNaN(s) && now < s) return false;
+          if (!isNaN(e) && now > e) return false;
+          return true;
+        }
+
+        const enabled = all.filter(b => b && b.enabled !== false && inWindow(b));
+
+        // 先挑同 variant；沒有就退到全部 enabled
+        let picked = enabled.filter(b => !variant ? true : (String(b.variant||"").toUpperCase() === variant));
+        if (!picked.length) picked = enabled;
+
+        // 權重（weight）支援：把權重展開成抽籤池
+        function weightedShuffle(list){
+          const pool = [];
+          list.forEach(b=>{
+            const w = Math.max(1, Number(b.weight||1) || 1);
+            const n = Math.min(200, w); // 上限避免爆
+            for (let i=0;i<n;i++) pool.push(b);
+          });
+          // 先隨機抽一輪去重，保留順序
+          const out = [];
+          const seen = new Set();
+          while (pool.length && out.length < list.length){
+            const k = Math.floor(Math.random()*pool.length);
+            const b = pool.splice(k,1)[0];
+            const id = b.id || JSON.stringify(b);
+            if (!seen.has(id)){ seen.add(id); out.push(b); }
+          }
+          // 補齊沒抽到的
+          list.forEach(b=>{
+            const id = b.id || JSON.stringify(b);
+            if (!seen.has(id)) out.push(b);
+          });
+          return out;
+        }
+
+        slides = weightedShuffle(picked).map(b => ({
+          type: b.type || "image",
+          title: b.title || "",
+          subtitle: b.subtitle || "",
+          media_url: b.media_url || "",
+          poster_url: b.poster_url || "",
+          cta_text: b.cta_text || "",
+          cta_link: b.cta_link || ""
+        }));
+
+        if (!slides.length) return;
+
+        bindSwipe();
+        go(0);
+
+        stopTimer();
+        if (slides.length > 1) timer = setInterval(()=>go(current+1), intervalMs);
+
       } catch (err) {
         console.error("loadHeroBanner error", err);
       }
@@ -1276,7 +1470,10 @@ function getWeekIndex() {
     // 初始化：年份＋載入 JSON
     document.getElementById("y").textContent = new Date().getFullYear();
     loadAllVideoItems();
-    loadHeroBanner();
+    
+    // 防止瀏覽器自動填入 email 造成干擾
+    try { const si = document.getElementById("searchInput"); if (si) si.value = ""; } catch(_){}
+loadHeroBanner();
   </script>
 
   <!-- 服務導覽開關 -->
@@ -1303,9 +1500,470 @@ function getWeekIndex() {
 
   <!-- Supabase Auth（使用 supabase-js v2） -->
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
+<script>
+    const { createClient } = supabase;
 
-<!-- removed: index device takeover script (avoid unintended sign-out/redirect) -->
+// === Auto logout (via BW.startIdleLogout) ===
+const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+    const SUPABASE_ANON_KEY =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
+    const supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    window.supa = supa;
+
+    /* ========= BookWide 單裝置接管（index 主控） =========
+       - 新裝置登入：接管（寫入 profiles.current_device_id）
+       - 舊裝置：偵測到被接管 → 提示 + global signOut
+       - 若 profiles 欄位不存在 / RLS 擋：自動略過（不影響登入）
+    ====================================================== */
+    function BW_getDeviceId(){
+      try{
+        let id = localStorage.getItem('bw_device_id');
+        if(!id){
+          id = (crypto && crypto.randomUUID) ? crypto.randomUUID()
+            : ('xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c=>{
+                const r = Math.random()*16|0, v = c==='x'?r:(r&0x3|0x8);
+                return v.toString(16);
+              }));
+          localStorage.setItem('bw_device_id', id);
+        }
+        return id;
+      }catch(e){
+        return 'no-storage';
+      }
+    }
+
+    function BW_showKickedModal(){
+      // 用最保守的提示：不依賴外部元件
+      try{
+        alert('此帳號已在另一個裝置登入，您已被登出');
+      }catch(_){}
+    }
+
+    async function BW_forceSignOut(){
+      try{ localStorage.setItem('bw_forced_logout','1'); }catch(_){}
+      try{ await supa.auth.signOut({ scope:'global' }); }
+       catch(_){ try{ try{ await supa.auth.signOut({ scope:'global' }); }
+     catch(_){ try{ await supa.auth.signOut(); }catch(__){} } }catch(__){} }
+      BW_showKickedModal();
+      // 回首頁（帶參數方便你 debug）
+      try{
+        const url = new URL(location.href);
+        url.searchParams.set('denied','kicked');
+        location.href = url.pathname + '?' + url.searchParams.toString();
+      }catch(_){
+        location.href = location.pathname + '?denied=kicked';
+      }
+    }
+
+    async function BW_enforceTakeover(user){
+      try{
+        if(!user || !user.id) return;
+        const deviceId = BW_getDeviceId();
+        // 直接覆寫 profiles.current_device_id（新裝置接管）
+        const up = await supa.from('profiles')
+          .update({ current_device_id: deviceId, last_seen_at: new Date().toISOString() })
+          .eq('id', user.id);
+        if(up.error){
+          console.warn('[BW] profiles update blocked:', up.error.message||up.error);
+          return; // RLS 擋就略過，不影響登入
+        }
+      }catch(e){
+        console.warn('[BW] takeover error:', e);
+      }
+    }
+
+    function BW_startDeviceGuard(user){
+      let running = false;
+      const my = BW_getDeviceId();
+      const uid = user && user.id;
+      if(!uid) return null;
+
+      const tick = async ()=>{
+        if(running) return;
+        running = true;
+        try{
+          const { data, error } = await supa.from('profiles')
+            .select('current_device_id')
+            .eq('id', uid)
+            .maybeSingle();
+          if(error){
+            console.warn('[BW] guard select blocked:', error.message||error);
+            return; // 被擋就不做，避免影響使用
+          }
+          // ✅ current_device_id 為空 → 立刻寫成自己（補洞：避免兩台都不踢）
+if(!data?.current_device_id){
+  const up = await supa.from('profiles')
+    .update({ current_device_id: my, last_seen_at: new Date().toISOString() })
+    .eq('id', uid);
+  if(up.error){
+    console.warn('[BW] guard takeover blocked:', up.error.message||up.error);
+  }
+  return;
+}
+
+// ✅ 有值但不是我 → 踢下線
+if(data.current_device_id !== my){
+  await BW_forceSignOut();
+}
+
+
+
+
+
+        }finally{
+          running = false;
+        }
+      };
+
+      tick();
+      return setInterval(tick, 30*1000); // 每 30 秒檢查一次，踢得夠快
+    }
+
+    // 被踢提示（跨頁保險）
+    (function BW_popForcedLogoutHint(){
+      try{
+        if(localStorage.getItem('bw_forced_logout')==='1'){
+          localStorage.removeItem('bw_forced_logout');
+          BW_showKickedModal();
+        }
+      }catch(_){}
+    })();
+/* ========= End single-device takeover ========= */
+
+
+    // ✅ OAuth callback：如果網址帶 ?code=...，就兌換成 session（Google / 之後 FB/LINE/微信）
+    (async () => {
+      try{
+        const qs = new URLSearchParams(location.search);
+        const code = qs.get('code');
+        if (code){
+          await supa.auth.exchangeCodeForSession(code);
+          try{ await initAuthAndProfile(); }catch(_e){}
+          // ✅ 若有 next=... 就回到原本頁
+          try{ redirectToNext(); }catch(_e){}
+          // 清掉 query（保留 next）避免刷新又跑一次
+          const keepNext = qs.get('next');
+          const clean = location.origin + location.pathname + (keepNext ? ('?next=' + encodeURIComponent(keepNext)) : '') + location.hash;
+          history.replaceState({}, document.title, clean);
+        }
+      }catch(e){
+        console.warn('exchangeCodeForSession failed:', e);
+      }
+    })();
+
+
+    const btnLogin   = document.getElementById('btnLogin');
+    const btnLogout  = document.getElementById('btnLogout');
+    const acctWrap   = document.getElementById('accountWrap');
+    const nameBadge  = document.getElementById('userNameBadge');
+    const btnAccount = document.getElementById('btnAccount');
+    const acctLogout = document.querySelector('.acct-logout');
+    const btnPwEye   = document.getElementById('btnPwEye');
+
+    // OAuth buttons (Google 已接；其餘先預留)
+    const oauthGoogle   = document.getElementById('oauthGoogle');
+    const oauthFacebook = document.getElementById('oauthFacebook');
+    const oauthLine     = document.getElementById('oauthLine');
+    const oauthWeChat   = document.getElementById('oauthWeChat');
+
+    const modal       = document.getElementById('authModal');
+    const authTitle   = document.getElementById('authTitle');
+    const authEmail   = document.getElementById('authEmail');
+    const authPass    = document.getElementById('authPassword');
+    const authErr     = document.getElementById('authErr');
+    const authToggle  = document.getElementById('authToggle');
+    const authSubmit  = document.getElementById('authSubmit');
+    const authCancel  = document.getElementById('authCancel');
+    const linkForgot  = document.getElementById('linkForgot');
+
+    let authMode = 'login';
+
+    function setAuthMode(mode) {
+      authMode = mode;
+      if (mode === 'login') {
+        authTitle.textContent = '登入';
+        authToggle.textContent = '沒有帳號？改為註冊';
+      } else {
+        authTitle.textContent = '註冊新帳號';
+        authToggle.textContent = '已有帳號？改為登入';
+      }
+      authErr.textContent = '';
+    }
+
+    function openModal(mode = 'login') {
+      setAuthMode(mode);
+      modal.classList.add('open');
+      modal.setAttribute('aria-hidden','false');
+      authEmail.focus();
+    }
+
+    function closeModal() {
+      modal.classList.remove('open');
+      modal.setAttribute('aria-hidden','true');
+      authErr.textContent = '';
+      authPass.value = '';
+    }
+
+
+    function safeSameOriginUrl(maybeUrl){
+      try{
+        const u = new URL(maybeUrl, location.origin);
+        if (u.origin === location.origin) return u.href;
+      }catch(e){}
+      return null;
+    }
+    function getNextParam(){
+      const qs = new URLSearchParams(location.search);
+      return qs.get('next') || '';
+    }
+    function redirectToNext(){
+      const next = getNextParam();
+      if (!next) return;
+      const href = safeSameOriginUrl(next);
+      if (href) location.href = href;
+    }
+
+    async function paintUser(u) {
+      try {
+        if (u) {
+          let display = u.user_metadata?.name || (u.email ? u.email.split('@')[0] : '使用者');
+          let email   = u.email || '';
+          let avatar  = u.user_metadata?.avatar_url || '';
+
+          try {
+            const { data: prof } = await supa
+              .from('profiles')
+              .select('nickname, avatar_url, is_admin')
+              .eq('id', u.id)
+              .maybeSingle();
+            if (prof) {
+              if (prof.nickname)   display = prof.nickname;
+              if (prof.avatar_url) avatar  = prof.avatar_url;
+              const adminItem = document.querySelector('.acct-item.acct-admin');
+              if (adminItem) adminItem.style.display = prof.is_admin ? 'block' : 'none';
+            }
+          } catch {}
+
+          nameBadge.textContent = email || display || '已登入';
+
+          const img  = document.getElementById('acctAvatar');
+          const fb   = document.getElementById('acctFallback');
+          const disp = document.getElementById('acctDisplay');
+          const mail = document.getElementById('acctEmail');
+
+          disp.textContent = display || '—';
+          mail.textContent = email || '—';
+
+          if (avatar) {
+            img.src = avatar;
+            img.style.display = 'block';
+            fb.style.display  = 'none';
+          } else {
+            img.removeAttribute('src');
+            img.style.display = 'none';
+            fb.style.display  = 'grid';
+            fb.textContent    = (email || display || 'U').slice(0,2).toUpperCase();
+          }
+
+          btnLogin.style.display  = 'none';
+          if (btnLogout) btnLogout.style.display = 'none';
+          acctWrap.style.display  = 'inline-block';
+
+          document.querySelector('.acct-item.acct-plan')
+            ?.style.setProperty('display','block');
+        } else {
+          btnLogin.style.display  = 'inline-block';
+          if (btnLogout) btnLogout.style.display = 'none';
+          acctWrap.style.display  = 'none';
+        }
+      } catch (e) {
+        console.error('paintUser error', e);
+      }
+    }
+
+    if (btnAccount) {
+      btnAccount.addEventListener('click', (e)=>{
+        e.stopPropagation();
+        acctWrap.classList.toggle('open');
+      });
+      document.addEventListener('click', ()=>acctWrap.classList.remove('open'));
+    }
+
+    if (btnLogin) {
+      btnLogin.addEventListener('click', ()=>{ window.location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search + location.hash); });
+    }
+
+    async function doLogout(){
+      try{
+        // ✅ 1) Supabase 端登出（global：讓 refresh token 失效）
+        await supa.auth.signOut({ scope: 'global' });
+      }catch(e){
+        // fallback（舊版不支援 scope）
+        try{ await supa.auth.signOut({ scope:'global' }); }
+       catch(_){ try{ try{ await supa.auth.signOut({ scope:'global' }); }
+     catch(_){ try{ await supa.auth.signOut(); }catch(__){} } }catch(__){} }
+      }
+
+      // ✅ 2) 清掉本機可能殘留的 session（避免「登出後又自動登入」）
+      try{
+        const projectRef = (SUPABASE_URL.match(/https:\/\/([^.]+)/)?.[1] || '');
+        const prefix = 'sb-' + projectRef;
+        const shouldClear = (k)=> k.includes('-auth-token') || k.startsWith(prefix);
+
+        Object.keys(localStorage).forEach(k=>{ if (shouldClear(k)) localStorage.removeItem(k); });
+        Object.keys(sessionStorage).forEach(k=>{ if (shouldClear(k)) sessionStorage.removeItem(k); });
+      }catch(e){}
+
+      CURRENT_USER_IS_ADMIN = false;
+      await paintUser(null);
+      if (typeof renderGrid === 'function') {
+        renderGrid();
+      }
+
+      // ✅ 3) 乾淨回首頁（移除 OAuth code/state 參數）
+      const url = new URL(location.href);
+      url.searchParams.delete('code');
+      url.searchParams.delete('state');
+      url.searchParams.delete('error');
+      url.searchParams.delete('error_description');
+      location.href = url.pathname + url.search + url.hash;
+    }
+
+    if (btnLogout) {
+      btnLogout.addEventListener('click', doLogout);
+    }
+    if (acctLogout) {
+      acctLogout.addEventListener('click', (e)=>{
+        e.preventDefault();
+        doLogout();
+      });
+    }
+
+    authCancel.addEventListener('click', closeModal);
+    authToggle.addEventListener('click', ()=>{
+      setAuthMode(authMode === 'login' ? 'signup' : 'login');
+    });
+
+    if (btnPwEye) {
+      btnPwEye.addEventListener('click', ()=>{
+        if (!authPass) return;
+        const isPwd = authPass.type === 'password';
+        authPass.type = isPwd ? 'text' : 'password';
+        btnPwEye.textContent = isPwd ? '隱藏' : '顯示';
+      });
+    }
+
+    async function signInOAuth(provider){
+      // 把 next 帶著走（如果有）
+      const next = getNextParam();
+      const redirectTo = location.origin + location.pathname + (next ? ('?next=' + encodeURIComponent(next)) : '');
+      try{
+        await supa.auth.signInWithOAuth({
+          provider,
+          options: {
+            redirectTo,
+            // ✅ 讓 Google 每次都跳出選帳號（避免自動帶入上一個帳號）
+            queryParams: { prompt: 'select_account' }
+          }
+        });
+        }catch(e){
+        showError(e?.message || String(e));
+      }
+    }
+
+    if (oauthGoogle){
+      oauthGoogle.addEventListener('click', ()=> signInOAuth('google'));
+    }
+    const notReady = () => showError('此登入方式先預留，等你提供對應的 Client ID / Secret 後我再接上。');
+    if (oauthFacebook) oauthFacebook.addEventListener('click', notReady);
+    if (oauthLine)     oauthLine.addEventListener('click', notReady);
+    if (oauthWeChat)   oauthWeChat.addEventListener('click', notReady);
+
+
+    authSubmit.addEventListener('click', async ()=>{
+      authErr.textContent = '';
+      const email = authEmail.value.trim();
+      const password = authPass.value;
+
+      if (!email || !password) {
+        authErr.textContent = '請輸入 Email 與密碼。';
+        return;
+      }
+
+      try {
+        if (authMode === 'login') {
+          const { data, error } = await supa.auth.signInWithPassword({ email, password });
+          if (error) throw error;
+          await initAuthAndProfile();
+          closeModal();
+        } else {
+          const { data, error } = await supa.auth.signUp({ email, password });
+          if (error) throw error;
+          authErr.textContent = '註冊成功，請到信箱收信完成驗證，然後再登入。';
+        }
+      } catch (err) {
+        console.error(err);
+        authErr.textContent = err.message || '操作失敗，請稍後再試。';
+      }
+    });
+
+    linkForgot.addEventListener('click', async ()=>{
+      authErr.textContent = '';
+      const email = authEmail.value.trim();
+      if (!email) {
+        authErr.textContent = '請先輸入 Email 再點「忘記密碼」。';
+        return;
+      }
+      try {
+        const { error } = await supa.auth.resetPasswordForEmail(email, {
+          redirectTo: 'https://bookwide.net/reset.html?type=recovery'
+
+        });
+        if (error) throw error;
+        authErr.textContent = '已寄出重設密碼信件，請到信箱收信。';
+      } catch (err) {
+        console.error(err);
+        authErr.textContent = err.message || '寄送失敗，請稍後再試。';
+      }
+    });
+
+    async function initAuthAndProfile(){
+      try {
+        const { data } = await supa.auth.getSession();
+        const user = data.session?.user ?? null;
+        await paintUser(user);
+
+        // [BW] 單一裝置接管 + 監控
+        if (user) {
+          await BW_enforceTakeover(user);
+          BW_startDeviceGuard(user);
+        }
+
+
+        CURRENT_USER_IS_ADMIN = false;
+        if (user) {
+          const { data: profile, error } = await supa
+            .from('profiles')
+            .select('is_admin')
+            .eq('id', user.id)
+            .maybeSingle();
+          if (!error && profile && profile.is_admin === true) {
+            CURRENT_USER_IS_ADMIN = true;
+          }
+        }
+      } catch (e) {
+        console.error('check admin failed', e);
+        CURRENT_USER_IS_ADMIN = false;
+      }
+      // 使用者狀態確定後，再重畫一次列表（決定是否套用 15 片限制）
+      if (typeof renderGrid === 'function') {
+        renderGrid();
+      }
+    }
+
+    initAuthAndProfile();
+  </script>
 
   <link rel="stylesheet" href="/shared/footer.css?v=20251219">
 <!-- ================= BookWide Footer (inline, no JS injection) ================= -->
