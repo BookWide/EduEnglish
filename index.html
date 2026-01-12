@@ -67,6 +67,34 @@
       height: 100%;
       object-fit: cover;
     }
+    /* ===== Hero carousel dots ===== */
+    .hero-dots{
+      position:absolute;
+      left:0; right:0; bottom:10px;
+      display:flex;
+      justify-content:center;
+      gap:8px;
+      pointer-events:auto;
+      z-index:5;
+    }
+    .hero-dot{
+      width:8px; height:8px;
+      border-radius:999px;
+      background: rgba(255,255,255,.45);
+      box-shadow: 0 2px 8px rgba(0,0,0,.25);
+      border: 1px solid rgba(0,0,0,.08);
+      cursor:pointer;
+    }
+    .hero-dot[aria-current="true"]{
+      width:26px;
+      background: rgba(255,255,255,.92);
+    }
+    @media (max-width: 640px){
+      .hero-dots{ bottom:8px; }
+      .hero-dot{ width:7px; height:7px; }
+      .hero-dot[aria-current="true"]{ width:22px; }
+    }
+
     @media (max-width: 900px) {
       .hero-inner {
         flex-direction: column;
@@ -723,11 +751,9 @@
         <!-- 左：影片 / 圖片區（50%） -->
         <div class="hero-media">
           <div class="hero-media-frame">
-            <video id="homeHeroVideo" controls preload="metadata" poster="assets/home-hero.jpg">
-              <!-- 預設首頁宣傳影片（若 hero-banner.json 存在會被覆寫） -->
-              <source src="assets/home-hero.mp4" type="video/mp4" />
-              您的瀏覽器不支援影片播放。
-            </video>
+            <img id="homeHeroImage" alt="" style="display:none" />
+              <video id="homeHeroVideo" preload="metadata" playsinline muted loop style="display:none"></video>
+              <div class="hero-dots" id="heroDots" aria-label="Hero banners"></div>
             <!-- 圖片型 Hero 會改用這張圖（預設隱藏） -->
             <img id="homeHeroImage" alt="BookWide Hero" style="display:none;" />
           </div>
@@ -774,7 +800,7 @@
       </div>
 
       <div class="search-box-wrapper">
-        <input id="searchInput" type="search" class="search-box" placeholder="搜尋標題、關鍵字…" />
+        <input id="searchInput" name="q" autocomplete="off" autocapitalize="off" spellcheck="false" type="search" class="search-box" placeholder="搜尋標題、關鍵字…" />
       </div>
 
       <div id="videoGrid" class="grid"></div>
@@ -876,55 +902,232 @@
     let VIDEO_ITEMS = [];
 
     async function loadHeroBanner() {
+      // 支援：
+      // - v1: {type,title,subtitle,media_url,poster_url,cta_text,cta_link}
+      // - v2: {version:2, interval_ms, ab_test:{enabled,variants}, banners:[...] }
+      // A/B：URL ?ab=A|B 其次 localStorage('bw_ab')，最後隨機或預設 A
+      const videoEl = document.getElementById("homeHeroVideo");
+      const imgEl   = document.getElementById("homeHeroImage");
+      const dotsEl  = document.getElementById("heroDots");
+      const titleEl = document.querySelector(".hero-title");
+      const subEl   = document.querySelector(".hero-sub");
+      const btnTry  = document.getElementById("btn-try-mid-autumn");
+
+      let slides = [];
+      let intervalMs = 6000;
+      let current = 0;
+      let timer = null;
+
+      const qs = new URLSearchParams(location.search);
+      function pickVariant(cfg){
+        const forced = (qs.get("ab") || "").toUpperCase();
+        if (forced === "A" || forced === "B") {
+          try { localStorage.setItem("bw_ab", forced); } catch(_){}
+          return forced;
+        }
+        let saved = "";
+        try { saved = (localStorage.getItem("bw_ab") || "").toUpperCase(); } catch(_){}
+        if (saved === "A" || saved === "B") return saved;
+
+        // 若 v2 指定 variants，隨機挑一個（預設 A）
+        const vars = (cfg?.ab_test?.variants && Array.isArray(cfg.ab_test.variants)) ? cfg.ab_test.variants : ["A","B"];
+        const pool = vars.map(v=>String(v).toUpperCase()).filter(v=>v==="A"||v==="B");
+        if (!pool.length) return "A";
+        const v = pool[Math.floor(Math.random()*pool.length)];
+        try { localStorage.setItem("bw_ab", v); } catch(_){}
+        return v;
+      }
+
+      function stopTimer(){
+        if (timer) { clearInterval(timer); timer = null; }
+      }
+
+      function setDots(){
+        if (!dotsEl) return;
+        dotsEl.innerHTML = "";
+        if (!slides || slides.length <= 1) {
+          dotsEl.style.display = "none";
+          return;
+        }
+        dotsEl.style.display = "flex";
+        slides.forEach((_, i) => {
+          const d = document.createElement("button");
+          d.className = "hero-dot";
+          d.type = "button";
+          d.setAttribute("aria-label", `slide ${i+1}`);
+          d.setAttribute("aria-current", i === current ? "true" : "false");
+          d.addEventListener("click", () => {
+            go(i, true);
+          });
+          dotsEl.appendChild(d);
+        });
+      }
+
+      function applySlide(s){
+        if (!s) return;
+        const type = (s.type || "image").toLowerCase();
+        if (s.title && titleEl) titleEl.textContent = s.title;
+        if (typeof s.subtitle === "string" && subEl) subEl.textContent = s.subtitle;
+
+        if (s.cta_text && btnTry) btnTry.textContent = s.cta_text;
+        if (s.cta_link) HERO_CTA_LINK = s.cta_link;
+
+        // media
+        if (type === "video") {
+          if (imgEl) { imgEl.style.display = "none"; imgEl.removeAttribute("src"); }
+          if (videoEl && s.media_url) {
+            videoEl.style.display = "block";
+            videoEl.muted = true;
+            videoEl.loop = true;
+            videoEl.playsInline = true;
+            videoEl.autoplay = true;
+            videoEl.controls = false;
+            if (s.poster_url) videoEl.poster = s.poster_url;
+
+            // 使用 <source> 讓 load() 正常刷新
+            let srcEl = videoEl.querySelector("source");
+            if (!srcEl) { srcEl = document.createElement("source"); videoEl.appendChild(srcEl); }
+            srcEl.src = s.media_url;
+            srcEl.type = "video/mp4";
+            videoEl.load();
+            // iOS/Safari 可能需要 play() 才會顯示第一幀
+            const p = videoEl.play?.();
+            if (p && p.catch) p.catch(()=>{});
+          }
+        } else { // image
+          if (videoEl) {
+            try { videoEl.pause?.(); } catch(_){}
+            videoEl.style.display = "none";
+            const srcEl = videoEl.querySelector("source");
+            if (srcEl) srcEl.removeAttribute("src");
+          }
+          if (imgEl && s.media_url) {
+            imgEl.src = s.media_url;
+            imgEl.style.display = "block";
+          }
+        }
+      }
+
+      function go(idx, userAction=false){
+        if (!slides.length) return;
+        current = (idx + slides.length) % slides.length;
+        applySlide(slides[current]);
+        setDots();
+        if (userAction) {
+          stopTimer();
+          if (slides.length > 1) timer = setInterval(()=>go(current+1), intervalMs);
+        }
+      }
+
+      function bindSwipe(){
+        const frame = document.querySelector(".hero-media-frame");
+        if (!frame) return;
+        let x0 = null;
+        frame.addEventListener("touchstart", (e)=>{
+          if (!slides || slides.length <= 1) return;
+          x0 = e.touches?.[0]?.clientX ?? null;
+        }, {passive:true});
+        frame.addEventListener("touchend", (e)=>{
+          if (!slides || slides.length <= 1) return;
+          if (x0 == null) return;
+          const x1 = e.changedTouches?.[0]?.clientX ?? null;
+          if (x1 == null) return;
+          const dx = x1 - x0;
+          if (Math.abs(dx) < 40) return;
+          if (dx < 0) go(current+1, true);
+          else go(current-1, true);
+          x0 = null;
+        }, {passive:true});
+      }
+
       try {
         const res = await fetch(HERO_JSON_URL, { cache: "no-store" });
-        if (!res.ok) return; // 找不到就用預設文案
+        if (!res.ok) return;
 
         const cfg = await res.json();
         if (!cfg || typeof cfg !== "object") return;
 
-        const type    = cfg.type || "video";
-        const titleEl = document.querySelector(".hero-title");
-        const subEl   = document.querySelector(".hero-sub");
-        const videoEl = document.getElementById("homeHeroVideo");
-        const imgEl   = document.getElementById("homeHeroImage");
-        const btnTry  = document.getElementById("btn-try-mid-autumn");
-
-        if (cfg.title && titleEl)    titleEl.textContent = cfg.title;
-        if (cfg.subtitle && subEl)   subEl.textContent   = cfg.subtitle;
-        if (cfg.cta_text && btnTry)  btnTry.textContent  = cfg.cta_text;
-        if (cfg.cta_link)            HERO_CTA_LINK       = cfg.cta_link;
-
-        // 媒體切換
-        if (type === "image") {
-          if (imgEl && cfg.media_url) {
-            imgEl.src = cfg.media_url;
-            imgEl.style.display = "block";
-          }
-          if (videoEl) {
-            videoEl.style.display = "none";
-            videoEl.pause?.();
-          }
-        } else { // 預設使用影片
-          if (videoEl && cfg.media_url) {
-            let srcEl = videoEl.querySelector("source");
-            if (!srcEl) {
-              srcEl = document.createElement("source");
-              videoEl.appendChild(srcEl);
-            }
-            srcEl.src = cfg.media_url;
-            // 類型先寫 mp4，若之後有需要再擴充
-            srcEl.type = "video/mp4";
-            videoEl.load();
-            videoEl.style.display = "block";
-          }
-          if (videoEl && cfg.poster_url) {
-            videoEl.poster = cfg.poster_url;
-          }
-          if (imgEl) {
-            imgEl.style.display = "none";
-          }
+        // v1
+        if (!cfg.version || cfg.version === 1) {
+          slides = [{
+            type: cfg.type || "video",
+            title: cfg.title || "",
+            subtitle: cfg.subtitle || "",
+            media_url: cfg.media_url || "",
+            poster_url: cfg.poster_url || "",
+            cta_text: cfg.cta_text || "",
+            cta_link: cfg.cta_link || ""
+          }];
+          intervalMs = 99999999;
+          go(0);
+          return;
         }
+
+        // v2
+        intervalMs = Number(cfg.interval_ms || 6000) || 6000;
+
+        const variant = (cfg.ab_test?.enabled === false) ? "" : pickVariant(cfg);
+
+        const all = Array.isArray(cfg.banners) ? cfg.banners : [];
+        const now = Date.now();
+
+        function inWindow(b){
+          const s = b.start_at ? Date.parse(b.start_at) : NaN;
+          const e = b.end_at   ? Date.parse(b.end_at)   : NaN;
+          if (!isNaN(s) && now < s) return false;
+          if (!isNaN(e) && now > e) return false;
+          return true;
+        }
+
+        const enabled = all.filter(b => b && b.enabled !== false && inWindow(b));
+
+        // 先挑同 variant；沒有就退到全部 enabled
+        let picked = enabled.filter(b => !variant ? true : (String(b.variant||"").toUpperCase() === variant));
+        if (!picked.length) picked = enabled;
+
+        // 權重（weight）支援：把權重展開成抽籤池
+        function weightedShuffle(list){
+          const pool = [];
+          list.forEach(b=>{
+            const w = Math.max(1, Number(b.weight||1) || 1);
+            const n = Math.min(200, w); // 上限避免爆
+            for (let i=0;i<n;i++) pool.push(b);
+          });
+          // 先隨機抽一輪去重，保留順序
+          const out = [];
+          const seen = new Set();
+          while (pool.length && out.length < list.length){
+            const k = Math.floor(Math.random()*pool.length);
+            const b = pool.splice(k,1)[0];
+            const id = b.id || JSON.stringify(b);
+            if (!seen.has(id)){ seen.add(id); out.push(b); }
+          }
+          // 補齊沒抽到的
+          list.forEach(b=>{
+            const id = b.id || JSON.stringify(b);
+            if (!seen.has(id)) out.push(b);
+          });
+          return out;
+        }
+
+        slides = weightedShuffle(picked).map(b => ({
+          type: b.type || "image",
+          title: b.title || "",
+          subtitle: b.subtitle || "",
+          media_url: b.media_url || "",
+          poster_url: b.poster_url || "",
+          cta_text: b.cta_text || "",
+          cta_link: b.cta_link || ""
+        }));
+
+        if (!slides.length) return;
+
+        bindSwipe();
+        go(0);
+
+        stopTimer();
+        if (slides.length > 1) timer = setInterval(()=>go(current+1), intervalMs);
+
       } catch (err) {
         console.error("loadHeroBanner error", err);
       }
@@ -1267,7 +1470,10 @@ function getWeekIndex() {
     // 初始化：年份＋載入 JSON
     document.getElementById("y").textContent = new Date().getFullYear();
     loadAllVideoItems();
-    loadHeroBanner();
+    
+    // 防止瀏覽器自動填入 email 造成干擾
+    try { const si = document.getElementById("searchInput"); if (si) si.value = ""; } catch(_){}
+loadHeroBanner();
   </script>
 
   <!-- 服務導覽開關 -->
