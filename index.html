@@ -328,6 +328,26 @@
 }
 .oauth-hint{color:rgba(230,240,255,.72);font-size:12px;line-height:1.5;margin-top:10px}
 
+
+  /* ===== Hero Carousel Dots (v2) ===== */
+  .hero-media-frame{ position:relative; }
+  .hero-dots{
+    position:absolute; left:50%; transform:translateX(-50%);
+    bottom:14px; display:flex; gap:8px; z-index:5;
+    padding:6px 10px; border-radius:999px;
+    background:rgba(15,23,42,.35);
+    backdrop-filter: blur(6px);
+  }
+  .hero-dot{
+    width:10px; height:10px; border-radius:50%;
+    border:1px solid rgba(255,255,255,.75);
+    background:rgba(255,255,255,.25);
+    cursor:pointer;
+  }
+  .hero-dot.active{
+    background:rgba(255,255,255,.95);
+  }
+
 </style>
 
   <!-- 導覽列＋登入（沿用你目前樣式） -->
@@ -730,7 +750,8 @@
             </video>
             <!-- 圖片型 Hero 會改用這張圖（預設隱藏） -->
             <img id="homeHeroImage" alt="BookWide Hero" style="display:none;" />
-          </div>
+                        <div class="hero-dots" id="heroDots" aria-label="Hero dots"></div>
+</div>
         </div>
 
         <!-- 右：原本的文案區（保持內容不變） -->
@@ -878,29 +899,233 @@
     async function loadHeroBanner() {
       try {
         const res = await fetch(HERO_JSON_URL, { cache: "no-store" });
-        if (!res.ok) return; // 找不到就用預設文案
+        if (!res.ok) return;
 
         const cfg = await res.json();
         if (!cfg || typeof cfg !== "object") return;
 
-        const type    = cfg.type || "video";
         const titleEl = document.querySelector(".hero-title");
         const subEl   = document.querySelector(".hero-sub");
         const videoEl = document.getElementById("homeHeroVideo");
         const imgEl   = document.getElementById("homeHeroImage");
+        const dotsEl  = document.getElementById("heroDots");
         const btnTry  = document.getElementById("btn-try-mid-autumn");
 
-        if (cfg.title && titleEl)    titleEl.textContent = cfg.title;
-        if (cfg.subtitle && subEl)   subEl.textContent   = cfg.subtitle;
-        if (cfg.cta_text && btnTry)  btnTry.textContent  = cfg.cta_text;
-        if (cfg.cta_link)            HERO_CTA_LINK       = cfg.cta_link;
+        const forceVariant = (() => {
+          try{
+            const qs = new URLSearchParams(location.search);
+            const v = (qs.get("ab") || qs.get("variant") || "").toUpperCase();
+            return (v === "A" || v === "B") ? v : "";
+          }catch(_e){ return ""; }
+        })();
 
-        // 媒體切換
-        if (type === "image") {
-          if (imgEl && cfg.media_url) {
-            imgEl.src = cfg.media_url;
-            imgEl.style.display = "block";
+        function getOrAssignVariant() {
+          const ab = cfg.ab_test;
+          if (!ab || !ab.enabled || !Array.isArray(ab.variants) || ab.variants.length < 1) return "";
+          if (forceVariant) return forceVariant;
+          const key = "bwHeroVariant";
+          try{
+            const existing = (localStorage.getItem(key) || "").toUpperCase();
+            if (existing && ab.variants.includes(existing)) return existing;
+            const picked = ab.variants[Math.floor(Math.random() * ab.variants.length)];
+            localStorage.setItem(key, picked);
+            return picked;
+          }catch(_e){
+            return ab.variants[0] || "";
           }
+        }
+
+        function isWithinWindow(b) {
+          const now = Date.now();
+          const s = b.start_at ? Date.parse(b.start_at) : NaN;
+          const e = b.end_at ? Date.parse(b.end_at) : NaN;
+          if (!Number.isNaN(s) && now < s) return false;
+          if (!Number.isNaN(e) && now > e) return false;
+          return true;
+        }
+
+        function normalizeToV1(obj){
+          return {
+            type: obj.type || "image",
+            title: obj.title || "",
+            subtitle: obj.subtitle || "",
+            media_url: obj.media_url || "",
+            poster_url: obj.poster_url || "",
+            cta_text: obj.cta_text || "",
+            cta_link: obj.cta_link || ""
+          };
+        }
+
+        function pickWeighted(list){
+          const items = list.filter(Boolean);
+          const total = items.reduce((s, x) => s + (Number(x.weight) || 0), 0);
+          if (total <= 0) return items[0] || null;
+          let r = Math.random() * total;
+          for (const it of items){
+            r -= (Number(it.weight) || 0);
+            if (r <= 0) return it;
+          }
+          return items[items.length - 1] || null;
+        }
+
+        function renderOne(banner){
+          const b = normalizeToV1(banner);
+
+          if (b.title && titleEl) titleEl.textContent = b.title;
+          if (b.subtitle && subEl) subEl.textContent = b.subtitle;
+          if (b.cta_text && btnTry) btnTry.textContent = b.cta_text;
+          if (b.cta_link) HERO_CTA_LINK = b.cta_link;
+
+          // reset
+          if (imgEl) { imgEl.removeAttribute("src"); imgEl.style.display = "none"; }
+          if (videoEl) {
+            try{ videoEl.pause?.(); }catch(_e){}
+            videoEl.style.display = "none";
+            // keep the element but clear src so it doesn't hold old errors
+            const srcEl = videoEl.querySelector("source");
+            if (srcEl) srcEl.removeAttribute("src");
+            videoEl.removeAttribute("poster");
+          }
+
+          if (b.type === "image") {
+            if (imgEl && b.media_url) {
+              imgEl.src = b.media_url;
+              imgEl.style.display = "block";
+            }
+            if (videoEl) videoEl.style.display = "none";
+          } else {
+            if (videoEl && b.media_url) {
+              let srcEl = videoEl.querySelector("source");
+              if (!srcEl) {
+                srcEl = document.createElement("source");
+                videoEl.appendChild(srcEl);
+              }
+              srcEl.src = b.media_url;
+              srcEl.type = "video/mp4";
+              if (b.poster_url) videoEl.poster = b.poster_url;
+
+              // 首頁不要顯示控制列（避免黑框+控制列）
+              videoEl.controls = false;
+              videoEl.muted = true;
+              videoEl.playsInline = true;
+              videoEl.loop = true;
+
+              // 若瀏覽器允許就自動播放；不允許也至少會有 poster
+              try{
+                videoEl.load();
+                videoEl.style.display = "block";
+                const p = videoEl.play?.();
+                if (p && typeof p.catch === "function") p.catch(()=>{});
+              }catch(_e){
+                // fallback：改用 poster 當圖片
+                if (imgEl && b.poster_url) {
+                  imgEl.src = b.poster_url;
+                  imgEl.style.display = "block";
+                  videoEl.style.display = "none";
+                }
+              }
+
+              // 若影片載入失敗，退回 poster 圖片
+              videoEl.onerror = () => {
+                if (imgEl && b.poster_url) {
+                  imgEl.src = b.poster_url;
+                  imgEl.style.display = "block";
+                }
+                videoEl.style.display = "none";
+              };
+            }
+          }
+        }
+
+        // ========== v2 carousel ==========
+        const isV2 = Number(cfg.version) === 2 && Array.isArray(cfg.banners);
+        if (isV2) {
+          const variant = getOrAssignVariant();
+          const enabled = cfg.banners
+            .filter(b => b && b.enabled !== false)
+            .filter(isWithinWindow)
+            .filter(b => !variant || (String(b.variant || "").toUpperCase() === variant || String(b.variant || "").toUpperCase() === "ALL"))
+            .sort((a,b) => (Number(a.order)||0) - (Number(b.order)||0));
+
+          if (!enabled.length) return;
+
+          // rotate list by weighted pick, but keep deterministic "current" per refresh:
+          // 1) initial pick weighted, 2) then follow order
+          const first = pickWeighted(enabled) || enabled[0];
+          const startIndex = Math.max(0, enabled.findIndex(x => x.id === first.id));
+          const play = enabled.slice(startIndex).concat(enabled.slice(0, startIndex));
+
+          let idx = 0;
+          let timer = null;
+          const interval = Math.max(2500, Number(cfg.interval_ms) || 6000);
+
+          function buildDots(){
+            if (!dotsEl) return;
+            dotsEl.innerHTML = "";
+            play.forEach((_, i) => {
+              const d = document.createElement("button");
+              d.type = "button";
+              d.className = "hero-dot" + (i === idx ? " active" : "");
+              d.setAttribute("aria-label", "Slide " + (i+1));
+              d.addEventListener("click", () => { go(i, true); });
+              dotsEl.appendChild(d);
+            });
+          }
+          function setActiveDot(){
+            if (!dotsEl) return;
+            const dots = dotsEl.querySelectorAll(".hero-dot");
+            dots.forEach((el,i)=> el.classList.toggle("active", i===idx));
+          }
+
+          function go(next, userAction=false){
+            idx = (next + play.length) % play.length;
+            renderOne(play[idx]);
+            setActiveDot();
+            if (userAction) restart();
+          }
+
+          function restart(){
+            if (timer) { clearInterval(timer); timer = null; }
+            timer = setInterval(()=>go(idx+1,false), interval);
+          }
+
+          // swipe support
+          (function bindSwipe(){
+            const frame = document.querySelector(".hero-media-frame");
+            if (!frame) return;
+            let sx = 0, sy = 0, down = false;
+            frame.addEventListener("pointerdown", (e)=>{
+              down = true; sx = e.clientX; sy = e.clientY;
+              try{ frame.setPointerCapture(e.pointerId); }catch(_e){}
+            });
+            frame.addEventListener("pointerup", (e)=>{
+              if (!down) return;
+              down = false;
+              const dx = e.clientX - sx;
+              const dy = e.clientY - sy;
+              if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) {
+                go(dx < 0 ? idx+1 : idx-1, true);
+              }
+            });
+            frame.addEventListener("pointercancel", ()=>{ down=false; });
+          })();
+
+          // initial
+          renderOne(play[idx]);
+          buildDots();
+          restart();
+          return;
+        }
+
+        // ========== v1 fallback ==========
+        // v1 結構：{type,title,subtitle,media_url,poster_url,cta_text,cta_link}
+        renderOne(cfg);
+
+      } catch (err) {
+        console.error("loadHeroBanner error", err);
+      }
+    }
+
           if (videoEl) {
             videoEl.style.display = "none";
             videoEl.pause?.();
