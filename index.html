@@ -67,7 +67,41 @@
       height: 100%;
       object-fit: cover;
     }
-    @media (max-width: 900px) {
+    
+    /* === Hero Carousel (commercial) === */
+    .hero-media-frame{ touch-action: pan-y; }
+    .hero-media-frame .hero-dots{
+      position:absolute;
+      left:50%;
+      bottom:10px;
+      transform:translateX(-50%);
+      display:flex;
+      gap:8px;
+      padding:6px 10px;
+      border-radius:999px;
+      background:rgba(15,23,42,.35);
+      backdrop-filter: blur(6px);
+      z-index:5;
+      align-items:center;
+    }
+    .hero-media-frame .hero-dot{
+      width:9px;height:9px;border-radius:999px;
+      border:1px solid rgba(255,255,255,.65);
+      background:rgba(255,255,255,.35);
+      cursor:pointer;
+      padding:0;
+    }
+    .hero-media-frame .hero-dot.active{
+      width:18px;
+      background:rgba(255,255,255,.95);
+      border-color:rgba(255,255,255,.95);
+    }
+    .hero-media-frame .hero-fade{
+      animation: heroFade .18s ease;
+    }
+    @keyframes heroFade{ from{opacity:.55} to{opacity:1} }
+
+@media (max-width: 900px) {
       .hero-inner {
         flex-direction: column;
       }
@@ -875,118 +909,269 @@
 
     let VIDEO_ITEMS = [];
 
-    async function loadHeroBanner() {
+    
+    // === Hero Carousel (commercial) ===
+    // JSON schema (v2):
+    // {
+    //   "version": 2,
+    //   "interval_ms": 6000,
+    //   "ab_test": { "enabled": true, "variants": ["A","B"] },
+    //   "banners": [
+    //     {"id":"hero-1","enabled":true,"variant":"ALL","type":"image","media_url":"...","poster_url":"...","title":"...","subtitle":"...","cta_text":"...","cta_link":"...","weight":100}
+    //   ]
+    // }
+    async function loadHeroCarousel() {
       try {
         const res = await fetch(HERO_JSON_URL, { cache: "no-store" });
-        if (!res.ok) return; // 找不到就用預設文案
+        if (!res.ok) return; // 找不到就用預設
 
-        const cfg = await res.json();
-        if (!cfg || typeof cfg !== "object") return;
+        const cfg0 = await res.json();
+        if (!cfg0 || typeof cfg0 !== "object") return;
 
-        const type    = cfg.type || "video";
-        const titleEl = document.querySelector(".hero-title");
-        const subEl   = document.querySelector(".hero-sub");
+        // 兼容舊版（單一物件）：直接套用
+        if (!Array.isArray(cfg0.banners)) {
+          applyHeroSlide(cfg0);
+          return;
+        }
+
+        const intervalMs = Math.max(2500, Number(cfg0.interval_ms || 6000));
+        const now = Date.now();
+
+        let banners = cfg0.banners
+          .filter(b => b && b.enabled !== false)
+          .filter(b => {
+            const s = b.start_at ? Date.parse(b.start_at) : NaN;
+            const e = b.end_at   ? Date.parse(b.end_at)   : NaN;
+            if (!Number.isNaN(s) && now < s) return false;
+            if (!Number.isNaN(e) && now > e) return false;
+            return true;
+          });
+
+        if (!banners.length) return;
+
+        // A/B 分流（可用 ?ab=A|B 強制）
+        const variant = pickHeroVariant(cfg0);
+        banners = banners.filter(b => {
+          const v = (b.variant || "ALL").toUpperCase();
+          return v === "ALL" || v === variant;
+        });
+        if (!banners.length) return;
+
+        // 權重抽樣排序（同一個 session 固定順序）
+        banners = stabilizeWeightedOrder(banners);
+
+        initHeroDots(banners.length);
+        let idx = 0;
+
+        const frame = document.querySelector(".hero-media-frame");
         const videoEl = document.getElementById("homeHeroVideo");
-        const imgEl   = document.getElementById("homeHeroImage");
-        const btnTry  = document.getElementById("btn-try-mid-autumn");
+        const imgEl = document.getElementById("homeHeroImage");
 
-        if (cfg.title && titleEl)    titleEl.textContent = cfg.title;
-        if (cfg.subtitle && subEl)   subEl.textContent   = cfg.subtitle;
-        if (cfg.cta_text && btnTry)  btnTry.textContent  = cfg.cta_text;
-        if (cfg.cta_link)            HERO_CTA_LINK       = cfg.cta_link;
+        function set(i, userAction) {
+          idx = (i + banners.length) % banners.length;
+          applyHeroSlide(banners[idx]);
 
-        // 媒體切換
-        if (type === "image") {
-          if (imgEl && cfg.media_url) {
-            imgEl.src = cfg.media_url;
-            imgEl.style.display = "block";
+          // dot active
+          const dots = document.querySelectorAll(".hero-dot");
+          dots.forEach((d, k) => d.classList.toggle("active", k === idx));
+
+          // simple fade
+          if (videoEl) videoEl.classList.remove("hero-fade");
+          if (imgEl) imgEl.classList.remove("hero-fade");
+          const el = (banners[idx].type === "image") ? imgEl : videoEl;
+          if (el) {
+            el.classList.remove("hero-fade");
+            // force reflow
+            void el.offsetWidth;
+            el.classList.add("hero-fade");
           }
-          if (videoEl) {
-            videoEl.style.display = "none";
-            videoEl.pause?.();
-          }
-        } else { // 預設使用影片
-          if (videoEl && cfg.media_url) {
-            let srcEl = videoEl.querySelector("source");
-            if (!srcEl) {
-              srcEl = document.createElement("source");
-              videoEl.appendChild(srcEl);
-            }
-            srcEl.src = cfg.media_url;
-            // 類型先寫 mp4，若之後有需要再擴充
-            srcEl.type = "video/mp4";
-            videoEl.load();
-            videoEl.style.display = "block";
-          }
-          if (videoEl && cfg.poster_url) {
-            videoEl.poster = cfg.poster_url;
-          }
-          if (imgEl) {
-            imgEl.style.display = "none";
+
+          if (userAction) {
+            // 互動後延後下一次切換
+            restartTimer();
           }
         }
+
+        // dots click
+        document.querySelectorAll(".hero-dot").forEach((d, k) => {
+          d.addEventListener("click", () => set(k, true));
+        });
+
+        // autoplay
+        let timer = null;
+        function restartTimer() {
+          if (timer) clearInterval(timer);
+          timer = setInterval(() => set(idx + 1, false), intervalMs);
+        }
+        restartTimer();
+
+        // pause on hover (desktop)
+        if (frame) {
+          frame.addEventListener("mouseenter", () => { if (timer) clearInterval(timer); timer = null; });
+          frame.addEventListener("mouseleave", () => { restartTimer(); });
+        }
+
+        // swipe (mobile)
+        if (frame) {
+          let sx = 0, sy = 0, active = false;
+          frame.addEventListener("touchstart", (e) => {
+            const t = e.touches && e.touches[0];
+            if (!t) return;
+            sx = t.clientX; sy = t.clientY; active = true;
+          }, { passive: true });
+
+          frame.addEventListener("touchend", (e) => {
+            if (!active) return;
+            active = false;
+            const t = e.changedTouches && e.changedTouches[0];
+            if (!t) return;
+            const dx = t.clientX - sx;
+            const dy = t.clientY - sy;
+            if (Math.abs(dx) < 40 || Math.abs(dx) < Math.abs(dy)) return;
+            if (dx < 0) set(idx + 1, true);
+            else set(idx - 1, true);
+          }, { passive: true });
+        }
+
+        // first paint
+        set(0, false);
+
       } catch (err) {
-        console.error("loadHeroBanner error", err);
+        console.error("loadHeroCarousel error", err);
       }
     }
 
+    function pickHeroVariant(cfg0) {
+      const params = getUrlParams?.() || {};
+      const forced = (params.ab || params.hero_ab || "").toString().toUpperCase();
+      if (forced === "A" || forced === "B") {
+        try { localStorage.setItem("bwHeroVariant", forced); } catch(e){}
+        return forced;
+      }
 
-    function categoryLabel(cat) {
-      switch (cat) {
-        case "story": return "故事 Story";
-        case "music": return "音樂 Music";
-        case "movie": return "電影 Movie";
-        case "news":  return "實況 News";
-        case "pro":   return "語法 Grammer";
-        default:      return "其他";
+      let v = null;
+      try { v = (localStorage.getItem("bwHeroVariant") || "").toUpperCase(); } catch(e){}
+      if (v === "A" || v === "B") return v;
+
+      // 穩定分流：用 email（若有）或 UA 做 hash
+      let seed = "";
+      try { seed = (window.BW_USER_EMAIL || document.getElementById("acctEmail")?.textContent || "").trim(); } catch(e){}
+      if (!seed) seed = navigator.userAgent || "ua";
+      const h = stableHash(seed);
+      v = (h % 2 === 0) ? "A" : "B";
+      try { localStorage.setItem("bwHeroVariant", v); } catch(e){}
+      return v;
+    }
+
+    function stableHash(s) {
+      // 32-bit FNV-1a
+      let h = 0x811c9dc5;
+      for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+      }
+      return h >>> 0;
+    }
+
+    function stabilizeWeightedOrder(list) {
+      // 以 localStorage seed 固定排序（避免每次 reload 亂跳）
+      let seed = "";
+      try { seed = localStorage.getItem("bwHeroOrderSeed") || ""; } catch(e){}
+      if (!seed) {
+        seed = String(Date.now()) + Math.random().toString(16).slice(2);
+        try { localStorage.setItem("bwHeroOrderSeed", seed); } catch(e){}
+      }
+      const base = stableHash(seed);
+      const scored = list.map((b, i) => {
+        const w = Math.max(1, Number(b.weight || 100));
+        const id = (b.id || b.slug || ("b" + i)).toString();
+        const s = stableHash(id + "::" + base);
+        // 小技巧：用 hash 生成 (0,1] 的 u，做加權隨機排序 key = -ln(u)/w
+        const u = ((s % 100000) + 1) / 100001;
+        const key = -Math.log(u) / w;
+        return { b, key };
+      });
+      scored.sort((a, c) => a.key - c.key);
+      return scored.map(x => x.b);
+    }
+
+    function initHeroDots(n) {
+      const frame = document.querySelector(".hero-media-frame");
+      if (!frame) return;
+
+      let dotsWrap = document.getElementById("heroDots");
+      if (!dotsWrap) {
+        dotsWrap = document.createElement("div");
+        dotsWrap.id = "heroDots";
+        dotsWrap.className = "hero-dots";
+        frame.appendChild(dotsWrap);
+      }
+      dotsWrap.innerHTML = "";
+      for (let i = 0; i < n; i++) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "hero-dot" + (i === 0 ? " active" : "");
+        b.setAttribute("aria-label", "hero banner " + (i + 1));
+        dotsWrap.appendChild(b);
       }
     }
 
-    function levelShort(level) {
-      switch (Number(level)) {
-        case 1: return "初級";
-        case 2: return "中級";
-        case 3: return "進階";
-        default: return "未標註";
+    function applyHeroSlide(cfg) {
+      if (!cfg || typeof cfg !== "object") return;
+
+      const titleEl = document.querySelector(".hero-title");
+      const subEl   = document.querySelector(".hero-sub");
+      const videoEl = document.getElementById("homeHeroVideo");
+      const imgEl   = document.getElementById("homeHeroImage");
+      const btnTry  = document.getElementById("btn-try-mid-autumn");
+
+      if (cfg.title && titleEl)    titleEl.textContent = cfg.title;
+      if (cfg.subtitle && subEl)   subEl.textContent   = cfg.subtitle;
+      if (cfg.cta_text && btnTry)  btnTry.textContent  = cfg.cta_text;
+      if (cfg.cta_link)            HERO_CTA_LINK       = cfg.cta_link;
+
+      const type = (cfg.type || "video").toLowerCase();
+
+      // 媒體切換（單一容器：切換 src 即可）
+      if (type === "image") {
+        if (imgEl && cfg.media_url) {
+          imgEl.src = cfg.media_url;
+          imgEl.style.display = "block";
+        }
+        if (videoEl) {
+          videoEl.style.display = "none";
+          try { videoEl.pause?.(); } catch(e){}
+        }
+      } else {
+        if (videoEl && cfg.media_url) {
+          let srcEl = videoEl.querySelector("source");
+          if (!srcEl) {
+            srcEl = document.createElement("source");
+            videoEl.appendChild(srcEl);
+          }
+          srcEl.src = cfg.media_url;
+          srcEl.type = "video/mp4";
+          if (cfg.poster_url) videoEl.poster = cfg.poster_url;
+
+          // 可控的自動播放（預設關）
+          const auto = cfg.video_autoplay === true;
+          videoEl.autoplay = auto;
+          videoEl.muted = auto; // autoplay 需要 muted 才穩
+          videoEl.loop = auto;
+          videoEl.playsInline = true;
+
+          videoEl.load();
+          videoEl.style.display = "block";
+          if (auto) {
+            videoEl.play?.().catch(()=>{});
+          }
+        }
+        if (imgEl) {
+          imgEl.style.display = "none";
+        }
       }
     }
 
-    function secondsToText(sec) {
-      if (!sec || isNaN(sec)) return "時長不明";
-      const m = Math.floor(sec / 60);
-      const s = sec % 60;
-      return `${m} 分 ${s.toString().padStart(2, "0")} 秒`;
-    }
-
-    // ===== 渲染卡片 =====
-    let currentCategory = "all";
-    let currentLevel = 0;
-    let currentSearch = "";
-
-    const WEEKLY_LIMIT_PER_CATEGORY = 3; // 每個分類預設 3 片
-    let CURRENT_USER_IS_ADMIN = false;   // 從 profiles.is_admin 讀取
-
-    
-async function loadWeeklyIndex() {
-  try {
-    const res = await fetch(WEEKLY_INDEX_URL, { cache: "no-store" });
-    if (!res.ok) {
-      console.warn("weekly-index.json not found, fallback to 輪播模式");
-      WEEKLY_INDEX = null;
-      return;
-    }
-    const data = await res.json();
-    if (!data || !Array.isArray(data.weeks)) {
-      console.warn("weekly-index.json 格式不正確，改用輪播模式");
-      WEEKLY_INDEX = null;
-      return;
-    }
-    WEEKLY_INDEX = data;
-  } catch (e) {
-    console.error("loadWeeklyIndex failed", e);
-    WEEKLY_INDEX = null;
-  }
-}
 
     
 const PLAN_MAX_WEEKS = {
@@ -1267,7 +1452,7 @@ function getWeekIndex() {
     // 初始化：年份＋載入 JSON
     document.getElementById("y").textContent = new Date().getFullYear();
     loadAllVideoItems();
-    loadHeroBanner();
+    loadHeroCarousel();
   </script>
 
   <!-- 服務導覽開關 -->
