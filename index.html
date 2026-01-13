@@ -1299,12 +1299,132 @@ function getWeekIndex() {
 
 // === Auto logout (via BW.startIdleLogout) ===
 const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+    const SUPABASE_ANON_KEY =
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-    const supa = (window.BW && BW.supa) ? BW.supa : (window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY));
+    const supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     window.supa = supa;
 
-    
+    /* ========= BookWide 單裝置接管（index 主控） =========
+       - 新裝置登入：接管（寫入 profiles.current_device_id）
+       - 舊裝置：偵測到被接管 → 提示 + global signOut
+       - 若 profiles 欄位不存在 / RLS 擋：自動略過（不影響登入）
+    ====================================================== */
+    function BW_getDeviceId(){
+      try{
+        let id = localStorage.getItem('bw_device_id');
+        if(!id){
+          id = (crypto && crypto.randomUUID) ? crypto.randomUUID()
+            : ('xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c=>{
+                const r = Math.random()*16|0, v = c==='x'?r:(r&0x3|0x8);
+                return v.toString(16);
+              }));
+          localStorage.setItem('bw_device_id', id);
+        }
+        return id;
+      }catch(e){
+        return 'no-storage';
+      }
+    }
+
+    function BW_showKickedModal(){
+      // 用最保守的提示：不依賴外部元件
+      try{
+        alert('此帳號已在另一個裝置登入，您已被登出');
+      }catch(_){}
+    }
+
+    async function BW_forceSignOut(){
+      try{ localStorage.setItem('bw_forced_logout','1'); }catch(_){}
+      try{ await supa.auth.signOut({ scope:'global' }); }
+       catch(_){ try{ try{ await supa.auth.signOut({ scope:'global' }); }
+     catch(_){ try{ await supa.auth.signOut(); }catch(__){} } }catch(__){} }
+      BW_showKickedModal();
+      // 回首頁（帶參數方便你 debug）
+      try{
+        const url = new URL(location.href);
+        url.searchParams.set('denied','kicked');
+        location.href = url.pathname + '?' + url.searchParams.toString();
+      }catch(_){
+        location.href = location.pathname + '?denied=kicked';
+      }
+    }
+
+    async function BW_enforceTakeover(user){
+      try{
+        if(!user || !user.id) return;
+        const deviceId = BW_getDeviceId();
+        // 直接覆寫 profiles.current_device_id（新裝置接管）
+        const up = await supa.from('profiles')
+          .update({ current_device_id: deviceId, last_seen_at: new Date().toISOString() })
+          .eq('id', user.id);
+        if(up.error){
+          console.warn('[BW] profiles update blocked:', up.error.message||up.error);
+          return; // RLS 擋就略過，不影響登入
+        }
+      }catch(e){
+        console.warn('[BW] takeover error:', e);
+      }
+    }
+
+    function BW_startDeviceGuard(user){
+      let running = false;
+      const my = BW_getDeviceId();
+      const uid = user && user.id;
+      if(!uid) return null;
+
+      const tick = async ()=>{
+        if(running) return;
+        running = true;
+        try{
+          const { data, error } = await supa.from('profiles')
+            .select('current_device_id')
+            .eq('id', uid)
+            .maybeSingle();
+          if(error){
+            console.warn('[BW] guard select blocked:', error.message||error);
+            return; // 被擋就不做，避免影響使用
+          }
+          // ✅ current_device_id 為空 → 立刻寫成自己（補洞：避免兩台都不踢）
+if(!data?.current_device_id){
+  const up = await supa.from('profiles')
+    .update({ current_device_id: my, last_seen_at: new Date().toISOString() })
+    .eq('id', uid);
+  if(up.error){
+    console.warn('[BW] guard takeover blocked:', up.error.message||up.error);
+  }
+  return;
+}
+
+// ✅ 有值但不是我 → 踢下線
+if(data.current_device_id !== my){
+  await BW_forceSignOut();
+}
+
+
+
+
+
+        }finally{
+          running = false;
+        }
+      };
+
+      tick();
+      return setInterval(tick, 30*1000); // 每 30 秒檢查一次，踢得夠快
+    }
+
+    // 被踢提示（跨頁保險）
+    (function BW_popForcedLogoutHint(){
+      try{
+        if(localStorage.getItem('bw_forced_logout')==='1'){
+          localStorage.removeItem('bw_forced_logout');
+          BW_showKickedModal();
+        }
+      }catch(_){}
+    })();
+/* ========= End single-device takeover ========= */
+
 
     // ✅ OAuth callback：如果網址帶 ?code=...，就兌換成 session（Google / 之後 FB/LINE/微信）
     (async () => {
@@ -1747,19 +1867,6 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
    ">聯絡客服</a>
 <!-- /BookWide：首頁唯一客服入口 -->
 
-
-<!-- ===== BookWide subscription pass flag (index-only, no player changes) ===== -->
-<script>
-(function(){
-  try{
-    // 當使用者「已登入且訂閱有效」時，由 subscription.html / index 的既有流程寫入。
-    // 這裡只放一個最保守的通行旗標，避免 player 端因 profiles.expires_at / RLS 讀取問題而誤判過期。
-    // 注意：沒有訂閱的人通常進不到 subscription.html，不會被寫入此旗標。
-    localStorage.setItem('bw_subscription_ok','1');
-    localStorage.setItem('bw_subscription_checked_at', String(Date.now()));
-  }catch(e){}
-})();
-</script>
 </body>
 </html>
 
