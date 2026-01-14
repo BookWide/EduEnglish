@@ -11,7 +11,6 @@
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     });
-    // expose for other modules (Talk placement / learning console)
     window.BW = window.BW || {};
     window.BW.supabase = supabase;
 
@@ -1022,7 +1021,6 @@ body{line-height:1.1}
             <option value="Sophia.mp4">Sophia</option>
           </select>
         </label>
-      <button class="smallBtn" id="btnPlacement">程度測驗</button>
       <button class="smallBtn" id="btnReplay">重播</button>
       <span class="fileTag" id="fileTag"></span>
     </div>
@@ -1532,67 +1530,128 @@ function guessFillFromSentence(en){
     return s.replace(target, "____");
   }
 
+    /* ========= Azure TTS (方案2：產品級穩定聲音) ========= */
+  // v20260114-azure-tts
+  // - 每位老師固定 Azure voice（跨裝置一致）
+  // - 前端丟文字 -> Supabase Edge Function 回傳 audio/mpeg -> <audio> 播放
+
+  const AZURE_TTS_FN = (SUPABASE_URL || '').replace(/\/+$/,'') + '/functions/v1/azure-tts';
+
+  // 以 teacher mp4 檔名做 key（你目前 teacherSelect 的 value 就是這個）
+  const AZURE_VOICES = {
+    "Diana.mp4": "en-US-JennyNeural",
+    "Emma.mp4": "en-US-AriaNeural",
+    "Sophia.mp4": "en-GB-SoniaNeural"
+  };
+
+  let ttsAudio = new Audio();
+  ttsAudio.preload = "auto";
+  ttsAudio.playsInline = true;
+
+  let ttsAbort = null;
+  let lastObjUrl = null;
+
+  function getAzureVoiceForTeacher() {
+    const v = (teacherSelect && teacherSelect.value) ? teacherSelect.value : "";
+    return AZURE_VOICES[v] || "en-US-JennyNeural";
+  }
+
   async function speak(text){
+    if(!text) return;
+
+    // 停掉上一段
+    stopSpeak();
+
+    // 開始嘴型/影片（若你有這兩個函式）
+    try { if(typeof __tvStart === "function") __tvStart(); } catch(e){}
+
+    // 叫 Edge Function 產音訊
+    ttsAbort = new AbortController();
+
+    const token = (window.BW && window.BW.session && window.BW.session.access_token) ? window.BW.session.access_token : null;
+
+    const payload = {
+      text: String(text),
+      voice: getAzureVoiceForTeacher(),
+      // 你要更好聽可改：audio-24khz-48kbitrate-mono-mp3 / audio-16khz-32kbitrate-mono-mp3
+      format: "audio-24khz-48kbitrate-mono-mp3",
+      rate: "0%",      // 可調：-10% ~ +10%
+      pitch: "0%",     // 可調：-10% ~ +10%
+    };
+
+    const headers = {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_ANON_KEY,
+      "authorization": "Bearer " + (token || SUPABASE_ANON_KEY),
+    };
+
+    let res;
     try{
-      if(!("speechSynthesis" in window)) return;
-      const synth = window.speechSynthesis;
-      // stop any ongoing speech to avoid overlap / loop
-      try{ synth.cancel(); }catch(_){}
+      res = await fetch(AZURE_TTS_FN, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+        signal: ttsAbort.signal,
+      });
+    } catch(err){
+      // 取消播放不算錯
+      if(err && (err.name === "AbortError")) return;
+      console.warn("Azure TTS fetch failed", err);
+      try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
+      return;
+    }
 
-      // ===== Teacher -> Voice profile (方案 1 + 3) =====
-      const teacherKey = (selTeacher?.value || "diana").toLowerCase().replace(".mp4","");
-      const PROFILES = {
-        diana:  { lang:"en-US", rate:1.00, pitch:1.00, prefs:[/google.*us.*english/i,/zira/i,/jenny/i,/aria/i,/en-us/i] },
-        emma:   { lang:"en-GB", rate:0.95, pitch:1.05, prefs:[/google.*uk.*english/i,/en-gb/i,/uk/i,/hazel/i,/serena/i] },
-        sophia: { lang:"en-AU", rate:1.05, pitch:0.95, prefs:[/google.*australia/i,/en-au/i,/australia/i] },
-      };
-      const prof = PROFILES[teacherKey] || PROFILES.diana;
+    if(!res.ok){
+      const msg = await res.text().catch(()=> "");
+      console.warn("Azure TTS not ok:", res.status, msg);
+      try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
+      return;
+    }
 
-      function _pickVoice(voices){
-        if(!voices || !voices.length) return null;
-        const lang2 = (prof.lang||"en-US").slice(0,2).toLowerCase();
-        const pool = voices.filter(v => (v.lang||"").toLowerCase().startsWith(lang2));
-        const cand = pool.length ? pool : voices;
+    const buf = await res.arrayBuffer();
+    const blob = new Blob([buf], { type: "audio/mpeg" });
+    lastObjUrl = URL.createObjectURL(blob);
 
-        for(const rx of (prof.prefs||[])){
-          const hit = cand.find(v => rx.test(((v.name||"") + " " + (v.lang||"")).toLowerCase()));
-          if(hit) return hit;
-        }
-        const exact = cand.find(v => (v.lang||"").toLowerCase() === (prof.lang||"").toLowerCase());
-        return exact || cand[0] || null;
-      }
+    ttsAudio.src = lastObjUrl;
 
-      // Some browsers load voices async: wait briefly if needed
-      let voices = synth.getVoices ? synth.getVoices() : [];
-      if(!voices.length){
-        await new Promise(res=>{
-          const t = setTimeout(res, 200);
-          const prev = synth.onvoiceschanged;
-          synth.onvoiceschanged = ()=>{
-            try{ prev && prev(); }catch(_){}
-            clearTimeout(t); res();
-          };
-        });
-        voices = synth.getVoices ? synth.getVoices() : [];
-      }
-      const voice = _pickVoice(voices);
+    // 播完要停嘴型 + 釋放 URL
+    ttsAudio.onended = () => {
+      try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
+      try { if(lastObjUrl) URL.revokeObjectURL(lastObjUrl); } catch(e){}
+      lastObjUrl = null;
+    };
 
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang  = prof.lang || "en-US";
-      u.rate  = prof.rate ?? 1.0;
-      u.pitch = prof.pitch ?? 1.0;
-      if(voice) u.voice = voice;
-
-      lastTts = text;
-      __tvStart();
-      synth.speak(u);
-      u.onend = ()=>{ __tvStop(); };
-      u.onerror = ()=>{ __tvStop(); };
-    }catch(e){}
+    // 播放（若遇到 autoplay policy，會被 browser 擋；你目前是按鈕觸發，通常 OK）
+    try{
+      await ttsAudio.play();
+    } catch(err){
+      console.warn("audio.play blocked", err);
+      try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
+    }
   }
 
   function stopSpeak(){
-    try{ window.speechSynthesis.cancel(); }catch(e){}
+    try{
+      if(ttsAbort) ttsAbort.abort();
+    }catch(e){}
+    ttsAbort = null;
+
+    try{
+      if(ttsAudio){
+        ttsAudio.pause();
+        ttsAudio.currentTime = 0;
+      }
+    }catch(e){}
+
+    try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
+
+    try{
+      if(lastObjUrl) URL.revokeObjectURL(lastObjUrl);
+    }catch(e){}
+    lastObjUrl = null;
+  }
+  /* ========= /Azure TTS ========= */
+catch(e){}
     __tvStop();
   }
 
@@ -1946,205 +2005,6 @@ if(!firstId){
   mask.addEventListener("click", (e)=>{ if(e.target===mask) closeModal(); });
 
   
-      // ===== Placement (3-min survey) =====
-      const btnPlacement = $("btnPlacement");
-      const placementMask = $("placementMask");
-      const placementBody = $("placementBody");
-      const btnPlacementClose = $("btnPlacementClose");
-      const btnPlacementReset = $("btnPlacementReset");
-      const btnPlacementSubmit = $("btnPlacementSubmit");
-
-      let placementData = null;
-
-      function openPlacement(){
-        placementMask.style.display = "flex";
-        if (!placementData) loadPlacement();
-      }
-      function closePlacement(){
-        placementMask.style.display = "none";
-      }
-      async function loadPlacement(){
-        placementBody.innerHTML = `<div class="muted" style="padding:12px 0;">載入中…</div>`;
-        const urls = [
-          "./talk/placement.json",
-          "./placement.json",
-          "./data/placement.json"
-        ];
-        let lastErr = null;
-        for (const u of urls){
-          try{
-            const res = await fetch(u + "?ts=" + Date.now(), {cache:"no-store"});
-            if(!res.ok) throw new Error("HTTP " + res.status);
-            placementData = await res.json();
-            renderPlacement();
-            return;
-          }catch(e){ lastErr = e; }
-        }
-        placementBody.innerHTML = `<div class="muted" style="padding:12px 0;">載入失敗：請確認 <code>talk/placement.json</code> 是否存在。</div>`;
-        console.error("placement load failed", lastErr);
-      }
-
-      function renderPlacement(){
-        const secs = (placementData && placementData.sections) ? placementData.sections : [];
-        let html = "";
-        secs.forEach((sec, si)=>{
-          html += `<div style="margin:14px 0 6px; font-weight:800;">${sec.title || ("Section " + (si+1))}</div>`;
-          (sec.questions||[]).forEach((q, qi)=>{
-            const qid = `q_${si}_${qi}`;
-            html += `<div style="border:1px solid #e5e7eb; border-radius:14px; padding:12px; margin:10px 0; background:#fff;">
-              <div style="font-weight:700; margin-bottom:8px;">${q.prompt || ""}</div>
-              <div style="display:flex; flex-direction:column; gap:8px;">`;
-            (q.options||[]).forEach((op, oi)=>{
-              const id = `${qid}_${oi}`;
-              html += `<label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
-                <input type="radio" name="${qid}" id="${id}" value="${op.level || ""}" data-weight="${op.weight || 1}" style="margin-top:3px;">
-                <div><div style="font-weight:650;">${op.text || ""}</div></div>
-              </label>`;
-            });
-            html += `</div></div>`;
-          });
-        });
-
-        html += `<div class="muted" style="margin-top:10px;">完成後會自動推薦等級，並把你帶到對應週次（可再手動換週）。</div>`;
-        placementBody.innerHTML = html;
-      }
-
-      function resetPlacement(){
-        placementBody.querySelectorAll('input[type="radio"]').forEach(i=> i.checked=false);
-      }
-
-      
-function computePlacement(){
-        // returns {level, scores, total, max, confidence, answers}
-        const levels = ["A1","A2","B1","B2","C1","C2"];
-        const scores = Object.fromEntries(levels.map(l=>[l,0]));
-        const answers = {};
-        let max = 0;
-
-        for(const q of (placementData.questions||[])){
-          const name = 'q_'+q.id;
-          const checked = placementBody.querySelector(`input[name="${name}"]:checked`);
-          if(!checked) continue;
-          const optId = checked.value;
-          answers[q.id] = optId;
-
-          const opt = (q.options||[]).find(o=>String(o.id)===String(optId));
-          if(!opt) continue;
-
-          // support opt.weights {A1:1,...} OR opt.scores {A1:1,...}
-          const w = opt.weights || opt.scores || {};
-          for(const l of levels){
-            const v = Number(w[l]||0);
-            if(Number.isFinite(v)) scores[l] += v;
-            max = Math.max(max, scores[l]); // rough; for confidence we use totals below
-          }
-        }
-
-        // choose best level by score, tie-break by lower (easier) level
-        const best = levels.slice().sort((a,b)=>{
-          const da = scores[a], db = scores[b];
-          if(db!==da) return db-da;
-          return levels.indexOf(a)-levels.indexOf(b);
-        })[0] || "A1";
-
-        const total = levels.reduce((s,l)=>s+scores[l],0);
-        const sorted = levels.slice().sort((a,b)=>scores[b]-scores[a]);
-        const top = scores[sorted[0]]||0;
-        const second = scores[sorted[1]]||0;
-        const confidence = (top<=0) ? 0 : Math.max(0, Math.min(1, (top-second)/(top)));
-
-        return { level: best, scores, total, max: top, confidence, answers };
-      }
-
-      function applyPlacement(result){
-        try{
-          localStorage.setItem('bw_placement_result', JSON.stringify({
-            ...result,
-            ts: new Date().toISOString(),
-            version: placementData.version || placementData.schema || 'v1'
-          }));
-        }catch(_){}
-
-        // map level -> starting week (9 weeks per level)
-        const order = ["A1","A2","B1","B2","C1","C2"];
-        const idx = Math.max(0, order.indexOf(result.level));
-        const startWeek = idx*9 + 1;
-
-        try{
-          localStorage.setItem('bw_talk_active_week', String(startWeek));
-        }catch(_){}
-
-        // Optional: write to Supabase (non-blocking, no hard dependency)
-        (async ()=>{
-          try{
-            const supa = window.BW && window.BW.supabase;
-            const user = window.BW && window.BW.user;
-            if(!supa || !user) return;
-
-            const payload = {
-              user_id: user.id,
-              email: user.email || null,
-              level: result.level,
-              score_total: result.total,
-              score_top: result.max,
-              confidence: result.confidence,
-              answers: result.answers,
-              created_at: new Date().toISOString()
-            };
-            // table name can be changed later; if not exists, it will just fail silently
-            await supa.from('bw_placement_results').insert(payload);
-          }catch(_){}
-        })();
-
-        // show comment + jump to recommended week
-        const comment = (function(){
-          const pct = Math.round((result.confidence||0)*100);
-          const msg = (pct>=60) ? "信心度高" : (pct>=35 ? "信心度中等" : "信心度偏低（建議再測一次）");
-          return `你的程度估計：${result.level}（${msg}）\n建議從第 ${startWeek} 週開始。`;
-        })();
-
-        try{
-          placementResult.innerHTML = `
-            <div style="font-size:18px;font-weight:800;margin-bottom:6px;">✅ 測驗完成：${result.level}</div>
-            <div style="color:#475569;line-height:1.6;white-space:pre-line;">${comment}</div>
-            <div style="margin-top:10px;color:#64748b;font-size:13px;">（已存入本機；若已登入，也會嘗試寫入資料庫供學習控制台使用）</div>
-          `;
-        }catch(_){}
-
-        // update URL so Talk 立即套用推薦週
-        try{
-          const u = new URL(location.href);
-          u.searchParams.set('week', String(startWeek));
-          // keep other params (scene/teacher)
-          location.href = u.toString();
-        }catch(_){
-          location.reload();
-        }
-      }
-
-      // ---------- Placement UI ----------
-// ---------- Placement UI (safe init) ----------
-function initPlacementUI(){
-  const btn = $("btnPlacement");
-  if(!btn) return;
-
-  const closeBtn = $("btnPlacementClose");
-  const mask = $("placementMask");
-
-  const open = ()=>{ if(mask) mask.style.display = "flex"; };
-  const close = ()=>{ if(mask) mask.style.display = "none"; };
-
-  btn.addEventListener("click", open);
-  if(closeBtn) closeBtn.addEventListener("click", close);
-  if(mask){
-    mask.addEventListener("click", (e)=>{ if(e.target === mask) close(); });
-  }
-}
-if(document.readyState === "loading"){
-  document.addEventListener("DOMContentLoaded", initPlacementUI);
-}else{
-  initPlacementUI();
-}
 btnReplay.addEventListener("click", ()=>{
     const t = currentTurn();
     if(t.en) speak(t.en);
@@ -2283,23 +2143,5 @@ btnReplay.addEventListener("click", ()=>{
 
   init();
 })();</script>
-
-<!-- ===== Placement Modal (3-min level survey) ===== -->
-<div id="placementMask" class="mask" style="display:none;">
-  <div class="modal">
-    <div class="modalHead">
-      <div class="modalTitle">3 分鐘程度測驗</div>
-      <button class="modalClose" id="btnPlacementClose">✕</button>
-    </div>
-    <div class="modalBody" id="placementBody" style="max-height:60vh; overflow:auto;">
-      <div class="muted" style="padding:12px 0;">載入中…</div>
-    </div>
-    <div class="modalFoot" style="display:flex; gap:10px; justify-content:flex-end;">
-      <button class="btn" id="btnPlacementReset">重填</button>
-      <button class="btnPrimary" id="btnPlacementSubmit">完成並套用</button>
-    </div>
-  </div>
-</div>
-
 </body>
 </html>
