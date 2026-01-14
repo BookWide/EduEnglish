@@ -4,13 +4,6 @@
 <!-- ===== BookWide Guard (Talk: subscription required) ===== -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-  // BookWide Supabase public config (global)
-  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-  window.SUPABASE_URL = SUPABASE_URL;
-  window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
-</script>
-<script>
 (async function() {
   try {
     const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
@@ -1237,10 +1230,140 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     clearTimeout(showToast._t);
     showToast._t = setTimeout(()=>toastEl.style.display="none", 1800);
   }
-  function openModal(){
-    mask.style.display = "flex";
-    mask.setAttribute("aria-hidden","false");
+    // ===== Azure TTS (per-teacher voice) =====
+  const AZURE_TTS_ENDPOINT = `${SUPABASE_URL}/functions/v1
+
+  const modalTitleEl = document.querySelector('#mask .modalTop .t');
+
+  function teacherComment(teacherName){
+    // 可再微調語氣
+    const map = {
+      "Diana":  ["很棒！節奏很好。下一輪試著把句尾語氣放鬆一點。", "做得好！記得把關鍵字說清楚就更像母語者。"],
+      "Emma":   ["Nice! 你的句子很完整。下一輪把重音放在關鍵字上。", "Good job! 速度可以再慢一點點，會更清晰。"],
+      "Sophia": ["Excellent! 用字很自然。再多練兩輪就穩了。", "很不錯！注意連音（linking），聽起來會更順。"]
+    };
+    const arr = map[teacherName] || ["做得很好！繼續保持，每天 5 分鐘最有效。"];
+    return arr[Math.floor(Math.random()*arr.length)];
   }
+
+  function showLearningReport(){
+    const tName = getTeacherName ? getTeacherName() : (selTeacher?.selectedOptions?.[0]?.textContent||"老師").trim();
+    if(modalTitleEl) modalTitleEl.textContent = "學習報告";
+    const comment = teacherComment(tName);
+
+    const html = `
+      <div style="text-align:center;padding:10px 6px 6px;">
+        <div style="font-size:40px;line-height:1;">⭐️⭐️⭐️</div>
+        <div style="font-size:26px;font-weight:900;margin:8px 0 6px;color:#16a34a;">很棒！</div>
+        <div style="font-size:18px;font-weight:800;margin:0 0 10px;">${escHtml(tName)} 評語</div>
+        <div style="text-align:left;background:#f8fafc;border:1px solid #e5e7eb;border-radius:14px;padding:12px 14px;line-height:1.6;">
+          ${escHtml(comment)}
+        </div>
+        <div style="display:flex;gap:10px;justify-content:center;margin-top:14px;">
+          <button class="pill" id="btnReportClose" style="min-width:120px;">繼續</button>
+        </div>
+      </div>
+    `;
+    modalBody.innerHTML = html;
+    openModal();
+    setTimeout(()=>{
+      const btn = document.getElementById('btnReportClose');
+      if(btn) btn.onclick = ()=> closeModal();
+    },0);
+
+    // 也可以讓老師唸出評語（可關閉）
+    // speak(comment).catch(()=>{});
+  }
+
+  function escHtml(s){
+    return String(s||"").replace(/[&<>"']/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+/azure-tts`;
+  const azureAudio = document.getElementById('bwAzureAudio') || (function(){
+    const a = document.createElement('audio');
+    a.id = 'bwAzureAudio';
+    a.preload = 'none';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    return a;
+  })();
+
+  const TEACHER_VOICES = {
+    // 你可以在這裡換成你喜歡的 Azure voice 名稱
+    "Diana":  { voice: "en-US-JennyNeural",   rate: "0%",  pitch: "0%"  },
+    "Emma":   { voice: "en-US-AriaNeural",    rate: "0%",  pitch: "0%"  },
+    "Sophia": { voice: "en-US-MichelleNeural",rate: "0%",  pitch: "0%"  },
+    "_default": { voice: "en-US-JennyNeural", rate: "0%", pitch: "0%" }
+  };
+
+  function getTeacherName(){
+    const opt = selTeacher?.selectedOptions?.[0];
+    return (opt?.textContent || opt?.label || opt?.value || "").trim() || "Diana";
+  }
+  function getTeacherVoiceConf(){
+    const name = getTeacherName();
+    return TEACHER_VOICES[name] || TEACHER_VOICES._default;
+  }
+
+  async function azureSpeak(text, conf){
+    const payload = {
+      text: String(text || "").trim(),
+      voice: conf?.voice || TEACHER_VOICES._default.voice,
+      rate: conf?.rate ?? "0%",
+      pitch: conf?.pitch ?? "0%"
+    };
+    if(!payload.text) return;
+
+    // stop previous
+    try { azureAudio.pause(); } catch(_){}
+    try { azureAudio.currentTime = 0; } catch(_){}
+    if (azureAudio.src && azureAudio.src.startsWith("blob:")) {
+      try { URL.revokeObjectURL(azureAudio.src); } catch(_){}
+    }
+
+    const r = await fetch(AZURE_TTS_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": `Bearer ${SUPABASE_ANON_KEY}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if(!r.ok){
+      const t = await r.text().catch(()=> "");
+      console.warn("Azure TTS failed:", r.status, t);
+      // fallback: browser TTS (保底，不會卡住)
+      try { speakBrowser(payload.text); } catch(_){}
+      return;
+    }
+
+    const ab = await r.arrayBuffer();
+    const url = URL.createObjectURL(new Blob([ab], { type: "audio/mpeg" }));
+    azureAudio.src = url;
+
+    await new Promise((resolve) => {
+      const done = () => { azureAudio.removeEventListener("ended", done); resolve(true); };
+      azureAudio.addEventListener("ended", done);
+      azureAudio.play().catch(()=> resolve(true));
+    });
+  }
+
+  function speakBrowser(text){
+    const u = new SpeechSynthesisUtterance(String(text||""));
+    u.lang = "en-US";
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  }
+
+  // 用這個 speak() 統一發音：全部走 Azure（每個老師固定 voice）
+  async function speak(text){
+    const conf = getTeacherVoiceConf();
+    return azureSpeak(text, conf);
+  }
+
+  // ===== End: Azure TTS =====
   function closeModal(){
     mask.style.display = "none";
     mask.setAttribute("aria-hidden","true");
@@ -1513,88 +1636,22 @@ function guessFillFromSentence(en){
     return s.replace(target, "____");
   }
 
-  
-  // ===== Azure TTS Switch =====
-  const USE_AZURE_TTS = true; // 改成 false 可退回 Browser Speech
-  const AZURE_TTS_ENDPOINT = `${SUPABASE_URL}/functions/v1/azure-tts`;
-
-  // 每位老師固定一個 Azure voice（可自行改）
-  const TEACHER_AZURE_VOICE = {
-    "Diana": "en-US-JennyNeural",
-    "Emma": "en-US-AriaNeural",
-    "Sophia": "en-US-AnaNeural"
-  };
-
-  let __ttsAudio = null;
-  let __ttsBlobUrl = null;
-
-async function speak(text){
+  async function speak(text){
     try{
+      if(!("speechSynthesis" in window)) return;
+      window.speechSynthesis.cancel();
       const now = Date.now();
       if (text && text === lastTts && (now - lastTtsAt) < 800) return; // 防止重複發聲
       lastTtsAt = now;
-      lastTts = text;
-
-      // --- stop any previous audio ---
-      try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(e){}
-      try{ if(__ttsAudio){ __ttsAudio.pause(); __ttsAudio.currentTime = 0; } }catch(e){}
-      try{ if(__ttsBlobUrl){ URL.revokeObjectURL(__ttsBlobUrl); } }catch(e){}
-      __ttsAudio = null;
-      __ttsBlobUrl = null;
-
-      __tvStart();
-
-      // ===== Azure TTS (Edge Function) =====
-      if (USE_AZURE_TTS){
-        const sel = document.getElementById("selTeacher");
-        const teacherKey = sel ? String(sel.value||"") : "";
-        const voice = (TEACHER_AZURE_VOICE[teacherKey] || "en-US-JennyNeural");
-
-        const r = await fetch(AZURE_TTS_ENDPOINT, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": "Bearer " + SUPABASE_ANON_KEY
-          },
-          body: JSON.stringify({ text, voice, rate: "0%", pitch: "0%" })
-        });
-
-        if(!r.ok){
-          const t = await r.text().catch(()=> "");
-          console.warn("[azure-tts] failed:", r.status, t.slice(0,200));
-          throw new Error("azure-tts " + r.status);
-        }
-
-        const blob = await r.blob();
-        __ttsBlobUrl = URL.createObjectURL(blob);
-        __ttsAudio = new Audio(__ttsBlobUrl);
-
-        __ttsAudio.onended = ()=>{
-          __tvStop();
-          try{ if(__ttsBlobUrl) URL.revokeObjectURL(__ttsBlobUrl); }catch(e){}
-          __ttsAudio = null;
-          __ttsBlobUrl = null;
-        };
-        __ttsAudio.onerror = ()=>{
-          __tvStop();
-        };
-
-        await __ttsAudio.play();
-        return;
-      }
-
-      // ===== Fallback: Browser Speech =====
-      if(!("speechSynthesis" in window)){ __tvStop(); return; }
       const u = new SpeechSynthesisUtterance(text);
       u.lang = "en-US";
       u.rate = 1.0;
+      lastTts = text;
+      __tvStart();
       window.speechSynthesis.speak(u);
       u.onend = ()=>{ __tvStop(); };
       u.onerror = ()=>{ __tvStop(); };
-    }catch(e){
-      try{ __tvStop(); }catch(_){}
-    }
+    }catch(e){}
   }
 
   function stopSpeak(){
@@ -1626,7 +1683,7 @@ async function speak(text){
       updateUI();
       speak(currentTurn().en); // only speak AI turns
     }else{
-      showToast("本情境完成 ✅");
+      showLearningReport();
     }
   }
 
@@ -2090,5 +2147,6 @@ if(!firstId){
 
   init();
 })();</script>
+  <audio id="bwAzureAudio" preload="none" style="display:none"></audio>
 </body>
 </html>
