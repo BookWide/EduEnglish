@@ -454,24 +454,6 @@
   </header>
 
   <main>
-
-<!-- ===== 今日口說任務（Talk） ===== -->
-<section class="card" id="bwTalkTaskCard" style="margin-top:14px;">
-  <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
-    <div>
-      <div style="font-weight:900; font-size:18px;">今日口說任務</div>
-      <div style="color:#64748b; margin-top:4px;">
-        你的程度：<b id="bwDashLevel">—</b>　｜　建議從 Week <b id="bwDashWeek">—</b> 開始
-      </div>
-    </div>
-    <div style="display:flex; gap:10px; flex-wrap:wrap;">
-      <button class="btn" id="bwDashTakePlacement" type="button">去做程度測驗</button>
-      <button class="btn primary" id="bwDashGoTalk" type="button">開始口說</button>
-    </div>
-  </div>
-</section>
-
-
     <h1>學習控制台</h1>
 
     <div class="layout" id="dashLayout">
@@ -511,6 +493,17 @@
             <div class="empty-tip">載入中...</div>
           </div>
         </section>
+
+    <!-- 今日口說任務 -->
+    <section class="card" id="todayTalkCard" style="margin-top:14px;">
+      <div class="card-head">
+        <div class="title">今日口說任務</div>
+        <div class="tag" title="AI Speaking">AI Speak</div>
+      </div>
+      <div id="talkList" class="review-list"></div>
+      <div id="talkEmpty" class="empty-tip" style="display:none;">本日尚未安排口說任務。</div>
+    </section>
+
       </div>
 
       <!-- 右側：排行榜分享 / 學習曲線 / 金榜排行 -->
@@ -549,17 +542,136 @@
   </main>
 </div>
 
-<!-- Supabase JS SDK -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-<script>
+<!-- Supabase JS SDK (ESM) -->
+<script type="module">
+  import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
   const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
   const SUPABASE_ANON_KEY =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
-  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  const VIDEO_INDEX_URL = "../data/index-all.json";
+    // expose for debugging
+  window.supabaseClient = supabase;
+const VIDEO_INDEX_URL = "../data/index-all.json";
+  const WEEKLY_INDEX_URL = "../data/weekly-index.json";
   let videoIndexMap = {};
+  let WEEKLY_INDEX = null;
+
+  // ====== safe html ======
+  function escapeHtml(str){
+    if(str === null || str === undefined) return "";
+    return String(str)
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;")
+      .replace(/'/g,"&#039;");
+  }
+
+
+
+    function pickTodayTalkFromWeeklyIndex(weekly){
+    try{
+      const today = new Date();
+      const todayKey = today.toISOString().slice(0,10); // YYYY-MM-DD
+      const weeks = (weekly && weekly.weeks) ? weekly.weeks : [];
+
+      // ---- 1) 先嘗試「按日期」的寫法（若 weekly-index 有 days/schedule）----
+      const tryExtract = (dayObj)=>{
+        if(!dayObj || typeof dayObj!=="object") return null;
+        const cand =
+          dayObj.talk ?? dayObj.speaking ?? dayObj.ai_speaking ?? dayObj.speaking_task ??
+          (dayObj.tasks ? (dayObj.tasks.talk ?? dayObj.tasks.speaking) : null);
+        if(!cand) return null;
+        const t = Array.isArray(cand) ? cand[0] : cand;
+        if(!t) return null;
+
+        if(typeof t === "string"){
+          return { scene: t, title: "AI Speaking", level: "", trial: false, cover:"" };
+        }
+        return {
+          scene: t.scene || t.slug || t.id || t.key || "",
+          title: t.title || t.name || "AI Speaking",
+          level: t.level || t.cefr || "",
+          trial: !!t.trial,
+          cover: t.cover || t.poster || t.image || ""
+        };
+      };
+
+      for(const w of weeks){
+        const days = w.days ?? w.day ?? w.items ?? w.schedule ?? null;
+        if(!days) continue;
+
+        if(Array.isArray(days)){
+          for(const d of days){
+            const dk = d.date || d.day || d.key;
+            if(dk === todayKey){
+              const got = tryExtract(d);
+              if(got && got.scene) return got;
+            }
+          }
+        }else if(typeof days === "object"){
+          const d = days[todayKey];
+          const got = tryExtract(d);
+          if(got && got.scene) return got;
+        }
+      }
+
+      // ---- 2) fallback：本週 talks 自動輪 3 支（你要的「今天沒排就補一支」）----
+      // weekly-index.json 目前格式：weeks[x].talks = [{scene,title,level}, ...] fileciteturn3file0L1-L60
+      if(weeks && weeks.length){
+        const weekIndex = getWeekIndex(); // 已存在：依「本週」選擇 weeks[x]
+        const target = weeks[(weekIndex % weeks.length + weeks.length) % weeks.length];
+        const talks = (target && Array.isArray(target.talks)) ? target.talks : null;
+        if(talks && talks.length){
+          const dow = today.getDay(); // 0(日)~6(六)
+          const pick = talks[dow % talks.length]; // 3 支就會 0,1,2,0,1,2,0
+          if(pick){
+            return {
+              scene: pick.scene || pick.slug || pick.id || "",
+              title: pick.title || pick.name || "AI Speaking",
+              level: pick.level || pick.cefr || "",
+              trial: false,
+              cover: pick.cover || pick.poster || pick.image || ""
+            };
+          }
+        }
+      }
+    }catch(e){}
+    return null;
+  }
+
+  function renderTodayTalk(task){
+    const list = document.getElementById("talkList");
+    const empty = document.getElementById("talkEmpty");
+    if(!list || !empty) return;
+
+    if(!task || !task.scene){
+      list.innerHTML = "";
+      empty.style.display = "";
+      return;
+    }
+    empty.style.display = "none";
+
+    const title = task.title || "AI Speaking";
+    const level = task.level ? String(task.level) : "";
+    const cover = task.cover ? String(task.cover) : "";
+    const sub = level ? `${level}${task.trial ? " · 試用" : ""}` : (task.trial ? "試用" : "");
+
+    list.innerHTML = `
+      <div class="review-item" data-jump="talk" data-scene="${encodeURIComponent(task.scene)}">
+        <div class="review-thumb">
+          ${cover ? `<img src="${cover}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:800;background:#eef2ff;color:#1d4ed8;">talk</div>`}
+        </div>
+        <div class="review-meta">
+          <div class="t">${escapeHtml(title)}</div>
+          <div class="s">${escapeHtml(sub)}</div>
+        </div>
+      </div>
+    `;
+  }
+
   let curveChart = null;
 
   async function loadVideoIndex(){
@@ -586,6 +698,112 @@
     const cover_path = idx.cover_path || `assets/${cat}/${slug}.jpg`;
     return { cat, title, cover_path };
   }
+
+const PLAN_MAX_WEEKS = {
+  trial: 4,
+  month: 4,
+  half: 27,
+  half_year: 27,
+  year: 54,
+  annual: 54
+};
+
+const CONTENT_MAX_WEEKS = 54; // weekly-index.json 目前最多 54 週
+
+function getUrlParams(){
+  const out = {};
+  try{
+    const usp = new URLSearchParams(window.location.search);
+    for(const [k,v] of usp.entries()){
+      out[k] = v;
+    }
+  }catch(e){}
+  return out;
+}
+
+function getSubscriptionContext(){
+  const params = getUrlParams();
+
+  // 1️⃣ 先看網址參數（方便測試：?plan=year&start=2025-01-15）
+  let plan  = params.plan || params.sub_plan || null;
+  let start = params.start || params.sub_start || null;
+
+  // 2️⃣ 再看 localStorage（和首頁 index.html 共用同一組 key）
+  if(!plan){
+    try{ plan = localStorage.getItem("bwSubPlan") || null; }catch(e){}
+  }
+  if(!start){
+    try{ start = localStorage.getItem("bwSubStart") || null; }catch(e){}
+  }
+
+  if(!plan || !PLAN_MAX_WEEKS[plan]){
+    plan = "month";
+  }
+
+  let startDate = null;
+  if(start){
+    const d = new Date(start);
+    if(!Number.isNaN(d.getTime())){
+      startDate = d;
+    }
+  }
+
+  if(!startDate){
+    const today = new Date();
+    startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  }
+
+  return { plan, startDate };
+}
+
+function getWeekIndex(){
+  const { plan, startDate } = getSubscriptionContext();
+  const today = new Date();
+
+  startDate.setHours(0,0,0,0);
+  today.setHours(0,0,0,0);
+
+  const diffDays = Math.floor((today.getTime() - startDate.getTime()) / 86400000);
+  let weekNumber = Math.floor(diffDays / 7) + 1;
+
+  if(weekNumber < 1) weekNumber = 1;
+
+  const planMax = PLAN_MAX_WEEKS[plan] || 4;
+  const maxWeek = Math.min(planMax, CONTENT_MAX_WEEKS);
+  if(weekNumber > maxWeek) weekNumber = maxWeek;
+
+  const weekIndex = weekNumber - 1;
+  console.debug("[dashboard weekly] plan=%s start=%s weekNumber=%d index=%d",
+    plan,
+    startDate.toISOString().slice(0,10),
+    weekNumber,
+    weekIndex
+  );
+  return weekIndex;
+}
+
+async function loadWeeklyIndex(){
+  if(WEEKLY_INDEX !== null) return;
+  try{
+    const res = await fetch(WEEKLY_INDEX_URL + "?v=20251124");
+    if(!res.ok){
+      console.warn("weekly-index.json 載入失敗，今日複習改用 watch_logs");
+      WEEKLY_INDEX = null;
+      return;
+    }
+    const data = await res.json();
+    if(!data || !Array.isArray(data.weeks)){
+      console.warn("weekly-index.json 格式不正確，今日複習改用 watch_logs");
+      WEEKLY_INDEX = null;
+      return;
+    }
+    WEEKLY_INDEX = data;
+  }catch(e){
+    console.error("loadWeeklyIndex error", e);
+    WEEKLY_INDEX = null;
+  }
+}
+
 
   function storageUrl(path){
     if(!path) return "";
@@ -877,7 +1095,8 @@
     const { data: logs, error: lErr } = await supabase
       .from("watch_logs")
       .select("*")
-      .eq("email", userEmail)
+      .eq("user_id", user.id)
+
       .order("updated_at", { ascending:false });
 
     if(lErr){
@@ -906,15 +1125,54 @@
     const { data: quizLogs, error: qErr } = await supabase
       .from("quiz_logs")
       .select("email,score,created_at")
-      .eq("email", userEmail)
+      .eq("user_id", user.id)
+
       .order("created_at",{ ascending:false });
 
     if(qErr){
       console.error("quiz_logs error", qErr);
     }
 
-    // 今日複習：未完成
-    const todayReview = logsFilled.filter(r => (r.progress_pct || 0) < 100);
+    // 先嘗試載入 weekly-index.json，從本週 15 支影片中隨機推薦 3 支
+    await loadWeeklyIndex();
+
+    
+    // 今日口說任務（由 weekly-index.json 自動決定）
+    const todayTalk = pickTodayTalkFromWeeklyIndex(WEEKLY_INDEX);
+    renderTodayTalk(todayTalk);
+let todayReview = [];
+    if(WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) && WEEKLY_INDEX.weeks.length){
+      const weekIndex = getWeekIndex();
+      const weeksArr = WEEKLY_INDEX.weeks;
+      const target = weeksArr[(weekIndex % weeksArr.length + weeksArr.length) % weeksArr.length];
+      if(target && Array.isArray(target.videos)){
+        const weeklyList = target.videos.map(v => {
+          const slug = v.slug;
+          if(!slug) return null;
+          const meta = metaFromIndex(slug);
+          return {
+            slug,
+            video_slug: slug,
+            category: v.category || meta.cat,
+            video_category: v.category || meta.cat,
+            title: meta.title,
+            video_title: meta.title,
+            cover_path: meta.cover_path
+          };
+        }).filter(Boolean);
+
+        if(weeklyList.length){
+          // 隨機打散，取前 3 支當作「今日複習」
+          weeklyList.sort(() => Math.random() - 0.5);
+          todayReview = weeklyList.slice(0, 3);
+        }
+      }
+    }
+
+    // 如果 weekly-index 無法使用，退回舊邏輯：從未完成紀錄中推薦
+    if(!todayReview.length){
+      todayReview = logsFilled.filter(r => (r.progress_pct || 0) < 100);
+    }
 
     // 繼續播放
     let continueItem = null;
@@ -1050,59 +1308,1258 @@
   }
 
   init();
-</script>
 
-<script type="module">
-import { supabase } from "./supa.js";
-
-const LS_LEVEL = "BW_PLACEMENT_LEVEL";
-const LS_ACTIVE_WEEK = "BW_TALK_ACTIVE_WEEK";
-
-const $ = (id)=>document.getElementById(id);
-
-function cefrToStartWeek(level){
-  const map = {A1:1, A2:10, B1:19, B2:28, C1:37, C2:46};
-  return map[level] || 1;
-}
-
-async function readLevelBestEffort(){
-  // 1) localStorage
-  const lv = localStorage.getItem(LS_LEVEL);
-  if(lv) return {level: lv, week: Number(localStorage.getItem(LS_ACTIVE_WEEK)||cefrToStartWeek(lv))};
-  // 2) supabase profiles (optional)
-  try{
-    const { data: { user } } = await supabase.auth.getUser();
-    if(user){
-      const { data, error } = await supabase.from("profiles")
-        .select("placement_level,talk_active_week")
-        .eq("id", user.id).maybeSingle();
-      if(!error && data?.placement_level){
-        return {level: data.placement_level, week: Number(data.talk_active_week||cefrToStartWeek(data.placement_level))};
-      }
-    }
-  }catch(e){ /* ignore */ }
-  return {level:"A1", week:1};
-}
-
-(async ()=>{
-  const info = await readLevelBestEffort();
-  $("bwDashLevel").textContent = info.level || "A1";
-  $("bwDashWeek").textContent  = String(info.week || 1);
-
-  $("bwDashTakePlacement")?.addEventListener("click", ()=>{
-    // profile page handles placement
-    location.href = "./account/profile.html#placement";
+  // click: talk card
+  document.addEventListener("click", (e)=>{
+    const el = e.target.closest("[data-jump='talk']");
+    if(!el) return;
+    const scene = decodeURIComponent(el.dataset.scene || "");
+    if(scene) window.location.href = `/talk.html?scene=${encodeURIComponent(scene)}`;
   });
-
-  $("bwDashGoTalk")?.addEventListener("click", ()=>{
-    const w = info.week || 1;
-    localStorage.setItem(LS_ACTIVE_WEEK, String(w));
-    location.href = "./talk.html"; // talk.html will read BW_TALK_ACTIVE_WEEK
-  });
-})();
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
