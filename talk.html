@@ -11,10 +11,16 @@
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     });
+    // expose for other modules (Talk placement / learning console)
+    window.BW = window.BW || {};
+    window.BW.supabase = supabase;
+
 
     // --- require login ---
     const { data: sess } = await supabase.auth.getSession();
     const session = sess && sess.session;
+    window.BW.session = session || null;
+    window.BW.user = (session && session.user) ? session.user : null;
     if (!session || !session.user) {
       const red = encodeURIComponent(location.pathname + location.search + location.hash);
       location.replace('/account/login.html?redirect=' + red);
@@ -1217,12 +1223,18 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   let unlockedWeek = 1;               // computed
   let talkMode = "dialogue";          // "dialogue" or "shadow"
   let activeWeek = (function(){
+        const qs = new URLSearchParams(location.search);
+        const q = Number(qs.get('week'));
+        if (Number.isFinite(q) && q>=1) return Math.floor(q);
+
         const v = Number(localStorage.getItem('bw_talk_active_week'));
-        if (Number.isFinite(v) && v>=1) return v;
+        if (Number.isFinite(v) && v>=1) return Math.floor(v);
+
         const w = Number(window.BW_TALK_ACTIVE_WEEK);
-        if (Number.isFinite(w) && w>=1) return w;
+        if (Number.isFinite(w) && w>=1) return Math.floor(w);
+
         return 1;
-      })();
+      })();;
   let activeSceneId = null;
   let activeSceneTitle = "";
   let activeScene = null;             // loaded json
@@ -1960,41 +1972,117 @@ if(!firstId){
         placementBody.querySelectorAll('input[type="radio"]').forEach(i=> i.checked=false);
       }
 
-      function computePlacement(){
+      
+function computePlacement(){
+        // returns {level, scores, total, max, confidence, answers}
         const levels = ["A1","A2","B1","B2","C1","C2"];
-        const score = Object.fromEntries(levels.map(l=>[l,0]));
-        placementBody.querySelectorAll('input[type="radio"]:checked').forEach(i=>{
-          const lvl = (i.value||"").toUpperCase();
-          const w = Number(i.dataset.weight)||1;
-          if(score[lvl] != null) score[lvl] += w;
-        });
-        // pick best
-        let best = "A1", bestV = -1;
-        levels.forEach(l=>{
-          if(score[l] > bestV){ bestV = score[l]; best = l; }
-        });
-        return best;
+        const scores = Object.fromEntries(levels.map(l=>[l,0]));
+        const answers = {};
+        let max = 0;
+
+        for(const q of (placementData.questions||[])){
+          const name = 'q_'+q.id;
+          const checked = placementBody.querySelector(`input[name="${name}"]:checked`);
+          if(!checked) continue;
+          const optId = checked.value;
+          answers[q.id] = optId;
+
+          const opt = (q.options||[]).find(o=>String(o.id)===String(optId));
+          if(!opt) continue;
+
+          // support opt.weights {A1:1,...} OR opt.scores {A1:1,...}
+          const w = opt.weights || opt.scores || {};
+          for(const l of levels){
+            const v = Number(w[l]||0);
+            if(Number.isFinite(v)) scores[l] += v;
+            max = Math.max(max, scores[l]); // rough; for confidence we use totals below
+          }
+        }
+
+        // choose best level by score, tie-break by lower (easier) level
+        const best = levels.slice().sort((a,b)=>{
+          const da = scores[a], db = scores[b];
+          if(db!==da) return db-da;
+          return levels.indexOf(a)-levels.indexOf(b);
+        })[0] || "A1";
+
+        const total = levels.reduce((s,l)=>s+scores[l],0);
+        const sorted = levels.slice().sort((a,b)=>scores[b]-scores[a]);
+        const top = scores[sorted[0]]||0;
+        const second = scores[sorted[1]]||0;
+        const confidence = (top<=0) ? 0 : Math.max(0, Math.min(1, (top-second)/(top)));
+
+        return { level: best, scores, total, max: top, confidence, answers };
       }
 
-      function applyPlacement(){
-        const chosen = computePlacement();
-        const levels = ["A1","A2","B1","B2","C1","C2"];
-        const weeksPer = 9;
-        const idx = Math.max(0, levels.indexOf(chosen));
-        const wk = idx*weeksPer + 1;
-        persistLevel(chosen);
-        activeWeek = wk; persistWeek();
-        // update UI if teacher/week select exists
+      function applyPlacement(result){
         try{
-          // open scene picker to show new week range
-          showToast(`已套用程度：${chosen}（從 Week ${wk} 開始）`);
-        }catch(e){}
-        closePlacement();
-        // If page has week list open, refresh it
-        try{ renderWeekPills(); renderScenePicker(); }catch(e){}
+          localStorage.setItem('bw_placement_result', JSON.stringify({
+            ...result,
+            ts: new Date().toISOString(),
+            version: placementData.version || placementData.schema || 'v1'
+          }));
+        }catch(_){}
+
+        // map level -> starting week (9 weeks per level)
+        const order = ["A1","A2","B1","B2","C1","C2"];
+        const idx = Math.max(0, order.indexOf(result.level));
+        const startWeek = idx*9 + 1;
+
+        try{
+          localStorage.setItem('bw_talk_active_week', String(startWeek));
+        }catch(_){}
+
+        // Optional: write to Supabase (non-blocking, no hard dependency)
+        (async ()=>{
+          try{
+            const supa = window.BW && window.BW.supabase;
+            const user = window.BW && window.BW.user;
+            if(!supa || !user) return;
+
+            const payload = {
+              user_id: user.id,
+              email: user.email || null,
+              level: result.level,
+              score_total: result.total,
+              score_top: result.max,
+              confidence: result.confidence,
+              answers: result.answers,
+              created_at: new Date().toISOString()
+            };
+            // table name can be changed later; if not exists, it will just fail silently
+            await supa.from('bw_placement_results').insert(payload);
+          }catch(_){}
+        })();
+
+        // show comment + jump to recommended week
+        const comment = (function(){
+          const pct = Math.round((result.confidence||0)*100);
+          const msg = (pct>=60) ? "信心度高" : (pct>=35 ? "信心度中等" : "信心度偏低（建議再測一次）");
+          return `你的程度估計：${result.level}（${msg}）\n建議從第 ${startWeek} 週開始。`;
+        })();
+
+        try{
+          placementResult.innerHTML = `
+            <div style="font-size:18px;font-weight:800;margin-bottom:6px;">✅ 測驗完成：${result.level}</div>
+            <div style="color:#475569;line-height:1.6;white-space:pre-line;">${comment}</div>
+            <div style="margin-top:10px;color:#64748b;font-size:13px;">（已存入本機；若已登入，也會嘗試寫入資料庫供學習控制台使用）</div>
+          `;
+        }catch(_){}
+
+        // update URL so Talk 立即套用推薦週
+        try{
+          const u = new URL(location.href);
+          u.searchParams.set('week', String(startWeek));
+          // keep other params (scene/teacher)
+          location.href = u.toString();
+        }catch(_){
+          location.reload();
+        }
       }
 
-      // ---------- Placement UI (safe init) ----------
+      // ---------- Placement UI ----------
+// ---------- Placement UI (safe init) ----------
 function initPlacementUI(){
   const btn = $("btnPlacement");
   if(!btn) return;
@@ -2017,7 +2105,7 @@ if(document.readyState === "loading"){
   initPlacementUI();
 });
         btnPlacementReset.addEventListener("click", resetPlacement);
-        btnPlacementSubmit.addEventListener("click", applyPlacement);
+        if(btnPlacementSubmit) btnPlacementSubmit.addEventListener("click", ()=>{ const r=computePlacement(); applyPlacement(r); });
       }
 
 btnReplay.addEventListener("click", ()=>{
