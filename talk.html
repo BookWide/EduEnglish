@@ -11,15 +11,10 @@
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     });
-    window.BW = window.BW || {};
-    window.BW.supabase = supabase;
-
 
     // --- require login ---
     const { data: sess } = await supabase.auth.getSession();
     const session = sess && sess.session;
-    window.BW.session = session || null;
-    window.BW.user = (session && session.user) ? session.user : null;
     if (!session || !session.user) {
       const red = encodeURIComponent(location.pathname + location.search + location.hash);
       location.replace('/account/login.html?redirect=' + red);
@@ -1182,7 +1177,7 @@ let __tvWatch = null;
 const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const DAY = 24*60*60*1000;
-  const MAX_WEEKS = 54; // MVP
+  const MAX_WEEKS = 999; // MVP
   const ITEMS_PER_WEEK = 3;
 
   // UI refs
@@ -1220,19 +1215,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   let byWeek = new Map();             // weekNo -> scenes[]
   let unlockedWeek = 1;               // computed
   let talkMode = "dialogue";          // "dialogue" or "shadow"
-  let activeWeek = (function(){
-        const qs = new URLSearchParams(location.search);
-        const q = Number(qs.get('week'));
-        if (Number.isFinite(q) && q>=1) return Math.floor(q);
-
-        const v = Number(localStorage.getItem('bw_talk_active_week'));
-        if (Number.isFinite(v) && v>=1) return Math.floor(v);
-
-        const w = Number(window.BW_TALK_ACTIVE_WEEK);
-        if (Number.isFinite(w) && w>=1) return Math.floor(w);
-
-        return 1;
-      })();;
+  let activeWeek = 1;
   let activeSceneId = null;
   let activeSceneTitle = "";
   let activeScene = null;             // loaded json
@@ -1241,13 +1224,6 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   let lastTts = null;
   let lastTtsAt = 0;
 // -------- utils --------
-      function persistWeek(){
-        try{ localStorage.setItem('bw_talk_active_week', String(activeWeek)); }catch(e){}
-      }
-      function persistLevel(level){
-        try{ localStorage.setItem('bw_talk_level', String(level||'')); }catch(e){}
-      }
-
   function showToast(msg){
     toastEl.textContent = msg;
     toastEl.style.display = "block";
@@ -1530,128 +1506,92 @@ function guessFillFromSentence(en){
     return s.replace(target, "____");
   }
 
-    /* ========= Azure TTS (方案2：產品級穩定聲音) ========= */
-  // v20260114-azure-tts
-  // - 每位老師固定 Azure voice（跨裝置一致）
-  // - 前端丟文字 -> Supabase Edge Function 回傳 audio/mpeg -> <audio> 播放
+  
+  // ===== Azure TTS Switch =====
+  const USE_AZURE_TTS = true; // 改成 false 可退回 Browser Speech
+  const AZURE_TTS_ENDPOINT = `${SUPABASE_URL}/functions/v1/azure-tts`;
 
-  const AZURE_TTS_FN = (SUPABASE_URL || '').replace(/\/+$/,'') + '/functions/v1/azure-tts';
-
-  // 以 teacher mp4 檔名做 key（你目前 teacherSelect 的 value 就是這個）
-  const AZURE_VOICES = {
-    "Diana.mp4": "en-US-JennyNeural",
-    "Emma.mp4": "en-US-AriaNeural",
-    "Sophia.mp4": "en-GB-SoniaNeural"
+  // 每位老師固定一個 Azure voice（可自行改）
+  const TEACHER_AZURE_VOICE = {
+    "Diana": "en-US-JennyNeural",
+    "Emma": "en-US-AriaNeural",
+    "Sophia": "en-US-AnaNeural"
   };
 
-  let ttsAudio = new Audio();
-  ttsAudio.preload = "auto";
-  ttsAudio.playsInline = true;
+  let __ttsAudio = null;
+  let __ttsBlobUrl = null;
 
-  let ttsAbort = null;
-  let lastObjUrl = null;
-
-  function getAzureVoiceForTeacher() {
-    const v = (teacherSelect && teacherSelect.value) ? teacherSelect.value : "";
-    return AZURE_VOICES[v] || "en-US-JennyNeural";
-  }
-
-  async function speak(text){
-    if(!text) return;
-
-    // 停掉上一段
-    stopSpeak();
-
-    // 開始嘴型/影片（若你有這兩個函式）
-    try { if(typeof __tvStart === "function") __tvStart(); } catch(e){}
-
-    // 叫 Edge Function 產音訊
-    ttsAbort = new AbortController();
-
-    const token = (window.BW && window.BW.session && window.BW.session.access_token) ? window.BW.session.access_token : null;
-
-    const payload = {
-      text: String(text),
-      voice: getAzureVoiceForTeacher(),
-      // 你要更好聽可改：audio-24khz-48kbitrate-mono-mp3 / audio-16khz-32kbitrate-mono-mp3
-      format: "audio-24khz-48kbitrate-mono-mp3",
-      rate: "0%",      // 可調：-10% ~ +10%
-      pitch: "0%",     // 可調：-10% ~ +10%
-    };
-
-    const headers = {
-      "Content-Type": "application/json",
-      "apikey": SUPABASE_ANON_KEY,
-      "authorization": "Bearer " + (token || SUPABASE_ANON_KEY),
-    };
-
-    let res;
+async function speak(text){
     try{
-      res = await fetch(AZURE_TTS_FN, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal: ttsAbort.signal,
-      });
-    } catch(err){
-      // 取消播放不算錯
-      if(err && (err.name === "AbortError")) return;
-      console.warn("Azure TTS fetch failed", err);
-      try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
-      return;
-    }
+      const now = Date.now();
+      if (text && text === lastTts && (now - lastTtsAt) < 800) return; // 防止重複發聲
+      lastTtsAt = now;
+      lastTts = text;
 
-    if(!res.ok){
-      const msg = await res.text().catch(()=> "");
-      console.warn("Azure TTS not ok:", res.status, msg);
-      try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
-      return;
-    }
+      // --- stop any previous audio ---
+      try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(e){}
+      try{ if(__ttsAudio){ __ttsAudio.pause(); __ttsAudio.currentTime = 0; } }catch(e){}
+      try{ if(__ttsBlobUrl){ URL.revokeObjectURL(__ttsBlobUrl); } }catch(e){}
+      __ttsAudio = null;
+      __ttsBlobUrl = null;
 
-    const buf = await res.arrayBuffer();
-    const blob = new Blob([buf], { type: "audio/mpeg" });
-    lastObjUrl = URL.createObjectURL(blob);
+      __tvStart();
 
-    ttsAudio.src = lastObjUrl;
+      // ===== Azure TTS (Edge Function) =====
+      if (USE_AZURE_TTS){
+        const sel = document.getElementById("selTeacher");
+        const teacherKey = sel ? String(sel.value||"") : "";
+        const voice = (TEACHER_AZURE_VOICE[teacherKey] || "en-US-JennyNeural");
 
-    // 播完要停嘴型 + 釋放 URL
-    ttsAudio.onended = () => {
-      try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
-      try { if(lastObjUrl) URL.revokeObjectURL(lastObjUrl); } catch(e){}
-      lastObjUrl = null;
-    };
+        const r = await fetch(AZURE_TTS_ENDPOINT, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": "Bearer " + SUPABASE_ANON_KEY
+          },
+          body: JSON.stringify({ text, voice, rate: "0%", pitch: "0%" })
+        });
 
-    // 播放（若遇到 autoplay policy，會被 browser 擋；你目前是按鈕觸發，通常 OK）
-    try{
-      await ttsAudio.play();
-    } catch(err){
-      console.warn("audio.play blocked", err);
-      try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
+        if(!r.ok){
+          const t = await r.text().catch(()=> "");
+          console.warn("[azure-tts] failed:", r.status, t.slice(0,200));
+          throw new Error("azure-tts " + r.status);
+        }
+
+        const blob = await r.blob();
+        __ttsBlobUrl = URL.createObjectURL(blob);
+        __ttsAudio = new Audio(__ttsBlobUrl);
+
+        __ttsAudio.onended = ()=>{
+          __tvStop();
+          try{ if(__ttsBlobUrl) URL.revokeObjectURL(__ttsBlobUrl); }catch(e){}
+          __ttsAudio = null;
+          __ttsBlobUrl = null;
+        };
+        __ttsAudio.onerror = ()=>{
+          __tvStop();
+        };
+
+        await __ttsAudio.play();
+        return;
+      }
+
+      // ===== Fallback: Browser Speech =====
+      if(!("speechSynthesis" in window)){ __tvStop(); return; }
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = "en-US";
+      u.rate = 1.0;
+      window.speechSynthesis.speak(u);
+      u.onend = ()=>{ __tvStop(); };
+      u.onerror = ()=>{ __tvStop(); };
+    }catch(e){
+      try{ __tvStop(); }catch(_){}
     }
   }
 
   function stopSpeak(){
-    try{
-      if(ttsAbort) ttsAbort.abort();
-    }catch(e){}
-    ttsAbort = null;
-
-    try{
-      if(ttsAudio){
-        ttsAudio.pause();
-        ttsAudio.currentTime = 0;
-      }
-    }catch(e){}
-
-    try { if(typeof __tvStop === "function") __tvStop(); } catch(e){}
-
-    try{
-      if(lastObjUrl) URL.revokeObjectURL(lastObjUrl);
-    }catch(e){}
-    lastObjUrl = null;
-  }
-  /* ========= /Azure TTS ========= */
-catch(e){}
+    try{ window.speechSynthesis.cancel(); }catch(e){}
     __tvStop();
   }
 
@@ -1780,7 +1720,7 @@ catch(e){}
         btn.textContent = locked ? "尚未" : "開始";
         btn.disabled = locked;
         btn.addEventListener("click", ()=>{
-          activeWeek = wk; persistWeek();
+          activeWeek = wk;
           localStorage.setItem(LS_LAST_SCENE, it.id);
           closeModal();
           loadSceneById(it.id, it.title);
@@ -1865,7 +1805,8 @@ async function init(){
     // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
-    activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;; persistWeek();
+    activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;
+
     // 模式：對話(dialogue) / 跟讀(shadow)
     try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
 
@@ -1957,7 +1898,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek; persistWeek();
+          activeWeek = Number(mapped.week)||activeWeek;
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
           try{ localStorage.setItem(LS_LAST_SCENE, mapped.id); }catch(_e){}
         }
@@ -1974,7 +1915,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek; persistWeek();
+          activeWeek = Number(mapped.week)||activeWeek;
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
         }
       }else{
@@ -2004,8 +1945,7 @@ if(!firstId){
   btnClose.addEventListener("click", closeModal);
   mask.addEventListener("click", (e)=>{ if(e.target===mask) closeModal(); });
 
-  
-btnReplay.addEventListener("click", ()=>{
+  btnReplay.addEventListener("click", ()=>{
     const t = currentTurn();
     if(t.en) speak(t.en);
     else if(lastTts) speak(lastTts);
