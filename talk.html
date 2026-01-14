@@ -1016,6 +1016,7 @@ body{line-height:1.1}
             <option value="Sophia.mp4">Sophia</option>
           </select>
         </label>
+      <button class="smallBtn" id="btnPlacement">程度測驗</button>
       <button class="smallBtn" id="btnReplay">重播</button>
       <span class="fileTag" id="fileTag"></span>
     </div>
@@ -1177,7 +1178,7 @@ let __tvWatch = null;
 const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const DAY = 24*60*60*1000;
-  const MAX_WEEKS = 999; // MVP
+  const MAX_WEEKS = 8; // MVP
   const ITEMS_PER_WEEK = 3;
 
   // UI refs
@@ -1215,7 +1216,13 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   let byWeek = new Map();             // weekNo -> scenes[]
   let unlockedWeek = 1;               // computed
   let talkMode = "dialogue";          // "dialogue" or "shadow"
-  let activeWeek = 1;
+  let activeWeek = (function(){
+        const v = Number(localStorage.getItem('bw_talk_active_week'));
+        if (Number.isFinite(v) && v>=1) return v;
+        const w = Number(window.BW_TALK_ACTIVE_WEEK);
+        if (Number.isFinite(w) && w>=1) return w;
+        return 1;
+      })();
   let activeSceneId = null;
   let activeSceneTitle = "";
   let activeScene = null;             // loaded json
@@ -1224,6 +1231,13 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   let lastTts = null;
   let lastTtsAt = 0;
 // -------- utils --------
+      function persistWeek(){
+        try{ localStorage.setItem('bw_talk_active_week', String(activeWeek)); }catch(e){}
+      }
+      function persistLevel(level){
+        try{ localStorage.setItem('bw_talk_level', String(level||'')); }catch(e){}
+      }
+
   function showToast(msg){
     toastEl.textContent = msg;
     toastEl.style.display = "block";
@@ -1654,7 +1668,7 @@ function guessFillFromSentence(en){
         btn.textContent = locked ? "尚未" : "開始";
         btn.disabled = locked;
         btn.addEventListener("click", ()=>{
-          activeWeek = wk;
+          activeWeek = wk; persistWeek();
           localStorage.setItem(LS_LAST_SCENE, it.id);
           closeModal();
           loadSceneById(it.id, it.title);
@@ -1739,8 +1753,7 @@ async function init(){
     // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
-    activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;
-
+    activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;; persistWeek();
     // 模式：對話(dialogue) / 跟讀(shadow)
     try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
 
@@ -1832,7 +1845,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek;
+          activeWeek = Number(mapped.week)||activeWeek; persistWeek();
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
           try{ localStorage.setItem(LS_LAST_SCENE, mapped.id); }catch(_e){}
         }
@@ -1849,7 +1862,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek;
+          activeWeek = Number(mapped.week)||activeWeek; persistWeek();
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
         }
       }else{
@@ -1879,7 +1892,117 @@ if(!firstId){
   btnClose.addEventListener("click", closeModal);
   mask.addEventListener("click", (e)=>{ if(e.target===mask) closeModal(); });
 
-  btnReplay.addEventListener("click", ()=>{
+  
+      // ===== Placement (3-min survey) =====
+      const btnPlacement = $("btnPlacement");
+      const placementMask = $("placementMask");
+      const placementBody = $("placementBody");
+      const btnPlacementClose = $("btnPlacementClose");
+      const btnPlacementReset = $("btnPlacementReset");
+      const btnPlacementSubmit = $("btnPlacementSubmit");
+
+      let placementData = null;
+
+      function openPlacement(){
+        placementMask.style.display = "flex";
+        if (!placementData) loadPlacement();
+      }
+      function closePlacement(){
+        placementMask.style.display = "none";
+      }
+      async function loadPlacement(){
+        placementBody.innerHTML = `<div class="muted" style="padding:12px 0;">載入中…</div>`;
+        const urls = [
+          "./talk/placement.json",
+          "./placement.json",
+          "./data/placement.json"
+        ];
+        let lastErr = null;
+        for (const u of urls){
+          try{
+            const res = await fetch(u + "?ts=" + Date.now(), {cache:"no-store"});
+            if(!res.ok) throw new Error("HTTP " + res.status);
+            placementData = await res.json();
+            renderPlacement();
+            return;
+          }catch(e){ lastErr = e; }
+        }
+        placementBody.innerHTML = `<div class="muted" style="padding:12px 0;">載入失敗：請確認 <code>talk/placement.json</code> 是否存在。</div>`;
+        console.error("placement load failed", lastErr);
+      }
+
+      function renderPlacement(){
+        const secs = (placementData && placementData.sections) ? placementData.sections : [];
+        let html = "";
+        secs.forEach((sec, si)=>{
+          html += `<div style="margin:14px 0 6px; font-weight:800;">${sec.title || ("Section " + (si+1))}</div>`;
+          (sec.questions||[]).forEach((q, qi)=>{
+            const qid = `q_${si}_${qi}`;
+            html += `<div style="border:1px solid #e5e7eb; border-radius:14px; padding:12px; margin:10px 0; background:#fff;">
+              <div style="font-weight:700; margin-bottom:8px;">${q.prompt || ""}</div>
+              <div style="display:flex; flex-direction:column; gap:8px;">`;
+            (q.options||[]).forEach((op, oi)=>{
+              const id = `${qid}_${oi}`;
+              html += `<label style="display:flex; gap:10px; align-items:flex-start; cursor:pointer;">
+                <input type="radio" name="${qid}" id="${id}" value="${op.level || ""}" data-weight="${op.weight || 1}" style="margin-top:3px;">
+                <div><div style="font-weight:650;">${op.text || ""}</div></div>
+              </label>`;
+            });
+            html += `</div></div>`;
+          });
+        });
+
+        html += `<div class="muted" style="margin-top:10px;">完成後會自動推薦等級，並把你帶到對應週次（可再手動換週）。</div>`;
+        placementBody.innerHTML = html;
+      }
+
+      function resetPlacement(){
+        placementBody.querySelectorAll('input[type="radio"]').forEach(i=> i.checked=false);
+      }
+
+      function computePlacement(){
+        const levels = ["A1","A2","B1","B2","C1","C2"];
+        const score = Object.fromEntries(levels.map(l=>[l,0]));
+        placementBody.querySelectorAll('input[type="radio"]:checked').forEach(i=>{
+          const lvl = (i.value||"").toUpperCase();
+          const w = Number(i.dataset.weight)||1;
+          if(score[lvl] != null) score[lvl] += w;
+        });
+        // pick best
+        let best = "A1", bestV = -1;
+        levels.forEach(l=>{
+          if(score[l] > bestV){ bestV = score[l]; best = l; }
+        });
+        return best;
+      }
+
+      function applyPlacement(){
+        const chosen = computePlacement();
+        const levels = ["A1","A2","B1","B2","C1","C2"];
+        const weeksPer = 9;
+        const idx = Math.max(0, levels.indexOf(chosen));
+        const wk = idx*weeksPer + 1;
+        persistLevel(chosen);
+        activeWeek = wk; persistWeek();
+        // update UI if teacher/week select exists
+        try{
+          // open scene picker to show new week range
+          showToast(`已套用程度：${chosen}（從 Week ${wk} 開始）`);
+        }catch(e){}
+        closePlacement();
+        // If page has week list open, refresh it
+        try{ renderWeekPills(); renderScenePicker(); }catch(e){}
+      }
+
+      if(btnPlacement){
+        btnPlacement.addEventListener("click", openPlacement);
+        btnPlacementClose.addEventListener("click", closePlacement);
+        placementMask.addEventListener("click", (e)=>{ if(e.target===placementMask) closePlacement(); });
+        btnPlacementReset.addEventListener("click", resetPlacement);
+        btnPlacementSubmit.addEventListener("click", applyPlacement);
+      }
+
+btnReplay.addEventListener("click", ()=>{
     const t = currentTurn();
     if(t.en) speak(t.en);
     else if(lastTts) speak(lastTts);
@@ -2017,5 +2140,23 @@ if(!firstId){
 
   init();
 })();</script>
+
+<!-- ===== Placement Modal (3-min level survey) ===== -->
+<div id="placementMask" class="mask" style="display:none;">
+  <div class="modal">
+    <div class="modalHead">
+      <div class="modalTitle">3 分鐘程度測驗</div>
+      <button class="modalClose" id="btnPlacementClose">✕</button>
+    </div>
+    <div class="modalBody" id="placementBody" style="max-height:60vh; overflow:auto;">
+      <div class="muted" style="padding:12px 0;">載入中…</div>
+    </div>
+    <div class="modalFoot" style="display:flex; gap:10px; justify-content:flex-end;">
+      <button class="btn" id="btnPlacementReset">重填</button>
+      <button class="btnPrimary" id="btnPlacementSubmit">完成並套用</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
