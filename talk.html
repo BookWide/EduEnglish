@@ -2,54 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <!-- ===== BookWide Guard (Talk: subscription required) ===== -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2">
-// ===== Browser Speech (fallback) helpers =====
-let __BW_VOICES = [];
-function __bwLoadVoices(){
-  try{ __BW_VOICES = window.speechSynthesis ? speechSynthesis.getVoices() : []; }catch(_e){ __BW_VOICES=[]; }
-}
-if(window.speechSynthesis){
-  __bwLoadVoices();
-  window.speechSynthesis.onvoiceschanged = __bwLoadVoices;
-}
-function __bwPickVoice({langs=[], nameHints=[]}){
-  __bwLoadVoices();
-  const vs = __BW_VOICES || [];
-  const lh = (s)=>String(s||"").toLowerCase();
-  const hints = nameHints.map(lh);
-  // 1) lang + nameHints
-  for(const lang of langs){
-    const cand = vs.filter(v=>lh(v.lang)===lh(lang));
-    for(const h of hints){
-      const hit = cand.find(v=>lh(v.name).includes(h) || lh(v.voiceURI).includes(h));
-      if(hit) return hit;
-    }
-  }
-  // 2) lang only
-  for(const lang of langs){
-    const hit = vs.find(v=>lh(v.lang)===lh(lang));
-    if(hit) return hit;
-  }
-  // 3) nameHints only
-  for(const h of hints){
-    const hit = vs.find(v=>lh(v.name).includes(h) || lh(v.voiceURI).includes(h));
-    if(hit) return hit;
-  }
-  return vs[0] || null;
-}
-function __bwSetTtsMode(text){
-  const el = document.getElementById("ttsMode");
-  if(el) el.textContent = text;
-}
-
-</script>
-<script>
-  // BookWide Supabase public config (global)
-  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-  window.SUPABASE_URL = SUPABASE_URL;
-  window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
-</script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 (async function() {
   try {
@@ -1061,7 +1014,7 @@ body{line-height:1.1}
                         <option value="Diana.mp4">Diana</option>
             <option value="Emma.mp4">Emma</option>
             <option value="Sophia.mp4">Sophia</option>
-          </select> <span id="ttsMode" style="margin-left:8px;display:inline-block;padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);font-weight:900;font-size:12px;color:rgba(255,255,255,.9)">TTS: —</span>
+          </select>
         </label>
       <button class="smallBtn" id="btnReplay">重播</button>
       <span class="fileTag" id="fileTag"></span>
@@ -1224,7 +1177,7 @@ let __tvWatch = null;
 const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const DAY = 24*60*60*1000;
-  const MAX_WEEKS = 999; // MVP
+  const MAX_WEEKS = 8; // MVP
   const ITEMS_PER_WEEK = 3;
 
   // UI refs
@@ -1553,159 +1506,22 @@ function guessFillFromSentence(en){
     return s.replace(target, "____");
   }
 
-  
-  // ===== Azure TTS Switch =====
-  const USE_AZURE_TTS = true; // 改成 false 可退回 Browser Speech
-  const AZURE_TTS_ENDPOINT = `${SUPABASE_URL}/functions/v1/azure-tts`;
-
-  // 每位老師固定一個 Azure voice（可自行改）
-  const TEACHER_AZURE_VOICE = {
-    "Diana": "en-US-JennyNeural",
-    "Emma": "en-US-AriaNeural",
-    "Sophia": "en-US-AnaNeural"
-  };
-
-  let __ttsAudio = null;
-  let __ttsBlobUrl = null;
-
-async function speak(text){
+  async function speak(text){
     try{
+      if(!("speechSynthesis" in window)) return;
+      window.speechSynthesis.cancel();
       const now = Date.now();
       if (text && text === lastTts && (now - lastTtsAt) < 800) return; // 防止重複發聲
       lastTtsAt = now;
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = "en-US";
+      u.rate = 1.0;
       lastTts = text;
-
-      // --- stop any previous audio ---
-      try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(e){}
-      try{ if(__ttsAudio){ __ttsAudio.pause(); __ttsAudio.currentTime = 0; } }catch(e){}
-      try{ if(__ttsBlobUrl){ URL.revokeObjectURL(__ttsBlobUrl); } }catch(e){}
-      __ttsAudio = null;
-      __ttsBlobUrl = null;
-
       __tvStart();
-
-      // ===== Azure TTS (Edge Function) =====
-      if (USE_AZURE_TTS){
-        const sel = document.getElementById("selTeacher");
-        const teacherKey = sel ? String(sel.value||"") : "";
-        const voice = (TEACHER_AZURE_VOICE[teacherKey] || "en-US-JennyNeural");
-        const TEACHER_AZURE_TONE = {
-          Diana:  { rate: "0%",  pitch: "0%"  },
-          Emma:   { rate: "-4%", pitch: "+6%" },  // a bit calmer + brighter
-          Sophia: { rate: "+4%", pitch: "-4%" }   // a bit faster + deeper
-        };
-        const tone = TEACHER_AZURE_TONE[teacherKey] || TEACHER_AZURE_TONE.Diana;
-        const rate = tone.rate;
-        const pitch = tone.pitch;
-
-        const r = await fetch(AZURE_TTS_ENDPOINT, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": "Bearer " + SUPABASE_ANON_KEY
-          },
-          body: JSON.stringify({ text, voice, rate, pitch })
-        });
-
-        if(!r.ok){
-          const t = await r.text().catch(()=> "");
-          console.warn("[azure-tts] failed:", r.status, t.slice(0,200));
-          throw new Error("azure-tts " + r.status);
-        }
-
-        const blob = await r.blob();
-        __ttsBlobUrl = URL.createObjectURL(blob);
-        __ttsAudio = new Audio(__ttsBlobUrl);
-
-        __ttsAudio.onended = ()=>{
-          __tvStop();
-          try{ if(__ttsBlobUrl) URL.revokeObjectURL(__ttsBlobUrl); }catch(e){}
-          __ttsAudio = null;
-          __ttsBlobUrl = null;
-        };
-        __ttsAudio.onerror = ()=>{
-          __tvStop();
-        };
-
-        await __ttsAudio.play();
-        return;
-      }
-
-      // ===== Fallback: Browser Speech (per-teacher voice / tone) =====
-      if(!("speechSynthesis" in window)){ __tvStop(); return; }
-
-      // teacherKey: Diana / Emma / Sophia
-      const sel = document.getElementById("selTeacher");
-      const teacherKey = sel ? String(sel.value||"").replace(/\.mp4$/i,"") : "Diana";
-
-      // preferences (best-effort; actual voice depends on OS/Chrome)
-      const TEACHER_WEB_PREF = {
-        Diana:  { lang:"en-US", rate:1.00, pitch:1.00, want:["en-us","female","jenny","aria"] },
-        Emma:   { lang:"en-GB", rate:0.98, pitch:1.05, want:["en-gb","uk","female","amy","serena","hazel"] },
-        Sophia: { lang:"en-AU", rate:1.03, pitch:0.96, want:["en-au","australia","female","olivia","isla"] }
-      };
-      const pref = TEACHER_WEB_PREF[teacherKey] || TEACHER_WEB_PREF.Diana;
-
-      // load voices (Chrome may populate asynchronously)
-      const voices = (window.speechSynthesis.getVoices && window.speechSynthesis.getVoices()) || [];
-      const norm = (v)=>(String(v||"").toLowerCase());
-      const pickVoice = ()=>{
-        if(!voices || !voices.length) return null;
-        // 1) match by language + keywords
-        const wants = pref.want || [];
-        let best=null, bestScore=-1;
-        for(const v of voices){
-          const s = norm(v.name)+" "+norm(v.lang);
-          if(pref.lang && norm(v.lang) !== norm(pref.lang) && !norm(v.lang).startsWith(norm(pref.lang).slice(0,2))) continue;
-          let sc=0;
-          for(const w of wants){ if(s.includes(w)) sc+=2; }
-          if(norm(v.lang)===norm(pref.lang)) sc+=3;
-          if(sc>bestScore){ bestScore=sc; best=v; }
-        }
-        if(best) return best;
-        // 2) fallback: any voice with same primary language
-        const primary = norm(pref.lang).split("-")[0];
-        return voices.find(v=>norm(v.lang).startsWith(primary)) || voices[0] || null;
-      };
-
-      
-const u = new SpeechSynthesisUtterance(String(text||""));
-const t = String(teacher||"").toLowerCase();
-
-// Strongly differentiated fallback profiles
-const FALLBACK_PROFILE = {
-  diana: { langs:["en-US","en"], nameHints:["jenny","google us english","microsoft"], rate:1.00, pitch:0.95 },
-  emma:  { langs:["en-GB","en"], nameHints:["google uk english female","sonia","libby","aria","microsoft"], rate:0.92, pitch:1.25 },
-  sophia:{ langs:["en-AU","en"], nameHints:["google english (australia)","google australian","natasha","catherine","microsoft"], rate:1.10, pitch:0.80 },
-};
-
-let key = "diana";
-if(t.includes("emma")) key="emma";
-if(t.includes("sophia")) key="sophia";
-const prof = FALLBACK_PROFILE[key];
-
-try{
-  const v = __bwPickVoice({langs:prof.langs, nameHints:prof.nameHints});
-  if(v) u.voice = v;
-  u.lang = (u.voice && u.voice.lang) ? u.voice.lang : (prof.langs[0] || "en-US");
-}catch(_e){ u.lang = prof.langs[0] || "en-US"; }
-
-u.rate = prof.rate;
-u.pitch = prof.pitch;
-
-try{
-  __bwSetTtsMode(`TTS: Fallback (${(u.voice && u.voice.name) ? u.voice.name : u.lang})`);
-}catch(_e){}
-
-speechSynthesis.cancel();
-speechSynthesis.speak(u);
-
+      window.speechSynthesis.speak(u);
       u.onend = ()=>{ __tvStop(); };
       u.onerror = ()=>{ __tvStop(); };
-    }catch(e){
-      try{ __tvStop(); }catch(_){}
-    }
+    }catch(e){}
   }
 
   function stopSpeak(){
@@ -1720,33 +1536,6 @@ speechSynthesis.speak(u);
     }
     return -1;
   }
-
-  // ===== Simple scoring + feedback (restore score comments) =====
-  function __bwTok(s){
-    return String(s||"")
-      .toLowerCase()
-      .replace(/['’]/g,"")
-      .replace(/[^a-z0-9\s]/g," ")
-      .split(/\s+/).filter(Boolean);
-  }
-  function __bwScore(user, expected){
-    const a = __bwTok(user);
-    const b = __bwTok(expected);
-    if(!b.length) return 0;
-    const setA = new Set(a);
-    let hit=0;
-    for(const t of b){ if(setA.has(t)) hit++; }
-    // reward coverage of expected keywords; clamp to [0,100]
-    return Math.max(0, Math.min(100, Math.round((hit / b.length) * 100)));
-  }
-  function __bwComment(score){
-    if(score>=90) return "太棒了！非常接近母語表達 ✅";
-    if(score>=75) return "很好！用字很到位，語序也自然 👍";
-    if(score>=60) return "不錯！再把關鍵字補齊會更像原句 🙂";
-    if(score>=40) return "有方向了！建議再對照關鍵字重說一次 💪";
-    return "先別急～把句子骨架抓住，再慢慢加細節 ✍️";
-  }
-
   function expectedAfter(aiIndex){
     for(let i=aiIndex+1;i<turns.length;i++){
       const t = turns[i];
@@ -2145,22 +1934,6 @@ if(!firstId){
       fillInput.value = "";
       showToast("已送出 ✅");
       // advance to NEXT AI line (skip USER expected line)
-      
-      // score vs expected line (the USER turn after current AI)
-      try{
-        const expTurn = expectedAfter(turnIdx);
-        const expEn = expTurn && expTurn.en ? String(expTurn.en) : "";
-        if(expEn){
-          const sc = __bwScore(said, expEn);
-          const msg = `得分 ${sc} / 100｜${__bwComment(sc)}`;
-          showToast(msg);
-          // also show a gentle hint in the panel
-          try{
-            const hintEl = document.getElementById("fillHint");
-            if(hintEl) hintEl.textContent = (sc>=75) ? "很棒，直接進下一句。" : ("參考關鍵句： " + expEn);
-          }catch(_){}
-        }
-      }catch(_e){}
       nextTurn();
       return;
     }
