@@ -33,7 +33,7 @@
     // --- read profile (RLS: profiles_select_own) ---
     const { data: prof, error } = await supabase
       .from('profiles')
-      .select('id, expires_at, is_paused')
+      .select('id, expires_at, is_paused, cefr_level, level_updated_at, talk_level_anchor_at')
       .eq('id', uid)
       .maybeSingle();
 
@@ -52,6 +52,10 @@
     // expose (optional)
     window.BW_SUB_OK = ok;
     window.BW_SUB_EXPIRES_AT = exp || null;
+    window.BW_CEFR_LEVEL = (prof && prof.cefr_level) ? String(prof.cefr_level) : null;
+    window.BW_LEVEL_UPDATED_AT = (prof && prof.level_updated_at) ? String(prof.level_updated_at) : null;
+    window.BW_TALK_ANCHOR_AT = (prof && prof.talk_level_anchor_at) ? String(prof.talk_level_anchor_at) : null;
+    try{ if(window.BW_CEFR_LEVEL) localStorage.setItem('BW_CEFR_LEVEL', String(window.BW_CEFR_LEVEL)); }catch(_e){}
 
     if (!ok) {
       // 未訂閱 / 已到期 / 暫停
@@ -882,36 +886,68 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   const WEEK_DAYS = 7;        // 每週 = 7 天（固定）
   const ADVANCE_WEEKS = 0.5;  // 提前 unlock（0.5 = 提前半週）
 
-  function ensureAnchorTs(){
-    const uid = getUserId() || "anon";
-    const k = LS_ANCHOR_BASE + uid;
-    let ts = 0;
-    try{ ts = Number(localStorage.getItem(k)||"0"); }catch(e){ ts = 0; }
+  function parseIsoToTs(iso){
+  if(!iso) return 0;
+  const t = Date.parse(String(iso));
+  return Number.isFinite(t) ? t : 0;
+}
 
-    // If subscription expires_at exists, we can detect first-time after subscribe:
-    // store a copy of expires_at; if user renews later, we keep anchor (do not reset).
-    const expNow = (()=>{ try{ return (window.BW_SUB_EXPIRES_AT || localStorage.getItem("BW_SUB_EXPIRES_AT") || "").toString(); }catch(e){ return ""; }})();
+function getCefrLevel(){
+  try{
+    return (window.BW_CEFR_LEVEL || localStorage.getItem("BW_CEFR_LEVEL") || "A1").toString().trim().toUpperCase();
+  }catch(e){ return "A1"; }
+}
+
+function levelStartWeek(level){
+  const L = (level||"A1").toString().trim().toUpperCase();
+  // 你可依課表再調整：每級各 4 週為一段（每週 3 片）
+  if(L==="A0") return 1;
+  if(L==="A1") return 1;
+  if(L==="A2") return 5;
+  if(L==="B1") return 9;
+  if(L==="B2") return 13;
+  if(L==="C1") return 17;
+  if(L==="C2") return 21;
+  return 1;
+}
+
+// anchor per user (prefer DB: talk_level_anchor_at / level_updated_at, fallback LS)
+function ensureAnchorTs(){
+  const uid = getUserId() || "anon";
+  const k = LS_ANCHOR_BASE + uid;
+
+  // 1) DB anchor (from guard)
+  const dbIso = (window.BW_TALK_ANCHOR_AT || window.BW_LEVEL_UPDATED_AT || "").toString();
+  const dbTs = parseIsoToTs(dbIso);
+  if(dbTs){
+    // 同步寫入 LS 供離線/快取使用（但不覆寫更新時間）
     try{
-      const expKey = LS_EXPIRES_BASE + uid;
-      const expOld = localStorage.getItem(expKey) || "";
-      if(expNow && !expOld) localStorage.setItem(expKey, expNow);
+      const old = Number(localStorage.getItem(k)||"0");
+      if(!old || Math.abs(old - dbTs) > 1000) localStorage.setItem(k, String(dbTs));
     }catch(_e){}
-
-    if(!ts){
-      ts = Date.now();
-      try{ localStorage.setItem(k, String(ts)); }catch(e){}
-    }
-    return ts;
+    return dbTs;
   }
 
-  function computeUnlockedWeek(){
-    const ts = ensureAnchorTs();
-    const diff = Date.now() - ts;
-    const weekMs = WEEK_DAYS * DAY;
-    const passed = diff / weekMs; // 0.0, 1.0, 2.0...
-    const w = Math.floor(passed + ADVANCE_WEEKS) + 1;
-    return Math.max(1, Math.min(MAX_WEEKS, w));
+  // 2) fallback: LS
+  let ts = 0;
+  try{ ts = Number(localStorage.getItem(k)||"0"); }catch(e){ ts = 0; }
+  if(!ts){
+    ts = Date.now();
+    try{ localStorage.setItem(k, String(ts)); }catch(e){}
   }
+  return ts;
+}
+
+function computeUnlockedWeek(){
+  const ts = ensureAnchorTs();
+  const diff = Math.max(0, Date.now() - ts);
+  const weekMs = WEEK_DAYS * DAY;
+  const passed = diff / weekMs; // 0.0, 1.0, 2.0...
+  const prog = Math.floor(passed + ADVANCE_WEEKS); // 第 0 週 = 起始週
+  const base = levelStartWeek(getCefrLevel());
+  const w = base + prog;
+  return Math.max(1, Math.min(MAX_WEEKS, w));
+}
 
   // ---- turns normalize (defensive) ----
   function normalizeTurns(raw){
