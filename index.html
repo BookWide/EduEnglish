@@ -1724,15 +1724,21 @@ if(data.current_device_id !== my){
 
 // ===== [BW] First-time Level Survey Gate (Talk) =====
 // 規則：只要 talk_level_week 還沒寫入（null），就先導去評測
+// ===== [BW] First-time Level Survey Gate (Talk) =====
+// 規則：
+// - 若 talk_level_week 尚未寫入：
+//    - 若已是有效訂閱：不強制跳評測（避免「評測→訂閱」循環），僅放行
+//    - 若尚未訂閱：導去評測（評測完成後導去 pricing）
+// 你要求：最後停在「我的訂閱」頁
 async function BW_gateLevelSurveyIfNeeded(user){
   try{
-    const { data: prof, error } = await supa
+    // 1) 先看是否已完成評測
+    const { data: prof, error: pErr } = await supa
       .from('profiles')
       .select('talk_level_week')
       .eq('id', user.id)
       .maybeSingle();
-
-    if(error) return; // 讀不到先不擋，避免誤傷
+    if(pErr) return; // 讀不到先不擋，避免誤傷
     const hasWeek = (prof && prof.talk_level_week != null);
     if(hasWeek) return;
 
@@ -1740,10 +1746,48 @@ async function BW_gateLevelSurveyIfNeeded(user){
     const here = location.pathname || '';
     if (here.includes('/account/level-survey')) return;
 
-    // 登入完成後先去評測；評測頁做完會導去 pricing（你已在評測頁處理）
-    // 你要求：最後停在「我的訂閱」頁
+    // 2) 若未評測，先嘗試判斷「是否已有效訂閱」
+    //    - 若 orders 表不存在或欄位不符，catch 後視為「未知」，仍可導評測
+    //    - 但只要抓到「已有效訂閱」，就放行（避免循環）
+    let hasActiveSub = false;
+    try{
+      const { data: rows, error: oErr } = await supa
+        .from('orders')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending:false })
+        .limit(3);
+
+      if(!oErr && Array.isArray(rows) && rows.length){
+        const now = Date.now();
+        for(const r of rows){
+          const st = String(r.status || r.state || '').toLowerCase();
+          const okStatus = (st === 'paid' || st === 'success' || st === 'active' || st === 'succeeded');
+          // 可能的到期欄位
+          const exp = r.expire_at || r.expires_at || r.expired_at || r.end_at || r.ends_at || r.valid_until;
+          let expMs = NaN;
+          if (exp) {
+            const t = Date.parse(exp);
+            if(!Number.isNaN(t)) expMs = t;
+          }
+          // 若沒有到期欄位，就只用 status 判斷
+          if(okStatus && (Number.isNaN(expMs) || expMs > now)){
+            hasActiveSub = true;
+            break;
+          }
+        }
+      }
+    }catch(_e){
+      // orders 表不存在或 RLS 擋住：忽略，交給下方導評測
+    }
+
+    // 3) 已有效訂閱：放行（不要強制評測，避免循環）
+    if(hasActiveSub) return;
+
+    // 4) 未訂閱且未評測：導去評測（評測頁你已設成完成後導去 pricing）
     const next = encodeURIComponent('/account/subscription.html');
     location.replace('/account/level-survey.html?next=' + next);
+
   }catch(e){
     console.warn('BW_gateLevelSurveyIfNeeded error', e);
   }
