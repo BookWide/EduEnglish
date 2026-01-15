@@ -551,6 +551,30 @@
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+/* ===== Talk level-week (B1 starts at W11; you said W16 is B1) ===== */
+function levelFromWeek(week){
+  const w = Number(week||0);
+  if (!w) return 'A1';
+  if (w <= 10) return 'A1';
+  if (w <= 20) return 'B1';
+  if (w <= 30) return 'B2';
+  if (w <= 40) return 'C1';
+  return 'C2';
+}
+async function getTalkLevelWeek(user){
+  try{
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('talk_level_week')
+      .eq('id', user.id)
+      .maybeSingle();
+    if (!error && data && data.talk_level_week) return Number(data.talk_level_week);
+  }catch(_e){}
+  const ls = Number(localStorage.getItem('BW_TALK_LEVEL_WEEK')||'');
+  return ls || 0;
+}
+
+
     // expose for debugging
   window.supabaseClient = supabase;
 const VIDEO_INDEX_URL = "../data/index-all.json";
@@ -567,40 +591,6 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
       .replace(/>/g,"&gt;")
       .replace(/"/g,"&quot;")
       .replace(/'/g,"&#039;");
-  }
-
-  // ====== Talk Level Week (from profiles.talk_level_week) ======
-  // - level-survey 會把 profiles.talk_level_week 寫成 1~54（例：16）
-  // - 本頁用它來決定「今日口說」要解鎖到第幾週
-  let TALK_LEVEL_WEEK = null; // 1-based
-
-  async function loadTalkLevelWeek(user){
-    try{
-      if(!user || !user.id) return null;
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('talk_level_week')
-        .eq('id', user.id)
-        .maybeSingle();
-      if(error){
-        console.warn('profiles.talk_level_week error', error);
-        return null;
-      }
-      const w = Number(data?.talk_level_week);
-      if(Number.isFinite(w) && w > 0) return w;
-      return null;
-    }catch(e){
-      console.warn('loadTalkLevelWeek failed', e);
-      return null;
-    }
-  }
-
-  function getTalkWeekIndex(){
-    // weekly-index.json 的 weeks 是 0-based array
-    // talk_level_week 是 1-based week number
-    const w = Number(TALK_LEVEL_WEEK);
-    if(Number.isFinite(w) && w > 0) return w - 1;
-    return 0;
   }
 
 
@@ -655,7 +645,7 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
       // ---- 2) fallback：本週 talks 自動輪 3 支（你要的「今天沒排就補一支」）----
       // weekly-index.json 目前格式：weeks[x].talks = [{scene,title,level}, ...] fileciteturn3file0L1-L60
       if(weeks && weeks.length){
-        const weekIndex = getTalkWeekIndex(); // 依「評測解鎖週」選擇 weeks[x]
+        const weekIndex = getWeekIndex(); // 已存在：依「本週」選擇 weeks[x]
         const target = weeks[(weekIndex % weeks.length + weeks.length) % weeks.length];
         const talks = (target && Array.isArray(target.talks)) ? target.talks : null;
         if(talks && talks.length){
@@ -691,10 +681,13 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
     const title = task.title || "AI Speaking";
     const level = task.level ? String(task.level) : "";
     const cover = task.cover ? String(task.cover) : "";
-    const sub = level ? `${level}${task.trial ? " · 試用" : ""}` : (task.trial ? "試用" : "");
+    const week = Number(task.week||0) || 0;
+    const weekStr = week ? `W${week}` : "";
+    const base = level ? `${level}${task.trial ? " · 試用" : ""}` : (task.trial ? "試用" : "");
+    const sub = [weekStr, base].filter(Boolean).join(" · ");
 
     list.innerHTML = `
-      <div class="review-item" data-jump="talk" data-scene="${encodeURIComponent(task.scene)}">
+      <div class="review-item" data-jump="talk" data-scene="${encodeURIComponent(task.scene)}" data-week="${encodeURIComponent(task.week||"")}">
         <div class="review-thumb">
           ${cover ? `<img src="${cover}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:800;background:#eef2ff;color:#1d4ed8;">talk</div>`}
         </div>
@@ -1156,33 +1149,15 @@ async function loadWeeklyIndex(){
       .filter(Boolean);
 
     // 測驗紀錄（只需要分數與日期）
-    // 有些環境 quiz_logs 可能沒有 user_id 欄位（或 RLS 不允許），會直接 400。
-    // 這裡做「先 user_id，失敗就改用 email」的容錯，避免整頁 console 爆紅。
-    let quizLogs = [];
-    {
-      const q1 = await supabase
-        .from("quiz_logs")
-        .select("email,score,created_at")
-        .eq("user_id", user.id)
-        .order("created_at", { ascending: false })
-        .limit(10);
+    const { data: quizLogs, error: qErr } = await supabase
+      .from("quiz_logs")
+      .select("email,score,created_at")
+      .eq("user_id", user.id)
 
-      if(!q1.error){
-        quizLogs = q1.data || [];
-      } else {
-        console.warn("quiz_logs user_id query failed; fallback to email", q1.error);
-        const q2 = await supabase
-          .from("quiz_logs")
-          .select("email,score,created_at")
-          .eq("email", user.email || "")
-          .order("created_at", { ascending: false })
-          .limit(10);
-        if(q2.error){
-          console.error("quiz_logs error", q2.error);
-        } else {
-          quizLogs = q2.data || [];
-        }
-      }
+      .order("created_at",{ ascending:false });
+
+    if(qErr){
+      console.error("quiz_logs error", qErr);
     }
 
     // 先嘗試載入 weekly-index.json，從本週 15 支影片中隨機推薦 3 支
@@ -1190,8 +1165,23 @@ async function loadWeeklyIndex(){
 
     
     // 今日口說任務（由 weekly-index.json 自動決定）
-    const todayTalk = pickTodayTalkFromWeeklyIndex(WEEKLY_INDEX);
-    renderTodayTalk(todayTalk);
+    // 今日口說：優先用『評測結果 talk_level_week』(W16=B1)，避免被週表(weekly-index)綁死
+    const talkWeek = await getTalkLevelWeek(user);
+    if (talkWeek){
+      const lvl = levelFromWeek(talkWeek);
+      const task = {
+        kind:'talk',
+        week: talkWeek,
+        title: `Week ${talkWeek}`,
+        subtitle: `AI Speak · ${lvl}`,
+        scene: null,
+        level: lvl
+      };
+      renderTodayTalk(task);
+    }else{
+      const todayTalk = pickTodayTalkFromWeeklyIndex(WEEKLY_INDEX);
+      renderTodayTalk(todayTalk);
+    }
 let todayReview = [];
     if(WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) && WEEKLY_INDEX.weeks.length){
       const weekIndex = getWeekIndex();
@@ -1356,9 +1346,6 @@ let todayReview = [];
     document.getElementById("userEmail").textContent = user.email || "";
     document.getElementById("userPill").style.display = "flex";
 
-    // 先讀取評測解鎖週，提供「今日口說」與 weekly-index 對齊
-    TALK_LEVEL_WEEK = await loadTalkLevelWeek(user);
-
     loadDashboard(user);
   }
 
@@ -1368,6 +1355,14 @@ let todayReview = [];
   document.addEventListener("click", (e)=>{
     const el = e.target.closest("[data-jump='talk']");
     if(!el) return;
+
+    const weekRaw = (el.dataset.week || "").trim();
+    const week = Number(weekRaw||0) || 0;
+    if(week){
+      window.location.href = `/talk.html?week=${encodeURIComponent(String(week))}`;
+      return;
+    }
+
     const scene = decodeURIComponent(el.dataset.scene || "");
     if(scene) window.location.href = `/talk.html?scene=${encodeURIComponent(scene)}`;
   });
