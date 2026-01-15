@@ -622,7 +622,8 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
       // weekly-index.json 目前格式：weeks[x].talks = [{scene,title,level}, ...] fileciteturn3file0L1-L60
       if(weeks && weeks.length){
         const weekIndex = getWeekIndex(); // 已存在：依「本週」選擇 weeks[x]
-        const target = weeks[(weekIndex % weeks.length + weeks.length) % weeks.length];
+        const idx = Math.max(0, Math.min(weeks.length-1, (weekIndex||1)-1));
+        const target = weeks[idx];
         const talks = (target && Array.isArray(target.talks)) ? target.talks : null;
         if(talks && talks.length){
           const dow = today.getDay(); // 0(日)~6(六)
@@ -707,6 +708,30 @@ const PLAN_MAX_WEEKS = {
   year: 54,
   annual: 54
 };
+  // ===== Talk Level Week (assessment-based) =====
+  // - talk_level_week: start week based on assessment (e.g., B1 -> 16)
+  // - talk_level_anchor_at: assessment completion time (anchor)
+  let USER_TALK_LEVEL_WEEK = 0;
+  let USER_TALK_ANCHOR_AT = null;
+
+  function getLS(key, def=null){ try{ const v = localStorage.getItem(key); return v??def; }catch(e){ return def; } }
+  function getTalkLevelWeekFallback(userId){
+    // Prefer DB value; fallback to localStorage from level-survey
+    const cap = parseInt(getLS("BW_LEVEL_WEEK_CAP","0")||"0",10);
+    if(cap && cap>0) return cap;
+    // last resort: map BW_CEFR_LEVEL
+    const lvl = (getLS("BW_CEFR_LEVEL","")||"").toUpperCase();
+    const map = { A1:4, A2:8, B1:16, B2:32, C1:48, C2:54 };
+    return map[lvl] || 1;
+  }
+  function getTalkAnchorFallback(userId){
+    // Prefer DB value; fallback to cached anchor
+    const k = userId ? `BW_TALK_ANCHOR_TS_${userId}` : "BW_TALK_ANCHOR_TS";
+    const v = getLS(k, null);
+    if(v) return v;
+    return null;
+  }
+
 
 const CONTENT_MAX_WEEKS = 54; // weekly-index.json 目前最多 54 週
 
@@ -757,29 +782,34 @@ function getSubscriptionContext(){
 }
 
 function getWeekIndex(){
-  const { plan, startDate } = getSubscriptionContext();
+  // Assessment-based week progression:
+  // activeWeek = talk_level_week + weeksSince(talk_level_anchor_at)
   const today = new Date();
-
-  startDate.setHours(0,0,0,0);
   today.setHours(0,0,0,0);
 
-  const diffDays = Math.floor((today.getTime() - startDate.getTime()) / 86400000);
-  let weekNumber = Math.floor(diffDays / 7) + 1;
+  const baseWeek = (USER_TALK_LEVEL_WEEK && USER_TALK_LEVEL_WEEK>0) ? USER_TALK_LEVEL_WEEK : 1;
+
+  let anchor = null;
+  if(USER_TALK_ANCHOR_AT){
+    const d = new Date(USER_TALK_ANCHOR_AT);
+    if(!Number.isNaN(d.getTime())) anchor = d;
+  }
+  if(!anchor){
+    // If no anchor, treat as starting today (still shows baseWeek)
+    anchor = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  }
+  anchor.setHours(0,0,0,0);
+
+  const diffDays = Math.floor((today.getTime() - anchor.getTime()) / 86400000);
+  const passedWeeks = Math.max(0, Math.floor(diffDays / 7));
+
+  let weekNumber = baseWeek + passedWeeks;
 
   if(weekNumber < 1) weekNumber = 1;
-
-  const planMax = PLAN_MAX_WEEKS[plan] || 4;
-  const maxWeek = Math.min(planMax, CONTENT_MAX_WEEKS);
+  const maxWeek = CONTENT_MAX_WEEKS;
   if(weekNumber > maxWeek) weekNumber = maxWeek;
 
-  const weekIndex = weekNumber - 1;
-  console.debug("[dashboard weekly] plan=%s start=%s weekNumber=%d index=%d",
-    plan,
-    startDate.toISOString().slice(0,10),
-    weekNumber,
-    weekIndex
-  );
-  return weekIndex;
+  return weekNumber; // 1-based
 }
 
 async function loadWeeklyIndex(){
@@ -1088,6 +1118,23 @@ async function loadWeeklyIndex(){
   /* ---------- 主流程 ---------- */
   async function loadDashboard(user){
     const userEmail = user.email;
+
+    // Load talk assessment fields from profiles (if available)
+    try{
+      const { data: prof, error: pErr } = await supabase
+        .from("profiles")
+        .select("talk_level_week, talk_level_anchor_at")
+        .eq("id", user.id)
+        .maybeSingle();
+      if(!pErr && prof){
+        USER_TALK_LEVEL_WEEK = prof.talk_level_week || 0;
+        USER_TALK_ANCHOR_AT = prof.talk_level_anchor_at || null;
+      }
+    }catch(_e){}
+
+    // Fallbacks (localStorage) if DB not set yet
+    if(!USER_TALK_LEVEL_WEEK) USER_TALK_LEVEL_WEEK = getTalkLevelWeekFallback(user.id);
+    if(!USER_TALK_ANCHOR_AT) USER_TALK_ANCHOR_AT = getTalkAnchorFallback(user.id);
 
     await loadVideoIndex();
 
