@@ -15,92 +15,54 @@
   try {
     const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    });
 
-    // create client (UMD: window.supabase)
-    const sb = window.supabase?.createClient
-      ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-      : null;
-
-    if (!sb) {
-      console.error('[Talk Guard] Supabase client missing');
-      return;
-    }
-
-    // session
-    const { data: sessData } = await sb.auth.getSession();
-    const session = sessData?.session || null;
-    if (!session) {
-      location.replace('/account/login.html?redirect=' + encodeURIComponent(location.pathname + location.search));
+    // --- require login ---
+    const { data: sess } = await supabase.auth.getSession();
+    const session = sess && sess.session;
+    if (!session || !session.user) {
+      const red = encodeURIComponent(location.pathname + location.search + location.hash);
+      location.replace('/account/login.html?redirect=' + red);
       return;
     }
 
     const uid = session.user.id;
-    window.BW_USER_ID = uid;
-    try { localStorage.setItem('BW_USER_ID', uid); } catch(e) {}
 
-    // ---- read minimal profile for subscription gate ----
-    let prof = null;
-    let err1 = null;
-    try{
-      const r1 = await sb.from('profiles')
-        .select('id, expires_at, is_paused')
-        .eq('id', uid)
-        .maybeSingle();
-      prof = r1.data || null;
-      err1 = r1.error || null;
-    }catch(e){ err1 = e; }
+    // --- read profile (RLS: profiles_select_own) ---
+    const { data: prof, error } = await supabase
+      .from('profiles')
+      .select('id, expires_at, is_paused')
+      .eq('id', uid)
+      .maybeSingle();
 
-    if (err1) console.warn('[Talk Guard] profiles(min) failed, fallback to localStorage:', err1);
-
-    const paused = !!(prof?.is_paused) || (()=>{ try{ return String(localStorage.getItem('BW_IS_PAUSED')||'') === '1'; }catch(e){ return false; }})();
-    const expIso = (prof?.expires_at ? String(prof.expires_at) : '') || (()=>{ try{ return String(localStorage.getItem('BW_SUB_EXPIRES_AT')||''); }catch(e){ return ''; }})();
-
-    // subscription check (Taipei date)
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
-    const ok = (!paused) && !!expIso && (expIso.slice(0,10) >= today);
-
-    if (!ok) {
-      location.replace('/account/subscription.html?err=need_sub');
+    if (error) {
+      // 讀不到 profile：保守導回訂閱頁
+      location.replace('/account/subscription.html?err=profile');
       return;
     }
 
-    // cache for fallback
-    try{
-      if (expIso) localStorage.setItem('BW_SUB_EXPIRES_AT', expIso);
-      localStorage.setItem('BW_IS_PAUSED', paused ? '1' : '0');
-    }catch(e){}
+    const paused = !!(prof && prof.is_paused);
+    const exp = prof && prof.expires_at ? String(prof.expires_at) : '';
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
 
-    // ---- optional level anchor (for Week unlock) ----
-    // schema may not have these columns yet; do not hard-fail.
-    try{
-      const r2 = await sb.from('profiles')
-        .select('cefr_level, level_updated_at, talk_level_anchor_at')
-        .eq('id', uid)
-        .maybeSingle();
-      const p2 = r2.data || null;
-      const anchorIso = (p2 && (p2.talk_level_anchor_at || p2.level_updated_at)) ? String(p2.talk_level_anchor_at || p2.level_updated_at) : '';
-      if (anchorIso) {
-        try{
-          localStorage.setItem('BW_TALK_LEVEL_ANCHOR_AT', anchorIso);
-          const ms = Date.parse(anchorIso);
-          if (isFinite(ms) && ms > 0) {
-            // NOTE: talk.html later uses LS_ANCHOR_BASE = "BW_TALK_ANCHOR_TS_"
-            localStorage.setItem('BW_TALK_ANCHOR_TS_' + uid, String(ms));
-          }
-        }catch(e){}
-      }
-      if (p2?.cefr_level) {
-        try{ localStorage.setItem('BW_CEFR_LEVEL', String(p2.cefr_level)); }catch(e){}
-      }
-    }catch(e){
-      console.warn('[Talk Guard] profiles(optional) skipped:', e);
+    const ok = (!paused) && exp && (exp >= today);
+
+    // expose (optional)
+    window.BW_SUB_OK = ok;
+    window.BW_SUB_EXPIRES_AT = exp || null;
+
+    if (!ok) {
+      // 未訂閱 / 已到期 / 暫停
+      location.replace('/account/subscription.html');
+      return;
     }
-
   } catch (e) {
-    console.error('[Talk Guard] unexpected:', e);
+    // guard 本身出錯：保守導回訂閱頁（避免無限迴圈）
+    location.replace('/account/subscription.html?err=guard');
   }
 })();
-</script>
 </script>
 <!-- ===== /BookWide Guard ===== -->
 
@@ -1278,6 +1240,13 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   function openModal(){
     mask.style.display = "flex";
     mask.setAttribute("aria-hidden","false");
+    // auto scroll to current week (align with level result, e.g., B1 -> W16)
+    requestAnimationFrame(()=>{
+      try{
+        const el = document.getElementById("wk-" + String(activeWeek));
+        if(el) el.scrollIntoView({block:"start", behavior:"smooth"});
+      }catch(_e){}
+    });
   }
   function closeModal(){
     mask.style.display = "none";
@@ -1345,6 +1314,25 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     const passed = diff / weekMs; // 0.0, 1.0, 2.0...
     const w = Math.floor(passed + ADVANCE_WEEKS) + 1;
     return Math.max(1, Math.min(MAX_WEEKS, w));
+  }
+
+  function getLevelCapWeek(){
+    // Prefer explicit cap from level survey
+    try{
+      const v = Number(localStorage.getItem("BW_LEVEL_WEEK_CAP")||"0");
+      if(v && Number.isFinite(v)) return Math.max(1, Math.min(MAX_WEEKS, v));
+    }catch(_e){}
+    // Fallback: map CEFR to cap weeks (B1 -> 16)
+    let L = "A1";
+    try{ L = (localStorage.getItem("BW_CEFR_LEVEL")||"A1").toString().trim().toUpperCase(); }catch(_e){}
+    if(L==="A0") return 4;
+    if(L==="A1") return 4;
+    if(L==="A2") return 8;
+    if(L==="B1") return 16;
+    if(L==="B2") return 24;
+    if(L==="C1") return 32;
+    if(L==="C2") return 40;
+    return 4;
   }
 
   // ---- turns normalize (defensive) ----
@@ -1748,6 +1736,7 @@ async function speak(text){
       const locked = wk > unlockedWeek;
       const g = document.createElement("div");
       g.className = "group";
+      g.id = "wk-" + wk;
       const head = document.createElement("div");
       head.className = "gHead";
       head.innerHTML = `<div>Week ${wk}</div><div class="lock">${locked ? "🔒 尚未解鎖" : "✅ 可練習"}</div>`;
@@ -1846,8 +1835,10 @@ async function init(){
   setTeacher(urlT || savedT || (selTeacher ? selTeacher.value : "teacher.mp4"));
     getOverrides();
     unlockedWeek = computeUnlockedWeek();
-
-    // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
+    const levelCap = getLevelCapWeek();
+    // Align with assessment result (e.g., B1 -> W16): jump list/selection to levelCap
+    if(levelCap && levelCap>unlockedWeek) unlockedWeek = levelCap;
+// 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
     activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;
