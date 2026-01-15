@@ -48,40 +48,57 @@
 
     // --- orders fallback (handle test accounts recreated with new uid) ---
     let oexp = '';
+    let opaid = '';
+    let ocreated = '';
+    let hasPaid = false;
     try {
-      // 1) try by user_id (if your orders table has it)
-      let q = supabase
+      // 1) by user_id (best)
+      const r1 = await supabase
         .from('orders')
-        .select('status, expires_at, paid_at, created_at, user_id, email')
-        .eq('status', 'paid')
-        .order('paid_at', { ascending: false, nullsFirst: false })
-        .order('created_at', { ascending: false })
-        .limit(5);
-
-      // Some schemas may not have user_id; if it errors, we catch and retry by email.
-      const r1 = await q.eq('user_id', uid);
+        .select('status,expires_at,paid_at,created_at')
+        .eq('user_id', u.id)
+        .order('created_at', { ascending:false })
+        .limit(1);
       if (!r1.error && r1.data && r1.data.length) {
         const row = r1.data[0];
-        if (row.expires_at) oexp = String(row.expires_at).slice(0,10);
+        if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
+        if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
+        if (row?.paid_at) opaid = String(row.paid_at);
+        if (row?.created_at) ocreated = String(row.created_at);
       } else {
-        // 2) fallback by email
+        // 2) fallback by email (covers cases where order created before account was recreated)
         const r2 = await supabase
           .from('orders')
-          .select('status, expires_at, paid_at, created_at, user_id, email')
-          .eq('status', 'paid')
-          .ilike('email', email)
-          .order('paid_at', { ascending: false, nullsFirst: false })
-          .order('created_at', { ascending: false })
-          .limit(5);
+          .select('status,expires_at,paid_at,created_at')
+          .eq('email', u.email)
+          .order('created_at', { ascending:false })
+          .limit(1);
         if (!r2.error && r2.data && r2.data.length) {
           const row = r2.data[0];
-          if (row.expires_at) oexp = String(row.expires_at).slice(0,10);
+          if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
+          if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
+          if (row?.paid_at) opaid = String(row.paid_at);
+          if (row?.created_at) ocreated = String(row.created_at);
         }
       }
-    } catch (e) {
-      // ignore
-    }
+    } catch (e) {}
 
+    // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
+    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
+    const today = new Date().toISOString().slice(0,10);
+    let ok = (pe && pe >= today) || (oexp && oexp >= today);
+    if (!ok && hasPaid) {
+      // paid_at/created_at within last 400 days => treat as valid
+      const base = (opaid || ocreated || '').slice(0,10);
+      if (base) {
+        const t0 = new Date(base + 'T00:00:00Z').getTime();
+        const t1 = Date.now();
+        const days = (t1 - t0) / 86400000;
+        if (days >= 0 && days <= 400) ok = true;
+      } else {
+        ok = true;
+      }
+    }
     // --- decide ---
     const ok = (!paused) && (
       (pexp && pexp >= today) ||
