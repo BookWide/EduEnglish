@@ -4,10 +4,18 @@
 <!-- ===== BookWide Guard (Talk: subscription required) ===== -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+  // BookWide Supabase public config (global)
+  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+  window.SUPABASE_URL = SUPABASE_URL;
+  window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
+</script>
+<script>
 (async function() {
   try {
     const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     });
@@ -21,38 +29,74 @@
       return;
     }
 
-    const uid = session.user.id;
+    const user = session.user;
+    const uid = user.id;
+    const email = (user.email || '').toLowerCase();
 
-    // --- read profile (RLS: profiles_select_own) ---
-    const { data: prof, error } = await supabase
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
+
+    // --- read profile (best effort) ---
+    const { data: prof, error: perr } = await supabase
       .from('profiles')
       .select('id, expires_at, is_paused')
       .eq('id', uid)
       .maybeSingle();
 
-    if (error) {
-      // 讀不到 profile：保守導回訂閱頁
-      location.replace('/account/subscription.html?err=profile');
-      return;
+    // 如果 profiles 讀不到（RLS / row 不存在），不要直接判死刑：改用 orders 當 fallback
+    const paused = !!(prof && prof.is_paused);
+    const pexp = prof && prof.expires_at ? String(prof.expires_at).slice(0,10) : '';
+
+    // --- orders fallback (handle test accounts recreated with new uid) ---
+    let oexp = '';
+    try {
+      // 1) try by user_id (if your orders table has it)
+      let q = supabase
+        .from('orders')
+        .select('status, expires_at, paid_at, created_at, user_id, email')
+        .eq('status', 'paid')
+        .order('paid_at', { ascending: false, nullsFirst: false })
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      // Some schemas may not have user_id; if it errors, we catch and retry by email.
+      const r1 = await q.eq('user_id', uid);
+      if (!r1.error && r1.data && r1.data.length) {
+        const row = r1.data[0];
+        if (row.expires_at) oexp = String(row.expires_at).slice(0,10);
+      } else {
+        // 2) fallback by email
+        const r2 = await supabase
+          .from('orders')
+          .select('status, expires_at, paid_at, created_at, user_id, email')
+          .eq('status', 'paid')
+          .ilike('email', email)
+          .order('paid_at', { ascending: false, nullsFirst: false })
+          .order('created_at', { ascending: false })
+          .limit(5);
+        if (!r2.error && r2.data && r2.data.length) {
+          const row = r2.data[0];
+          if (row.expires_at) oexp = String(row.expires_at).slice(0,10);
+        }
+      }
+    } catch (e) {
+      // ignore
     }
 
-    const paused = !!(prof && prof.is_paused);
-    const exp = prof && prof.expires_at ? String(prof.expires_at) : '';
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
+    // --- decide ---
+    const ok = (!paused) && (
+      (pexp && pexp >= today) ||
+      (oexp && oexp >= today)
+    );
 
-    const ok = (!paused) && exp && (exp >= today);
-
-    // expose (optional)
     window.BW_SUB_OK = ok;
-    window.BW_SUB_EXPIRES_AT = exp || null;
+    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
+    window.BW_PROFILE_OK = !perr;
 
     if (!ok) {
-      // 未訂閱 / 已到期 / 暫停
       location.replace('/account/subscription.html');
       return;
     }
   } catch (e) {
-    // guard 本身出錯：保守導回訂閱頁（避免無限迴圈）
     location.replace('/account/subscription.html?err=guard');
   }
 })();
@@ -1177,7 +1221,7 @@ let __tvWatch = null;
 const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const DAY = 24*60*60*1000;
-  const MAX_WEEKS = 8; // MVP
+  const MAX_WEEKS = 999; // MVP
   const ITEMS_PER_WEEK = 3;
 
   // UI refs
@@ -1506,22 +1550,88 @@ function guessFillFromSentence(en){
     return s.replace(target, "____");
   }
 
-  async function speak(text){
+  
+  // ===== Azure TTS Switch =====
+  const USE_AZURE_TTS = true; // 改成 false 可退回 Browser Speech
+  const AZURE_TTS_ENDPOINT = `${SUPABASE_URL}/functions/v1/azure-tts`;
+
+  // 每位老師固定一個 Azure voice（可自行改）
+  const TEACHER_AZURE_VOICE = {
+    "Diana": "en-US-JennyNeural",
+    "Emma": "en-US-AriaNeural",
+    "Sophia": "en-US-AnaNeural"
+  };
+
+  let __ttsAudio = null;
+  let __ttsBlobUrl = null;
+
+async function speak(text){
     try{
-      if(!("speechSynthesis" in window)) return;
-      window.speechSynthesis.cancel();
       const now = Date.now();
       if (text && text === lastTts && (now - lastTtsAt) < 800) return; // 防止重複發聲
       lastTtsAt = now;
+      lastTts = text;
+
+      // --- stop any previous audio ---
+      try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(e){}
+      try{ if(__ttsAudio){ __ttsAudio.pause(); __ttsAudio.currentTime = 0; } }catch(e){}
+      try{ if(__ttsBlobUrl){ URL.revokeObjectURL(__ttsBlobUrl); } }catch(e){}
+      __ttsAudio = null;
+      __ttsBlobUrl = null;
+
+      __tvStart();
+
+      // ===== Azure TTS (Edge Function) =====
+      if (USE_AZURE_TTS){
+        const sel = document.getElementById("selTeacher");
+        const teacherKey = sel ? String(sel.value||"") : "";
+        const voice = (TEACHER_AZURE_VOICE[teacherKey] || "en-US-JennyNeural");
+
+        const r = await fetch(AZURE_TTS_ENDPOINT, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": "Bearer " + SUPABASE_ANON_KEY
+          },
+          body: JSON.stringify({ text, voice, rate: "0%", pitch: "0%" })
+        });
+
+        if(!r.ok){
+          const t = await r.text().catch(()=> "");
+          console.warn("[azure-tts] failed:", r.status, t.slice(0,200));
+          throw new Error("azure-tts " + r.status);
+        }
+
+        const blob = await r.blob();
+        __ttsBlobUrl = URL.createObjectURL(blob);
+        __ttsAudio = new Audio(__ttsBlobUrl);
+
+        __ttsAudio.onended = ()=>{
+          __tvStop();
+          try{ if(__ttsBlobUrl) URL.revokeObjectURL(__ttsBlobUrl); }catch(e){}
+          __ttsAudio = null;
+          __ttsBlobUrl = null;
+        };
+        __ttsAudio.onerror = ()=>{
+          __tvStop();
+        };
+
+        await __ttsAudio.play();
+        return;
+      }
+
+      // ===== Fallback: Browser Speech =====
+      if(!("speechSynthesis" in window)){ __tvStop(); return; }
       const u = new SpeechSynthesisUtterance(text);
       u.lang = "en-US";
       u.rate = 1.0;
-      lastTts = text;
-      __tvStart();
       window.speechSynthesis.speak(u);
       u.onend = ()=>{ __tvStop(); };
       u.onerror = ()=>{ __tvStop(); };
-    }catch(e){}
+    }catch(e){
+      try{ __tvStop(); }catch(_){}
+    }
   }
 
   function stopSpeak(){
