@@ -1220,8 +1220,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   // State
   let indexData = null;               // {scenes:[]}
   let byWeek = new Map();             // weekNo -> scenes[]
-  let unlockedWeek = 1;
-  let levelWeek = 0; // assessment week cap (e.g., B1 -> 16)               // computed
+  let unlockedWeek = 1;               // computed
   let talkMode = "dialogue";          // "dialogue" or "shadow"
   let activeWeek = 1;
   let activeSceneId = null;
@@ -1241,13 +1240,6 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   function openModal(){
     mask.style.display = "flex";
     mask.setAttribute("aria-hidden","false");
-    // auto scroll to current week (align with level result, e.g., B1 -> W16)
-    requestAnimationFrame(()=>{
-      try{
-        const el = document.getElementById("wk-" + String(activeWeek));
-        if(el) el.scrollIntoView({block:"start", behavior:"smooth"});
-      }catch(_e){}
-    });
   }
   function closeModal(){
     mask.style.display = "none";
@@ -1315,25 +1307,6 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     const passed = diff / weekMs; // 0.0, 1.0, 2.0...
     const w = Math.floor(passed + ADVANCE_WEEKS) + 1;
     return Math.max(1, Math.min(MAX_WEEKS, w));
-  }
-
-  function getLevelCapWeek(){
-    // Prefer explicit cap from level survey
-    try{
-      const v = Number(localStorage.getItem("BW_LEVEL_WEEK_CAP")||"0");
-      if(v && Number.isFinite(v)) return Math.max(1, Math.min(MAX_WEEKS, v));
-    }catch(_e){}
-    // Fallback: map CEFR to cap weeks (B1 -> 16)
-    let L = "A1";
-    try{ L = (localStorage.getItem("BW_CEFR_LEVEL")||"A1").toString().trim().toUpperCase(); }catch(_e){}
-    if(L==="A0") return 4;
-    if(L==="A1") return 4;
-    if(L==="A2") return 8;
-    if(L==="B1") return 16;
-    if(L==="B2") return 24;
-    if(L==="C1") return 32;
-    if(L==="C2") return 40;
-    return 4;
   }
 
   // ---- turns normalize (defensive) ----
@@ -1576,6 +1549,14 @@ async function speak(text){
         const sel = document.getElementById("selTeacher");
         const teacherKey = sel ? String(sel.value||"") : "";
         const voice = (TEACHER_AZURE_VOICE[teacherKey] || "en-US-JennyNeural");
+        const TEACHER_AZURE_TONE = {
+          Diana:  { rate: "0%",  pitch: "0%"  },
+          Emma:   { rate: "-4%", pitch: "+6%" },  // a bit calmer + brighter
+          Sophia: { rate: "+4%", pitch: "-4%" }   // a bit faster + deeper
+        };
+        const tone = TEACHER_AZURE_TONE[teacherKey] || TEACHER_AZURE_TONE.Diana;
+        const rate = tone.rate;
+        const pitch = tone.pitch;
 
         const r = await fetch(AZURE_TTS_ENDPOINT, {
           method: "POST",
@@ -1584,7 +1565,7 @@ async function speak(text){
             "apikey": SUPABASE_ANON_KEY,
             "Authorization": "Bearer " + SUPABASE_ANON_KEY
           },
-          body: JSON.stringify({ text, voice, rate: "0%", pitch: "0%" })
+          body: JSON.stringify({ text, voice, rate, pitch })
         });
 
         if(!r.ok){
@@ -1611,11 +1592,52 @@ async function speak(text){
         return;
       }
 
-      // ===== Fallback: Browser Speech =====
+      // ===== Fallback: Browser Speech (per-teacher voice / tone) =====
       if(!("speechSynthesis" in window)){ __tvStop(); return; }
+
+      // teacherKey: Diana / Emma / Sophia
+      const sel = document.getElementById("selTeacher");
+      const teacherKey = sel ? String(sel.value||"").replace(/\.mp4$/i,"") : "Diana";
+
+      // preferences (best-effort; actual voice depends on OS/Chrome)
+      const TEACHER_WEB_PREF = {
+        Diana:  { lang:"en-US", rate:1.00, pitch:1.00, want:["en-us","female","jenny","aria"] },
+        Emma:   { lang:"en-GB", rate:0.98, pitch:1.05, want:["en-gb","uk","female","amy","serena","hazel"] },
+        Sophia: { lang:"en-AU", rate:1.03, pitch:0.96, want:["en-au","australia","female","olivia","isla"] }
+      };
+      const pref = TEACHER_WEB_PREF[teacherKey] || TEACHER_WEB_PREF.Diana;
+
+      // load voices (Chrome may populate asynchronously)
+      const voices = (window.speechSynthesis.getVoices && window.speechSynthesis.getVoices()) || [];
+      const norm = (v)=>(String(v||"").toLowerCase());
+      const pickVoice = ()=>{
+        if(!voices || !voices.length) return null;
+        // 1) match by language + keywords
+        const wants = pref.want || [];
+        let best=null, bestScore=-1;
+        for(const v of voices){
+          const s = norm(v.name)+" "+norm(v.lang);
+          if(pref.lang && norm(v.lang) !== norm(pref.lang) && !norm(v.lang).startsWith(norm(pref.lang).slice(0,2))) continue;
+          let sc=0;
+          for(const w of wants){ if(s.includes(w)) sc+=2; }
+          if(norm(v.lang)===norm(pref.lang)) sc+=3;
+          if(sc>bestScore){ bestScore=sc; best=v; }
+        }
+        if(best) return best;
+        // 2) fallback: any voice with same primary language
+        const primary = norm(pref.lang).split("-")[0];
+        return voices.find(v=>norm(v.lang).startsWith(primary)) || voices[0] || null;
+      };
+
       const u = new SpeechSynthesisUtterance(text);
-      u.lang = "en-US";
-      u.rate = 1.0;
+      u.lang = pref.lang || "en-US";
+      u.rate = pref.rate ?? 1.0;
+      u.pitch = pref.pitch ?? 1.0;
+      try{
+        const v = pickVoice();
+        if(v) u.voice = v;
+      }catch(e){}
+
       window.speechSynthesis.speak(u);
       u.onend = ()=>{ __tvStop(); };
       u.onerror = ()=>{ __tvStop(); };
@@ -1636,6 +1658,33 @@ async function speak(text){
     }
     return -1;
   }
+
+  // ===== Simple scoring + feedback (restore score comments) =====
+  function __bwTok(s){
+    return String(s||"")
+      .toLowerCase()
+      .replace(/['’]/g,"")
+      .replace(/[^a-z0-9\s]/g," ")
+      .split(/\s+/).filter(Boolean);
+  }
+  function __bwScore(user, expected){
+    const a = __bwTok(user);
+    const b = __bwTok(expected);
+    if(!b.length) return 0;
+    const setA = new Set(a);
+    let hit=0;
+    for(const t of b){ if(setA.has(t)) hit++; }
+    // reward coverage of expected keywords; clamp to [0,100]
+    return Math.max(0, Math.min(100, Math.round((hit / b.length) * 100)));
+  }
+  function __bwComment(score){
+    if(score>=90) return "太棒了！非常接近母語表達 ✅";
+    if(score>=75) return "很好！用字很到位，語序也自然 👍";
+    if(score>=60) return "不錯！再把關鍵字補齊會更像原句 🙂";
+    if(score>=40) return "有方向了！建議再對照關鍵字重說一次 💪";
+    return "先別急～把句子骨架抓住，再慢慢加細節 ✍️";
+  }
+
   function expectedAfter(aiIndex){
     for(let i=aiIndex+1;i<turns.length;i++){
       const t = turns[i];
@@ -1734,16 +1783,12 @@ async function speak(text){
       const list = byWeek.get(wk) || [];
       if(!list.length) continue;
 
-      // If assessment week exists, only show that week (3 dialogs) and keep others hidden.
-      if(levelWeek && wk !== levelWeek) continue;
-
-      const locked = levelWeek ? false : (wk > unlockedWeek);
+      const locked = wk > unlockedWeek;
       const g = document.createElement("div");
       g.className = "group";
-      g.id = "wk-" + wk;
       const head = document.createElement("div");
       head.className = "gHead";
-      head.innerHTML = `<div>Week ${wk}</div><div class="lock">${locked ? "🔒 尚未解鎖" : (levelWeek ? "✅ 本週可練習" : "✅ 可練習")}</div>`;
+      head.innerHTML = `<div>Week ${wk}</div><div class="lock">${locked ? "🔒 尚未解鎖" : "✅ 可練習"}</div>`;
       g.appendChild(head);
 
       for(const it of list){
@@ -1839,13 +1884,8 @@ async function init(){
   setTeacher(urlT || savedT || (selTeacher ? selTeacher.value : "teacher.mp4"));
     getOverrides();
     unlockedWeek = computeUnlockedWeek();
-    const levelCap = getLevelCapWeek();
-    levelWeek = levelCap || 0;
-    // Align with assessment result (e.g., B1 -> W16): jump list/selection to levelCap
-    if(levelCap && levelCap>unlockedWeek) unlockedWeek = levelCap;
-// 依測驗結果：只開放該週的 3 組對話（例如 B1 -> Week16），Week1-15 不解鎖
-    if(levelWeek){ activeWeek = levelWeek; }
-// 用 localStorage 記住上次的週；沒有就用目前已解鎖週
+
+    // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
     activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;
@@ -2043,6 +2083,22 @@ if(!firstId){
       fillInput.value = "";
       showToast("已送出 ✅");
       // advance to NEXT AI line (skip USER expected line)
+      
+      // score vs expected line (the USER turn after current AI)
+      try{
+        const expTurn = expectedAfter(turnIdx);
+        const expEn = expTurn && expTurn.en ? String(expTurn.en) : "";
+        if(expEn){
+          const sc = __bwScore(said, expEn);
+          const msg = `得分 ${sc} / 100｜${__bwComment(sc)}`;
+          showToast(msg);
+          // also show a gentle hint in the panel
+          try{
+            const hintEl = document.getElementById("fillHint");
+            if(hintEl) hintEl.textContent = (sc>=75) ? "很棒，直接進下一句。" : ("參考關鍵句： " + expEn);
+          }catch(_){}
+        }
+      }catch(_e){}
       nextTurn();
       return;
     }
