@@ -432,19 +432,7 @@
       margin-top:4px;
       padding-right:4px;
     }
-  
-/* ---- today talk mini card ---- */
-.bw-todaytalk-left{width:56px;display:flex;align-items:center;justify-content:center}
-.bw-todaytalk-badge{width:44px;height:44px;border-radius:14px;background:#eaf1ff;color:#1d4ed8;
-  display:flex;align-items:center;justify-content:center;font-weight:800;letter-spacing:.5px}
-.bw-todaytalk-mid{flex:1;min-width:0}
-.bw-todaytalk-title{font-weight:800;font-size:16px;color:#0f172a;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bw-todaytalk-sub{margin-top:4px;color:#64748b;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bw-todaytalk-right{display:flex;align-items:center;justify-content:flex-end}
-.bw-card-mini{padding:14px 14px}
-.bw-row{display:flex;gap:12px}
-
-</style>
+  </style>
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -581,6 +569,40 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
       .replace(/'/g,"&#039;");
   }
 
+  // ====== Talk Level Week (from profiles.talk_level_week) ======
+  // - level-survey 會把 profiles.talk_level_week 寫成 1~54（例：16）
+  // - 本頁用它來決定「今日口說」要解鎖到第幾週
+  let TALK_LEVEL_WEEK = null; // 1-based
+
+  async function loadTalkLevelWeek(user){
+    try{
+      if(!user || !user.id) return null;
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('talk_level_week')
+        .eq('id', user.id)
+        .maybeSingle();
+      if(error){
+        console.warn('profiles.talk_level_week error', error);
+        return null;
+      }
+      const w = Number(data?.talk_level_week);
+      if(Number.isFinite(w) && w > 0) return w;
+      return null;
+    }catch(e){
+      console.warn('loadTalkLevelWeek failed', e);
+      return null;
+    }
+  }
+
+  function getTalkWeekIndex(){
+    // weekly-index.json 的 weeks 是 0-based array
+    // talk_level_week 是 1-based week number
+    const w = Number(TALK_LEVEL_WEEK);
+    if(Number.isFinite(w) && w > 0) return w - 1;
+    return 0;
+  }
+
 
 
     function pickTodayTalkFromWeeklyIndex(weekly){
@@ -633,7 +655,7 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
       // ---- 2) fallback：本週 talks 自動輪 3 支（你要的「今天沒排就補一支」）----
       // weekly-index.json 目前格式：weeks[x].talks = [{scene,title,level}, ...] fileciteturn3file0L1-L60
       if(weeks && weeks.length){
-        const weekIndex = getWeekIndex(); // 已存在：依「本週」選擇 weeks[x]
+        const weekIndex = getTalkWeekIndex(); // 依「評測解鎖週」選擇 weeks[x]
         const target = weeks[(weekIndex % weeks.length + weeks.length) % weeks.length];
         const talks = (target && Array.isArray(target.talks)) ? target.talks : null;
         if(talks && talks.length){
@@ -1134,15 +1156,33 @@ async function loadWeeklyIndex(){
       .filter(Boolean);
 
     // 測驗紀錄（只需要分數與日期）
-    const { data: quizLogs, error: qErr } = await supabase
-      .from("quiz_logs")
-      .select("email,score,created_at")
-      .eq("user_id", user.id)
+    // 有些環境 quiz_logs 可能沒有 user_id 欄位（或 RLS 不允許），會直接 400。
+    // 這裡做「先 user_id，失敗就改用 email」的容錯，避免整頁 console 爆紅。
+    let quizLogs = [];
+    {
+      const q1 = await supabase
+        .from("quiz_logs")
+        .select("email,score,created_at")
+        .eq("user_id", user.id)
+        .order("created_at", { ascending: false })
+        .limit(10);
 
-      .order("created_at",{ ascending:false });
-
-    if(qErr){
-      console.error("quiz_logs error", qErr);
+      if(!q1.error){
+        quizLogs = q1.data || [];
+      } else {
+        console.warn("quiz_logs user_id query failed; fallback to email", q1.error);
+        const q2 = await supabase
+          .from("quiz_logs")
+          .select("email,score,created_at")
+          .eq("email", user.email || "")
+          .order("created_at", { ascending: false })
+          .limit(10);
+        if(q2.error){
+          console.error("quiz_logs error", q2.error);
+        } else {
+          quizLogs = q2.data || [];
+        }
+      }
     }
 
     // 先嘗試載入 weekly-index.json，從本週 15 支影片中隨機推薦 3 支
@@ -1316,6 +1356,9 @@ let todayReview = [];
     document.getElementById("userEmail").textContent = user.email || "";
     document.getElementById("userPill").style.display = "flex";
 
+    // 先讀取評測解鎖週，提供「今日口說」與 weekly-index 對齊
+    TALK_LEVEL_WEEK = await loadTalkLevelWeek(user);
+
     loadDashboard(user);
   }
 
@@ -1328,76 +1371,6 @@ let todayReview = [];
     const scene = decodeURIComponent(el.dataset.scene || "");
     if(scene) window.location.href = `/talk.html?scene=${encodeURIComponent(scene)}`;
   });
-
-/* ================== Talk Level Week (v20260116) ==================
-   - 讀 profiles.talk_level_week
-   - 若 profiles 不存在：自動 upsert 建立（避免 err=profile 迴圈）
-   - 依 talk_level_week 產生「今日口說任務」：直接帶到 /talk.html?week=XX
-================================================================== */
-async function BW_ensureProfileRow(user){
-  try{
-    // upsert minimal row (RLS: user can write own row)
-    await supabase
-      .from('profiles')
-      .upsert({ id:user.id, email:user.email }, { onConflict:'id' });
-  }catch(e){
-    console.warn('ensureProfileRow failed', e);
-  }
-}
-async function BW_getTalkLevelWeek(user){
-  try{
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('talk_level_week')
-      .eq('id', user.id)
-      .maybeSingle();
-    if(error) throw error;
-    return (data && data.talk_level_week) ? Number(data.talk_level_week) : null;
-  }catch(e){
-    console.warn('getTalkLevelWeek failed', e);
-    return null;
-  }
-}
-function BW_renderTodayTalk(week){
-  const wrap = document.getElementById('todayTalkWrap');
-  if(!wrap) return;
-  wrap.innerHTML = '';
-  const card = document.createElement('div');
-  card.className = 'bw-row bw-card bw-card-mini';
-  const left = document.createElement('div');
-  left.className = 'bw-todaytalk-left';
-  left.innerHTML = `
-    <div class="bw-todaytalk-badge">talk</div>
-  `;
-  const mid = document.createElement('div');
-  mid.className = 'bw-todaytalk-mid';
-  if(!week){
-    mid.innerHTML = `
-      <div class="bw-todaytalk-title">尚未評測你的程度</div>
-      <div class="bw-todaytalk-sub">先做 3 分鐘測驗，系統會自動對齊你的 Week</div>
-    `;
-  }else{
-    mid.innerHTML = `
-      <div class="bw-todaytalk-title">Business Meeting</div>
-      <div class="bw-todaytalk-sub">B1 · Week ${week}（依你的評測結果）</div>
-    `;
-  }
-  const right = document.createElement('div');
-  right.className = 'bw-todaytalk-right';
-  const btn = document.createElement('a');
-  btn.className = 'bw-btn bw-btn-primary';
-  btn.textContent = week ? '開始' : '去評測';
-  btn.href = week
-    ? `/talk.html?week=${encodeURIComponent(week)}`
-    : `/account/level-survey.html?next=${encodeURIComponent('/account/learning-dashboard.html')}`;
-  right.appendChild(btn);
-
-  card.appendChild(left);
-  card.appendChild(mid);
-  card.appendChild(right);
-  wrap.appendChild(card);
-}
-
 </script>
 </body>
 </html>
