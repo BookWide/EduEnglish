@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>英文程度測驗｜BookWide</title>
 
-<!-- Supabase (official UMD build; provides window.supabase) -->
+<!-- Supabase -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <style>
@@ -261,7 +261,7 @@ a{color:inherit}
       <div class="logo">🧠</div>
       <div style="min-width:0">
         <div class="brandTitle">英文程度測驗</div>
-        <div class="brandSub">BookWide · 第一次登入需完成 · 完成後進入訂閱</div>
+        <div class="brandSub">BookWide · 訂閱戶專用 · 完成後自動解鎖 Talk Week</div>
       </div>
     </div>
     <div class="right">
@@ -381,17 +381,14 @@ a{color:inherit}
 const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
-async function waitSupabase(ms = 5000){
-  const start = Date.now();
-  while(!window.supabase){
-    if(Date.now() - start > ms) return false;
-    await new Promise(r=>setTimeout(r,50));
-  }
-  return true;
+if(!window.supabase){
+  document.body.innerHTML = '<div style="padding:22px;font-family:system-ui;color:#fff;background:#0b1224">Supabase SDK 未載入，請重新整理或檢查網路。<\/div>';
+  throw new Error('Supabase SDK not loaded');
 }
 
-let sb;
-// sb will be created in init() after SDK is ready
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
+});
 
 const $ = (id)=>document.getElementById(id);
 const toastEl = $("toast");
@@ -628,12 +625,14 @@ function finish(){
     localStorage.setItem("BW_LEVEL_WEEK_CAP", String(cap));
   }catch(_e){}
 
+  // mark survey done (one-time)
+  try{ localStorage.setItem('BW_LEVEL_DONE','1'); }catch(_e){}
+
   // write to profiles
   saveToProfile(level, rawScore, cap).catch(()=>{});
 
-  // mark level survey done (one-time) + go to subscription
-  try{ localStorage.setItem("BW_LEVEL_DONE", "1"); }catch(_e){}
-  setTimeout(()=>{ location.replace("/account/subscription.html"); }, 900);
+  // after survey: go to your mature pricing -> checkout -> ecpay flow
+  setTimeout(()=>{ location.replace('/pricing.html'); }, 650);
 }
 
 async function saveToProfile(level, score, cap){
@@ -660,64 +659,20 @@ async function saveToProfile(level, score, cap){
 }
 
 async function guard(){
-  // Ensure SDK loaded
-  if(!sb){
-    $("progressText").textContent = "載入中（初始化）…";
-    $("progressFill").style.width = "2%";
-    const ok = await waitSupabase(6000);
-    if(!ok){
-      $("progressText").textContent = "Supabase SDK 載入失敗，請重新整理";
-      toast("Supabase SDK 載入失敗");
-      return false;
-    }
-    sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
-    });
-  }
-
-  // require login (but DO NOT silently hang)
+  // require login
   const { data: sess } = await sb.auth.getSession();
   session = sess && sess.session;
-
-  // Not logged in: show intro + ask user to login
   if(!session || !session.user){
-    $("progressText").textContent = "請先登入後開始測驗";
-    $("progressFill").style.width = "6%";
-    $("screenIntro").style.display = "";
-    $("screenQuiz").style.display = "none";
-    $("screenResult").style.display = "none";
-    $("footQuiz").style.display = "none";
-
-    $("userEmail").textContent = "—";
-    $("statEmail").textContent = "尚未登入";
-    $("statExisting").textContent = "（尚未測）";
-    $("statCount").textContent = String(QUESTIONS.length);
-
-    // Start button becomes login
-    $("btnStart").textContent = "登入後開始";
-    $("btnStart").onclick = ()=>{
-      const red = encodeURIComponent(location.pathname + location.search + location.hash);
-      location.replace("/account/login.html?redirect=" + red);
-    };
-
-    // Pill click also login
-    $("pillUser").style.cursor = "pointer";
-    $("pillUser").onclick = ()=>{
-      const red = encodeURIComponent(location.pathname + location.search + location.hash);
-      location.replace("/account/login.html?redirect=" + red);
-    };
-
+    const red = encodeURIComponent(location.pathname + location.search + location.hash);
+    location.replace("/account/login.html?redirect=" + red);
     return false;
   }
-
   user = session.user;
   uid = user.id;
   $("userEmail").textContent = user.email || "已登入";
   $("statEmail").textContent = user.email || "已登入";
-  $("btnStart").textContent = "開始測驗";
-  $("btnStart").onclick = ()=>startQuiz(false);
 
-  // Fetch profile (best-effort). DO NOT require subscription here.
+  // profile (optional; do NOT require subscription here)
   const { data: prof } = await sb
     .from("profiles")
     .select("id, cefr_level, cefr_score")
@@ -726,10 +681,10 @@ async function guard(){
 
   profile = prof || null;
 
-  // show existing level
-  if(prof && prof.cefr_level){
-    const cap = weekCapFromCefr(prof.cefr_level);
-    $("statExisting").textContent = `${String(prof.cefr_level).toUpperCase()}（已解鎖到 W${cap}）`;
+  // show existing level (if any)
+  if(profile && profile.cefr_level){
+    const cap = weekCapFromCefr(profile.cefr_level);
+    $("statExisting").textContent = `${String(profile.cefr_level).toUpperCase()}（已解鎖到 W${cap}）`;
     $("btnRetake").style.display = "";
   }else{
     $("statExisting").textContent = "（尚未測）";
@@ -742,7 +697,7 @@ async function guard(){
 // ----- events -----
 $("btnBack").onclick = ()=>history.back();
 $("btnHome").onclick = ()=>location.replace("/");
-$("btnGoTalk").onclick = ()=>location.replace("/account/subscription.html");
+$("btnGoTalk").onclick = ()=>location.replace("/pricing.html");
 $("btnAgain").onclick = ()=>startQuiz(true);
 $("btnRetake").onclick = ()=>startQuiz(true);
 $("btnQuit").onclick = ()=>location.replace("/");
@@ -765,13 +720,7 @@ function startQuiz(force){
 (async function init(){
   try{
     const ok = await guard();
-  if(!ok) return;
-  $('progressText').textContent = '準備開始';
-  $('progressFill').style.width = '12%';
-  $('screenIntro').style.display = '';
-  $('screenQuiz').style.display = 'none';
-  $('screenResult').style.display = 'none';
-  $('footQuiz').style.display = 'none';
+    if(!ok) return;
 
     // intro
     showScreen("intro");
