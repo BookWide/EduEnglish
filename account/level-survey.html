@@ -628,44 +628,28 @@ async function saveToProfile(level, score, cap){
   $("saveHint").textContent = "正在寫入你的帳號資料…";
   try{
     const payload = {
-      id: uid,
-      email: (user && user.email) ? user.email : null,
       cefr_level: level,
       cefr_score: score,
       level_updated_at: new Date().toISOString(),
     };
-
-    // 1) 優先用 upsert：新帳號可能還沒有 profiles row
-    let { error } = await supabase
+    const { error } = await supabase
       .from("profiles")
-      .upsert(payload, { onConflict: "id" });
-
-    // 2) 若 RLS 未開 insert 權限，upsert 可能失敗；退回 update
-    if(error){
-      const r = await supabase
-        .from("profiles")
-        .update({
-          cefr_level: level,
-          cefr_score: score,
-          level_updated_at: payload.level_updated_at,
-        })
-        .eq("id", uid);
-      error = r.error;
-    }
+      .update(payload)
+      .eq("id", uid);
 
     if(error){
-      $("saveHint").textContent = "寫入失敗（權限或網路問題），但本機已記住結果。";
+      $("saveHint").textContent = "寫入失敗（稍後可重試），但本機已記住結果。";
       return;
     }
     $("saveHint").textContent = `已更新：${level}（Talk 將解鎖到 W${cap}）`;
-  }catch(_e){
+  }catch(e){
     $("saveHint").textContent = "寫入失敗（網路或權限問題），但本機已記住結果。";
   }
 }
 
 async function guard(){
   // require login
-  const { data: sess } = await supabase.auth.getSession();
+  const { data: sess } = await sb.auth.getSession();
   session = sess && sess.session;
   if(!session || !session.user){
     const red = encodeURIComponent(location.pathname + location.search + location.hash);
@@ -677,20 +661,31 @@ async function guard(){
   $("userEmail").textContent = user.email || "已登入";
   $("statEmail").textContent = user.email || "已登入";
 
-  // NOTE: 本頁是「英語程度測驗」：不做訂閱守門。
-  // 目的：讓新註冊使用者先完成測驗 → 再引導到訂閱 / 學習控制台。
+  // subscription check (same as talk guard)
   const { data: prof, error } = await supabase
     .from("profiles")
-    .select("id, cefr_level, cefr_score")
+    .select("id, expires_at, is_paused, cefr_level, cefr_score")
     .eq("id", uid)
     .maybeSingle();
 
-  if(!error && prof) profile = prof;
+  if(error || !prof){
+    location.replace("/account/subscription.html?err=profile");
+    return false;
+  }
+  profile = prof;
 
-  // show existing level (if any)
-  if(profile && profile.cefr_level){
-    const cap = weekCapFromCefr(profile.cefr_level);
-    $("statExisting").textContent = `${String(profile.cefr_level).toUpperCase()}（已解鎖到 W${cap}）`;
+  const paused = !!prof.is_paused;
+  const exp = prof.expires_at ? String(prof.expires_at) : "";
+  const ok = (!paused) && exp && (exp >= todayTW());
+  if(!ok){
+    location.replace("/account/subscription.html");
+    return false;
+  }
+
+  // show existing level
+  if(prof.cefr_level){
+    const cap = weekCapFromCefr(prof.cefr_level);
+    $("statExisting").textContent = `${String(prof.cefr_level).toUpperCase()}（已解鎖到 W${cap}）`;
     $("btnRetake").style.display = "";
   }else{
     $("statExisting").textContent = "（尚未測）";
