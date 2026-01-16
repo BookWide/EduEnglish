@@ -5,9 +5,6 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>英文程度測驗｜BookWide</title>
 
-<!-- Supabase -->
-<script src="https://cdn.jsdelivr.net/npm/@sb/sb-js@2"></script>
-
 <style>
 :root{
   --bg0:#04070f;
@@ -261,7 +258,7 @@ a{color:inherit}
       <div class="logo">🧠</div>
       <div style="min-width:0">
         <div class="brandTitle">英文程度測驗</div>
-        <div class="brandSub">BookWide · 訂閱戶專用 · 完成後自動解鎖 Talk Week</div>
+        <div class="brandSub">BookWide · 第一次登入需完成 · 完成後進入訂閱</div>
       </div>
     </div>
     <div class="right">
@@ -618,17 +615,14 @@ function finish(){
   try{
     localStorage.setItem("BW_CEFR_LEVEL", level);
     localStorage.setItem("BW_LEVEL_WEEK_CAP", String(cap));
-    // 英文評測只做一次：完成即記錄
-    localStorage.setItem("BW_LEVEL_DONE", "1");
   }catch(_e){}
 
-  // write to profiles（成功/失敗都不阻擋流程）
-  Promise.resolve()
-    .then(()=>saveToProfile(level, rawScore, cap))
-    .finally(()=>{
-      // 統一流程：完成評測 → 進訂閱頁
-      setTimeout(()=>location.replace("/account/subscription.html"), 900);
-    });
+  // write to profiles
+  saveToProfile(level, rawScore, cap).catch(()=>{});
+
+  // mark level survey done (one-time) + go to subscription
+  try{ localStorage.setItem("BW_LEVEL_DONE", "1"); }catch(_e){}
+  setTimeout(()=>{ location.replace("/account/subscription.html"); }, 900);
 }
 
 async function saveToProfile(level, score, cap){
@@ -648,43 +642,66 @@ async function saveToProfile(level, score, cap){
       $("saveHint").textContent = "寫入失敗（稍後可重試），但本機已記住結果。";
       return;
     }
-    $("saveHint").textContent = `已更新：${level}（即將前往訂閱頁）`;
+    $("saveHint").textContent = `已更新：${level}（Talk 將解鎖到 W${cap}）`;
   }catch(e){
     $("saveHint").textContent = "寫入失敗（網路或權限問題），但本機已記住結果。";
   }
 }
 
 async function guard(){
-  // require login
+  // require login (but DO NOT silently hang)
   const { data: sess } = await sb.auth.getSession();
   session = sess && sess.session;
+
+  // Not logged in: show intro + ask user to login
   if(!session || !session.user){
-    const red = encodeURIComponent(location.pathname + location.search + location.hash);
-    location.replace("/account/login.html?redirect=" + red);
+    $("progressText").textContent = "請先登入後開始測驗";
+    $("progressFill").style.width = "6%";
+    $("screenIntro").style.display = "";
+    $("screenQuiz").style.display = "none";
+    $("screenResult").style.display = "none";
+    $("footQuiz").style.display = "none";
+
+    $("userEmail").textContent = "—";
+    $("statEmail").textContent = "尚未登入";
+    $("statExisting").textContent = "（尚未測）";
+    $("statCount").textContent = String(QUESTIONS.length);
+
+    // Start button becomes login
+    $("btnStart").textContent = "登入後開始";
+    $("btnStart").onclick = ()=>{
+      const red = encodeURIComponent(location.pathname + location.search + location.hash);
+      location.replace("/account/login.html?redirect=" + red);
+    };
+
+    // Pill click also login
+    $("pillUser").style.cursor = "pointer";
+    $("pillUser").onclick = ()=>{
+      const red = encodeURIComponent(location.pathname + location.search + location.hash);
+      location.replace("/account/login.html?redirect=" + red);
+    };
+
     return false;
   }
+
   user = session.user;
   uid = user.id;
   $("userEmail").textContent = user.email || "已登入";
   $("statEmail").textContent = user.email || "已登入";
+  $("btnStart").textContent = "開始測驗";
+  $("btnStart").onclick = ()=>startQuiz(false);
 
-  // NOTE: 此頁用於『第一次登入必做英文評測』，因此不檢查訂閱。
-  // 仍嘗試讀取 profiles 以顯示既有等級（若沒有也不阻擋）。
-  let prof = null;
-  try{
-    const r = await sb
-      .from("profiles")
-      .select("id, cefr_level, cefr_score")
-      .eq("id", uid)
-      .maybeSingle();
-    prof = r?.data || null;
-  }catch(_e){
-    prof = null;
-  }
+  // Fetch profile (best-effort). DO NOT require subscription here.
+  const { data: prof } = await sb
+    .from("profiles")
+    .select("id, cefr_level, cefr_score")
+    .eq("id", uid)
+    .maybeSingle();
 
+  profile = prof || null;
 
   // show existing level
-  if(prof.cefr_level){
+  if(prof && prof.cefr_level){
     const cap = weekCapFromCefr(prof.cefr_level);
     $("statExisting").textContent = `${String(prof.cefr_level).toUpperCase()}（已解鎖到 W${cap}）`;
     $("btnRetake").style.display = "";
@@ -722,7 +739,13 @@ function startQuiz(force){
 (async function init(){
   try{
     const ok = await guard();
-    if(!ok) return;
+  if(!ok) return;
+  $('progressText').textContent = '準備開始';
+  $('progressFill').style.width = '12%';
+  $('screenIntro').style.display = '';
+  $('screenQuiz').style.display = 'none';
+  $('screenResult').style.display = 'none';
+  $('footQuiz').style.display = 'none';
 
     // intro
     showScreen("intro");
