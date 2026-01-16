@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>英文程度測驗｜BookWide</title>
 
-<!-- Supabase (ESM import; avoids duplicate global 'supabase') -->
+<!-- Supabase -->
+<script src="https://cdn.jsdelivr.net/npm/@sb/sb-js@2"></script>
 
 <style>
 :root{
@@ -351,7 +352,7 @@ a{color:inherit}
         <div class="small" id="saveHint">正在寫入你的帳號資料…</div>
         <div style="display:flex; gap:10px; flex-wrap:wrap">
           <button class="btn" id="btnHome">回首頁</button>
-          <button class="btn btnPrimary" id="btnGoTalk">前往 Talk</button>
+          <button class="btn btnPrimary" id="btnGoTalk">前往訂閱</button>
           <button class="btn" id="btnAgain">再測一次</button>
         </div>
       </div>
@@ -369,9 +370,7 @@ a{color:inherit}
   <div class="toast" id="toast"></div>
 </div>
 
-<script type="module">
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-
+<script>
 /* ============================
    BookWide Level Survey (MVP)
    - Requires login + active subscription
@@ -382,7 +381,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
-const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
 });
 
@@ -619,10 +618,17 @@ function finish(){
   try{
     localStorage.setItem("BW_CEFR_LEVEL", level);
     localStorage.setItem("BW_LEVEL_WEEK_CAP", String(cap));
+    // 英文評測只做一次：完成即記錄
+    localStorage.setItem("BW_LEVEL_DONE", "1");
   }catch(_e){}
 
-  // write to profiles
-  saveToProfile(level, rawScore, cap).catch(()=>{});
+  // write to profiles（成功/失敗都不阻擋流程）
+  Promise.resolve()
+    .then(()=>saveToProfile(level, rawScore, cap))
+    .finally(()=>{
+      // 統一流程：完成評測 → 進訂閱頁
+      setTimeout(()=>location.replace("/account/subscription.html"), 900);
+    });
 }
 
 async function saveToProfile(level, score, cap){
@@ -642,7 +648,7 @@ async function saveToProfile(level, score, cap){
       $("saveHint").textContent = "寫入失敗（稍後可重試），但本機已記住結果。";
       return;
     }
-    $("saveHint").textContent = `已更新：${level}（Talk 將解鎖到 W${cap}）`;
+    $("saveHint").textContent = `已更新：${level}（即將前往訂閱頁）`;
   }catch(e){
     $("saveHint").textContent = "寫入失敗（網路或權限問題），但本機已記住結果。";
   }
@@ -662,26 +668,20 @@ async function guard(){
   $("userEmail").textContent = user.email || "已登入";
   $("statEmail").textContent = user.email || "已登入";
 
-  // subscription check (same as talk guard)
-  const { data: prof, error } = await sb
-    .from("profiles")
-    .select("id, expires_at, is_paused, cefr_level, cefr_score")
-    .eq("id", uid)
-    .maybeSingle();
-
-  if(error || !prof){
-    location.replace("/account/subscription.html?err=profile");
-    return false;
+  // NOTE: 此頁用於『第一次登入必做英文評測』，因此不檢查訂閱。
+  // 仍嘗試讀取 profiles 以顯示既有等級（若沒有也不阻擋）。
+  let prof = null;
+  try{
+    const r = await sb
+      .from("profiles")
+      .select("id, cefr_level, cefr_score")
+      .eq("id", uid)
+      .maybeSingle();
+    prof = r?.data || null;
+  }catch(_e){
+    prof = null;
   }
-  profile = prof;
 
-  const paused = !!prof.is_paused;
-  const exp = prof.expires_at ? String(prof.expires_at) : "";
-  const ok = (!paused) && exp && (exp >= todayTW());
-  if(!ok){
-    location.replace("/account/subscription.html");
-    return false;
-  }
 
   // show existing level
   if(prof.cefr_level){
@@ -699,7 +699,7 @@ async function guard(){
 // ----- events -----
 $("btnBack").onclick = ()=>history.back();
 $("btnHome").onclick = ()=>location.replace("/");
-$("btnGoTalk").onclick = ()=>location.replace("/talk.html");
+$("btnGoTalk").onclick = ()=>location.replace("/account/subscription.html");
 $("btnAgain").onclick = ()=>startQuiz(true);
 $("btnRetake").onclick = ()=>startQuiz(true);
 $("btnQuit").onclick = ()=>location.replace("/");
