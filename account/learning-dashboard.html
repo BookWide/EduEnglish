@@ -562,7 +562,7 @@ function levelFromWeek(week){
   return 'C2';
 }
 async function getTalkLevelWeek(user){
-  // 1) Local best (highest) from level-survey
+  // 1) Local best (highest) from level-survey (preferred)
   try{
     const bestRaw = localStorage.getItem('BW_CEFR_BEST');
     if (bestRaw){
@@ -572,18 +572,30 @@ async function getTalkLevelWeek(user){
     }
   }catch(_e){}
 
-  // 2) Legacy local key
+  // 2) Local week-cap keys (current production)
+  const cap = Number(localStorage.getItem('BW_LEVEL_WEEK_CAP') || 0);
+  if (cap) return cap;
+
+  // 3) Legacy local key
   const lsWeek = Number(localStorage.getItem('BW_TALK_LEVEL_WEEK') || 0);
   if (lsWeek) return lsWeek;
 
-  // 3) Cloud fallback
+  // 4) Cloud fallback (either talk_level_week or cefr_level)
   try{
     const { data, error } = await supabase
       .from('profiles')
-      .select('talk_level_week')
+      .select('talk_level_week, cefr_level')
       .eq('id', user.id)
       .maybeSingle();
-    if (!error && data && data.talk_level_week) return Number(data.talk_level_week);
+    if (!error && data){
+      if (data.talk_level_week) return Number(data.talk_level_week);
+      if (data.cefr_level){
+        const lvl = String(data.cefr_level).trim().toUpperCase();
+        const map = {A0:1,A1:4,A2:8,B1:16,B2:27,C1:40,C2:54};
+        const w = Number(map[lvl]||0);
+        if (w) return w;
+      }
+    }
   }catch(_e){}
 
   return 0;
@@ -680,6 +692,36 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
     }catch(e){}
     return null;
   }
+
+  function pickTalkByWeekNumber(weekly, weekNumber){
+    try{
+      const weeks = (weekly && Array.isArray(weekly.weeks)) ? weekly.weeks : [];
+      if(!weeks.length) return null;
+      let wnum = Number(weekNumber||0);
+      if(!wnum) return null;
+      // normalize to 1..N
+      const idx = ((wnum - 1) % weeks.length + weeks.length) % weeks.length;
+      const target = weeks[idx];
+      const talks = (target && Array.isArray(target.talks)) ? target.talks : [];
+      if(!talks.length) return null;
+      const today = new Date();
+      const dow = today.getDay();
+      const pick = talks[dow % talks.length];
+      if(!pick) return null;
+      return {
+        scene: pick.scene || pick.slug || pick.id || "",
+        title: pick.title || pick.name || "AI Speaking",
+        level: pick.level || pick.cefr || "",
+        trial: false,
+        cover: pick.cover || pick.poster || pick.image || "",
+        week: wnum
+      };
+    }catch(e){
+      return null;
+    }
+  }
+
+
 
   function renderTodayTalk(task){
     const list = document.getElementById("talkList");
@@ -1177,26 +1219,22 @@ async function loadWeeklyIndex(){
 
     // 先嘗試載入 weekly-index.json，從本週 15 支影片中隨機推薦 3 支
     await loadWeeklyIndex();
-
-    
     // 今日口說任務（由 weekly-index.json 自動決定）
-    // 今日口說：優先用『評測結果 talk_level_week』(W16=B1)，避免被週表(weekly-index)綁死
-    const talkWeek = await getTalkLevelWeek(user);
-    if (talkWeek){
-      const lvl = levelFromWeek(talkWeek);
-      const task = {
-        kind:'talk',
-        week: talkWeek,
-        title: `Week ${talkWeek}`,
-        subtitle: `AI Speak · ${lvl}`,
-        scene: null,
-        level: lvl
-      };
-      renderTodayTalk(task);
-    }else{
-      const todayTalk = pickTodayTalkFromWeeklyIndex(WEEKLY_INDEX);
-      renderTodayTalk(todayTalk);
+    // 規則：優先用『評測解鎖上限 talkWeekCap』，但仍要給今天一支可點的 talk（要有 scene）
+    const talkWeekCap = await getTalkLevelWeek(user);
+    let todayTalk = null;
+    if (talkWeekCap && WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) && WEEKLY_INDEX.weeks.length){
+      const weeksLen = WEEKLY_INDEX.weeks.length;
+      const currentWeekNumber = (getWeekIndex() % weeksLen + weeksLen) % weeksLen + 1; // 1..N
+      const useWeek = Math.min(currentWeekNumber, Number(talkWeekCap));
+      todayTalk = pickTalkByWeekNumber(WEEKLY_INDEX, useWeek);
+      // 若該週沒 talks，就退回一般挑選
+      if (!todayTalk || !todayTalk.scene) todayTalk = null;
     }
+    if (!todayTalk){
+      todayTalk = pickTodayTalkFromWeeklyIndex(WEEKLY_INDEX);
+    }
+    renderTodayTalk(todayTalk);
 let todayReview = [];
     if(WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) && WEEKLY_INDEX.weeks.length){
       const weekIndex = getWeekIndex();
