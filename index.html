@@ -1489,46 +1489,67 @@ if(data.current_device_id !== my){
           if (!error && profile && profile.is_admin === true) {
             CURRENT_USER_IS_ADMIN = true;
           }
-
-          // === [BW] Gate：已訂閱一律放行；未訂閱才要求英文評測（只做一次） ===
-          // 規則：
-          // 1) 已登入 + 已訂閱 => 不要求評測，直接放行（並補寫 BW_LEVEL_DONE=1 避免舊用戶被擋）
-          // 2) 已登入 + 未訂閱 + 未完成評測 => 先去英文評測
-          // 3) 已登入 + 未訂閱 + 已完成評測 => 留在首頁，但點內容仍會被訂閱守門擋（由既有守門負責）
+          // === [BW] 最終入口版：新戶必測 Level Survey；曾付費/現訂閱放行 ===
           try {
-            let hasSub = false;
-            try {
-              const { data: orders, error: oerr } = await supa
-                .from('orders')
-                .select('status, paid_at, expire_at, buyer_id, user_id')
-                .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-                .order('paid_at', { ascending: false, nullsFirst: false })
-                .limit(20);
-              if (!oerr && Array.isArray(orders) && orders.length) {
-                const isActiveByExpire = (o) => {
-                  if (!o) return false;
-                  if (!o.expire_at) return true;
-                  const exp = new Date(o.expire_at);
-                  return !isNaN(exp.getTime()) && exp > new Date();
-                };
-                const paid = orders.filter(o => String(o.status||'').toLowerCase()==='paid');
-                hasSub = paid.some(isActiveByExpire);
-              }
-            } catch (e2) {
-              console.warn('[BW] subscription check failed:', e2);
+            const LEVEL_DONE_KEY = 'BW_LEVEL_DONE';
+            const hasLocalLevel = (() => {
+              try {
+                if (localStorage.getItem(LEVEL_DONE_KEY) === '1') return true;
+                const bestRaw = localStorage.getItem('BW_CEFR_BEST');
+                if (bestRaw) {
+                  const best = JSON.parse(bestRaw);
+                  if (best && (best.level || best.week || best.week_cap)) return true;
+                }
+              } catch(_) {}
+              return false;
+            })();
+
+            const hasProfileLevel = !!(profile && (profile.cefr_level || (profile.cefr_score !== null && profile.cefr_score !== undefined)));
+
+            function isActiveByExpire(row){
+              const exp = row && row.expire_at ? (new Date(row.expire_at)).getTime() : 0;
+              return Number.isFinite(exp) && exp > Date.now();
             }
 
-            if (hasSub) {
-              // ✅ 已訂閱：永遠放行，不再要求英文評測
-              try { localStorage.setItem('BW_LEVEL_DONE', '1'); } catch(_){ }
-            } else {
-              // ⛔ 未訂閱：才要求英文評測（只做一次）
-              const done = (localStorage.getItem('BW_LEVEL_DONE') === '1');
-              if (!done) {
-                if (!String(location.pathname).includes('/account/level-survey.html')) {
-                  location.href = '/account/level-survey.html';
-                  return;
-                }
+            // 1) 查訂閱/曾付費（orders）
+            let hasEverPaid = false;
+            let hasActivePaid = false;
+            try {
+              const { data: orders } = await supa
+                .from('orders')
+                .select('status,expire_at,paid_at,buyer_id,user_id')
+                .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+                .order('paid_at', { ascending: false, nullsFirst: false })
+                .limit(10);
+
+              const list = Array.isArray(orders) ? orders : [];
+              const paidList = list.filter(o => String(o?.status||'').toLowerCase() === 'paid');
+              hasEverPaid = paidList.length > 0;
+              hasActivePaid = paidList.some(isActiveByExpire);
+            } catch(_e) {}
+
+            // 2) 曾付費/現訂閱：放行（不再強制測）
+            if (hasEverPaid || hasActivePaid) {
+              localStorage.setItem(LEVEL_DONE_KEY, '1');
+            }
+
+            // 3) 新註冊/未曾付費：必做一次 Level Survey
+            const hasAnyLevel = hasLocalLevel || hasProfileLevel;
+            if (!hasEverPaid && !hasAnyLevel) {
+              if (!location.pathname.includes('/account/level-survey.html')) {
+                location.href = '/account/level-survey.html?next=%2Fpricing.html';
+                return;
+              }
+            }
+
+            // 4) 老用戶但沒測過：僅提示（不強制）
+            const dismissUntil = Number(localStorage.getItem('bw_level_prompt_until') || '0');
+            if ((hasEverPaid || hasActivePaid) && !hasAnyLevel && Date.now() > dismissUntil) {
+              const ok = confirm('BookWide：建議先做 3 分鐘英文評測，系統會自動幫你安排口說週進度。\n\n現在要開始嗎？');
+              if (ok) {
+                location.href = '/account/level-survey.html?next=%2Faccount%2Flearning-dashboard.html';
+              } else {
+                localStorage.setItem('bw_level_prompt_until', String(Date.now() + 7*24*60*60*1000));
               }
             }
           } catch(_) {}
