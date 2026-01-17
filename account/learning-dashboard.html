@@ -561,41 +561,55 @@ function levelFromWeek(week){
   if (w <= 40) return 'C1';
   return 'C2';
 }
-async function getTalkLevelWeek(user){
-  // 1) Local best (highest) from level-survey (preferred)
+
+
+const CEFR_ORDER = ['A1','A2','B1','B2','C1','C2'];
+function rankLevel(lv){
+  const s = String(lv||'').toUpperCase().trim();
+  const i = CEFR_ORDER.indexOf(s);
+  return i<0 ? 0 : i;
+}
+function getUserCefrLevel(){
+  // 1) BW_CEFR_BEST.level
   try{
     const bestRaw = localStorage.getItem('BW_CEFR_BEST');
-    if (bestRaw){
+    if(bestRaw){
       const best = JSON.parse(bestRaw);
-      const w = Number(best && (best.week_cap ?? best.week ?? best.talk_week) || 0);
-      if (w) return w;
+      if(best && best.level) return String(best.level).toUpperCase();
     }
   }catch(_e){}
 
-  // 2) Local week-cap keys (current production)
+  // 2) 相容舊 key
+  const lv = localStorage.getItem('BW_CEFR_LEVEL') || localStorage.getItem('BW_TALK_LEVEL') || '';
+  if(lv) return String(lv).toUpperCase();
+
+  return '';
+}
+async function getTalkLevelWeek(user){
+  // 1) 本機最高等級（優先）：BW_CEFR_BEST.week_cap / week
+  try{
+    const bestRaw = localStorage.getItem('BW_CEFR_BEST');
+    if(bestRaw){
+      const best = JSON.parse(bestRaw);
+      const wc = Number(best.week_cap || best.week || 0);
+      if(wc) return wc;
+    }
+  }catch(_e){}
+
+  // 2) 相容舊 key
   const cap = Number(localStorage.getItem('BW_LEVEL_WEEK_CAP') || 0);
-  if (cap) return cap;
+  if(cap) return cap;
+  const ls = Number(localStorage.getItem('BW_TALK_LEVEL_WEEK') || 0);
+  if(ls) return ls;
 
-  // 3) Legacy local key
-  const lsWeek = Number(localStorage.getItem('BW_TALK_LEVEL_WEEK') || 0);
-  if (lsWeek) return lsWeek;
-
-  // 4) Cloud fallback (either talk_level_week or cefr_level)
+  // 3) 最後才問 Supabase
   try{
     const { data, error } = await supabase
       .from('profiles')
-      .select('talk_level_week, cefr_level')
+      .select('talk_level_week')
       .eq('id', user.id)
       .maybeSingle();
-    if (!error && data){
-      if (data.talk_level_week) return Number(data.talk_level_week);
-      if (data.cefr_level){
-        const lvl = String(data.cefr_level).trim().toUpperCase();
-        const map = {A0:1,A1:4,A2:8,B1:16,B2:27,C1:40,C2:54};
-        const w = Number(map[lvl]||0);
-        if (w) return w;
-      }
-    }
+    if (!error && data && data.talk_level_week) return Number(data.talk_level_week);
   }catch(_e){}
 
   return 0;
@@ -622,7 +636,7 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
 
 
 
-    function pickTodayTalkFromWeeklyIndex(weekly){
+    function pickTodayTalkFromWeeklyIndex(weekly, userLevel){
     try{
       const today = new Date();
       const todayKey = today.toISOString().slice(0,10); // YYYY-MM-DD
@@ -677,7 +691,10 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
         const talks = (target && Array.isArray(target.talks)) ? target.talks : null;
         if(talks && talks.length){
           const dow = today.getDay(); // 0(日)~6(六)
-          const pick = talks[dow % talks.length]; // 3 支就會 0,1,2,0,1,2,0
+          const ur = rankLevel(userLevel || '');
+          const allowed = talks.filter(t => rankLevel(t.level || t.cefr || '') <= ur);
+          const pool = allowed.length ? allowed : talks; // 沒有符合就退回全量
+          const pick = pool[dow % pool.length];
           if(pick){
             return {
               scene: pick.scene || pick.slug || pick.id || "",
@@ -692,36 +709,6 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
     }catch(e){}
     return null;
   }
-
-  function pickTalkByWeekNumber(weekly, weekNumber){
-    try{
-      const weeks = (weekly && Array.isArray(weekly.weeks)) ? weekly.weeks : [];
-      if(!weeks.length) return null;
-      let wnum = Number(weekNumber||0);
-      if(!wnum) return null;
-      // normalize to 1..N
-      const idx = ((wnum - 1) % weeks.length + weeks.length) % weeks.length;
-      const target = weeks[idx];
-      const talks = (target && Array.isArray(target.talks)) ? target.talks : [];
-      if(!talks.length) return null;
-      const today = new Date();
-      const dow = today.getDay();
-      const pick = talks[dow % talks.length];
-      if(!pick) return null;
-      return {
-        scene: pick.scene || pick.slug || pick.id || "",
-        title: pick.title || pick.name || "AI Speaking",
-        level: pick.level || pick.cefr || "",
-        trial: false,
-        cover: pick.cover || pick.poster || pick.image || "",
-        week: wnum
-      };
-    }catch(e){
-      return null;
-    }
-  }
-
-
 
   function renderTodayTalk(task){
     const list = document.getElementById("talkList");
@@ -1219,21 +1206,54 @@ async function loadWeeklyIndex(){
 
     // 先嘗試載入 weekly-index.json，從本週 15 支影片中隨機推薦 3 支
     await loadWeeklyIndex();
+
+    
     // 今日口說任務（由 weekly-index.json 自動決定）
-    // 規則：優先用『評測解鎖上限 talkWeekCap』，但仍要給今天一支可點的 talk（要有 scene）
-    const talkWeekCap = await getTalkLevelWeek(user);
+    // 規則：使用者等級 >= 任務等級 才能做；並用「已解鎖週上限」決定可用內容。
+    const talkWeekCap = await getTalkLevelWeek(user); // 來自評測（本機最高）或 profiles
+    const userLevel = getUserCefrLevel() || (talkWeekCap ? levelFromWeek(talkWeekCap) : 'A1');
+
+    // 週別：以「訂閱週」為主，但不可超過解鎖上限
+    let weekIndex = getWeekIndex();
+    if(talkWeekCap){
+      const capIndex = Math.max(0, Number(talkWeekCap) - 1);
+      if(weekIndex > capIndex) weekIndex = capIndex;
+    }
+    const weekNo = weekIndex + 1;
+
     let todayTalk = null;
-    if (talkWeekCap && WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) && WEEKLY_INDEX.weeks.length){
-      const weeksLen = WEEKLY_INDEX.weeks.length;
-      const currentWeekNumber = (getWeekIndex() % weeksLen + weeksLen) % weeksLen + 1; // 1..N
-      const useWeek = Math.min(currentWeekNumber, Number(talkWeekCap));
-      todayTalk = pickTalkByWeekNumber(WEEKLY_INDEX, useWeek);
-      // 若該週沒 talks，就退回一般挑選
-      if (!todayTalk || !todayTalk.scene) todayTalk = null;
+    if(WEEKLY_INDEX){
+      // 優先：從當週 talks 取一支（依星期輪播）
+      const weeksArr = Array.isArray(WEEKLY_INDEX.weeks) ? WEEKLY_INDEX.weeks : [];
+      if(weeksArr.length){
+        const target = weeksArr[(weekIndex % weeksArr.length + weeksArr.length) % weeksArr.length];
+        const talks = (target && Array.isArray(target.talks)) ? target.talks : null;
+        if(talks && talks.length){
+          const dow = (new Date()).getDay();
+          const ur = rankLevel(userLevel);
+          const allowed = talks.filter(t => rankLevel(t.level || t.cefr || '') <= ur);
+          const pool = allowed.length ? allowed : talks;
+          const pick = pool[dow % pool.length];
+          if(pick && (pick.scene || pick.slug || pick.id)){
+            todayTalk = {
+              kind:'talk',
+              week: weekNo,
+              scene: pick.scene || pick.slug || pick.id,
+              title: pick.title || pick.name || 'AI Speak',
+              level: pick.level || pick.cefr || userLevel,
+              trial:false,
+              cover: pick.cover || pick.poster || pick.image || ''
+            };
+          }
+        }
+      }
     }
-    if (!todayTalk){
-      todayTalk = pickTodayTalkFromWeeklyIndex(WEEKLY_INDEX);
+
+    if(!todayTalk){
+      todayTalk = pickTodayTalkFromWeeklyIndex(WEEKLY_INDEX, userLevel);
+      if(todayTalk) todayTalk.week = todayTalk.week || weekNo;
     }
+
     renderTodayTalk(todayTalk);
 let todayReview = [];
     if(WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) && WEEKLY_INDEX.weeks.length){
@@ -1399,6 +1419,39 @@ let todayReview = [];
     document.getElementById("userEmail").textContent = user.email || "";
     document.getElementById("userPill").style.display = "flex";
 
+    // ===== subscription gate (same idea as player guard) =====
+    // We only need this to guard Talk entry. Non-subscribed users should go to pricing.
+    function todayTW(){
+      // YYYY-MM-DD in Asia/Taipei
+      const now = new Date();
+      const tw = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+      const y = tw.getFullYear();
+      const m = String(tw.getMonth()+1).padStart(2,'0');
+      const d = String(tw.getDate()).padStart(2,'0');
+      return `${y}-${m}-${d}`;
+    }
+
+    let subOk = false;
+    try{
+      const { data: prof, error: pErr } = await supabase
+        .from('profiles')
+        .select('expires_at,is_paused')
+        .eq('id', user.id)
+        .maybeSingle();
+
+      const exp = prof && prof.expires_at ? String(prof.expires_at).slice(0,10) : '';
+      subOk = !pErr && !!prof && !prof.is_paused && !!exp && exp >= todayTW();
+    }catch(_e){
+      subOk = false;
+    }
+    window.BW_SUB_OK = subOk;
+
+    // Optional UI hint for non-subscribed users
+    if(!subOk){
+      const empty = document.getElementById('talkEmpty');
+      if(empty) empty.textContent = '口說任務需訂閱，請前往訂閱方案。';
+    }
+
     loadDashboard(user);
   }
 
@@ -1408,6 +1461,12 @@ let todayReview = [];
   document.addEventListener("click", (e)=>{
     const el = e.target.closest("[data-jump='talk']");
     if(!el) return;
+
+    // subscription guard: non-subscribed users go to pricing (same as player guard)
+    if(!window.BW_SUB_OK){
+      window.location.href = "/pricing.html";
+      return;
+    }
 
     const weekRaw = (el.dataset.week || "").trim();
     const week = Number(weekRaw||0) || 0;
