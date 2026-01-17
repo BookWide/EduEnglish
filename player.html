@@ -1521,96 +1521,52 @@ user = await waitUser(1500, 250);
       if (badge) badge.textContent = email;
     }
   }
-// 3️⃣ 已登入且非 preview：訂閱守門（以 profiles.expires_at 為主；若缺/未更新，fallback 到 orders.paid+expire_at，避免誤踢到 pricing）
+// 3️⃣ 已登入且非 preview：用 profiles.expires_at 作為唯一訂閱權威（最穩，避免 orders/items 差異造成誤踢）
 if (!isPreview && user) {
-  const next = location.pathname + location.search;
-
-  function startOfToday(){
-    const d = new Date();
-    d.setHours(0,0,0,0);
-    return d;
-  }
-  function isActiveByExpire(expireAt){
-    if (!expireAt) return false;
-    const exp = new Date(expireAt);
-    if (isNaN(exp.getTime())) return false;
-    return exp.getTime() >= startOfToday().getTime();
-  }
-  function hasLocalLevel(){
-    if (localStorage.getItem('BW_LEVEL_DONE') === '1') return true;
-    try{
-      const best = localStorage.getItem('BW_CEFR_BEST');
-      if (best) {
-        const b = JSON.parse(best);
-        if (b && b.level) return true;
-      }
-    }catch(_e){}
-    return false;
-  }
-  function gotoPricing(denied){
-    const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-    url.searchParams.set('denied', denied || 'noactive');
-    url.searchParams.set('next', next);
-    location.href = url.toString();
-  }
-  function gotoSurveyThenPricing(denied){
-    // 先去測驗，測完再回 pricing（並保留 next=原本想看的 player）
-    const pricing = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-    pricing.searchParams.set('denied', denied || 'noactive');
-    pricing.searchParams.set('next', next);
-
-    const survey = new URL((ROOT_BASE || '') + '/account/level-survey.html', location.origin);
-    survey.searchParams.set('next', encodeURIComponent(pricing.pathname + pricing.search));
-    location.href = survey.toString();
-  }
-
   try{
-    // 3a) profiles.expires_at（最快）
     const { data: p, error: perr } = await playerSupa
       .from('profiles')
       .select('expires_at')
       .eq('id', user.id)
       .maybeSingle();
-    if (perr) console.warn('[BW-player] profiles expires_at read error =', perr);
+
+    if (perr) {
+      console.warn('[BW-player] profiles expires_at read error =', perr);
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
     const exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
-    if (exp && !isNaN(exp.getTime()) && exp.getTime() >= startOfToday().getTime()) {
-      console.log('[BW-player] allow by profiles.expires_at =', exp.toISOString());
-      localStorage.setItem('BW_LEVEL_DONE','1'); // 訂閱戶永遠放行，不逼測
-    } else {
-      // 3b) fallback：orders（跟 subscription.html 同口徑）
-      const { data: list, error: oerr } = await playerSupa
-        .from('orders')
-        .select('status,paid_at,expire_at')
-        .eq('user_id', user.id)
-        .order('paid_at', { ascending: false, nullsFirst: false })
-        .limit(8);
-      if (oerr) console.warn('[BW-player] orders read error =', oerr);
 
-      const arr = Array.isArray(list) ? list : [];
-      const paidList = arr.filter(o => String(o?.status||'').toLowerCase() === 'paid');
-      const activePaid = paidList.find(o => isActiveByExpire(o?.expire_at));
-      const hasEverPaid = paidList.length > 0;
-
-      if (activePaid) {
-        console.log('[BW-player] allow by orders activePaid');
-        localStorage.setItem('BW_LEVEL_DONE','1');
-      } else {
-        // 未訂閱（或已過期）
-        // 新戶（從未付費）且尚未做 level survey → 先測驗再導去 pricing
-        if (!hasEverPaid && !hasLocalLevel()) {
-          gotoSurveyThenPricing(exp && !isNaN(exp.getTime()) ? 'expired' : 'noactive');
-          return;
-        }
-        // 已測過或曾付費（但已過期）→ 直接 pricing
-        gotoPricing(exp && !isNaN(exp.getTime()) ? 'expired' : 'noactive');
-        return;
-      }
+    // 沒資料 / 讀不到 → 視為未啟用
+    if (!exp || isNaN(exp.getTime())) {
+      const next = location.pathname + location.search;
+      const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+      url.searchParams.set('denied', 'noactive');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
     }
+
+    // 已過期
+    if (exp.getTime() < today.getTime()) {
+      const next = location.pathname + location.search;
+      const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+      url.searchParams.set('denied', 'expired');
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
+    }
+
+    console.log('[BW-player] allow by profiles.expires_at =', exp.toISOString());
   }catch(e){
     console.error('[BW-player] subscription check exception', e);
-    // 例外時：至少不要誤導到 player 內卡死，導到 pricing
-    gotoPricing('noactive');
+    const next = location.pathname + location.search;
+    const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
+    url.searchParams.set('denied', 'noactive');
+    url.searchParams.set('next', next);
+    location.href = url.toString();
     return;
   }
 }
