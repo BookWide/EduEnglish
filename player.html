@@ -1521,26 +1521,72 @@ user = await waitUser(1500, 250);
       if (badge) badge.textContent = email;
     }
   }
-// 3️⃣ 已登入且非 preview：用 profiles.expires_at 作為唯一訂閱權威（最穩，避免 orders/items 差異造成誤踢）
+// 3️⃣ 已登入且非 preview：
+//    先以 profiles.expires_at 作為權威；若缺值但 orders 有有效訂單 → 放行並回填 profiles.expires_at（修正『已訂閱仍被彈去 pricing』）
+//    同時：訂閱通過後若尚未完成 Level Survey → 只導一次到 /account/level-survey.html
 if (!isPreview && user) {
   try{
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // 3-1) 讀 profiles
     const { data: p, error: perr } = await playerSupa
       .from('profiles')
-      // 同一次查：訂閱到期 + Level（避免多次 round-trip）
       .select('expires_at,cefr_level,cefr_score')
       .eq('id', user.id)
       .maybeSingle();
 
     if (perr) {
-      console.warn('[BW-player] profiles expires_at read error =', perr);
+      console.warn('[BW-player] profiles read error =', perr);
     }
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
 
-    const exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
+    // 3-2) 若 profiles 缺 expires_at：用 orders 補救（避免「明明 paid 但 profiles 沒寫到」）
+    async function findActiveOrderExpire(){
+      try{
+        const { data: orders, error: oerr } = await playerSupa
+          .from('orders')
+          .select('status,expire_at,paid_at')
+          .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+          .order('paid_at', { ascending: false, nullsFirst: false })
+          .limit(10);
 
-    // 沒資料 / 讀不到 → 視為未啟用
+        if (oerr) {
+          console.warn('[BW-player] orders read error =', oerr);
+          return null;
+        }
+        const list = Array.isArray(orders) ? orders : [];
+        for (const o of list){
+          if (String(o.status||'').toLowerCase() !== 'paid') continue;
+          const d = o.expire_at ? new Date(o.expire_at) : null;
+          if (d && !isNaN(d.getTime()) && d.getTime() >= today.getTime()) return d;
+        }
+        return null;
+      }catch(e){
+        console.warn('[BW-player] orders check exception', e);
+        return null;
+      }
+    }
+
+    if (!exp || isNaN(exp.getTime())) {
+      const od = await findActiveOrderExpire();
+      if (od) {
+        exp = od;
+        // best-effort 回填 profiles.expires_at（若 RLS 不允許，放行仍照常）
+        try{
+          await playerSupa
+            .from('profiles')
+            .update({ expires_at: od.toISOString() })
+            .eq('id', user.id);
+          console.log('[BW-player] backfill profiles.expires_at from orders =', od.toISOString());
+        }catch(e){
+          console.warn('[BW-player] backfill profiles.expires_at failed', e);
+        }
+      }
+    }
+
+    // 3-3) 判斷訂閱
     if (!exp || isNaN(exp.getTime())) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1550,7 +1596,6 @@ if (!isPreview && user) {
       return;
     }
 
-    // 已過期
     if (exp.getTime() < today.getTime()) {
       const next = location.pathname + location.search;
       const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
@@ -1560,29 +1605,21 @@ if (!isPreview && user) {
       return;
     }
 
-    console.log('[BW-player] allow by profiles.expires_at =', exp.toISOString());
+    console.log('[BW-player] allow by expires_at =', exp.toISOString());
 
-    // 3.5️⃣ 訂閱有效後：若尚未完成 Level Survey，先導去評測（只發生一次）
-    try{
-      const LEVEL_DONE_KEY = 'BW_LEVEL_DONE';
-      const hasLocalLevel = (() => {
-        try{
-          if (localStorage.getItem(LEVEL_DONE_KEY) === '1') return true;
-          const bestRaw = localStorage.getItem('BW_CEFR_BEST');
-          if (bestRaw) {
-            const best = JSON.parse(bestRaw);
-            if (best && (best.level || best.week || best.week_cap)) return true;
-          }
-        }catch(_e){}
-        return false;
-      })();
-      const hasProfileLevel = !!(p && (p.cefr_level || (p.cefr_score !== null && p.cefr_score !== undefined)));
-      if (!hasLocalLevel && !hasProfileLevel) {
-        const next = encodeURIComponent(location.pathname + location.search);
-        location.href = `/account/level-survey.html?next=${next}`;
-        return;
-      }
-    }catch(_e){}
+    // 3-4) 訂閱通過後，若尚未完成 Level Survey → 先做一次（之後不再打擾）
+    const levelDone = localStorage.getItem('BW_LEVEL_DONE') === '1'
+      || localStorage.getItem('BW_CEFR_BEST')
+      || (p && (p.cefr_level || p.cefr_score));
+
+    if (!levelDone) {
+      const next = location.pathname + location.search;
+      const url = new URL((ROOT_BASE || '') + '/account/level-survey.html', location.origin);
+      url.searchParams.set('next', next);
+      location.href = url.toString();
+      return;
+    }
+
   }catch(e){
     console.error('[BW-player] subscription check exception', e);
     const next = location.pathname + location.search;
