@@ -1521,99 +1521,97 @@ user = await waitUser(1500, 250);
       if (badge) badge.textContent = email;
     }
   }
-// 3️⃣ 已登入且非 preview：
-// - 先判斷訂閱（profiles.expires_at）
-// - 若未啟用/已過期：先檢查是否已完成 Level Survey（BW_LEVEL_DONE）
-//   - 未完成 → 先導去 /account/level-survey.html（完成後回 /pricing.html，再由 pricing 決定是否訂閱）
-//   - 已完成 → 直接導去 /pricing.html（保留 next 回來 player）
+// 3️⃣ 已登入且非 preview：訂閱守門（以 profiles.expires_at 為主；若缺/未更新，fallback 到 orders.paid+expire_at，避免誤踢到 pricing）
 if (!isPreview && user) {
-  console.log('[BW-player] uid=', user.id, 'levelUID=', localStorage.getItem('BW_LEVEL_UID'), 'BW_LEVEL_DONE=', localStorage.getItem('BW_LEVEL_DONE'));
-
   const next = location.pathname + location.search;
-  // Survey 完成狀態必須『綁定使用者』，避免換帳號還沿用上一位的 localStorage
-  const uid = user.id;
-  const levelUID = localStorage.getItem('BW_LEVEL_UID');
-  const surveyDone = (
-    (levelUID === uid && localStorage.getItem('BW_LEVEL_DONE') === '1') ||
-    (levelUID === uid && !!localStorage.getItem('BW_LEVEL_WEEK_CAP')) ||
-    (levelUID === uid && !!localStorage.getItem('BW_CEFR_BEST'))
-  );
 
-  let allowedByCache = false;
-
-  function goPricing(reason){
+  function startOfToday(){
+    const d = new Date();
+    d.setHours(0,0,0,0);
+    return d;
+  }
+  function isActiveByExpire(expireAt){
+    if (!expireAt) return false;
+    const exp = new Date(expireAt);
+    if (isNaN(exp.getTime())) return false;
+    return exp.getTime() >= startOfToday().getTime();
+  }
+  function hasLocalLevel(){
+    if (localStorage.getItem('BW_LEVEL_DONE') === '1') return true;
+    try{
+      const best = localStorage.getItem('BW_CEFR_BEST');
+      if (best) {
+        const b = JSON.parse(best);
+        if (b && b.level) return true;
+      }
+    }catch(_e){}
+    return false;
+  }
+  function gotoPricing(denied){
     const url = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-    url.searchParams.set('denied', reason || 'noactive');
+    url.searchParams.set('denied', denied || 'noactive');
     url.searchParams.set('next', next);
     location.href = url.toString();
   }
-
-  function goSurveyThenPricing(reason){
-    // Level Survey 完成後：回到 pricing（並保留 next 回 player）
+  function gotoSurveyThenPricing(denied){
+    // 先去測驗，測完再回 pricing（並保留 next=原本想看的 player）
     const pricing = new URL((ROOT_BASE || '') + '/pricing.html', location.origin);
-    pricing.searchParams.set('denied', reason || 'noactive');
+    pricing.searchParams.set('denied', denied || 'noactive');
     pricing.searchParams.set('next', next);
 
     const survey = new URL((ROOT_BASE || '') + '/account/level-survey.html', location.origin);
-    survey.searchParams.set('next', pricing.pathname + pricing.search);
+    survey.searchParams.set('next', encodeURIComponent(pricing.pathname + pricing.search));
     location.href = survey.toString();
   }
 
-  // 3-0️⃣ 本機快取：若 subscription.html 已寫入 BW_SUB_ACTIVE_UNTIL，優先使用（避免 profiles 尚未同步造成誤踢）
   try{
-    const until = localStorage.getItem('BW_SUB_ACTIVE_UNTIL');
-    if (until) {
-      const exp = new Date(until);
-      const today = new Date();
-      today.setHours(0,0,0,0);
-      if (!isNaN(exp.getTime()) && exp.getTime() >= today.getTime()) {
-        console.log('[BW-player] allow by BW_SUB_ACTIVE_UNTIL =', exp.toISOString());
-        allowedByCache = true;
-      } else {
-        // cache exists but expired → fall through to server check
-      }
-    }
-  }catch(_e){}
-
-  // 3-1️⃣ 伺服器判斷：profiles.expires_at
-  if (!allowedByCache) {
-    try{
+    // 3a) profiles.expires_at（最快）
     const { data: p, error: perr } = await playerSupa
       .from('profiles')
       .select('expires_at')
       .eq('id', user.id)
       .maybeSingle();
-
-    if (perr) {
-      console.warn('[BW-player] profiles expires_at read error =', perr);
-    }
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    if (perr) console.warn('[BW-player] profiles expires_at read error =', perr);
 
     const exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
+    if (exp && !isNaN(exp.getTime()) && exp.getTime() >= startOfToday().getTime()) {
+      console.log('[BW-player] allow by profiles.expires_at =', exp.toISOString());
+      localStorage.setItem('BW_LEVEL_DONE','1'); // 訂閱戶永遠放行，不逼測
+    } else {
+      // 3b) fallback：orders（跟 subscription.html 同口徑）
+      const { data: list, error: oerr } = await playerSupa
+        .from('orders')
+        .select('status,paid_at,expire_at')
+        .eq('user_id', user.id)
+        .order('paid_at', { ascending: false, nullsFirst: false })
+        .limit(8);
+      if (oerr) console.warn('[BW-player] orders read error =', oerr);
 
-    // 沒資料 / 讀不到 → 視為未啟用
-    if (!exp || isNaN(exp.getTime())) {
-      if (!surveyDone) return goSurveyThenPricing('noactive');
-      return goPricing('noactive');
+      const arr = Array.isArray(list) ? list : [];
+      const paidList = arr.filter(o => String(o?.status||'').toLowerCase() === 'paid');
+      const activePaid = paidList.find(o => isActiveByExpire(o?.expire_at));
+      const hasEverPaid = paidList.length > 0;
+
+      if (activePaid) {
+        console.log('[BW-player] allow by orders activePaid');
+        localStorage.setItem('BW_LEVEL_DONE','1');
+      } else {
+        // 未訂閱（或已過期）
+        // 新戶（從未付費）且尚未做 level survey → 先測驗再導去 pricing
+        if (!hasEverPaid && !hasLocalLevel()) {
+          gotoSurveyThenPricing(exp && !isNaN(exp.getTime()) ? 'expired' : 'noactive');
+          return;
+        }
+        // 已測過或曾付費（但已過期）→ 直接 pricing
+        gotoPricing(exp && !isNaN(exp.getTime()) ? 'expired' : 'noactive');
+        return;
+      }
     }
-
-    // 已過期
-    if (exp.getTime() < today.getTime()) {
-      if (!surveyDone) return goSurveyThenPricing('expired');
-      return goPricing('expired');
-    }
-
-    // 有效訂閱：順手寫入快取，讓之後更穩
-    try{ localStorage.setItem('BW_SUB_ACTIVE_UNTIL', exp.toISOString()); }catch(_e){}
-
-    console.log('[BW-player] allow by profiles.expires_at =', exp.toISOString());
   }catch(e){
     console.error('[BW-player] subscription check exception', e);
-    // 發生例外：走你指定流程：未完成 survey → survey；完成 survey → pricing
-    if (!surveyDone) return goSurveyThenPricing('noactive');
-    return goPricing('noactive');
+    // 例外時：至少不要誤導到 player 內卡死，導到 pricing
+    gotoPricing('noactive');
+    return;
   }
 }
 
