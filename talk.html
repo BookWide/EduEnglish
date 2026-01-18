@@ -1409,7 +1409,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
       // Input card becomes "your reply" (do NOT reveal the expected answer by default)
       fillTitle.textContent = "你的回覆";
-      const expected = (user?.en || "").trim();
+      const expected = ((user?.en || "").trim()) || (clozeEnabled ? autoExpectedFromAi(ai?.en) : "");
       // build cloze + options for low difficulty guidance
       const cl = makeCloze(expected);
       // default show cloze; user can press「提示」to reveal full expected answer temporarily
@@ -1565,6 +1565,37 @@ function guessFillFromSentence(en){
     const k = Math.max(1, words.length-2);
     const target = words[k].replace(/[.,!?;:]+$/,"");
     return s.replace(target, "____");
+  }
+
+  // When a talk JSON has no explicit USER reply for a turn, generate a minimal guided
+  // reply so learners still get a cloze-style scaffold.
+  function autoExpectedFromAi(aiEn){
+    const s = (aiEn || "").trim();
+    if(!s) return "";
+
+    const low = s.toLowerCase();
+    // Quick keyword based templates
+    if(low.includes("reservation")) return "Yes, I'd like to make a reservation.";
+    if(low.includes("check in") || low.includes("check-in")) return "Yes, I'd like to check in.";
+    if(low.includes("open") && low.includes("account")) return "Yes, I'd like to open an account.";
+    if(low.includes("mobile") && (low.includes("plan") || low.includes("data"))) return "Yes, I'd like to choose a mobile plan.";
+    if(low.includes("help") || low.includes("can i")) return "Yes, please.";
+
+    // Question-type heuristics
+    if(/\bdo you\b/.test(low)) return "Yes, I do.";
+    if(/\bcan you\b/.test(low)) return "Yes, I can.";
+    if(/\bwould you like\b/.test(low)) return "Yes, I'd like to _____.";
+
+    // Fallback: try to pick a meaningful keyword from the AI line and build a simple reply.
+    const stop = new Set(["the","a","an","to","for","and","or","of","in","on","at","with","your","you","i","we","they","is","are","am","do","does","did","can","could","would","should","please","here","there","this","that","it","my","our","their","me","us","them"]);
+    const words = s.replace(/[^A-Za-z\s-]/g," ").split(/\s+/).filter(Boolean);
+    const candidates = words.map(w=>w.toLowerCase()).filter(w=>w.length>=4 && !stop.has(w));
+    const kw = candidates.length ? candidates[candidates.length-1] : "";
+    if(kw === "account") return "Yes, I'd like to open an account.";
+    if(kw === "reservation") return "Yes, I'd like to make a reservation.";
+    if(kw === "plan") return "Yes, I'd like to choose a plan.";
+    if(kw) return `Yes, I'd like to ${kw}.`;
+    return "Yes, please.";
   }
 
   
@@ -1761,7 +1792,7 @@ async function speak(text){
       const list = byWeek.get(wk) || [];
       if(!list.length) continue;
 
-      const locked = wk !== unlockedWeek;// 只解鎖當週，其餘全部鎖住
+      const locked = wk > unlockedWeek;
       const g = document.createElement("div");
       g.className = "group";
       const head = document.createElement("div");
@@ -1866,7 +1897,7 @@ async function init(){
     // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
-    activeWeek = unlockedWeek;// 強制當週為主，避免選到已鎖週
+    activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;
 
     // 模式：對話(dialogue) / 跟讀(shadow)
     try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
@@ -1959,7 +1990,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
+          activeWeek = Number(mapped.week)||activeWeek;
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
           try{ localStorage.setItem(LS_LAST_SCENE, mapped.id); }catch(_e){}
         }
@@ -1976,7 +2007,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
+          activeWeek = Number(mapped.week)||activeWeek;
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
         }
       }else{
