@@ -660,6 +660,9 @@ function finish(){
   $("kpiWeek").textContent = "W" + cap;
   $("resultText").textContent = LEVEL_TEXT[level] || "已完成測驗，Talk 將依你的程度解鎖。";
 
+  // ✅ 立刻把「建議 Week」落地到 Talk 的解鎖起點（不跳轉）
+  const placement = applyTalkPlacementWeek(cap);
+
   showScreen("result");
   $("progressFill").style.width = "100%";
   $("progressText").textContent = "完成";
@@ -670,12 +673,33 @@ function finish(){
   // mark survey done (one-time)
   try{ localStorage.setItem('BW_LEVEL_DONE','1'); localStorage.setItem('BW_LEVEL_UID', uid); }catch(_e){} 
 
-  // write to profiles
+  // write to profiles (先存 level，再嘗試存 anchor；anchor 欄位若不存在也不影響)
   saveToProfile(level, rawScore, cap).catch(()=>{});
+  if(placement && placement.anchorTs){
+    saveTalkAnchorToProfile(placement.anchorTs).catch(()=>{});
+  }
 
   // after survey: go to your mature pricing -> checkout -> ecpay flow
   // NOTE: 不自動跳轉，讓使用者看完報告後自行決定是否前往訂閱方案
 
+}
+
+async function saveTalkAnchorToProfile(anchorTs){
+  try{
+    const payload = {
+      talk_anchor_ts: anchorTs,
+      talk_anchor_updated_at: new Date().toISOString(),
+    };
+    const { error } = await sb
+      .from("profiles")
+      .update(payload)
+      .eq("id", uid);
+    if(!error){
+      // 不覆蓋原本提示文字，只在成功時附註
+      const t = $("saveHint").textContent || "";
+      if(t && !t.includes("Talk 起點")) $("saveHint").textContent = t + "（Talk 起點已設定）";
+    }
+  }catch(_e){}
 }
 
 async function saveToProfile(level, score, cap){
@@ -743,23 +767,56 @@ function parseWeekFromText(s){
   const m = String(s||'').match(/W\s*(\d+)/i);
   return m ? Number(m[1]) : 0;
 }
-function goToTalk(week){
-  const w = Number(week||0) || parseWeekFromText($("kpiWeek")?.textContent) || 0;
-  if(w>=1){
-    try{
-      localStorage.setItem('TALK_START_WEEK', String(w));
-      localStorage.setItem('BW_LEVEL_WEEK_CAP', String(w));
-    }catch(e){}
-    location.href = `/talk.html?week=${encodeURIComponent(String(w))}`;
-    return;
+function getSafeNextPath(){
+  try{
+    const u = new URL(location.href);
+    const next = u.searchParams.get('next') || '';
+    // allow only same-site relative paths
+    if(next && /^\/[a-z0-9_\-\/\.]+$/i.test(next)) return next;
+  }catch(e){}
+  return '/index.html';
+}
+
+// Talk placement: set anchor timestamp (like talk.html uses) so unlocked week reflects the recommended week.
+function applyTalkPlacementWeek(targetWeek){
+  const w = Math.max(1, Math.min(54, Number(targetWeek||0) || parseWeekFromText($("kpiWeek")?.textContent) || 1));
+  try{
+    // keep compatibility with old keys (harmless)
+    localStorage.setItem('TALK_START_WEEK', String(w));
+    localStorage.setItem('BW_LEVEL_WEEK_CAP', String(w));
+  }catch(e){}
+
+  // talk.html uses: BW_TALK_ANCHOR_TS_<uid>
+  const uid = (localStorage.getItem('BW_USER_ID') || localStorage.getItem('bw_uid') || '').trim();
+  let anchorKey = '';
+  let anchorTs = 0;
+  if(uid){
+    const key = `BW_TALK_ANCHOR_TS_${uid}`;
+    const weekMs = 7 * 24 * 60 * 60 * 1000;
+    const ADVANCE_WEEKS = 0.5; // must match talk.html
+    // make computeUnlockedWeek(anchor) ~= w
+    const anchor = Date.now() - ((w - 1) - ADVANCE_WEEKS) * weekMs;
+    anchorKey = key;
+    anchorTs = Math.floor(anchor);
+    try{ localStorage.setItem(key, String(anchorTs)); }catch(e){}
   }
-  location.href = "/";
+  return { week: w, anchorKey, anchorTs };
+}
+
+function onRecommendWeekClick(){
+  const r = applyTalkPlacementWeek();
+  toast(`已設定 Talk 起點：W${r.week}`);
 }
 
 $("btnBack").onclick = ()=>history.back();
 
-$("kpiWeekWrap").onclick = ()=>goToTalk();
-$("btnHome").onclick = ()=>goToTalk();
+// 圖三的兩處：按下只做「後台/本機設定」，不強迫進入 Talk
+$("kpiWeekWrap").onclick = ()=>onRecommendWeekClick();
+$("btnHome").onclick = ()=>{
+  onRecommendWeekClick();
+  // 回首頁
+  location.href = "/index.html";
+};
 $("btnEmail").onclick = () => {
   // 用 mailto 讓使用者把報告寄給自己（不需要後端 SMTP）
   const email = $("userEmail").textContent && $("userEmail").textContent !== '—' ? $("userEmail").textContent.trim() : '' ;
@@ -783,7 +840,7 @@ $("btnEmail").onclick = () => {
   window.location.href = url;
 };
 $("btnRetake").onclick = ()=>startQuiz(true);
-$("btnQuit").onclick = ()=>location.replace("/");
+$("btnQuit").onclick = ()=>location.replace(getSafeNextPath());
 $("btnSkip").onclick = ()=>{
   // skip counts as answered? no
   idx++;
