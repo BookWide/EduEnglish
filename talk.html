@@ -33,7 +33,7 @@
     const uid = user.id;
     const email = (user.email || '').toLowerCase();
 
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
+    const todayTW = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
 
     // --- read profile (best effort) ---
     const { data: prof, error: perr } = await supabase
@@ -83,30 +83,26 @@
       }
     } catch (e) {}
 
-    // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
-    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    const today = new Date().toISOString().slice(0,10);
-    let ok = (pe && pe >= today) || (oexp && oexp >= today);
-    if (!ok && hasPaid) {
-      // paid_at/created_at within last 400 days => treat as valid
-      const base = (opaid || ocreated || '').slice(0,10);
-      if (base) {
-        const t0 = new Date(base + 'T00:00:00Z').getTime();
-        const t1 = Date.now();
-        const days = (t1 - t0) / 86400000;
-        if (days >= 0 && days <= 400) ok = true;
-      } else {
-        ok = true;
+    // Subscription validity
+    const todayISO = new Date().toISOString().slice(0,10);
+    const expISO = String(pexp || oexp || '').slice(0,10);
+
+    // base rule: not paused AND (profile/order has expiry) AND not expired
+    let subOk = (!paused) && (!!expISO) && (expISO >= todayISO);
+
+    // fallback: if there is a paid order but expiry is missing, treat it as valid for 400 days from created_at
+    if (!subOk && hasPaid && !expISO) {
+      const createdISO = String(ocreated || '').slice(0,10);
+      if (createdISO) {
+        const created = new Date(createdISO + 'T00:00:00Z');
+        const until = new Date(created.getTime() + 400*24*60*60*1000);
+        const untilISO = until.toISOString().slice(0,10);
+        subOk = (untilISO >= todayISO);
       }
     }
-    // --- decide ---
-    const ok = (!paused) && (
-      (pexp && pexp >= today) ||
-      (oexp && oexp >= today)
-    );
 
-    window.BW_SUB_OK = ok;
-    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
+    window.BW_SUB_OK = subOk;
+    window.BW_SUB_EXPIRES_AT = expISO || null;
     window.BW_PROFILE_OK = !perr;
 
     if (!ok) {
@@ -1873,11 +1869,7 @@ function renderPicker(){
   function showModalHtml(title, inner){
     modalBody.innerHTML = '<div style="font-weight:900; margin-bottom:10px">'+escapeHtml(title)+'</div>' + inner;
     openModal();
-  }
-  function escapeHtml(s){
-    return String(s??"").replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
-  }
-  function buildDialogueHtml(){
+  }  function buildDialogueHtml(){
     const d = (currentSceneJson && Array.isArray(currentSceneJson.dialogue)) ? currentSceneJson.dialogue : [];
     if(!d.length) return '<div class="sub">（此情境沒有 dialogue）</div>';
     return d.map((x,i)=>{
