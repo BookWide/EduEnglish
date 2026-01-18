@@ -33,7 +33,7 @@
     const uid = user.id;
     const email = (user.email || '').toLowerCase();
 
-    const todayTW = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
 
     // --- read profile (best effort) ---
     const { data: prof, error: perr } = await supabase
@@ -83,26 +83,30 @@
       }
     } catch (e) {}
 
-    // Subscription validity
-    const todayISO = new Date().toISOString().slice(0,10);
-    const expISO = String(pexp || oexp || '').slice(0,10);
-
-    // base rule: not paused AND (profile/order has expiry) AND not expired
-    let subOk = (!paused) && (!!expISO) && (expISO >= todayISO);
-
-    // fallback: if there is a paid order but expiry is missing, treat it as valid for 400 days from created_at
-    if (!subOk && hasPaid && !expISO) {
-      const createdISO = String(ocreated || '').slice(0,10);
-      if (createdISO) {
-        const created = new Date(createdISO + 'T00:00:00Z');
-        const until = new Date(created.getTime() + 400*24*60*60*1000);
-        const untilISO = until.toISOString().slice(0,10);
-        subOk = (untilISO >= todayISO);
+    // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
+    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
+    const today = new Date().toISOString().slice(0,10);
+    let ok = (pe && pe >= today) || (oexp && oexp >= today);
+    if (!ok && hasPaid) {
+      // paid_at/created_at within last 400 days => treat as valid
+      const base = (opaid || ocreated || '').slice(0,10);
+      if (base) {
+        const t0 = new Date(base + 'T00:00:00Z').getTime();
+        const t1 = Date.now();
+        const days = (t1 - t0) / 86400000;
+        if (days >= 0 && days <= 400) ok = true;
+      } else {
+        ok = true;
       }
     }
+    // --- decide ---
+    const ok = (!paused) && (
+      (pexp && pexp >= today) ||
+      (oexp && oexp >= today)
+    );
 
-    window.BW_SUB_OK = subOk;
-    window.BW_SUB_EXPIRES_AT = expISO || null;
+    window.BW_SUB_OK = ok;
+    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
     window.BW_PROFILE_OK = !perr;
 
     if (!ok) {
@@ -1234,7 +1238,7 @@ let __tvWatch = null;
 const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const DAY = 24*60*60*1000;
-  const MAX_WEEKS = 108; // week 1..108
+  const MAX_WEEKS = 999; // MVP
   const ITEMS_PER_WEEK = 3;
 
   // UI refs
@@ -1350,38 +1354,14 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     return ts;
   }
 
-  
-function computeUnlockedWeek(){
-  // 先吃「評測結果」寫入的 week（由 /account/level-survey.html 設定）
-  const keys = [
-    'BW_TALK_WEEK',
-    'BW_TALK_UNLOCK_WEEK',
-    'BW_UNLOCK_WEEK',
-    'BW_LEVEL_WEEK',
-    'BW_RECOMMENDED_WEEK'
-  ];
-  for (const k of keys){
-    const v = (localStorage.getItem(k) || '').trim();
-    if (!v) continue;
-    if (/^\d+$/.test(v)){
-      const n = parseInt(v, 10);
-      if (n >= 1 && n <= MAX_WEEKS) return n;
-    }
-    // 允許 W32 / w32
-    const m = v.match(/^[Ww]\s*(\d+)$/);
-    if (m){
-      const n = parseInt(m[1], 10);
-      if (n >= 1 && n <= MAX_WEEKS) return n;
-    }
+  function computeUnlockedWeek(){
+    const ts = ensureAnchorTs();
+    const diff = Date.now() - ts;
+    const weekMs = WEEK_DAYS * DAY;
+    const passed = diff / weekMs; // 0.0, 1.0, 2.0...
+    const w = Math.floor(passed + ADVANCE_WEEKS) + 1;
+    return Math.max(1, Math.min(MAX_WEEKS, w));
   }
-
-  // 沒有評測 week，就退回「時間週數」(避免全部都鎖死)
-  const anchorTs = ensureAnchorTs();
-  const diffDays = Math.floor((Date.now() - anchorTs) / 86400000);
-  const wk = Math.floor(diffDays / 7) + 1;
-  return Math.max(1, Math.min(MAX_WEEKS, wk));
-}
-
 
   // ---- turns normalize (defensive) ----
   function normalizeTurns(raw){
@@ -1429,7 +1409,7 @@ function computeUnlockedWeek(){
 
       // Input card becomes "your reply" (do NOT reveal the expected answer by default)
       fillTitle.textContent = "你的回覆";
-      const expected = ((user?.en || "").trim()) || (clozeEnabled ? autoExpectedFromAi(ai?.en) : "");
+      const expected = (user?.en || "").trim();
       // build cloze + options for low difficulty guidance
       const cl = makeCloze(expected);
       // default show cloze; user can press「提示」to reveal full expected answer temporarily
@@ -1585,37 +1565,6 @@ function guessFillFromSentence(en){
     const k = Math.max(1, words.length-2);
     const target = words[k].replace(/[.,!?;:]+$/,"");
     return s.replace(target, "____");
-  }
-
-  // When a talk JSON has no explicit USER reply for a turn, generate a minimal guided
-  // reply so learners still get a cloze-style scaffold.
-  function autoExpectedFromAi(aiEn){
-    const s = (aiEn || "").trim();
-    if(!s) return "";
-
-    const low = s.toLowerCase();
-    // Quick keyword based templates
-    if(low.includes("reservation")) return "Yes, I'd like to make a reservation.";
-    if(low.includes("check in") || low.includes("check-in")) return "Yes, I'd like to check in.";
-    if(low.includes("open") && low.includes("account")) return "Yes, I'd like to open an account.";
-    if(low.includes("mobile") && (low.includes("plan") || low.includes("data"))) return "Yes, I'd like to choose a mobile plan.";
-    if(low.includes("help") || low.includes("can i")) return "Yes, please.";
-
-    // Question-type heuristics
-    if(/\bdo you\b/.test(low)) return "Yes, I do.";
-    if(/\bcan you\b/.test(low)) return "Yes, I can.";
-    if(/\bwould you like\b/.test(low)) return "Yes, I'd like to _____.";
-
-    // Fallback: try to pick a meaningful keyword from the AI line and build a simple reply.
-    const stop = new Set(["the","a","an","to","for","and","or","of","in","on","at","with","your","you","i","we","they","is","are","am","do","does","did","can","could","would","should","please","here","there","this","that","it","my","our","their","me","us","them"]);
-    const words = s.replace(/[^A-Za-z\s-]/g," ").split(/\s+/).filter(Boolean);
-    const candidates = words.map(w=>w.toLowerCase()).filter(w=>w.length>=4 && !stop.has(w));
-    const kw = candidates.length ? candidates[candidates.length-1] : "";
-    if(kw === "account") return "Yes, I'd like to open an account.";
-    if(kw === "reservation") return "Yes, I'd like to make a reservation.";
-    if(kw === "plan") return "Yes, I'd like to choose a plan.";
-    if(kw) return `Yes, I'd like to ${kw}.`;
-    return "Yes, please.";
   }
 
   
@@ -1806,57 +1755,41 @@ async function speak(text){
     }
   }
 
-  
-function renderPicker(){
-  if (!elPicker) return;
-  elPicker.innerHTML = '';
+  function renderPicker(){
+    modalBody.innerHTML = "";
+    for(let wk=1; wk<=MAX_WEEKS; wk++){
+      const list = byWeek.get(wk) || [];
+      if(!list.length) continue;
 
-  const wk = unlockedWeek;
-  const items0 = byWeek.get(wk) || [];
-  const items = items0.slice().sort((a,b)=> (a.kind||'').localeCompare(b.kind||'') || (a.id||'').localeCompare(b.id||''));
+      const locked = wk !== unlockedWeek;// 只解鎖當週，其餘全部鎖住
+      const g = document.createElement("div");
+      g.className = "group";
+      const head = document.createElement("div");
+      head.className = "gHead";
+      head.innerHTML = `<div>Week ${wk}</div><div class="lock">${locked ? "🔒 尚未解鎖" : "✅ 可練習"}</div>`;
+      g.appendChild(head);
 
-  // 只顯示「當週三條」(Challenge/Core/Variation)
-  const wrap = document.createElement('div');
-  wrap.className = 'wk-block';
-  wrap.innerHTML = `
-    <div class="wk-head">
-      <div class="wk-title">Week ${wk}</div>
-      <div class="wk-badge ok">可練習</div>
-    </div>
-    <div class="wk-list"></div>
-  `;
-  const list = wrap.querySelector('.wk-list');
-
-  if (!items.length){
-    const empty = document.createElement('div');
-    empty.className = 'wk-empty';
-    empty.textContent = '本週內容尚未上架（缺少 talk/w'+wk+'...json）。';
-    list.appendChild(empty);
-  } else {
-    const pick3 = items.filter(x=> ['challenge','core','variation'].includes((x.kind||'').toLowerCase()));
-    const show = (pick3.length ? pick3 : items).slice(0,3);
-
-    for (const it of show){
-      const row = document.createElement('div');
-      row.className = 'wk-row';
-      row.innerHTML = `
-        <div class="wk-info">
-          <div class="wk-name">${escapeHtml(it.title || '')}</div>
-          <div class="wk-id">${escapeHtml(it.id || '')}</div>
-        </div>
-        <button class="wk-btn">開始</button>
-      `;
-      row.querySelector('.wk-btn').onclick = ()=>{
-        selectScenario(it);
-        closePicker();
-      };
-      list.appendChild(row);
-    }
-  }
-
-  elPicker.appendChild(wrap);
-}
-
+      for(const it of list){
+        const row = document.createElement("div");
+        row.className = "item";
+        const left = document.createElement("div");
+        left.innerHTML = `<div class="name">${escapeHtml(it.title)}</div><p class="sub">${escapeHtml(it.id)}${it.level?(" · "+escapeHtml(it.level)):""}</p>`;
+        const btn = document.createElement("button");
+        btn.className = locked ? "ghost" : "primary";
+        btn.style.height = "42px";
+        btn.style.fontSize = "15px";
+        btn.textContent = locked ? "尚未" : "開始";
+        btn.disabled = locked;
+        btn.addEventListener("click", ()=>{
+          activeWeek = wk;
+          localStorage.setItem(LS_LAST_SCENE, it.id);
+          closeModal();
+          loadSceneById(it.id, it.title);
+        });
+        row.appendChild(left);
+        row.appendChild(btn);
+        g.appendChild(row);
+      }
       modalBody.appendChild(g);
     }
   }
@@ -1869,7 +1802,11 @@ function renderPicker(){
   function showModalHtml(title, inner){
     modalBody.innerHTML = '<div style="font-weight:900; margin-bottom:10px">'+escapeHtml(title)+'</div>' + inner;
     openModal();
-  }  function buildDialogueHtml(){
+  }
+  function escapeHtml(s){
+    return String(s??"").replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+  function buildDialogueHtml(){
     const d = (currentSceneJson && Array.isArray(currentSceneJson.dialogue)) ? currentSceneJson.dialogue : [];
     if(!d.length) return '<div class="sub">（此情境沒有 dialogue）</div>';
     return d.map((x,i)=>{
@@ -1929,7 +1866,7 @@ async function init(){
     // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
-    activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;
+    activeWeek = unlockedWeek;// 強制當週為主，避免選到已鎖週
 
     // 模式：對話(dialogue) / 跟讀(shadow)
     try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
@@ -2022,7 +1959,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek;
+          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
           try{ localStorage.setItem(LS_LAST_SCENE, mapped.id); }catch(_e){}
         }
@@ -2039,7 +1976,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek;
+          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
         }
       }else{
