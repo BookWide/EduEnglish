@@ -432,7 +432,27 @@
       margin-top:4px;
       padding-right:4px;
     }
-  </style>
+  
+
+    .path-info{
+      display:flex;
+      align-items:center;
+      flex-wrap:wrap;
+      gap:10px;
+      margin: -6px 0 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .path-info .dot{
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      background: var(--brand);
+      box-shadow: 0 0 0 4px rgba(37,99,235,.12);
+    }
+    .path-info b{ color: var(--ink); }
+
+</style>
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -455,6 +475,7 @@
 
   <main>
     <h1>學習控制台</h1>
+    <div id="pathInfo" class="path-info">載入中...</div>
 
     <div class="layout" id="dashLayout">
       <!-- 左側：繼續播放 / 最近看過 / 今日複習 -->
@@ -636,81 +657,32 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
 
 
 
-    function pickTodayTalkFromWeeklyIndex(weekly, userLevel){
-    try{
-      const today = new Date();
-      const todayKey = today.toISOString().slice(0,10); // YYYY-MM-DD
-      const weeks = (weekly && weekly.weeks) ? weekly.weeks : [];
+    function pickTodayTalkFromWeeklyIndex(weekly){
+  if(!weekly || !Array.isArray(weekly.weeks)) return null;
 
-      // ---- 1) 先嘗試「按日期」的寫法（若 weekly-index 有 days/schedule）----
-      const tryExtract = (dayObj)=>{
-        if(!dayObj || typeof dayObj!=="object") return null;
-        const cand =
-          dayObj.talk ?? dayObj.speaking ?? dayObj.ai_speaking ?? dayObj.speaking_task ??
-          (dayObj.tasks ? (dayObj.tasks.talk ?? dayObj.tasks.speaking) : null);
-        if(!cand) return null;
-        const t = Array.isArray(cand) ? cand[0] : cand;
-        if(!t) return null;
+  const today = new Date();
+  const dow = today.getDay(); // 0(日)~6(六)
 
-        if(typeof t === "string"){
-          return { scene: t, title: "AI Speaking", level: "", trial: false, cover:"" };
-        }
-        return {
-          scene: t.scene || t.slug || t.id || t.key || "",
-          title: t.title || t.name || "AI Speaking",
-          level: t.level || t.cefr || "",
-          trial: !!t.trial,
-          cover: t.cover || t.poster || t.image || ""
-        };
-      };
+  // 沿用你原本就有的本週計算
+  const weekIndex = getWeekIndex();
+  const weeks = weekly.weeks;
+  const week = weeks[(weekIndex % weeks.length + weeks.length) % weeks.length];
 
-      for(const w of weeks){
-        const days = w.days ?? w.day ?? w.items ?? w.schedule ?? null;
-        if(!days) continue;
+  if(!week || !Array.isArray(week.talks) || week.talks.length === 0) return null;
 
-        if(Array.isArray(days)){
-          for(const d of days){
-            const dk = d.date || d.day || d.key;
-            if(dk === todayKey){
-              const got = tryExtract(d);
-              if(got && got.scene) return got;
-            }
-          }
-        }else if(typeof days === "object"){
-          const d = days[todayKey];
-          const got = tryExtract(d);
-          if(got && got.scene) return got;
-        }
-      }
+  const talks = week.talks;
+  const pick = talks[dow % talks.length];
 
-      // ---- 2) fallback：本週 talks 自動輪 3 支（你要的「今天沒排就補一支」）----
-      // weekly-index.json 目前格式：weeks[x].talks = [{scene,title,level}, ...] fileciteturn3file0L1-L60
-      if(weeks && weeks.length){
-        const weekIndex = getWeekIndex(); // 已存在：依「本週」選擇 weeks[x]
-        const target = weeks[(weekIndex % weeks.length + weeks.length) % weeks.length];
-        const talks = (target && Array.isArray(target.talks)) ? target.talks : null;
-        if(talks && talks.length){
-          const dow = today.getDay(); // 0(日)~6(六)
-          const ur = rankLevel(userLevel || '');
-          const allowed = talks.filter(t => rankLevel(t.level || t.cefr || '') <= ur);
-          const pool = allowed.length ? allowed : talks; // 沒有符合就退回全量
-          const pick = pool[dow % pool.length];
-          if(pick){
-            return {
-              scene: pick.scene || pick.slug || pick.id || "",
-              title: pick.title || pick.name || "AI Speaking",
-              level: pick.level || pick.cefr || "",
-              trial: false,
-              cover: pick.cover || pick.poster || pick.image || ""
-            };
-          }
-        }
-      }
-    }catch(e){}
-    return null;
-  }
+  return {
+    scene: pick.scene,
+    title: pick.title || 'AI Speaking',
+    level: pick.level || '',
+    week: week.global_week,
+    cover: ''
+  };
+}
 
-  function renderTodayTalk(task){
+function renderTodayTalk(task){
     const list = document.getElementById("talkList");
     const empty = document.getElementById("talkEmpty");
     if(!list || !empty) return;
@@ -779,7 +751,65 @@ const PLAN_MAX_WEEKS = {
   annual: 54
 };
 
-const CONTENT_MAX_WEEKS = 54; // weekly-index.json 目前最多 54 週
+// 內容庫週數可能會持續增加（TALK 可到 108、PLAYER 也會擴充）
+// Dashboard 只依 weekly-index.json 的 weeks.length 當作「目前可用內容上限」
+const CONTENT_MAX_WEEKS_FALLBACK = 54;
+function getContentMaxWeeks(){
+  try{
+    const n = WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) ? WEEKLY_INDEX.weeks.length : 0;
+    return n || CONTENT_MAX_WEEKS_FALLBACK;
+  }catch(_e){
+    return CONTENT_MAX_WEEKS_FALLBACK;
+  }
+}
+
+
+
+// ---------- 課表：slug -> 來源週（Phase 1-② 顯示用） ----------
+function weekOfSlug(slug){
+  try{
+    if(!slug || !WEEKLY_INDEX || !Array.isArray(WEEKLY_INDEX.weeks)) return null;
+    const weeks = WEEKLY_INDEX.weeks;
+    if(!weeks.length) return null;
+
+    const currentWeek = (getWeekIndex() + 1) || 1;
+    let bestWeek = null;
+    let bestDist = 1e9;
+
+    for(let i=0;i<weeks.length;i++){
+      const w = weeks[i];
+      const vids = (w && Array.isArray(w.videos)) ? w.videos : null;
+      if(!vids) continue;
+      if(vids.some(v => (v && v.slug) === slug)){
+        const weekNo = i + 1;
+        const dist = Math.abs(weekNo - currentWeek);
+        if(dist < bestDist){
+          bestDist = dist;
+          bestWeek = weekNo;
+          if(dist == 0) break;
+        }
+      }
+    }
+    return bestWeek;
+  }catch(e){
+    return null;
+  }
+}
+
+function normalizePaidYears(n){
+  const v = Number(n||0);
+  if(!Number.isFinite(v) || v < 1) return 1;
+  return Math.floor(v);
+}
+
+function getPlanMaxWeeks(plan, paidYears){
+  const p = String(plan||'').toLowerCase();
+  if(p === 'year' || p === 'annual'){
+    const years = normalizePaidYears(paidYears);
+    return 54 * years;
+  }
+  return PLAN_MAX_WEEKS[p] || 4;
+}
 
 function getUrlParams(){
   const out = {};
@@ -824,11 +854,21 @@ function getSubscriptionContext(){
     startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   }
 
-  return { plan, startDate };
+
+  // 3️⃣ paid_years（年方案續約累積）
+  // - 先看網址參數：?years=2（方便測試）
+  // - 再看 localStorage：bwPaidYears
+  let paidYears = params.years || params.paid_years || params.paidYears || null;
+  if(!paidYears){
+    try{ paidYears = localStorage.getItem("bwPaidYears") || null; }catch(e){}
+  }
+  paidYears = normalizePaidYears(paidYears);
+
+  return { plan, startDate, paidYears };
 }
 
 function getWeekIndex(){
-  const { plan, startDate } = getSubscriptionContext();
+  const { plan, startDate, paidYears } = getSubscriptionContext();
   const today = new Date();
 
   startDate.setHours(0,0,0,0);
@@ -839,19 +879,64 @@ function getWeekIndex(){
 
   if(weekNumber < 1) weekNumber = 1;
 
-  const planMax = PLAN_MAX_WEEKS[plan] || 4;
-  const maxWeek = Math.min(planMax, CONTENT_MAX_WEEKS);
+  const planMax = getPlanMaxWeeks(plan, paidYears);
+  const contentMax = getContentMaxWeeks();
+  const maxWeek = Math.min(planMax, contentMax);
   if(weekNumber > maxWeek) weekNumber = maxWeek;
 
   const weekIndex = weekNumber - 1;
-  console.debug("[dashboard weekly] plan=%s start=%s weekNumber=%d index=%d",
+  console.debug("[dashboard weekly] plan=%s paidYears=%d start=%s weekNumber=%d index=%d maxWeek=%d contentMax=%d",
     plan,
+    (paidYears||1),
     startDate.toISOString().slice(0,10),
     weekNumber,
-    weekIndex
+    weekIndex,
+    maxWeek,
+    contentMax
   );
   return weekIndex;
 }
+
+function calcRawWeekNumber(startDate){
+  const today = new Date();
+  const s = new Date(startDate.getTime());
+  s.setHours(0,0,0,0);
+  today.setHours(0,0,0,0);
+  const diffDays = Math.floor((today.getTime() - s.getTime()) / 86400000);
+  let weekNumber = Math.floor(diffDays / 7) + 1;
+  if(weekNumber < 1) weekNumber = 1;
+  return weekNumber;
+}
+
+function updatePathInfo(){
+  const el = document.getElementById('pathInfo');
+  if(!el) return;
+
+  const ctx = getSubscriptionContext();
+  const plan = ctx.plan;
+  const startDate = ctx.startDate;
+  const paidYears = ctx.paidYears;
+
+  const contentMax = getContentMaxWeeks();
+  const planMax = getPlanMaxWeeks(plan, paidYears);
+  const capWeek = Math.min(planMax, contentMax);
+
+  const rawWeek = calcRawWeekNumber(startDate);
+  const currentWeek = Math.min(rawWeek, capWeek);
+
+  const p = String(plan||'').toLowerCase();
+  const isYear = (p === 'year' || p === 'annual');
+  const planLabel = isYear ? '年方案' : '月方案';
+  const yearsLabel = isYear ? ('第 ' + String(paidYears) + ' 年') : '';
+
+  el.innerHTML = ''
+    + '<span class="dot"></span>'
+    + '<span>學習進度：<b>第 ' + currentWeek + ' 週</b> / 可用至 <b>第 ' + capWeek + ' 週</b>'
+    + (yearsLabel ? ('（' + yearsLabel + '）') : '')
+    + '</span>'
+    + '<span style="opacity:.75;">｜內容庫：' + contentMax + ' 週｜方案：' + planLabel + '</span>';
+}
+
 
 async function loadWeeklyIndex(){
   if(WEEKLY_INDEX !== null) return;
@@ -934,7 +1019,7 @@ async function loadWeeklyIndex(){
       <div class="cont-meta">
         <div class="title">${title}</div>
         <div class="sub">
-          上次進度 ${pct}%　${updated ? `更新：${updated}` : ""}
+          上次進度 ${pct}%　${updated ? `更新：${updated}` : ""}${item.source_week ? ` · 課表第 ${item.source_week} 週` : ""}
         </div>
         <div class="progress-wrap">
           <div class="bar"><span style="width:${pct}%;"></span></div>
@@ -971,7 +1056,7 @@ async function loadWeeklyIndex(){
             <div class="recent-title">${title}</div>
           </div>
           <div class="recent-meta">
-            ${pct ? `進度 ${pct}%` : ""}${pct && updated ? " · " : ""}${updated || ""}
+            ${pct ? `進度 ${pct}%` : ""}${pct && updated ? " · " : ""}${updated || ""}${v.source_week ? ` · 第 ${v.source_week} 週` : ""}
           </div>
         </li>
       `;
@@ -996,7 +1081,7 @@ async function loadWeeklyIndex(){
           </div>
           <div class="review-info">
             <div>${title}</div>
-            <small>${cat}</small>
+            <small>${cat}${v.source_week ? ` · 第 ${v.source_week} 週` : ""}</small>
           </div>
         </div>
       `;
@@ -1206,6 +1291,15 @@ async function loadWeeklyIndex(){
 
     // 先嘗試載入 weekly-index.json，從本週 15 支影片中隨機推薦 3 支
     await loadWeeklyIndex();
+    updatePathInfo();
+
+
+    // Phase 1-②：補上「來源週」供 UI 顯示
+    if(WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks)){
+      for(const r of logsFilled){
+        if(!r.source_week) r.source_week = weekOfSlug(r.slug);
+      }
+    }
 
     
     // 今日口說任務（由 weekly-index.json 自動決定）
@@ -1272,7 +1366,8 @@ let todayReview = [];
             video_category: v.category || meta.cat,
             title: meta.title,
             video_title: meta.title,
-            cover_path: meta.cover_path
+            cover_path: meta.cover_path,
+            source_week: (weekIndex + 1)
           };
         }).filter(Boolean);
 
@@ -1418,6 +1513,9 @@ let todayReview = [];
     const user = data.user;
     document.getElementById("userEmail").textContent = user.email || "";
     document.getElementById("userPill").style.display = "flex";
+
+    // 顯示：目前週數 / cap（Phase 1）
+    updatePathInfo();
 
     loadDashboard(user);
   }
