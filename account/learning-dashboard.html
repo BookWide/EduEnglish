@@ -432,7 +432,27 @@
       margin-top:4px;
       padding-right:4px;
     }
-  </style>
+  
+
+    .path-info{
+      display:flex;
+      align-items:center;
+      flex-wrap:wrap;
+      gap:10px;
+      margin: -6px 0 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .path-info .dot{
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      background: var(--brand);
+      box-shadow: 0 0 0 4px rgba(37,99,235,.12);
+    }
+    .path-info b{ color: var(--ink); }
+
+</style>
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -455,8 +475,7 @@
 
   <main>
     <h1>學習控制台</h1>
-    <div id="bwMeta" class="bw-meta"></div>
-    <div id="bwStatus" class="bw-status"></div>
+    <div id="pathInfo" class="path-info">載入中...</div>
 
     <div class="layout" id="dashLayout">
       <!-- 左側：繼續播放 / 最近看過 / 今日複習 -->
@@ -732,7 +751,65 @@ const PLAN_MAX_WEEKS = {
   annual: 54
 };
 
-const CONTENT_MAX_WEEKS = 54; // weekly-index.json 目前最多 54 週
+// 內容庫週數可能會持續增加（TALK 可到 108、PLAYER 也會擴充）
+// Dashboard 只依 weekly-index.json 的 weeks.length 當作「目前可用內容上限」
+const CONTENT_MAX_WEEKS_FALLBACK = 54;
+function getContentMaxWeeks(){
+  try{
+    const n = WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) ? WEEKLY_INDEX.weeks.length : 0;
+    return n || CONTENT_MAX_WEEKS_FALLBACK;
+  }catch(_e){
+    return CONTENT_MAX_WEEKS_FALLBACK;
+  }
+}
+
+
+
+// ---------- 課表：slug -> 來源週（Phase 1-② 顯示用） ----------
+function weekOfSlug(slug){
+  try{
+    if(!slug || !WEEKLY_INDEX || !Array.isArray(WEEKLY_INDEX.weeks)) return null;
+    const weeks = WEEKLY_INDEX.weeks;
+    if(!weeks.length) return null;
+
+    const currentWeek = (getWeekIndex() + 1) || 1;
+    let bestWeek = null;
+    let bestDist = 1e9;
+
+    for(let i=0;i<weeks.length;i++){
+      const w = weeks[i];
+      const vids = (w && Array.isArray(w.videos)) ? w.videos : null;
+      if(!vids) continue;
+      if(vids.some(v => (v && v.slug) === slug)){
+        const weekNo = i + 1;
+        const dist = Math.abs(weekNo - currentWeek);
+        if(dist < bestDist){
+          bestDist = dist;
+          bestWeek = weekNo;
+          if(dist == 0) break;
+        }
+      }
+    }
+    return bestWeek;
+  }catch(e){
+    return null;
+  }
+}
+
+function normalizePaidYears(n){
+  const v = Number(n||0);
+  if(!Number.isFinite(v) || v < 1) return 1;
+  return Math.floor(v);
+}
+
+function getPlanMaxWeeks(plan, paidYears){
+  const p = String(plan||'').toLowerCase();
+  if(p === 'year' || p === 'annual'){
+    const years = normalizePaidYears(paidYears);
+    return 54 * years;
+  }
+  return PLAN_MAX_WEEKS[p] || 4;
+}
 
 function getUrlParams(){
   const out = {};
@@ -751,8 +828,6 @@ function getSubscriptionContext(){
   // 1️⃣ 先看網址參數（方便測試：?plan=year&start=2025-01-15）
   let plan  = params.plan || params.sub_plan || null;
   let start = params.start || params.sub_start || null;
-  let years = parseInt(params.years || params.paid_years || "", 10);
-  if(!Number.isFinite(years) || years < 1) years = null;
 
   // 2️⃣ 再看 localStorage（和首頁 index.html 共用同一組 key）
   if(!plan){
@@ -760,10 +835,6 @@ function getSubscriptionContext(){
   }
   if(!start){
     try{ start = localStorage.getItem("bwSubStart") || null; }catch(e){}
-  }
-  if(!years){
-    try{ years = parseInt(localStorage.getItem("bwPaidYears")||"",10); }catch(e){}
-    if(!Number.isFinite(years) || years < 1) years = null;
   }
 
   if(!plan || !PLAN_MAX_WEEKS[plan]){
@@ -783,11 +854,21 @@ function getSubscriptionContext(){
     startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   }
 
-  return { plan, startDate, years: years || (plan==='year'?1:1) };
+
+  // 3️⃣ paid_years（年方案續約累積）
+  // - 先看網址參數：?years=2（方便測試）
+  // - 再看 localStorage：bwPaidYears
+  let paidYears = params.years || params.paid_years || params.paidYears || null;
+  if(!paidYears){
+    try{ paidYears = localStorage.getItem("bwPaidYears") || null; }catch(e){}
+  }
+  paidYears = normalizePaidYears(paidYears);
+
+  return { plan, startDate, paidYears };
 }
 
 function getWeekIndex(){
-  const { plan, startDate, years } = getSubscriptionContext();
+  const { plan, startDate, paidYears } = getSubscriptionContext();
   const today = new Date();
 
   startDate.setHours(0,0,0,0);
@@ -798,21 +879,64 @@ function getWeekIndex(){
 
   if(weekNumber < 1) weekNumber = 1;
 
-  const baseMax = PLAN_MAX_WEEKS[plan] || 4;
-  const planMax = (plan === 'year') ? (54 * (years || 1)) : baseMax;
-  const contentMax = (window.BW_CONTENT_WEEKS || CONTENT_MAX_WEEKS);
+  const planMax = getPlanMaxWeeks(plan, paidYears);
+  const contentMax = getContentMaxWeeks();
   const maxWeek = Math.min(planMax, contentMax);
   if(weekNumber > maxWeek) weekNumber = maxWeek;
 
   const weekIndex = weekNumber - 1;
-  console.debug("[dashboard weekly] plan=%s start=%s weekNumber=%d index=%d",
+  console.debug("[dashboard weekly] plan=%s paidYears=%d start=%s weekNumber=%d index=%d maxWeek=%d contentMax=%d",
     plan,
+    (paidYears||1),
     startDate.toISOString().slice(0,10),
     weekNumber,
-    weekIndex
+    weekIndex,
+    maxWeek,
+    contentMax
   );
   return weekIndex;
 }
+
+function calcRawWeekNumber(startDate){
+  const today = new Date();
+  const s = new Date(startDate.getTime());
+  s.setHours(0,0,0,0);
+  today.setHours(0,0,0,0);
+  const diffDays = Math.floor((today.getTime() - s.getTime()) / 86400000);
+  let weekNumber = Math.floor(diffDays / 7) + 1;
+  if(weekNumber < 1) weekNumber = 1;
+  return weekNumber;
+}
+
+function updatePathInfo(){
+  const el = document.getElementById('pathInfo');
+  if(!el) return;
+
+  const ctx = getSubscriptionContext();
+  const plan = ctx.plan;
+  const startDate = ctx.startDate;
+  const paidYears = ctx.paidYears;
+
+  const contentMax = getContentMaxWeeks();
+  const planMax = getPlanMaxWeeks(plan, paidYears);
+  const capWeek = Math.min(planMax, contentMax);
+
+  const rawWeek = calcRawWeekNumber(startDate);
+  const currentWeek = Math.min(rawWeek, capWeek);
+
+  const p = String(plan||'').toLowerCase();
+  const isYear = (p === 'year' || p === 'annual');
+  const planLabel = isYear ? '年方案' : '月方案';
+  const yearsLabel = isYear ? ('第 ' + String(paidYears) + ' 年') : '';
+
+  el.innerHTML = ''
+    + '<span class="dot"></span>'
+    + '<span>學習進度：<b>第 ' + currentWeek + ' 週</b> / 可用至 <b>第 ' + capWeek + ' 週</b>'
+    + (yearsLabel ? ('（' + yearsLabel + '）') : '')
+    + '</span>'
+    + '<span style="opacity:.75;">｜內容庫：' + contentMax + ' 週｜方案：' + planLabel + '</span>';
+}
+
 
 async function loadWeeklyIndex(){
   if(WEEKLY_INDEX !== null) return;
@@ -830,18 +954,6 @@ async function loadWeeklyIndex(){
       return;
     }
     WEEKLY_INDEX = data;
-    try{
-      window.BW_CONTENT_WEEKS = Array.isArray(data.weeks) ? data.weeks.length : CONTENT_MAX_WEEKS;
-      window.BW_WEEK_BY_SLUG = {};
-      if(Array.isArray(data.weeks)){
-        data.weeks.forEach(w => {
-          const gw = w.global_week;
-          (w.videos||[]).forEach(v => { if(v && v.slug) window.BW_WEEK_BY_SLUG[v.slug]=gw; });
-          (w.talks||[]).forEach(t => { if(t && t.scene) window.BW_WEEK_BY_SLUG['talk:'+t.scene]=gw; });
-        });
-      }
-    }catch(e){}
-
   }catch(e){
     console.error("loadWeeklyIndex error", e);
     WEEKLY_INDEX = null;
@@ -855,45 +967,6 @@ async function loadWeeklyIndex(){
     return `${SUPABASE_URL}/storage/v1/object/public/${path}`;
   }
 
-
-  function getContentWeeks(){
-    return window.BW_CONTENT_WEEKS || CONTENT_MAX_WEEKS;
-  }
-  function getPlanLabel(plan){
-    if(plan==='year') return '年方案';
-    if(plan==='halfyear') return '半年方案';
-    if(plan==='month') return '月方案';
-    return plan || '';
-  }
-  function getWeekForSlug(slug){
-    try{ return (window.BW_WEEK_BY_SLUG||{})[slug] || null; }catch(e){ return null; }
-  }
-  function setMetaAndStatus(weekNo, capWeek, years, plan, todayReview, logsFilled){
-    const metaEl = document.getElementById('bwMeta');
-    const statusEl = document.getElementById('bwStatus');
-    if(!metaEl || !statusEl) return;
-
-    const contentWeeks = getContentWeeks();
-    const planLabel = getPlanLabel(plan);
-    const yrText = (plan==='year') ? `（第 ${years||1} 年）` : '';
-    metaEl.textContent = `學習進度：第 ${weekNo} 週 / 可用至第 ${capWeek} 週${yrText}｜內容庫：${contentWeeks} 週｜方案：${planLabel}`;
-
-    // remaining based on todayReview list (3 items) for clarity
-    const prog = {};
-    (logsFilled||[]).forEach(r=>{ const s=r.video_slug||r.slug; if(s) prog[s]=Math.max(prog[s]||0, r.progress_pct||0); });
-    const COMPLETE_PCT = 90;
-    const pending = (todayReview||[]).filter(v=>{
-      const s=v.video_slug||v.slug;
-      return !s || (prog[s]||0) < COMPLETE_PCT;
-    });
-    if(weekNo < capWeek){
-      statusEl.classList.remove('ok');
-      statusEl.textContent = `狀態：第 ${weekNo} 週進行中 · 尚有 ${pending.length} 個項目未完成`;
-    }else{
-      statusEl.classList.add('ok');
-      statusEl.textContent = `狀態：✔ 本期課程已完成（第 ${capWeek} 週）`;
-    }
-  }
   function formatTime(ts){
     if(!ts) return "";
     const d = new Date(ts);
@@ -946,7 +1019,7 @@ async function loadWeeklyIndex(){
       <div class="cont-meta">
         <div class="title">${title}</div>
         <div class="sub">
-          上次進度 ${pct}%　${updated ? `更新：${updated}` : ""}
+          上次進度 ${pct}%　${updated ? `更新：${updated}` : ""}${item.source_week ? ` · 課表第 ${item.source_week} 週` : ""}
         </div>
         <div class="progress-wrap">
           <div class="bar"><span style="width:${pct}%;"></span></div>
@@ -983,7 +1056,7 @@ async function loadWeeklyIndex(){
             <div class="recent-title">${title}</div>
           </div>
           <div class="recent-meta">
-            ${pct ? `進度 ${pct}%` : ""}${pct && updated ? " · " : ""}${updated || ""}
+            ${pct ? `進度 ${pct}%` : ""}${pct && updated ? " · " : ""}${updated || ""}${v.source_week ? ` · 第 ${v.source_week} 週` : ""}
           </div>
         </li>
       `;
@@ -1008,7 +1081,7 @@ async function loadWeeklyIndex(){
           </div>
           <div class="review-info">
             <div>${title}</div>
-            <small>${cat}</small>
+            <small>${cat}${v.source_week ? ` · 第 ${v.source_week} 週` : ""}</small>
           </div>
         </div>
       `;
@@ -1218,6 +1291,15 @@ async function loadWeeklyIndex(){
 
     // 先嘗試載入 weekly-index.json，從本週 15 支影片中隨機推薦 3 支
     await loadWeeklyIndex();
+    updatePathInfo();
+
+
+    // Phase 1-②：補上「來源週」供 UI 顯示
+    if(WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks)){
+      for(const r of logsFilled){
+        if(!r.source_week) r.source_week = weekOfSlug(r.slug);
+      }
+    }
 
     
     // 今日口說任務（由 weekly-index.json 自動決定）
@@ -1232,14 +1314,6 @@ async function loadWeeklyIndex(){
       if(weekIndex > capIndex) weekIndex = capIndex;
     }
     const weekNo = weekIndex + 1;
-
-    // Phase1: cap week for display (plan cap × paidYears, clamped by content)
-    const subCtx = getSubscriptionContext();
-    const years = subCtx.years || 1;
-    const baseMax = PLAN_MAX_WEEKS[subCtx.plan] || 4;
-    const planCap = (subCtx.plan === 'year') ? (54 * years) : baseMax;
-    const capWeek = Math.min(planCap, getContentWeeks());
-
 
     let todayTalk = null;
     if(WEEKLY_INDEX){
@@ -1292,7 +1366,8 @@ let todayReview = [];
             video_category: v.category || meta.cat,
             title: meta.title,
             video_title: meta.title,
-            cover_path: meta.cover_path
+            cover_path: meta.cover_path,
+            source_week: (weekIndex + 1)
           };
         }).filter(Boolean);
 
@@ -1309,10 +1384,7 @@ let todayReview = [];
       todayReview = logsFilled.filter(r => (r.progress_pct || 0) < 100);
     }
 
-        // Phase1: render progress line + status line
-    setMetaAndStatus(weekNo, capWeek, years, subCtx.plan, todayReview, logsFilled);
-
-// 繼續播放
+    // 繼續播放
     let continueItem = null;
     if(logsFilled.length){
       const incomplete = logsFilled.filter(r => (r.progress_pct || 0) < 100);
@@ -1441,6 +1513,9 @@ let todayReview = [];
     const user = data.user;
     document.getElementById("userEmail").textContent = user.email || "";
     document.getElementById("userPill").style.display = "flex";
+
+    // 顯示：目前週數 / cap（Phase 1）
+    updatePathInfo();
 
     loadDashboard(user);
   }
