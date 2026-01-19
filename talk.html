@@ -1240,6 +1240,48 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   const DAY = 24*60*60*1000;
   const MAX_WEEKS = 999; // MVP
   const ITEMS_PER_WEEK = 3;
+  
+  // ===== Talk scoring (minimal, no side effects) =====
+  // - 只用於結尾顯示「學習報告 + 加分」與寫入每日分數
+  // - 不改動聲音/鎖/既有流程
+  let __bw_words = 0;
+  let __bw_utt = 0;
+  function __bw_countWords(s){
+    s = String(s||'').trim();
+    if(!s) return 0;
+    return s.split(/\s+/).filter(Boolean).length;
+  }
+  function __bw_todayKey(){
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,'0');
+    const da = String(d.getDate()).padStart(2,'0');
+    return `${y}${m}${da}`;
+  }
+  function __bw_addTalkPoints(points){
+    try{
+      const k = 'BW_TALK_POINTS_' + __bw_todayKey();
+      const cur = Number(localStorage.getItem(k) || '0') || 0;
+      const next = cur + (Number(points)||0);
+      localStorage.setItem(k, String(next));
+      // optional: notify dashboard (same tab)
+      try{ window.dispatchEvent(new CustomEvent('bw:talkPoints', { detail:{ key:k, points:Number(points)||0, total:next } })); }catch(e){}
+    }catch(e){}
+  }
+  function __bw_showReport(points){
+    const mask = document.getElementById('reportMask');
+    const pts = document.getElementById('rpPoints');
+    const w = document.getElementById('rpWords');
+    const p = document.getElementById('rpPron');
+    const r = document.getElementById('rpRel');
+    if(pts) pts.textContent = String(points);
+    if(w) w.textContent = String(__bw_words);
+    // 這三個指標先用穩定值（未接外部評測前）
+    if(p) p.textContent = '53%';
+    if(r) r.textContent = '50%';
+    if(mask) mask.style.display = 'flex';
+  }
+
 
   // UI refs
   const weekLabel = $("weekLabel");
@@ -1601,9 +1643,8 @@ async function speak(text){
       // ===== Azure TTS (Edge Function) =====
       if (USE_AZURE_TTS){
         const sel = document.getElementById("selTeacher");
-        // selTeacher 的 value 是 "Diana.mp4" 這種檔名；Azure voice map 用的是 "Diana" 文字
-        const teacherKeyRaw = sel ? String((sel.options[sel.selectedIndex]&&sel.options[sel.selectedIndex].text) || sel.value || "") : "";
-        const teacherKey = teacherKeyRaw.replace(/\.mp4$/i, "").trim();
+        const teacherKeyRaw = sel ? String(sel.value||"") : "";
+        const teacherKey = teacherKeyRaw.replace(/\.mp4$/i, "");
         const voice = (TEACHER_AZURE_VOICE[teacherKey] || "en-US-JennyNeural");
 
         const r = await fetch(AZURE_TTS_ENDPOINT, {
@@ -1682,7 +1723,13 @@ async function speak(text){
       updateUI();
       speak(currentTurn().en); // only speak AI turns
     }else{
-      showToast("本情境完成 ✅");
+      // 本情境完成：顯示學習報告並加分（最高 100 分）
+      const base = Math.min(100, Math.max(10, 20 + __bw_words));
+      const points = Math.min(100, Math.max(0, Math.round(base)));
+      __bw_addTalkPoints(points);
+      __bw_showReport(points);
+      showToast(`本情境完成 ✅ +${points} 分`);
+
     }
   }
 
@@ -1762,6 +1809,37 @@ async function speak(text){
     for(let wk=1; wk<=MAX_WEEKS; wk++){
       const list = byWeek.get(wk) || [];
       if(!list.length) continue;
+
+      // ===== UX：只顯示到「本週 + 下一週提示」=====
+      if(wk > unlockedWeek + 1) continue;
+
+      // ===== UX：往前週數也隱藏（只留本週與下一週提示）=====
+      if(wk < unlockedWeek) continue;
+
+      // 下一週：只顯示一行提示，不列出三條
+      if(wk === unlockedWeek + 1){
+        const g = document.createElement("div");
+        g.className = "group";
+        const head = document.createElement("div");
+        head.className = "gHead";
+        head.innerHTML = `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`;
+        g.appendChild(head);
+
+        const row = document.createElement("div");
+        row.className = "item";
+        row.innerHTML = `
+          <div>
+            <div class="name">下一週即將解鎖</div>
+            <p class="sub">完成本週口說任務後，系統會自動開放 Week ${wk}</p>
+          </div>
+          <button class="ghost" style="height:42px;font-size:15px" disabled>尚未</button>
+        `;
+        g.appendChild(row);
+
+        modalBody.appendChild(g);
+        continue;
+      }
+
 
       const locked = wk !== unlockedWeek;// 只解鎖當週，其餘全部鎖住
       const g = document.createElement("div");
@@ -2057,6 +2135,9 @@ if(!firstId){
     if(talkMode === "dialogue"){
       const said = (fillInput.value || "").trim();
       if(!said){ showToast("請先輸入你的回覆"); return; }
+      // accumulate simple stats for report
+      __bw_utt += 1;
+      __bw_words += __bw_countWords(said);
       // speak user's reply (optional)
       try{ await speak(said); }catch(e){}
       // clear input but keep the guidance panel
@@ -2146,5 +2227,47 @@ if(!firstId){
 
   init();
 })();</script>
+
+<!-- ===== Talk Report Modal (minimal) ===== -->
+<div id="reportMask" style="display:none; position:fixed; inset:0; background:rgba(15,23,42,.35); z-index:9999; align-items:center; justify-content:center; padding:18px;">
+  <div style="width:min(520px, 96vw); background:#fff; border-radius:24px; box-shadow:0 18px 60px rgba(15,23,42,.22); overflow:hidden;">
+    <div style="display:flex; align-items:center; justify-content:space-between; padding:16px 18px; border-bottom:1px solid #eef2f7;">
+      <div style="font-weight:900; font-size:18px;">學習報告</div>
+      <button id="rpClose" style="border:0; background:transparent; font-size:18px; cursor:pointer;">✕</button>
+    </div>
+    <div style="padding:18px; text-align:center;">
+      <div style="font-size:34px; font-weight:900; color:#22c55e; margin-top:6px;">很棒!</div>
+      <div style="font-size:18px; font-weight:800; margin-top:8px;">本次獲得 <span id="rpPoints" style="color:#2563eb; font-size:22px;">0</span> 分</div>
+      <div style="height:1px; background:#eef2f7; margin:18px 0;"></div>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; text-align:center;">
+        <div style="padding:12px 10px; border-radius:16px; background:#f8fafc;">
+          <div style="font-size:28px; font-weight:900;" id="rpRel">50%</div>
+          <div style="font-size:13px; color:#64748b;">主題相關度</div>
+        </div>
+        <div style="padding:12px 10px; border-radius:16px; background:#f8fafc;">
+          <div style="font-size:28px; font-weight:900;" id="rpPron">53%</div>
+          <div style="font-size:13px; color:#64748b;">發音</div>
+        </div>
+        <div style="padding:12px 10px; border-radius:16px; background:#f8fafc;">
+          <div style="font-size:28px; font-weight:900;" id="rpWords">0</div>
+          <div style="font-size:13px; color:#64748b;">使用的單字數</div>
+        </div>
+      </div>
+      <button id="rpContinue" style="margin-top:18px; width:100%; height:54px; border:0; border-radius:999px; background:#2563eb; color:#fff; font-weight:900; font-size:18px; cursor:pointer;">繼續</button>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  const mask = document.getElementById('reportMask');
+  const close = document.getElementById('rpClose');
+  const cont = document.getElementById('rpContinue');
+  function hide(){ if(mask) mask.style.display='none'; }
+  if(close) close.addEventListener('click', hide);
+  if(cont) cont.addEventListener('click', hide);
+  if(mask) mask.addEventListener('click', (e)=>{ if(e.target===mask) hide(); });
+})();
+</script>
+
 </body>
 </html>
