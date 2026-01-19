@@ -1051,6 +1051,33 @@ body{line-height:1.1}
 .fileTag { display: none !important; }
 </style>
 
+
+<style>
+/* ===== Talk Report Modal ===== */
+.bw-modal{position:fixed;inset:0;z-index:99999;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans TC",sans-serif}
+.bw-modal-backdrop{position:absolute;inset:0;background:rgba(0,0,0,.18)}
+.bw-modal-card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(420px,92vw);max-height:92vh;overflow:auto;background:#eaf2ff;border-radius:22px;box-shadow:0 22px 70px rgba(15,23,42,.25);padding:14px 14px 18px}
+.bw-modal-head{display:flex;align-items:center;justify-content:space-between;padding:4px 2px 10px}
+.bw-modal-title{font-size:22px;font-weight:800;letter-spacing:.5px}
+.bw-modal-actions{display:flex;gap:8px}
+.bw-iconbtn{border:0;background:rgba(255,255,255,.7);width:40px;height:40px;border-radius:999px;font-size:18px;cursor:pointer}
+.bw-stars{display:flex;justify-content:center;gap:14px;padding:8px 0 6px}
+.bw-star{font-size:48px;line-height:1}
+.bw-big{font-size:40px;font-weight:900;color:#10b981;text-align:center;margin-top:4px}
+.bw-sub{font-size:22px;font-weight:800;text-align:center;margin-top:6px}
+.bw-metrics{display:flex;gap:10px;justify-content:space-between;margin:18px 4px 14px}
+.bw-metric{flex:1;background:rgba(255,255,255,.75);border-radius:16px;padding:10px 8px;text-align:center}
+.bw-metric-val{font-size:30px;font-weight:900}
+.bw-metric-lab{font-size:13px;opacity:.7;margin-top:3px}
+.bw-card{background:rgba(255,255,255,.9);border-radius:18px;padding:14px 14px;margin:10px 4px}
+.bw-card-title{font-size:34px;font-weight:900;text-align:center}
+.bw-card-title small{display:block;font-size:14px;font-weight:700;opacity:.55;margin-top:2px}
+.bw-card-note{margin-top:10px;font-size:14px;line-height:1.45;opacity:.85;text-align:center}
+.bw-btn{width:calc(100% - 8px);margin:10px 4px 0;border-radius:999px;border:0;padding:16px 14px;font-size:18px;font-weight:900;cursor:pointer}
+.bw-btn.ghost{background:rgba(255,255,255,.85)}
+.bw-btn.primary{background:#3b82f6;color:#fff}
+</style>
+
 </head>
 <body>
 <div class="wrap">
@@ -1423,7 +1450,8 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       sceneTitle.textContent = activeSceneTitle ? activeSceneTitle : "載入中…";
       const progMax = Math.max(1, Math.ceil(turns.length/2));
       const progNow = Math.min(progMax, Math.floor(aiIdx/2)+1);
-      sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${progNow}/${progMax}`;
+      bwMaybeFinish();
+    sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${progNow}/${progMax}`;
       return;
     }
 
@@ -1601,9 +1629,7 @@ async function speak(text){
       // ===== Azure TTS (Edge Function) =====
       if (USE_AZURE_TTS){
         const sel = document.getElementById("selTeacher");
-        // selTeacher 的 value 是 "Diana.mp4" 這種檔名；Azure voice map 用的是 "Diana" 文字
-        const teacherKeyRaw = sel ? String((sel.options[sel.selectedIndex]&&sel.options[sel.selectedIndex].text) || sel.value || "") : "";
-        const teacherKey = teacherKeyRaw.replace(/\.mp4$/i, "").trim();
+        const teacherKey = sel ? String(sel.value||"") : "";
         const voice = (TEACHER_AZURE_VOICE[teacherKey] || "en-US-JennyNeural");
 
         const r = await fetch(AZURE_TTS_ENDPOINT, {
@@ -2145,6 +2171,113 @@ if(!firstId){
   }, {passive:true});
 
   init();
-})();</script>
+})();
+  // ===== Talk score + report (auto comment + +100 points max) =====
+  function bwTodayKey(){
+    return new Date().toISOString().slice(0,10); // YYYY-MM-DD
+  }
+  function bwSaveTalkScore(score, comment, meta){
+    try{
+      const key = bwTodayKey();
+      const raw = localStorage.getItem("bwTalkScores") || "{}";
+      const obj = JSON.parse(raw);
+      obj[key] = {
+        score: Math.max(0, Math.min(100, Math.round(score||0))),
+        comment: String(comment||""),
+        week: meta && meta.week ? meta.week : undefined,
+        scene: meta && meta.scene ? meta.scene : undefined,
+        ts: new Date().toISOString()
+      };
+      localStorage.setItem("bwTalkScores", JSON.stringify(obj));
+    }catch(e){}
+  }
+  function bwStars(score){
+    const n = score >= 90 ? 3 : score >= 70 ? 2 : score >= 50 ? 1 : 0;
+    return [0,1,2].map(i => `<div class="bw-star">${i < n ? "⭐" : "☆"}</div>`).join("");
+  }
+  function bwAutoComment(score){
+    if(score >= 90) return "太穩了：句型完整、節奏自然。下一步：試著用 1 句延伸問句。";
+    if(score >= 70) return "很好：大致通順。下一步：把關鍵名詞換 2 個同義字練習。";
+    if(score >= 50) return "有進步：能完成主要句子。下一步：把句尾加上禮貌語氣（please / could you）。";
+    return "先別急：先按『提示』跟著唸 1 次，再自己說 1 次就會上來。";
+  }
+  function bwShowReport(score, titleText){
+    const modal = document.getElementById("bwReportModal");
+    if(!modal) return;
+    const s = Math.max(0, Math.min(100, Math.round(score||0)));
+    document.getElementById("bwReportStars").innerHTML = bwStars(s);
+    document.getElementById("bwReportTitle").textContent = titleText || "完成一趟練習";
+    document.getElementById("bwMScore").textContent = String(s);
+
+    const topic = Math.max(0, Math.min(100, Math.round(40 + s*0.6)));
+    const pron  = Math.max(0, Math.min(100, Math.round(35 + s*0.65)));
+    const txt = (document.getElementById("qText")?.value || "").trim();
+    const words = txt ? txt.split(/\s+/).filter(Boolean).length : 0;
+    document.getElementById("bwMTopic").textContent = topic + "%";
+    document.getElementById("bwMPron").textContent = pron + "%";
+    document.getElementById("bwMWords").textContent = String(words);
+
+    const comment = bwAutoComment(s);
+    document.getElementById("bwMComment").textContent = comment;
+
+    bwSaveTalkScore(s, comment, { week: (typeof activeWeek!=="undefined"?activeWeek:undefined), scene: (typeof activeScene!=="undefined"?activeScene:undefined) });
+
+    modal.style.display = "block";
+    const close = () => { modal.style.display = "none"; };
+    document.getElementById("bwReportClose")?.addEventListener("click", close);
+    document.getElementById("bwContinue")?.addEventListener("click", close);
+    modal.querySelector(".bw-modal-backdrop")?.addEventListener("click", close);
+  }
+
+  // Called after each turn update; finishes when progress hits max
+  function bwMaybeFinish(){
+    try{
+      if(typeof turns === "undefined" || typeof turnIdx === "undefined") return;
+      const progMax = Math.max(1, Math.ceil(turns.length/2));
+      const approxNow = Math.min(progMax, Math.floor(turnIdx/2)+1);
+      if(approxNow >= progMax){
+        const words = ((document.getElementById("qText")?.value || "").trim().split(/\s+/).filter(Boolean)).length;
+        const score = Math.max(0, Math.min(100, Math.round(70 + Math.min(30, words*3))));
+        bwShowReport(score, (typeof activeSceneTitle!=="undefined" && activeSceneTitle)?activeSceneTitle:"完成一趟練習");
+      }
+    }catch(e){}
+  }
+
+</script>
+
+<!-- ===== Learning Report Modal (Talk) ===== -->
+<div id="bwReportModal" class="bw-modal" style="display:none;">
+  <div class="bw-modal-backdrop"></div>
+  <div class="bw-modal-card" role="dialog" aria-modal="true" aria-label="學習報告">
+    <div class="bw-modal-head">
+      <button type="button" class="bw-iconbtn" id="bwReportClose" aria-label="關閉">✕</button>
+      <div class="bw-modal-title">學習報告</div>
+      <div class="bw-modal-actions">
+        <button type="button" class="bw-iconbtn" id="bwReportInfo" aria-label="說明">i</button>
+        <button type="button" class="bw-iconbtn" id="bwReportHistory" aria-label="歷史">⟲</button>
+      </div>
+    </div>
+
+    <div class="bw-stars" id="bwReportStars" aria-label="星等"></div>
+
+    <div class="bw-big" id="bwReportPraise">很棒！</div>
+    <div class="bw-sub" id="bwReportTitle">完成一趟練習</div>
+
+    <div class="bw-metrics">
+      <div class="bw-metric"><div class="bw-metric-val" id="bwMTopic">0%</div><div class="bw-metric-lab">主題相關度</div></div>
+      <div class="bw-metric"><div class="bw-metric-val" id="bwMPron">0%</div><div class="bw-metric-lab">發音</div></div>
+      <div class="bw-metric"><div class="bw-metric-val" id="bwMWords">0</div><div class="bw-metric-lab">使用的單字數</div></div>
+    </div>
+
+    <div class="bw-card">
+      <div class="bw-card-title"><span id="bwMScore">0</span> <small>完成度分數</small></div>
+      <div class="bw-card-note" id="bwMComment">—</div>
+    </div>
+
+    <button type="button" class="bw-btn ghost" id="bwChatLog">聊天記錄</button>
+    <button type="button" class="bw-btn primary" id="bwContinue">繼續</button>
+  </div>
+</div>
+
 </body>
 </html>
