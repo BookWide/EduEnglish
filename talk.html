@@ -56,9 +56,10 @@
       const r1 = await supabase
         .from('orders')
         .select('status,expires_at,paid_at,created_at')
-        .eq('user_id', u.id)
+        .eq('user_id', uid)
         .order('created_at', { ascending:false })
         .limit(1);
+
       if (!r1.error && r1.data && r1.data.length) {
         const row = r1.data[0];
         if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
@@ -70,9 +71,10 @@
         const r2 = await supabase
           .from('orders')
           .select('status,expires_at,paid_at,created_at')
-          .eq('email', u.email)
+          .eq('email', email)
           .order('created_at', { ascending:false })
           .limit(1);
+
         if (!r2.error && r2.data && r2.data.length) {
           const row = r2.data[0];
           if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
@@ -85,9 +87,11 @@
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
     // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    const today = new Date().toISOString().slice(0,10);
-    let ok = (pe && pe >= today) || (oexp && oexp >= today);
-    if (!ok && hasPaid) {
+    let ok = (!paused) && (
+      (pexp && pexp >= today) ||
+      (oexp && oexp >= today)
+    );
+    if (!ok && !paused && hasPaid) {
       // paid_at/created_at within last 400 days => treat as valid
       const base = (opaid || ocreated || '').slice(0,10);
       if (base) {
@@ -99,11 +103,8 @@
         ok = true;
       }
     }
+
     // --- decide ---
-    const ok = (!paused) && (
-      (pexp && pexp >= today) ||
-      (oexp && oexp >= today)
-    );
 
     window.BW_SUB_OK = ok;
     window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
@@ -1078,6 +1079,7 @@ body{line-height:1.1}
           </select>
         </label>
       <button class="smallBtn" id="btnReplay">重播</button>
+      <button class="smallBtn" id="btnReport" title="學習報告">報告</button>
       <span class="fileTag" id="fileTag"></span>
     </div>
   </div>
@@ -1153,6 +1155,59 @@ body{line-height:1.1}
   </div>
 </div>
 
+<!-- report modal -->
+<div class="modalMask" id="reportMask" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="學習報告">
+    <div class="modalTop">
+      <div class="t">學習報告</div>
+      <button class="btnIcon" id="btnReportClose" aria-label="關閉">✕</button>
+    </div>
+    <div class="modalBody" id="reportBody">
+      <div style="text-align:center; padding:10px 6px 6px;">
+        <div id="repStars" style="font-size:34px; line-height:1; letter-spacing:4px;">★★☆</div>
+        <div id="repTitle" style="font-weight:950; font-size:20px; margin-top:8px; color:#0bbf55;">很棒!</div>
+        <div id="repSub" style="font-weight:800; font-size:12px; color:var(--muted); margin-top:6px;">買一杯咖啡</div>
+      </div>
+
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:10px;">
+        <div class="group" style="margin:0;">
+          <div class="gHead" style="justify-content:center;">主動練習度</div>
+          <div style="padding:12px; text-align:center;">
+            <div id="repPractice" style="font-weight:950; font-size:18px;">0%</div>
+          </div>
+        </div>
+        <div class="group" style="margin:0;">
+          <div class="gHead" style="justify-content:center;">接續</div>
+          <div style="padding:12px; text-align:center;">
+            <div id="repAccuracy" style="font-weight:950; font-size:18px;">0%</div>
+          </div>
+        </div>
+        <div class="group" style="margin:0;">
+          <div class="gHead" style="justify-content:center;">使用的單字數</div>
+          <div style="padding:12px; text-align:center;">
+            <div id="repWords" style="font-weight:950; font-size:18px;">0</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="group" style="margin-top:12px;">
+        <div class="gHead" style="justify-content:center;">完成度</div>
+        <div style="padding:12px; display:flex; justify-content:center;">
+          <svg id="repChart" width="280" height="120" viewBox="0 0 280 120" aria-label="完成度走勢">
+            <polyline id="repLine" fill="none" stroke="currentColor" stroke-width="3" points="0,100 280,100"></polyline>
+          </svg>
+        </div>
+        <div style="padding:0 12px 12px; text-align:center;" class="sub" id="repHint">點右上「報告」也可隨時查看</div>
+      </div>
+
+      <div style="display:flex; gap:10px; margin-top:12px;">
+        <button class="ghost" id="btnReportOk" style="flex:1;">關閉</button>
+        <button class="primary" id="btnReportContinue" style="flex:1;">繼續</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 /* =============================
    Talk weekly learner console
@@ -1163,6 +1218,90 @@ body{line-height:1.1}
    ============================= */
 (function(){
   const $ = (id)=>document.getElementById(id);
+
+  // ===== Learning report (end rating) =====
+  const __repState = {
+    expectedTotal: 0,
+    submitted: 0,
+    correct: 0,
+    timeline: [],
+    words: new Set(),
+    lastScene: ''
+  };
+
+  function __normWords(s){
+    return String(s||'')
+      .toLowerCase()
+      .replace(/[^a-z\s']/g,' ')
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+  function __overlapScore(a,b){
+    const wa = __normWords(a);
+    const wb = __normWords(b);
+    if(!wa.length || !wb.length) return 0;
+    const sb = new Set(wb);
+    let hit = 0;
+    for(const w of wa){ if(sb.has(w)) hit++; }
+    return hit / Math.max(wa.length, wb.length);
+  }
+  function __starsFromAcc(acc){
+    if(acc >= 80) return 3;
+    if(acc >= 60) return 2;
+    return 1;
+  }
+
+  function showReport(){
+    const m = $('reportMask');
+    const b = $('reportBody');
+    if(!m || !b) return;
+
+    const exp = Math.max(0, Number(__repState.expectedTotal||0));
+    const sub = Math.max(0, Number(__repState.submitted||0));
+    const cor = Math.max(0, Number(__repState.correct||0));
+
+    const practice = exp ? Math.round((sub/exp)*100) : (sub?100:0);
+    const acc = sub ? Math.round((cor/sub)*100) : 0;
+    const words = __repState.words ? __repState.words.size : 0;
+
+    const stars = __starsFromAcc(acc);
+    $('repStars').textContent = (stars>=1?'★':'☆') + (stars>=2?'★':'☆') + (stars>=3?'★':'☆');
+    $('repTitle').textContent = (stars===3?'很棒!':stars===2?'不錯!':'再來一次!');
+    $('repPractice').textContent = practice + '%';
+    $('repAccuracy').textContent = acc + '%';
+    $('repWords').textContent = String(words);
+
+    // chart
+    const pts = __repState.timeline && __repState.timeline.length ? __repState.timeline.slice(-12) : [];
+    const n = pts.length;
+    const line = $('repLine');
+    if(line){
+      if(n <= 1){
+        line.setAttribute('points', '0,100 280,100');
+      }else{
+        const xs = 280/(n-1);
+        const arr = [];
+        for(let i=0;i<n;i++){
+          const v = Math.max(0, Math.min(100, Number(pts[i]||0)));
+          const x = Math.round(i*xs);
+          const y = Math.round(110 - (v*0.9));
+          arr.push(x+','+y);
+        }
+        line.setAttribute('points', arr.join(' '));
+      }
+    }
+
+    m.style.display = 'flex';
+    m.setAttribute('aria-hidden','false');
+  }
+
+  function closeReport(){
+    const m = $('reportMask');
+    if(!m) return;
+    m.style.display = 'none';
+    m.setAttribute('aria-hidden','true');
+  }
+
   const toastEl = $("toast");
   const mask = $("mask");
   const modalBody = $("modalBody");
@@ -1253,7 +1392,11 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const btnPick = $("btnPick");
   const btnClose = $("btnClose");
+  const btnReportClose = $(\"btnReportClose\");
+  const btnReportOk = $(\"btnReportOk\");
+  const btnReportContinue = $(\"btnReportContinue\");
   const btnReplay = $("btnReplay");
+  const btnReport = $(\"btnReport\");
   const btnMic = $("btnMic");
   const btnType = $("btnType");
   const btnSkip = $("btnSkip");
@@ -1681,6 +1824,7 @@ async function speak(text){
       speak(currentTurn().en); // only speak AI turns
     }else{
       showToast("本情境完成 ✅");
+      try{ showReport(); }catch(e){}
     }
   }
 
@@ -1732,6 +1876,15 @@ async function speak(text){
       turns = [{en:"(No turns found in JSON)", zh:"JSON 沒有 turns/dialogue/lines/items 陣列", level: String(activeScene?.meta?.level || "A1")}];
     }
     turnIdx = 0;
+
+    // reset report stats for this scene
+    __repState.expectedTotal = turns.filter(t=>t && t.role==="USER" && (t.en||"" ).trim()).length;
+    __repState.submitted = 0;
+    __repState.correct = 0;
+    __repState.timeline = [];
+    __repState.words = new Set();
+    __repState.lastScene = activeSceneId || "";
+
     fillInput.value = "";
     updateUI();
     // autoplay first line
@@ -1761,32 +1914,7 @@ async function speak(text){
       const list = byWeek.get(wk) || [];
       if(!list.length) continue;
 
-      
-  // ===== 最小 UX 修正：只顯示「本週」＋「下一週提示」，其餘(包含往前週)一律不顯示 =====
-  if(wk !== unlockedWeek && wk !== unlockedWeek + 1) continue;
-
-  if(wk === unlockedWeek + 1){
-    const g = document.createElement("div");
-    g.className = "group";
-    const head = document.createElement("div");
-    head.className = "gHead";
-    head.innerHTML = `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`;
-    g.appendChild(head);
-
-    const row = document.createElement("div");
-    row.className = "item";
-    row.innerHTML = `
-      <div>
-        <div class="name">下一週即將解鎖</div>
-        <p class="sub">完成本週口說任務後，系統會自動開放 Week ${wk}</p>
-      </div>
-      <button class="ghost" style="height:42px;font-size:15px" disabled>尚未</button>
-    `;
-    g.appendChild(row);
-    modalBody.appendChild(g);
-    continue;
-  }
-// ===== UX：只顯示到「本週 + 下一週提示」=====
+      // ===== UX：只顯示到「本週 + 下一週提示」=====
       if(wk > unlockedWeek + 1) continue;
 
       // 下一週：只顯示一行提示，不列出三條
@@ -2065,6 +2193,13 @@ if(!firstId){
     else if(lastTts) speak(lastTts);
   });
 
+
+  if(btnReport) btnReport.addEventListener("click", showReport);
+  if(btnReportClose) btnReportClose.addEventListener("click", closeReport);
+  if(btnReportOk) btnReportOk.addEventListener("click", closeReport);
+  if(btnReportContinue) btnReportContinue.addEventListener("click", ()=>{ closeReport(); try{ fillInput.focus(); }catch(e){} });
+  const _rm = $("reportMask");
+  if(_rm) _rm.addEventListener("click", (e)=>{ if(e.target===_rm) closeReport(); });
   btnSkip.addEventListener("click", ()=>nextTurn());
 
   btnHint.addEventListener("click", ()=>{
@@ -2108,6 +2243,18 @@ if(!firstId){
     if(talkMode === "dialogue"){
       const said = (fillInput.value || "").trim();
       if(!said){ showToast("請先輸入你的回覆"); return; }
+
+      // report: score this reply vs expected
+      try{
+        const expected = (currentExpectedEn()||"").trim();
+        __repState.submitted++;
+        for(const w of __normWords(said)) __repState.words.add(w);
+        const sc = expected ? __overlapScore(said, expected) : 0;
+        if(sc >= 0.60) __repState.correct++;
+        const exp = Math.max(1, Number(__repState.expectedTotal||1));
+        const p = Math.round((__repState.submitted/exp)*100);
+        __repState.timeline.push(Math.max(0, Math.min(100, p)));
+      }catch(e){}
       // speak user's reply (optional)
       try{ await speak(said); }catch(e){}
       // clear input but keep the guidance panel
