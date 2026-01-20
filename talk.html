@@ -33,7 +33,7 @@
     const uid = user.id;
     const email = (user.email || '').toLowerCase();
 
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
+    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
 
     // --- read profile (best effort) ---
     const { data: prof, error: perr } = await supabase
@@ -56,7 +56,7 @@
       const r1 = await supabase
         .from('orders')
         .select('status,expires_at,paid_at,created_at')
-        .eq('user_id', u.id)
+        .eq('user_id', user.id)
         .order('created_at', { ascending:false })
         .limit(1);
       if (!r1.error && r1.data && r1.data.length) {
@@ -70,7 +70,7 @@
         const r2 = await supabase
           .from('orders')
           .select('status,expires_at,paid_at,created_at')
-          .eq('email', u.email)
+          .eq('email', user.email)
           .order('created_at', { ascending:false })
           .limit(1);
         if (!r2.error && r2.data && r2.data.length) {
@@ -85,10 +85,13 @@
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
     // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    const today = new Date().toISOString().slice(0,10);
-    let ok = (pe && pe >= today) || (oexp && oexp >= today);
-    if (!ok && hasPaid) {
-      // paid_at/created_at within last 400 days => treat as valid
+    let ok = (!paused) && (
+      (pexp && pexp >= todayStrStrStrStr) ||
+      (oexp && oexp >= todayStrStrStr)
+    );
+
+    // Paid but missing expires_at: treat as valid if payment is recent (<= 400 days), otherwise still allow (safety)
+    if (!ok && !paused && hasPaid) {
       const base = (opaid || ocreated || '').slice(0,10);
       if (base) {
         const t0 = new Date(base + 'T00:00:00Z').getTime();
@@ -99,14 +102,15 @@
         ok = true;
       }
     }
+
     // --- decide ---
     const ok = (!paused) && (
-      (pexp && pexp >= today) ||
-      (oexp && oexp >= today)
+      (pexp && pexp >= todayStrStrStrStr) ||
+      (oexp && oexp >= todayStrStrStr)
     );
 
     window.BW_SUB_OK = ok;
-    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
+    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= todayStrStrStrStr) ? pexp : (oexp || null);
     window.BW_PROFILE_OK = !perr;
 
     if (!ok) {
@@ -1221,10 +1225,15 @@ let __tvWatch = null;
   }catch(e){}
 
 
-  const INDEX_URL = new URL("/EduEnglish/talk/index.json", location.origin).toString();
+  const INDEX_URL = new URL("./index.json", location.href).toString();
   const FALLBACK_INDEX_URLS = [
-    new URL("./index.json", location.href).toString(),              // if talk.html inside /talk/
-    new URL("../talk/index.json", location.href).toString(),        // if talk.html inside /checklist/
+    // common deploy layouts
+    new URL("/talk/index.json", location.origin).toString(),            // if talk lives at /talk/
+    new URL("./talk/index.json", location.href).toString(),             // if talk.html at site root
+    new URL("./index.json", location.href).toString(),                  // if talk.html inside /talk/
+    new URL("../talk/index.json", location.href).toString(),            // if talk.html inside /account/ or /checklist/
+    // legacy repo path (safe to try; may 404)
+    new URL("/EduEnglish/talk/index.json", location.origin).toString()
   ];
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
@@ -1411,10 +1420,9 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       fillTitle.textContent = "你的回覆";
       const expected = (user?.en || "").trim();
       // build cloze + options for low difficulty guidance
-      const cl = makeCloze(expected, __bwSceneDefaultLevel(), activeScene?.task?.keywords || []);
-      __bwSetCloze(cl);
-      // default show cloze
-      fillEn.textContent = expected ? (cl.cloze || '請輸入你的回覆…') : '請輸入你的回覆…';
+      const cl = makeCloze(expected);
+      // default show cloze; user can press「提示」to reveal full expected answer temporarily
+      fillEn.textContent = expected ? (cl.cloze || "請輸入你的回覆…") : "請輸入你的回覆…";
       renderFillOptions(cl);
       fillHint.textContent = "對話模式：AI 先說一句，等你回覆（語音或輸入）才會進下一句。按「提示」可顯示完整建議句。";
       // do not auto-clear while typing
@@ -1450,165 +1458,58 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${turnIdx+1}/${Math.max(1,turns.length)}`;
   }
 
-  // ---- dialogue guidance: robust cloze (rule-based, no AI) ----
-  // Level 1: half-cloze (2-3 blanks)
-  // Level 2: harder cloze (3-4 blanks)
-  // Level 3: prompt-only (no blanks)
 
-  const __bwStop = new Set([
-    'a','an','the','and','or','but','so','because','if','when','while','though','although',
-    'to','of','in','on','at','for','from','with','by','about','as','into','over','under','between','through',
-    'is','am','are','was','were','be','been','being','do','does','did','done','doing',
-    'have','has','had','having','will','would','can','could','may','might','shall','should','must',
-    'i','you','he','she','it','we','they','me','him','her','us','them','my','your','his','her','its','our','their',
-    'this','that','these','those','here','there','please','thanks','thank',
-    'not','no','yes','okay','ok','well','just','very','really','maybe'
-  ]);
-
-  function __bwNormKeywords(keywords){
-    if(!Array.isArray(keywords)) return [];
-    return keywords.map(s=>String(s||'').trim().toLowerCase()).filter(Boolean);
-  }
-
-  function __bwTokenize(sentence){
-    const re = /([A-Za-z][A-Za-z'-]*|d+|[^ws]+|s+)/g;
-    const out = [];
-    let m;
-    while((m = re.exec(sentence)) !== null){
-      out.push({ t: m[0], i: out.length });
+  
+  // ---- dialogue guidance: cloze + options (A2-ish by default) ----
+  function makeCloze(expectedEn){
+    const s = (expectedEn||"").trim();
+    if(!s) return {cloze:"", answer:"", options:[]};
+    // pick a target word: prefer numbers, then last content word
+    const tokens = s.replace(/[?!.]/g,"").split(/\s+/).filter(Boolean);
+    let target = "";
+    // number?
+    for(const tk of tokens){
+      if(/\d/.test(tk)){ target = tk; break; }
     }
-    return out;
-  }
-
-  function __bwPickCandidates(tokens, keywordsNorm){
-    const cand = [];
-    for(let idx=0; idx<tokens.length; idx++){
-      const raw = tokens[idx].t;
-      if(!/^[A-Za-z][A-Za-z'-]*$/.test(raw)) continue;
-      const clean = raw.toLowerCase().replace(/^[^a-z]+|[^a-z]+$/g,'');
-      if(!clean) continue;
-      if(__bwStop.has(clean)) continue;
-      if(clean.length < 4) continue;
-
-      let score = 0;
-      if(keywordsNorm.includes(clean)) score += 100;
-      if(/(ing|ed|tion|sion|ment|able|ible|ness|ship|ive|ize|ise|ally)$/.test(clean)) score += 8;
-      if(/(check|change|fix|refund|resched|confirm|cancel|book|order|pay|charge|upgrade|downgrade|replace|return|deliver|report|recommend|explain|describe|help|need|want|prefer|request|suggest)/.test(clean)) score += 12;
-      score += Math.min(10, clean.length - 3);
-
-      cand.push({ idx, word: raw, norm: clean, score });
+    if(!target){
+      for(let i=tokens.length-1;i>=0;i--){
+        const tk = tokens[i].replace(/[^A-Za-z0-9'-]/g,"");
+        if(tk.length>=4 && !/^(this|that|with|have|your|what|where|when|could|would|please)$/i.test(tk)){
+          target = tokens[i];
+          break;
+        }
+      }
     }
-    cand.sort((a,b)=>(b.score-a.score) || (a.idx-b.idx));
-    return cand;
-  }
+    if(!target) target = tokens[Math.max(0, tokens.length-1)];
 
-  function __bwApplyBlanks(tokens, picks){
-    const pickSet = new Set(picks.map(p=>p.idx));
-    const answers = [];
-    let n = 1;
-    const out = tokens.map((tok, ti)=>{
-      if(!pickSet.has(ti)) return tok.t;
-      const ans = tok.t;
-      answers.push({ no: n, answer: ans });
-      n++;
-      const len = Math.max(4, Math.min(10, ans.replace(/[^A-Za-z]/g,'').length));
-      return '_'.repeat(len);
-    });
-    return { cloze: out.join(''), answers };
-  }
+    // build cloze
+    const esc = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const cloze = s.replace(new RegExp('\\b'+esc+'\\b'), '____');
 
-  function __bwShuffle(arr){
-    for(let i=arr.length-1;i>0;i--){
-      const j = Math.floor(Math.random()*(i+1));
-      const t = arr[i]; arr[i]=arr[j]; arr[j]=t;
-    }
-    return arr;
-  }
-
-  function __bwOptionsForAnswer(ans){
-    const pool = ['check','change','fix','confirm','reschedule','cancel','available','prefer','upgrade','downgrade','help','today','tomorrow','information','details','price','plan','data','billing','refund','replacement','support','manager','address','receipt','account'];
-    const a = String(ans||'').replace(/[^A-Za-z'-]/g,'').toLowerCase();
-    const opts = [String(ans||'')];
+    // distractor pool (small + stable)
+    const pool = ["gate","terminal","passport","boarding","information","coffee","small","large","help","today","tomorrow","please","thanks","baggage","counter","check-in"];
+    const lower = target.toLowerCase();
+    const opts = [target];
     for(const w of pool){
-      if(opts.length>=4) break;
-      if(w.toLowerCase() === a) continue;
-      opts.push(w);
+      if(opts.length>=3) break;
+      if(w.toLowerCase()===lower) continue;
+      // keep similar type: if target is number, add numbers
+      if(/\d/.test(target)){
+        if(/\d/.test(w)) opts.push(w);
+      }else{
+        if(!/\d/.test(w)) opts.push(w);
+      }
     }
-    return __bwShuffle(opts);
-  }
-
-  function __bwSceneDefaultLevel(){
-    const id = String(activeSceneId||'').toLowerCase();
-    if(id.includes('.challenge.')) return 3;
-    if(id.includes('.variation.')) return 2;
-    return 1;
-  }
-
-  // Cloze state (for grading / reroll)
-  let __bwCloze = null;
-  let __bwBlankCursor = 0;
-  let __bwSceneScoreSum = 0;
-  let __bwSceneScoreCount = 0;
-
-  function makeCloze(expectedEn, level, keywords){
-    const expected = String(expectedEn||'').trim();
-    const lv = (typeof level === 'number' && level>=1) ? level : __bwSceneDefaultLevel();
-
-    // Level 3: prompt-only
-    if(lv >= 3){
-      const goal = String(activeScene?.task?.goal || '').trim();
-      const hint = String(activeScene?.task?.hint || '').trim();
-      const prompt = goal || hint || '挑戰：用 1–2 句把問題說清楚，並提出你的要求。';
-      const out = { level: 3, expected, prompt, cloze: prompt, answers: [], optionsByBlank: [] };
-      __bwCloze = out;
-      __bwBlankCursor = 0;
-      return out;
+    // fallback for number
+    if(/\d/.test(target) && opts.length<3){
+      const n = parseInt(target.replace(/\D/g,""),10) || 12;
+      while(opts.length<3){
+        const cand = String(n + (opts.length===1?1:2));
+        if(!opts.includes(cand)) opts.push(cand);
+      }
     }
-
-    const keywordsNorm = __bwNormKeywords(keywords || activeScene?.task?.keywords || []);
-    const tokens = __bwTokenize(expected);
-    const cand = __bwPickCandidates(tokens, keywordsNorm);
-
-    const wordCount = tokens.filter(t=>/^[A-Za-z][A-Za-z'-]*$/.test(t.t)).length;
-    const maxBlanks = (lv===2)
-      ? (wordCount>=14 ? 4 : 3)
-      : (wordCount>=12 ? 3 : 2);
-
-    const picks = [];
-    for(const c of cand){
-      if(picks.length >= maxBlanks) break;
-      const tooClose = picks.some(p=>Math.abs(p.idx - c.idx) <= 2);
-      if(tooClose) continue;
-      picks.push(c);
-    }
-    if(!picks.length && cand.length) picks.push(cand[0]);
-
-    const applied = __bwApplyBlanks(tokens, picks);
-    const answers = applied.answers || [];
-    const optionsByBlank = answers.map(a=>__bwOptionsForAnswer(a.answer));
-
-    const out = { level: lv, expected, cloze: applied.cloze, answers, optionsByBlank };
-    __bwCloze = out;
-    __bwBlankCursor = 0;
-    return out;
+    return {cloze, answer: target, options: opts};
   }
-
-  function __bwGetCloze(){ return __bwCloze; }
-  function __bwSetCloze(cl){ __bwCloze = cl; __bwBlankCursor = 0; }
-
-  function __bwResetSceneScore(){ __bwSceneScoreSum = 0; __bwSceneScoreCount = 0; }
-  function __bwAddSceneScore(pct){
-    const v = Number(pct);
-    if(!Number.isFinite(v)) return;
-    __bwSceneScoreSum += v;
-    __bwSceneScoreCount += 1;
-    const avg = Math.round(__bwSceneScoreSum / Math.max(1, __bwSceneScoreCount));
-    const r = document.getElementById('rComplete');
-    if(r) r.textContent = String(avg);
-    // commit to dashboard
-    try{ if(typeof BW_commitTalkScore === 'function') BW_commitTalkScore(avg); }catch(e){}
-  }
-
 
   function ensureFillOpts(){
     let el = document.getElementById("fillOpts");
@@ -1628,60 +1529,31 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   function renderFillOptions(cl){
     const el = ensureFillOpts();
-    el.innerHTML = '';
-    if(!cl) return;
-    // Level 3: no options
-    if(cl.level >= 3) return;
-
-    const optsArr = Array.isArray(cl.optionsByBlank) ? cl.optionsByBlank : [];
-    if(optsArr.length === 0) return;
-
-    const cur = (typeof __bwBlankCursor === 'number') ? __bwBlankCursor : 0;
-    const options = optsArr[Math.max(0, Math.min(cur, optsArr.length-1))] || [];
-    if(options.length === 0) return;
-
-    const label = document.createElement('div');
-    label.style.fontSize = '11px';
-    label.style.color = 'var(--muted)';
-    label.textContent = '選空格 ' + (cur+1) + '/' + optsArr.length + '：點一下快速填入';
-    el.appendChild(label);
-
-    const row = document.createElement('div');
-    row.style.display = 'flex';
-    row.style.flexWrap = 'wrap';
-    row.style.gap = '10px';
-    row.style.marginTop = '8px';
-
-    options.forEach((opt)=>{
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'optBtn';
+    el.innerHTML = "";
+    if(!cl || !cl.options || cl.options.length===0) return;
+    cl.options.forEach((opt)=>{
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "optBtn";
       b.textContent = opt;
-      b.style.border = '1px solid var(--line)';
-      b.style.background = '#fff';
-      b.style.borderRadius = '999px';
-      b.style.padding = '10px 14px';
-      b.style.cursor = 'pointer';
-      b.addEventListener('click', ()=>{
-        // Initialize draft with cloze template if empty
-        if(!fillInput.value || String(fillInput.value).trim()===''){
-          fillInput.value = cl.cloze || cl.expected || '';
-        }
-        // Replace first blank run with opt
-        if(String(fillInput.value).includes('_')){
-          fillInput.value = String(fillInput.value).replace(/_+/, opt);
-        }
+      b.style.border = "1px solid var(--line)";
+      b.style.background = "#fff";
+      b.style.borderRadius = "999px";
+      b.style.padding = "10px 14px";
+      b.style.cursor = "pointer";
+      b.addEventListener("click", ()=>{
+        const expected = (currentExpectedEn()||"").trim();
+        if(!expected){ fillInput.value = opt; return; }
+        const cl2 = makeCloze(expected);
+        const completed = (cl2.cloze||"").includes("____")
+          ? cl2.cloze.replace("____", opt)
+          : expected;
+        fillInput.value = completed;
         fillInput.focus();
-        // Move cursor, re-render next blank options
-        __bwBlankCursor = Math.min(optsArr.length-1, (cur+1));
-        renderFillOptions(__bwGetCloze());
       });
-      row.appendChild(b);
+      el.appendChild(b);
     });
-
-    el.appendChild(row);
   }
-
 
   function currentExpectedEn(){
     if(talkMode!=="dialogue") return "";
@@ -1884,7 +1756,6 @@ try{showReport();}catch(e){}
     }
     turnIdx = 0;
     fillInput.value = "";
-    try{ __bwResetSceneScore(); }catch(e){}
     updateUI();
     // autoplay first line
     speak(currentTurn().en);
@@ -2229,8 +2100,7 @@ if(!firstId){
       // auto revert to cloze after 3 seconds
       clearTimeout(window.__bwHintTimer);
       window.__bwHintTimer = setTimeout(()=>{
-        const cl = makeCloze(expected, (__bwGetCloze() && __bwGetCloze().level) ? __bwGetCloze().level : __bwSceneDefaultLevel(), activeScene?.task?.keywords || []);
-        __bwSetCloze(cl);
+        const cl = makeCloze(expected);
         fillEn.textContent = cl.cloze || expected;
         renderFillOptions(cl);
       }, 3000);
@@ -2243,23 +2113,7 @@ if(!firstId){
   btnSave.addEventListener("click", saveLine);
 
   btnFill.addEventListener("click", ()=>{
-    // A) Reroll cloze + cycle level (1->2->3) for current expected line
-    if(talkMode === 'dialogue'){
-      const expected = (currentExpectedEn() || '').trim();
-      if(!expected){ showToast('本句沒有建議回覆'); return; }
-      const cur = __bwGetCloze();
-      const nextLv = cur && cur.level ? ((cur.level % 3) + 1) : 1;
-      const cl = makeCloze(expected, nextLv, activeScene?.task?.keywords || []);
-      __bwSetCloze(cl);
-      fillEn.textContent = cl.cloze || expected;
-      renderFillOptions(cl);
-      // put template into input for fast fill (L1/L2)
-      if(cl.level < 3){ fillInput.value = cl.cloze || ''; }
-      else { fillInput.value = ''; }
-      fillInput.focus();
-      showToast('填空引導：Level ' + cl.level);
-    }
-    fillCard.scrollIntoView({behavior:'smooth', block:'start'});
+    fillCard.scrollIntoView({behavior:"smooth", block:"start"});
     fillInput.focus();
   });
 
@@ -2277,46 +2131,15 @@ if(!firstId){
     if(talkMode === "dialogue"){
       const said = (fillInput.value || "").trim();
       if(!said){ showToast("請先輸入你的回覆"); return; }
-
-      const expected = (currentExpectedEn() || "").trim();
-      const cl = __bwGetCloze() || makeCloze(expected, __bwSceneDefaultLevel(), activeScene?.task?.keywords || []);
-
-      // B) Score: blank-based
-      let total = (cl.answers && cl.answers.length) ? cl.answers.length : 0;
-      let correct = 0;
-      if(total > 0){
-        const low = said.toLowerCase();
-        cl.answers.forEach(a=>{
-          const w = String(a.answer||'').toLowerCase();
-          if(w && low.includes(w)) correct++;
-        });
-      }
-      // If Level 3 (no blanks), simple similarity (did they type something meaningful)
-      let pct = 65;
-      if(cl.level >= 3){
-        pct = Math.max(60, Math.min(100, Math.round(60 + Math.min(40, said.length))));
-        correct = 1; total = 1;
-      }else if(total > 0){
-        pct = Math.round((correct / Math.max(1,total)) * 100);
-      }
-
       // speak user's reply (optional)
       try{ await speak(said); }catch(e){}
-
-      // accumulate score and update report
-      try{ __bwAddSceneScore(pct); }catch(e){}
-
-      // feedback
-      showToast('得分 ' + correct + '/' + total + ' · ' + pct + '%');
-
-      // clear input
+      // clear input but keep the guidance panel
       fillInput.value = "";
-
-      // advance to NEXT AI line
+      showToast("已送出 ✅");
+      // advance to NEXT AI line (skip USER expected line)
       nextTurn();
       return;
     }
-
     // non-dialogue (fill practice)
     const said = (fillInput.value || "").trim();
     if(!said){ showToast("請先填空"); return; }
@@ -2400,11 +2223,10 @@ if(!firstId){
 
 <script>
 const TEACHER_AZURE_VOICE = {
-  "diana.mp4":  "en-US-AvaNeural",
+  "diana.mp4":  "en-US-AnaNeural",
   "emma.mp4":   "en-US-AriaNeural",
-  "sophia.mp4": "en-GB-SoniaNeural"
+  "sophia.mp4": "en-AU-NatashaNeural"
 };
-function getTeacherVoice
 const TEACHER_TTS_STYLE = {
   "diana.mp4":  { rate: "-2%", pitch: "+10%" },
   "emma.mp4":   { rate: "+6%", pitch: "+2%" },
