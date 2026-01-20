@@ -85,24 +85,28 @@
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
     // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    const todayISO = new Date().toISOString().slice(0,10);
-    let okTmp = (pexp && pexp >= todayISO) || (oexp && oexp >= todayISO);
-    if (!okTmp && hasPaid) {
+    const today = new Date().toISOString().slice(0,10);
+    let ok = (pe && pe >= today) || (oexp && oexp >= today);
+    if (!ok && hasPaid) {
       // paid_at/created_at within last 400 days => treat as valid
       const base = (opaid || ocreated || '').slice(0,10);
       if (base) {
         const t0 = new Date(base + 'T00:00:00Z').getTime();
         const t1 = Date.now();
         const days = (t1 - t0) / 86400000;
-        if (days >= 0 && days <= 400) okTmp = true;
+        if (days >= 0 && days <= 400) ok = true;
       } else {
-        okTmp = true;
+        ok = true;
       }
     }
     // --- decide ---
-    const ok = (!paused) && okTmp;
-window.BW_SUB_OK = ok;
-    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= todayISO) ? pexp : (oexp || null);
+    const ok = (!paused) && (
+      (pexp && pexp >= today) ||
+      (oexp && oexp >= today)
+    );
+
+    window.BW_SUB_OK = ok;
+    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
     window.BW_PROFILE_OK = !perr;
 
     if (!ok) {
@@ -406,6 +410,9 @@ a{color:inherit}
 .taskItem .k{font-size:14px !important; margin-bottom:4px !important;}
 .taskItem .v{font-size:12px !important; line-height:1.2 !important;}
 
+
+/* BW: hide fav */
+#btnFav, .btnFav, button[data-action='fav']{display:none !important;}
 </style>
 
 <style id="v8-redo-patch">
@@ -1217,7 +1224,7 @@ let __tvWatch = null;
   }catch(e){}
 
 
-  const INDEX_URL = new URL("/EduEnglish/talk/index.json", location.origin).toString();
+  const INDEX_URL = new URL(TALK_BASE + 'index.json", location.origin).toString();
   const FALLBACK_INDEX_URLS = [
     new URL("./index.json", location.href).toString(),              // if talk.html inside /talk/
     new URL("../talk/index.json", location.href).toString(),        // if talk.html inside /checklist/
@@ -1431,12 +1438,12 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     const lz2 = document.getElementById("lineZhInline"); if(lz2) lz2.textContent = t.zh ? t.zh : " ";
     levBadge.textContent = t.level || "A1";
 
-    const fillText = (t.fill && t.fill.trim()) ? t.fill : (t.en ? guessFillFromSentence(t.en) : defaultFillByScene(activeSceneKey));
-fillTitle.textContent = "填空例句（半填空）";
+    const fillText = t.fill && t.fill.trim() ? t.fill : guessFillFromSentence(t.en);
+    fillTitle.textContent = "填空例句（半填空）";
     fillEn.textContent = fillText || "Can I get a ____ , please?";
-    fillCard.style.display = "";
-
-    fillHint.textContent = (t.hint && t.hint.trim()) ? t.hint : "照著上面句型填空：先填 1 個字就好。Tip: I want / I need / I'd like / can I / where is / how much";
+    fillHint.textContent = t.hint && t.hint.trim()
+      ? t.hint
+      : "先用「填空」完成一句，再改成你自己的說法。";
     if(!fillInput.value) fillInput.value = "";
 
     weekLabel.textContent = "W" + String(activeWeek);
@@ -1550,18 +1557,7 @@ fillTitle.textContent = "填空例句（半填空）";
     return (user && user.en) ? user.en : "";
   }
 
-function defaultFillByScene(scene){
-    const s = String(scene||"").toLowerCase();
-    if(s.includes("coffee")) return "I'd like a ____ , please.";
-    if(s.includes("directions")) return "How do I get to the ____ ?";
-    if(s.includes("airport")) return "Where is the ____ gate?";
-    if(s.includes("business")) return "Could we schedule a ____ meeting?";
-    if(s.includes("home") || s.includes("house")) return "I feel ____ at home.";
-    return "I would like to ____ .";
-  }
-
-
-  function guessFillFromSentence(en){
+function guessFillFromSentence(en){
     if(!en) return "";
     // Simple heuristic: blank the longest noun-ish token or last content word
     const s = String(en).trim();
@@ -1958,7 +1954,10 @@ async function init(){
     renderPicker();
 
     // pick scene
-    const params = new URLSearchParams(location.search);
+    const TALK_BASE = TALK_BASE + '';
+const TALK_INDEX_URL = TALK_BASE + 'index.json';
+
+const params = new URLSearchParams(location.search);
     const legacyScene = (params.get("scene")||"").trim(); // e.g. airport / coffee_shop / w02.variation.airport
     const forcedScene = null;
     let forcedByParam = false;
@@ -2111,22 +2110,20 @@ if(!firstId){
   btnSave.addEventListener("click", saveLine);
 
   btnFill.addEventListener("click", ()=>{
-    // ✅ 確保填空卡片一定可見（避免被「隱藏」後學員找不到）
-    fillCard.style.display = "";
+    // 強制顯示填空卡（避免曾按過隱藏後永遠叫不出來）
+    try{ fillCard.style.display = ""; }catch(e){}
     fillCard.scrollIntoView({behavior:"smooth", block:"start"});
-    // ✅ 半填空：若輸入框是空的，就先塞入「填空例句」讓學員直接改一個字即可
     const sk = (fillEn && fillEn.textContent) ? String(fillEn.textContent).trim() : "";
     if(!fillInput.value && sk){
       fillInput.value = sk;
-      // 把游標放到第一個空格附近
       const p = fillInput.value.indexOf("____");
-      if(p >= 0){
-        try{ fillInput.setSelectionRange(p, p+4); }catch(e){}
-      }
+      if(p >= 0){ try{ fillInput.setSelectionRange(p, p+4); }catch(e){} }
     }
     fillInput.focus();
+  });fillInput.focus();
   });
-btnHideFill.addEventListener("click", ()=>{
+
+  btnHideFill.addEventListener("click", ()=>{
     const hidden = fillCard.style.display === "none";
     fillCard.style.display = hidden ? "" : "none";
   });
@@ -2236,6 +2233,7 @@ const TEACHER_AZURE_VOICE = {
   "emma.mp4":   "en-US-AriaNeural",
   "sophia.mp4": "en-GB-SoniaNeural"
 };
+function getTeacherVoice
 const TEACHER_TTS_STYLE = {
   "diana.mp4":  { rate: "-2%", pitch: "+10%" },
   "emma.mp4":   { rate: "+6%", pitch: "+2%" },
