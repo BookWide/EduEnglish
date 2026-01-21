@@ -97,6 +97,36 @@
         if (days >= 0 && days <= 400) ok = true;
       } else {
         ok = true;
+      }
+    }
+    // --- decide ---
+    const ok = (!paused) && (
+      (pexp && pexp >= today) ||
+      (oexp && oexp >= today)
+    );
+
+    window.BW_SUB_OK = ok;
+    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
+    window.BW_PROFILE_OK = !perr;
+
+    if (!ok) {
+      location.replace('/account/subscription.html');
+      return;
+    }
+  } catch (e) {
+    location.replace('/account/subscription.html?err=guard');
+  }
+})();
+</script>
+<!-- ===== /BookWide Guard ===== -->
+
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Talk（每週口說）｜BookWide</title>
+<style>
+:root{
+  --bg:#f4f6fb; --card:#fff; --ink:#0b1220; --muted:#5b667a; --line:#e6eaf0;
+  --shadow:0 10px 28px rgba(10,20,40,.10); --r:18px; --r2:24px;
   --brand:#0b66ff; --brand2:#084fc6; --soft:#f6f8fb;
 }
 *{box-sizing:border-box}
@@ -1669,7 +1699,7 @@ async function speak(text){
       if(!("speechSynthesis" in window)){ __tvStop(); return; }
       const u = new SpeechSynthesisUtterance(text);
       u.lang = "en-US";
-      u.rate = 1.0;
+      u.rate = 0.9;
       window.speechSynthesis.speak(u);
       u.onend = ()=>{ __tvStop(); };
       u.onerror = ()=>{ __tvStop(); };
@@ -1707,8 +1737,16 @@ async function speak(text){
       updateUI();
       speak(currentTurn().en); // only speak AI turns
     }else{
+      // ✅ 結尾固定一句，不要唸你的句子
+      try{
+        heroEn.textContent = "See you soon.";
+        heroZh.textContent = "下次見。";
+        lineEn.textContent = "See you soon.";
+        lineZh.textContent = "下次見。";
+        speak("See you soon.");
+      }catch(e){}
       showToast("本情境完成 ✅");
-try{showReport();}catch(e){}
+      try{showReport();}catch(e){}
     }
   }
 
@@ -2134,26 +2172,28 @@ if(!firstId){
 
   btnSendFill.addEventListener("click", async ()=>{
     if(talkMode === "dialogue"){
+      stopRec();
       const said = (fillInput.value || "").trim();
       if(!said){ showToast("請先輸入你的回覆"); return; }
-      // speak user's reply (optional)
-      try{ await speak(said); }catch(e){}
+
+      // ✅ 不朗讀你的句子（避免最後一句被 AI「重唸」）
       // clear input but keep the guidance panel
       fillInput.value = "";
       showToast("已送出 ✅");
-      // advance to NEXT AI line (skip USER expected line)
+
+      // advance to NEXT AI line
       nextTurn();
       return;
     }
     // non-dialogue (fill practice)
+    stopRec();
     const said = (fillInput.value || "").trim();
     if(!said){ showToast("請先填空"); return; }
     await speak(said);
     showToast("做得好 ✅");
   });
 
-
-  btnType.addEventListener("click", ()=>{
+btnType.addEventListener("click", ()=>{
     if(talkMode === "dialogue"){
       // default show suggested reply (next USER turn)
       let aiIdx = turnIdx;
@@ -2180,40 +2220,64 @@ if(!firstId){
   // Speech recognition
   let rec = null;
   function startRec(){
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if(!SR){
-      showToast("此瀏覽器不支援語音辨識");
-      return;
-    }
-    if(rec){ try{rec.stop()}catch(e){} }
-    rec = new SR();
-    rec.lang = "en-US";
-    rec.interimResults = false;
-    rec.maxAlternatives = 1;
-    $("dotLive").style.background = "#ef4444";
-    rec.onresult = (ev)=>{
-      const said = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) ? ev.results[0][0].transcript : "";
-      $("dotLive").style.background = "#22c55e";
-      if(!said.trim()){
-        showToast("沒有聽清楚，請再說一次");
-        return;
+    if(!SR){ toast('這個瀏覽器不支援語音辨識'); return; }
+    try{
+      // stop previous
+      if(rec){
+        try{ rec.onresult=null; rec.onerror=null; rec.onend=null; rec.stop(); }catch(e){}
+        rec=null;
       }
-      // put into input and submit (dialogue mode)
-      fillInput.value = said.trim();
-      showToast("你說： " + said.trim());
-      // auto send -> advance to next AI
-      setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 350);
-    };
-    rec.onerror = ()=>{
-      $("dotLive").style.background = "#22c55e";
-      showToast("語音辨識失敗");
-    };
-    rec.onend = ()=>{
-      $("dotLive").style.background = "#22c55e";
-    };
-    try{ rec.start(); }catch(e){ showToast("語音辨識無法啟動"); }
+      if(recSilenceTimer){ clearTimeout(recSilenceTimer); recSilenceTimer=null; }
+
+      rec = new SR();
+      rec.lang = 'en-US';
+      rec.interimResults = true;   // show interim text
+      rec.continuous = true;       // keep listening until we stop
+
+      let finalText = '';
+      rec.onresult = (e)=>{
+        let interim = '';
+        for(let i=e.resultIndex;i<e.results.length;i++){
+          const r = e.results[i];
+          const t = (r[0] && r[0].transcript ? r[0].transcript : '').trim();
+          if(!t) continue;
+          if(r.isFinal){
+            finalText = (finalText ? (finalText+' ') : '') + t;
+          }else{
+            interim = t;
+          }
+        }
+        const show = (finalText + (interim ? (' ' + interim) : '')).trim();
+        if(show) inputFill.value = show;
+
+        // ✅ 不要太敏感：等你「停 1.4 秒」才自動送出
+        if(recSilenceTimer) clearTimeout(recSilenceTimer);
+        recSilenceTimer = setTimeout(()=>{
+          const v = (inputFill.value||'').trim();
+          if(v.length >= 2){
+            try{ rec.stop(); }catch(e){}
+            rec = null;
+            btnSendFill.click();
+          }
+        }, 1400);
+      };
+      rec.onerror = (e)=>{ console.warn('[rec]', e); toast('語音辨識失敗，請再試一次'); };
+      rec.onend = ()=>{ /* keep silence timer */ };
+
+      rec.start();
+      toast('開始聽你說…（說完停一下會自動送出）');
+    }catch(err){
+      console.error(err);
+      toast('語音辨識初始化失敗');
+    }
   }
-  btnMic.addEventListener("click", startRec);
+
+  function stopRec(){
+    try{ if(rec){ rec.stop(); rec=null; } }catch(e){}
+    if(recSilenceTimer){ clearTimeout(recSilenceTimer); recSilenceTimer=null; }
+  }
+
+btnMic.addEventListener("click", startRec);
 
   // Avoid iOS rubber band scroll / keep stable
   document.addEventListener("touchmove", (e)=>{
