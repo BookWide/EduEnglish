@@ -33,7 +33,7 @@
     const uid = user.id;
     const email = (user.email || '').toLowerCase();
 
-    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
 
     // --- read profile (best effort) ---
     const { data: prof, error: perr } = await supabase
@@ -56,7 +56,7 @@
       const r1 = await supabase
         .from('orders')
         .select('status,expires_at,paid_at,created_at')
-        .eq('user_id', user.id)
+        .eq('user_id', uid)
         .order('created_at', { ascending:false })
         .limit(1);
       if (!r1.error && r1.data && r1.data.length) {
@@ -70,7 +70,7 @@
         const r2 = await supabase
           .from('orders')
           .select('status,expires_at,paid_at,created_at')
-          .eq('email', user.email)
+          .eq('email', email)
           .order('created_at', { ascending:false })
           .limit(1);
         if (!r2.error && r2.data && r2.data.length) {
@@ -85,32 +85,34 @@
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
     // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    let ok = (!paused) && (
-      (pexp && pexp >= todayStrStrStrStr) ||
-      (oexp && oexp >= todayStrStrStr)
-    );
+    let okPaid = false;
 
-    // Paid but missing expires_at: treat as valid if payment is recent (<= 400 days), otherwise still allow (safety)
-    if (!ok && !paused && hasPaid) {
-      const base = (opaid || ocreated || '').slice(0,10);
-      if (base) {
-        const t0 = new Date(base + 'T00:00:00Z').getTime();
-        const t1 = Date.now();
-        const days = (t1 - t0) / 86400000;
-        if (days >= 0 && days <= 400) ok = true;
-      } else {
-        ok = true;
-      }
-    }
+// baseline validity by explicit expires_at (profile or order)
+let ok = (pexp && pexp >= today) || (oexp && oexp >= today);
 
-    // --- decide ---
-    const ok = (!paused) && (
-      (pexp && pexp >= todayStrStrStrStr) ||
-      (oexp && oexp >= todayStrStrStr)
-    );
+// If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
+// We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
+if (!ok && hasPaid) {
+  // paid_at/created_at within last 400 days => treat as valid
+  const base = (opaid || ocreated || '').slice(0,10);
+  if (base) {
+    const t0 = new Date(base + 'T00:00:00Z').getTime();
+    const t1 = Date.now();
+    const days = (t1 - t0) / 86400000;
+    if (days >= 0 && days <= 400) okPaid = true;
+  } else {
+    okPaid = true;
+  }
+}
 
-    window.BW_SUB_OK = ok;
-    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= todayStrStrStrStr) ? pexp : (oexp || null);
+// --- decide ---
+ok = (!paused) && (
+  (pexp && pexp >= today) ||
+  (oexp && oexp >= today) ||
+  okPaid
+);
+window.BW_SUB_OK = ok;
+    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
     window.BW_PROFILE_OK = !perr;
 
     if (!ok) {
@@ -1225,15 +1227,14 @@ let __tvWatch = null;
   }catch(e){}
 
 
-  const INDEX_URL = new URL("./index.json", location.href).toString();
+  const INDEX_URL = new URL("/EduEnglish/talk/index.json", location.origin).toString();
   const FALLBACK_INDEX_URLS = [
-    // common deploy layouts
-    new URL("/talk/index.json", location.origin).toString(),            // if talk lives at /talk/
-    new URL("./talk/index.json", location.href).toString(),             // if talk.html at site root
-    new URL("./index.json", location.href).toString(),                  // if talk.html inside /talk/
-    new URL("../talk/index.json", location.href).toString(),            // if talk.html inside /account/ or /checklist/
-    // legacy repo path (safe to try; may 404)
-    new URL("/EduEnglish/talk/index.json", location.origin).toString()
+    // Most likely deployments first (reduces noisy 404s)
+    new URL("./talk/index.json", location.href).toString(),          // talk.html at site root, data in /talk/
+    new URL("./EduEnglish/talk/index.json", location.href).toString(), // repo folder kept under site root
+    new URL("./index.json", location.href).toString(),              // talk.html and index.json same folder
+    new URL("/talk/index.json", location.origin).toString(),        // absolute /talk/
+    new URL("/EduEnglish/talk/index.json", location.origin).toString() // absolute /EduEnglish/talk/
   ];
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
@@ -1942,7 +1943,7 @@ async function init(){
     // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
-    activeWeek = (savedWeek && savedWeek<=unlockedWeek)? savedWeek : unlockedWeek;// 允許回到已解鎖的舊週
+    activeWeek = unlockedWeek;// 強制當週為主，避免選到已鎖週
 
     // 模式：對話(dialogue) / 跟讀(shadow)
     try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
@@ -1961,13 +1962,6 @@ async function init(){
 
     // pick scene
     const params = new URLSearchParams(location.search);
-
-    // URL week override: allow visiting any unlocked week
-    const qWeek = Number(params.get("week")||"0");
-    if(qWeek && qWeek>0 && qWeek<=Number(unlockedWeek||0)) {
-      activeWeek = qWeek;
-      try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
-    }
     const legacyScene = (params.get("scene")||"").trim(); // e.g. airport / coffee_shop / w02.variation.airport
     const forcedScene = null;
     let forcedByParam = false;
@@ -2042,7 +2036,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          if(Number(mapped.week)<=Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
+          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
           try{ localStorage.setItem(LS_LAST_SCENE, mapped.id); }catch(_e){}
         }
@@ -2059,7 +2053,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          if(Number(mapped.week)<=Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
+          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
         }
       }else{
@@ -2230,10 +2224,11 @@ if(!firstId){
 
 <script>
 const TEACHER_AZURE_VOICE = {
-  "diana.mp4":  "en-US-AnaNeural",
+  "diana.mp4":  "en-US-AvaNeural",
   "emma.mp4":   "en-US-AriaNeural",
-  "sophia.mp4": "en-AU-NatashaNeural"
+  "sophia.mp4": "en-GB-SoniaNeural"
 };
+function getTeacherVoice
 const TEACHER_TTS_STYLE = {
   "diana.mp4":  { rate: "-2%", pitch: "+10%" },
   "emma.mp4":   { rate: "+6%", pitch: "+2%" },
