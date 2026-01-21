@@ -1365,22 +1365,96 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   // ---- turns normalize (defensive) ----
   function normalizeTurns(raw){
-    const arr = Array.isArray(raw)
-      ? raw
-      : (raw && (raw.turns || raw.dialogue) ? (raw.turns || raw.dialogue) : []);
-    return (arr||[]).map(t=>{
+    // Support many legacy shapes across W1–W54:
+    // - {turns:[...]} or {dialogue:[...]} or {lines:[...]} or {items:[...]} or direct array
+    const src = raw || {};
+    const arr = Array.isArray(src) ? src
+      : (Array.isArray(src.turns) ? src.turns
+        : (Array.isArray(src.dialogue) ? src.dialogue
+          : (Array.isArray(src.lines) ? src.lines
+            : (Array.isArray(src.items) ? src.items : []))));
+
+    const out = (arr||[]).map(t=>{
       if(!t) return null;
-      const hasAI = !!(t.en || t.zh || t.english || t.text);
-      const hasUser = !t.en && (t.hint_en || t.hint_zh);
-      const en = (t.en ?? (hasUser ? t.hint_en : "") ?? t.english ?? t.text ?? '').toString().trim();
-      const zh = (t.zh ?? (hasUser ? t.hint_zh : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
-      const role = ((t.role ?? t.speaker ?? '').toString().trim()) || (hasUser ? "USER" : "AI");
-      const level = (t.level ?? t.cefr ?? '').toString().trim() || 'A1';
-      const hint = (t.hint ?? '').toString().trim();
-      const fill = (t.fill ?? t.blank ?? '').toString();
-      const answer = (t.answer ?? '').toString().trim();
-      return { en, zh, role, level, hint, fill, answer };
-    }).filter(x=>x && x.en);
+
+      // Allow string-only arrays
+      if(typeof t === "string"){
+        const s = t.trim();
+        if(!s) return null;
+        return { en:s, zh:"", role:"AI", level:String(src?.meta?.level || src?.level || "A1"), hint:"", fill:"", answer:"" };
+      }
+
+      if(typeof t !== "object") return null;
+
+      const rawRole = String(t.role ?? t.speaker ?? t.who ?? t.by ?? t.actor ?? "").trim();
+      const r = rawRole.toLowerCase();
+
+      // Detect "user-like" vs "ai-like"
+      const isUserLike =
+        r==="user" || r==="student" || r==="learner" || r==="you" || r==="usr" ||
+        r==="u" || r==="me" || r==="client" ||
+        r==="student:" || r==="user:" ||
+        r==="learner:";
+
+      const isAiLike =
+        r==="ai" || r==="assistant" || r==="bot" || r==="teacher" || r==="tutor" ||
+        r==="system" || r==="coach";
+
+      // Pull english/chinese from many field names
+      const en =
+        (t.en ?? t.text_en ?? t.english ?? t.eng ?? t.text ?? t.content ??
+         t.sentence_en ?? t.sentenceEn ??
+         t.expected_en ?? t.expectedEn ??
+         t.user_en ?? t.userEn ??
+         t.reply_en ?? t.replyEn ??
+         t.answer_en ?? t.answerEn ??
+         t.hint_en ?? t.hintEn ??
+         "").toString().trim();
+
+      const zh =
+        (t.zh ?? t.text_zh ?? t.chinese ?? t.cn ?? t.tw ??
+         t.sentence_zh ?? t.sentenceZh ??
+         t.hint_zh ?? t.hintZh ??
+         "").toString().trim();
+
+      // Some legacy "USER expected line" stores only hint_en/hint_zh
+      const role = (String(t.role ?? "").trim() ? String(t.role).trim() : (isUserLike ? "USER" : "AI"));
+      const roleFixed = isAiLike ? "AI" : (isUserLike ? "USER" : (role.toUpperCase()==="USER" ? "USER" : "AI"));
+
+      const level = (t.level ?? t.cefr ?? src?.meta?.level ?? src?.level ?? "").toString().trim() || "A1";
+      const hint = (t.hint ?? t.tip ?? t.prompt ?? "").toString().trim();
+      const fill = (t.fill ?? t.blank ?? t.cloze ?? "").toString();
+      const answer = (t.answer ?? t.ans ?? t.key ?? "").toString().trim();
+
+      if(!en) return null;
+      return { en, zh, role: roleFixed, level, hint, fill, answer };
+    }).filter(Boolean);
+
+    // If NO USER line exists at all, try infer from task/meta fields
+    const hasUser = out.some(x => x.role === "USER");
+    if(!hasUser){
+      const task = (src.task || src.meta || src) || {};
+      const cand =
+        (task.user_en ?? task.userEn ??
+         task.expected_en ?? task.expectedEn ??
+         task.hint_en ?? task.hintEn ??
+         task.cloze_source_en ?? task.clozeSourceEn ??
+         task.reply_en ?? task.replyEn ??
+         task.answer_en ?? task.answerEn ??
+         task.suggest_en ?? task.suggestEn ??
+         "").toString().trim();
+
+      if(cand){
+        const candZh = (task.hint_zh ?? task.hintZh ?? task.user_zh ?? task.userZh ?? "").toString().trim();
+        const userTurn = { en: cand, zh: candZh, role:"USER", level: String(src?.meta?.level || src?.level || "A1"), hint:"", fill:"", answer:"" };
+        // Insert after first AI if possible so dialogue mode can find it
+        const aiIdx = out.findIndex(x=>x.role==="AI");
+        if(aiIdx>=0) out.splice(aiIdx+1, 0, userTurn);
+        else out.push(userTurn);
+      }
+    }
+
+    return out;
   }
 
   function getOverrides(){
