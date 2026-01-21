@@ -1172,6 +1172,42 @@ body{line-height:1.1}
     return await fetchFirst(urls);
   }
 
+  function normalizeLesson(raw){
+    const lesson = (raw && typeof raw==='object') ? raw : {};
+    // accept legacy field names
+    let turns = Array.isArray(lesson.turns) ? lesson.turns : (Array.isArray(lesson.dialogue) ? lesson.dialogue : []);
+    if(!Array.isArray(turns)) turns = [];
+
+    turns = turns.map(t=>{
+      if(!t || typeof t!=='object') return t;
+      const r0 = String(t.role || t.speaker || t.who || '').toLowerCase();
+      let role = t.role;
+      if(r0==='ai' || r0==='assistant' || r0==='bot') role = 'teacher';
+      if(r0==='user' || r0==='student' || r0==='learner' || r0==='you' || r0==='usr') role = 'student';
+
+      const en = (t.en ?? t.text_en ?? t.english ?? t.text ?? t.content ?? '');
+      const zh = (t.zh ?? t.text_zh ?? t.chinese ?? '');
+      const out = Object.assign({}, t);
+      if(role) out.role = role;
+      if(en) out.en = String(en);
+      if(zh) out.zh = String(zh);
+      return out;
+    });
+
+    if(!turns.length){
+      const task = lesson.task || {};
+      const hintEn = task.hint_en ?? task.hintEn ?? task.user_en ?? task.userEn ?? '';
+      const hintZh = task.hint_zh ?? task.hintZh ?? '';
+      if(hintEn){
+        turns = [{ role:'student', en:String(hintEn), zh: hintZh?String(hintZh):'' }];
+      }
+    }
+
+    lesson.turns = turns;
+    return lesson;
+  }
+
+
   /* ---------- Guard (fail-closed only when Supabase works) ---------- */
   async function guardSubscription(){
     // If supabase-js not loaded, don't block (avoid bricking)
@@ -1360,18 +1396,32 @@ body{line-height:1.1}
   }
 
   function getStudentSentence(lesson){
-    const turns = lesson?.turns;
-    if(Array.isArray(turns)){
-      for(let i=turns.length-1;i>=0;i--){
-        if(turns[i]?.role==='student' && turns[i]?.en) return String(turns[i].en);
+    // Prefer the latest student/user sentence (W1–W54 legacy compatible)
+    const turns = Array.isArray(lesson?.turns) ? lesson.turns : (Array.isArray(lesson?.dialogue) ? lesson.dialogue : []);
+    for(let i=turns.length-1;i>=0;i--){
+      const t = turns[i] || {};
+      const r = String(t.role || t.speaker || t.who || '').toLowerCase();
+      const en = t.en ?? t.text_en ?? t.english ?? t.text ?? '';
+      if(en && (r==='student' || r==='user' || r==='learner' || r==='you' || r==='usr')){
+        return String(en);
       }
+      // legacy: role might be 'USER'
+      if(en && r==='user') return String(en);
     }
-    // fallback to task.hint or any teacher line
-    if(lesson?.task?.hint) return String(lesson.task.hint);
-    if(Array.isArray(turns)){
-      for(let i=turns.length-1;i>=0;i--){
-        if(turns[i]?.en) return String(turns[i].en);
-      }
+
+    // Legacy task hint fields (some old weeks store the user line here)
+    const task = lesson?.task || {};
+    const hintEn = task.hint_en ?? task.hintEn ?? task.user_en ?? task.userEn ?? task.cloze_source_en ?? task.clozeSourceEn ?? '';
+    if(hintEn) return String(hintEn);
+
+    // fallback to task.hint if it looks like English
+    const hint = task.hint ?? '';
+    if(hint && /[A-Za-z]/.test(String(hint))) return String(hint);
+
+    // final fallback: any en line
+    for(let i=turns.length-1;i>=0;i--){
+      const t = turns[i] || {};
+      if(t.en) return String(t.en);
     }
     return '';
   }
@@ -1543,7 +1593,7 @@ body{line-height:1.1}
       sceneId = core?.id || scenes[0]?.id || 'w01.core.coffee_shop';
     }
 
-    lesson = await loadLesson(sceneId);
+    lesson = normalizeLesson(await loadLesson(sceneId));
   }
 
   /* ---------- Wire buttons ---------- */
