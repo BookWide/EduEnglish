@@ -5,119 +5,76 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
   // BookWide Supabase public config (global)
-  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-  window.SUPABASE_URL = SUPABASE_URL;
-  window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
+  // (use window vars to avoid duplicate-const collisions)
+  window.SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+  window.SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 </script>
-<script>
-(async function() {
-  try {
-    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+<script>
+(async function(){
+  // ===== BookWide Guard (Talk student: subscription required) =====
+  try{
+    if(!window.supabase || !window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) return;
+
+    const sb = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY, {
+      auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
     });
 
-    // --- require login ---
-    const { data: sess } = await supabase.auth.getSession();
-    const session = sess && sess.session;
-    if (!session || !session.user) {
-      const red = encodeURIComponent(location.pathname + location.search + location.hash);
-      location.replace('/account/login.html?redirect=' + red);
+    const { data: sdata } = await sb.auth.getSession();
+    const session = sdata?.session || null;
+    if(!session){
+      // keep your original flow; simple redirect
+      const next = encodeURIComponent(location.pathname + location.search);
+      location.href = "/pricing.html?next=" + next;
       return;
     }
 
     const user = session.user;
-    const uid = user.id;
-    const email = (user.email || '').toLowerCase();
+    const email = String(user?.email||"").toLowerCase();
 
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
-
-    // --- read profile (best effort) ---
-    const { data: prof, error: perr } = await supabase
-      .from('profiles')
-      .select('id, expires_at, is_paused')
-      .eq('id', uid)
-      .maybeSingle();
-
-    // 如果 profiles 讀不到（RLS / row 不存在），不要直接判死刑：改用 orders 當 fallback
-    const paused = !!(prof && prof.is_paused);
-    const pexp = prof && prof.expires_at ? String(prof.expires_at).slice(0,10) : '';
-
-    // --- orders fallback (handle test accounts recreated with new uid) ---
-    let oexp = '';
-    let opaid = '';
-    let ocreated = '';
-    let hasPaid = false;
-    try {
-      // 1) by user_id (best)
-      const r1 = await supabase
-        .from('orders')
-        .select('status,expires_at,paid_at,created_at')
-        .eq('user_id', u.id)
-        .order('created_at', { ascending:false })
-        .limit(1);
-      if (!r1.error && r1.data && r1.data.length) {
-        const row = r1.data[0];
-        if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
-        if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
-        if (row?.paid_at) opaid = String(row.paid_at);
-        if (row?.created_at) ocreated = String(row.created_at);
-      } else {
-        // 2) fallback by email (covers cases where order created before account was recreated)
-        const r2 = await supabase
-          .from('orders')
-          .select('status,expires_at,paid_at,created_at')
-          .eq('email', u.email)
-          .order('created_at', { ascending:false })
-          .limit(1);
-        if (!r2.error && r2.data && r2.data.length) {
-          const row = r2.data[0];
-          if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
-          if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
-          if (row?.paid_at) opaid = String(row.paid_at);
-          if (row?.created_at) ocreated = String(row.created_at);
-        }
-      }
-    } catch (e) {}
-
-    // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
-    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    const today = new Date().toISOString().slice(0,10);
-    let ok = (pe && pe >= today) || (oexp && oexp >= today);
-    if (!ok && hasPaid) {
-      // paid_at/created_at within last 400 days => treat as valid
-      const base = (opaid || ocreated || '').slice(0,10);
-      if (base) {
-        const t0 = new Date(base + 'T00:00:00Z').getTime();
-        const t1 = Date.now();
-        const days = (t1 - t0) / 86400000;
-        if (days >= 0 && days <= 400) ok = true;
-      } else {
-        ok = true;
-      }
-    }
-    // --- decide ---
-    const ok = (!paused) && (
-      (pexp && pexp >= today) ||
-      (oexp && oexp >= today)
-    );
-
-    window.BW_SUB_OK = ok;
-    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
-    window.BW_PROFILE_OK = !perr;
-
-    if (!ok) {
-      location.replace('/account/subscription.html');
+    // Admin pass
+    if(email === "pmktools@gmail.com"){
       return;
     }
-  } catch (e) {
-    location.replace('/account/subscription.html?err=guard');
+
+    // Local cache pass if exists
+    const todayStr = new Date().toLocaleDateString("en-CA",{ timeZone:"Asia/Taipei" });
+    const paidUntil = localStorage.getItem("BW_PAID_UNTIL") || localStorage.getItem("BW_ORDER_EXPIRES") || "";
+    if(paidUntil && String(paidUntil) >= todayStr){
+      return;
+    }
+
+    // Try DB (best-effort). Adapt to your schema: profiles.paid_until / order_expires / role
+    let okPaid = false;
+    try{
+      const r = await sb.from("profiles").select("paid_until,order_expires,role").eq("id", user.id).maybeSingle();
+      const row = r?.data || null;
+      const role = String(row?.role||"").toLowerCase();
+      if(role === "admin"){ okPaid = true; }
+      const p = row?.paid_until ? String(row.paid_until).slice(0,10) : "";
+      const o = row?.order_expires ? String(row.order_expires).slice(0,10) : "";
+      if((p && p >= todayStr) || (o && o >= todayStr)) okPaid = true;
+      if(okPaid){
+        // cache for speed
+        const best = (p && (!o || p>=o)) ? p : o;
+        if(best) localStorage.setItem("BW_PAID_UNTIL", best);
+      }
+    }catch(_e){}
+
+    if(!okPaid){
+      const next = encodeURIComponent(location.pathname + location.search);
+      location.href = "/pricing.html?next=" + next;
+      return;
+    }
+  }catch(e){
+    console.warn("[Talk Guard] error", e);
+    // Fail-open to avoid locking everyone out due to guard bugs
   }
 })();
 </script>
+
+
+
 <!-- ===== /BookWide Guard ===== -->
 
 <meta charset="utf-8"/>
@@ -1051,6 +1008,27 @@ body{line-height:1.1}
 .fileTag { display: none !important; }
 </style>
 
+
+<style id="bw-locked-ui">
+/* BookWide Talk — Locked minimal UI (no noise, no duplicates) */
+.big{ display:none !important; }
+#sceneSub, .sceneSub{ display:none !important; }
+#subTitle, .sub{ display:none !important; }
+#fileTag, .fileTag{ display:none !important; }
+#fillTitle, .fillHead, #levBadge, #btnHideFill{ display:none !important; }
+#fillHint, .fillHint{ display:none !important; }
+#bottomPanel, .bottomPanel{ display:none !important; }
+.controlsWrap{ display:flex !important; align-items:center !important; gap:10px !important; flex-wrap:nowrap !important; }
+.controls{ flex:0 0 auto !important; }
+.row2{ flex:1 1 auto !important; display:flex !important; align-items:center !important; justify-content:flex-start !important; gap:10px !important; flex-wrap:nowrap !important; }
+#btnSave{ display:none !important; }
+@media (max-width:820px){
+  .wrap{ padding:10px 12px !important; }
+  .hero{ padding:10px 12px !important; }
+  .mic{ width:64px !important; height:64px !important; }
+}
+</style>
+
 </head>
 <body>
 <div class="wrap">
@@ -1223,8 +1201,12 @@ let __tvWatch = null;
 
   const INDEX_URL = new URL("/EduEnglish/talk/index.json", location.origin).toString();
   const FALLBACK_INDEX_URLS = [
-    new URL("./index.json", location.href).toString(),              // if talk.html inside /talk/
-    new URL("../talk/index.json", location.href).toString(),        // if talk.html inside /checklist/
+    // Most likely deployments first (reduces noisy 404s)
+    new URL("./talk/index.json", location.href).toString(),          // talk.html at site root, data in /talk/
+    new URL("./EduEnglish/talk/index.json", location.href).toString(), // repo folder kept under site root
+    new URL("./index.json", location.href).toString(),              // talk.html and index.json same folder
+    new URL("/talk/index.json", location.origin).toString(),        // absolute /talk/
+    new URL("/EduEnglish/talk/index.json", location.origin).toString() // absolute /EduEnglish/talk/
   ];
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
@@ -1939,12 +1921,38 @@ async function init(){
     try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
 
     try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
-    // load index.json
+    // load index.json (NO silent fallback to Week1)
+    let indexOk = false;
     try{
       indexData = await fetchJsonAny([INDEX_URL, ...FALLBACK_INDEX_URLS]);
+      indexOk = Array.isArray(indexData?.scenes) && indexData.scenes.length > 0;
     }catch(e){
+      indexOk = false;
       indexData = { scenes: [] };
-      showToast("讀不到 talk/index.json");
+    }
+
+    // If index.json missing, we still try to load by URL ?scene=w32.core.xxx directly.
+    // If that also fails, we stop here and show a clear error (avoid "week1 fallback").
+    if(!indexOk){
+      const params0 = new URLSearchParams(location.search);
+      const directSceneId = (params0.get("scene")||"").trim(); // e.g. w32.core.mobile_plan
+      if(directSceneId && /^w\d{2,3}\.(core|variation|challenge)\./i.test(directSceneId)){
+        try{
+          // Build a minimal index just for this one scene
+          indexData = { scenes: [{ id: directSceneId, week: Number(directSceneId.match(/^w(\d{2,3})/i)?.[1]||"")||"", title: directSceneId, json: directSceneId + ".json" }] };
+          indexOk = true;
+        }catch(_e){}
+      }
+    }
+
+    if(!indexOk){
+      showToast("讀不到 index.json（請確認放在 /EduEnglish/talk/ 或 /talk/ 或同目錄）");
+      // show in main title area too
+      try{
+        enEl.textContent = "⚠️ Missing index.json";
+        zhEl.textContent = "找不到 index.json：請確認檔案路徑與部署。";
+      }catch(_e){}
+      return;
     }
 
     buildWeekMap();
@@ -2260,61 +2268,19 @@ function getTeacherVoice(sel){
     </div>
   </div>
 </div>
-<script>
-function showReport(){ document.getElementById('bwReportMask').style.display='block';
-  try{bwSaveTalkDailyScore();
-  try{ if(typeof totalScore!=='undefined'){ BW_commitTalkScore(totalScore);} }catch(e){}
-}catch(e){} }
-function closeReport(){ document.getElementById('bwReportMask').style.display='none'; }
-</script>
+
 <!-- ===== End Learning Report ===== -->
 
 
-<script>
-function bwSaveTalkDailyScore(){
-  try{
-    const d = new Date();
-    const key = d.toISOString().slice(0,10); // UTC key
-    const twKey = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // Taiwan key
-    const score = (function(){
-      const el = document.getElementById('rComplete');
-      const v = el ? Number(String(el.textContent||'').trim()) : NaN;
-      return Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 65;
-    })();
-    const active = (function(){
-      const el = document.getElementById('rActive');
-      if(!el) return null;
-      const t = String(el.textContent||'').replace('%','').trim();
-      const v = Number(t);
-      return Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : null;
-    })();
-    const pron = (function(){
-      const el = document.getElementById('rPron');
-      if(!el) return null;
-      const t = String(el.textContent||'').replace('%','').trim();
-      const v = Number(t);
-      return Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : null;
-    })();
-    const words = (function(){
-      const el = document.getElementById('rWords');
-      if(!el) return null;
-      const v = Number(String(el.textContent||'').trim());
-      return Number.isFinite(v) ? Math.max(0, Math.min(9999, Math.round(v))) : null;
-    })();
 
-    let obj = {};
-    const raw = localStorage.getItem('bwTalkScores');
-    if(raw){ try{ obj = JSON.parse(raw)||{}; }catch(e){ obj = {}; } }
-    obj[key] = { score, active, pron, words, updated_at: new Date().toISOString() };
-    if (twKey && twKey !== key) obj[twKey] = obj[key];
-    localStorage.setItem('bwTalkScores', JSON.stringify(obj));
-  }catch(e){}
-}
-</script>
 
 
 <!-- ===== BW TALK SCORE → DASHBOARD BRIDGE (LOCKED) ===== -->
+
+<!-- ===== /BW TALK SCORE → DASHBOARD BRIDGE ===== -->
+
 <script>
+/* ===== Dashboard Score Bridge (Talk) ===== */
 (function(){
   const KEY = "BW_DAILY_SCORE_MAP";
   const TZ = "Asia/Taipei";
@@ -2327,12 +2293,32 @@ function bwSaveTalkDailyScore(){
       const map = JSON.parse(localStorage.getItem(KEY) || "{}");
       map[day] = (Number(map[day]) || 0) + Number(score || 0);
       localStorage.setItem(KEY, JSON.stringify(map));
-      console.log("[BW SCORE SAVED]", day, map[day]);
-    }catch(e){ console.error(e); }
+    }catch(_e){}
   };
 })();
-</script>
-<!-- ===== /BW TALK SCORE → DASHBOARD BRIDGE ===== -->
 
+function bwSaveTalkDailyScore(){
+  try{
+    const el = document.getElementById('rComplete');
+    const v = el ? Number(String(el.textContent||'').trim()) : NaN;
+    const score = Number.isFinite(v) ? v : 0;
+    if(window.BW_commitTalkScore) window.BW_commitTalkScore(score);
+  }catch(_e){}
+}
+
+// Optional report popup (kept for compatibility)
+function showReport(){
+  try{
+    const el=document.getElementById('boxReport');
+    if(el) el.style.display='block';
+  }catch(_e){}
+}
+function hideReport(){
+  try{
+    const el=document.getElementById('boxReport');
+    if(el) el.style.display='none';
+  }catch(_e){}
+}
+</script>
 </body>
 </html>
