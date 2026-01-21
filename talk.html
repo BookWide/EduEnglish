@@ -85,7 +85,7 @@
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
     // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    const todayUTC = new Date().toISOString().slice(0,10); // UTC (debug). Use TW 'today' above for access check
+    const today = new Date().toISOString().slice(0,10);
     let ok = (pe && pe >= today) || (oexp && oexp >= today);
     if (!ok && hasPaid) {
       // paid_at/created_at within last 400 days => treat as valid
@@ -1221,14 +1221,11 @@ let __tvWatch = null;
   }catch(e){}
 
 
-  const INDEX_URL = new URL("/EduEnglish/data/weekly-index.json", location.origin).toString();
-// Try common locations (new → old). Put the REAL one first to avoid 404 noise.
-const FALLBACK_INDEX_URLS = [
-  new URL("/EduEnglish/data/index.json", location.origin).toString(),
-  new URL("/EduEnglish/talk/index.json", location.origin).toString(),
-  new URL("./index.json", location.href).toString(),               // if talk.html sits next to index.json
-  new URL("../talk/index.json", location.href).toString(),         // legacy
-];
+  const INDEX_URL = new URL("/EduEnglish/talk/index.json", location.origin).toString();
+  const FALLBACK_INDEX_URLS = [
+    new URL("./index.json", location.href).toString(),              // if talk.html inside /talk/
+    new URL("../talk/index.json", location.href).toString(),        // if talk.html inside /checklist/
+  ];
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
   const LS_SAVED = "BW_TALK_SAVED_LINES";
@@ -1936,11 +1933,7 @@ async function init(){
     // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
-    // URL week has highest priority; then last saved; else current unlocked week.
-    // (Fix: avoid overwriting ?week=... which caused "URL WEEK1 but menu WEEK32")
-    const __p0 = new URLSearchParams(location.search);
-    const __urlWeek0 = Number(__p0.get("week") || "0");
-    activeWeek = (__urlWeek0>0 ? __urlWeek0 : (savedWeek>0 ? savedWeek : unlockedWeek));
+    activeWeek = unlockedWeek;// 強制當週為主，避免選到已鎖週
 
     // 模式：對話(dialogue) / 跟讀(shadow)
     try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
@@ -2033,7 +2026,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek; // respect resolved scene week
+          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
           try{ localStorage.setItem(LS_LAST_SCENE, mapped.id); }catch(_e){}
         }
@@ -2050,7 +2043,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek; // respect resolved scene week
+          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
         }
       }else{
@@ -2111,7 +2104,30 @@ if(!firstId){
   btnSave.addEventListener("click", saveLine);
 
   btnFill.addEventListener("click", ()=>{
+    // ===== 保命線：填空引導一定要出 =====
+    // 1) 先拿「本句建議回覆（USER）」；拿不到就退到「本句老師句（AI）」
+    const expected = (currentExpectedEn() || "").trim();
+    const t = currentTurn();
+    const aiEn = (t && t.en) ? String(t.en).trim() : "";
+    const src = expected || aiEn;
+    if(!src){
+      showToast("這一關沒有可用句子，無法產生填空。");
+      fillCard.scrollIntoView({behavior:"smooth", block:"start"});
+      fillInput.focus();
+      return;
+    }
+    // 2) 優先用完整 cloze（多空格）；若失敗就用最小保命 heuristic（至少一個 ____）
+    let cl = {cloze:"", options:[]};
+    try{ cl = makeCloze(src) || cl; }catch(e){ /* ignore */ }
+    const clozeText = (cl && cl.cloze) ? cl.cloze : "";
+    fillEn.textContent = clozeText || guessFillFromSentence(src) || src;
+    try{ renderFillOptions(cl); }catch(e){ /* ignore */ }
+    // 3) 展開填空區並聚焦
+    fillCard.style.display = "";
     fillCard.scrollIntoView({behavior:"smooth", block:"start"});
+    fillInput.value = "";
+    fillInput.focus();
+  });
     fillInput.focus();
   });
 
