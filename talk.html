@@ -1124,7 +1124,7 @@ body{line-height:1.1}
           <button class="badge" id="btnHideFill" type="button">隱藏</button>
         </div>
       </div>
-      <div class="fillEn" id="fillEn">Can I get a ____ , please?</div>
+      <div class="fillEn" id="fillEn"></div>
       <div class="fillHint" id="fillHint">先用「填空」完成一句，再改成你自己的說法。</div>
       <div class="fillRow">
         <input class="inp" id="fillInput" placeholder="填入空格…"/>
@@ -1282,6 +1282,27 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   let activeSceneId = null;
   let activeSceneTitle = "";
   let activeScene = null;             // loaded json
+
+  // ===== Scene templates (no JSON required) =====
+  const SCENE_TEMPLATES = {
+    coffee_shop: { ai: "What would you like to drink?", zh:"你想喝什麼？", user:"Can I get a coffee, please?" },
+    airport: { ai: "Where are you flying to today?", zh:"你今天要飛去哪裡？", user:"I'm flying to Tokyo." },
+    directions: { ai: "How can I get to the train station?", zh:"我怎麼去火車站？", user:"Go straight and turn left at the second street." },
+    business_meeting: { ai: "Nice to meet you. What do you do?", zh:"很高興認識你，你做什麼工作？", user:"I'm in sales." },
+    mobile_plan: { ai: "How much data do you need each month?", zh:"你每個月需要多少流量？", user:"I need about ten gigabytes." },
+    hotel: { ai: "Do you have a reservation?", zh:"你有訂房嗎？", user:"Yes, I have a reservation under Lin." },
+  };
+  const STOP_WORDS = new Set([
+    "please","pls","thanks","thank","today","tomorrow","yesterday","afternoon","morning","evening","night",
+    "now","later","here","there","ok","okay","yeah","yes","no","a","an","the","to","of","for","and","or","but","on","in","at","with","as","is","are","am","be","was","were","do","did","does","can","could","would","should","will","may","might","i","you","he","she","we","they","me","my","your","his","her","our","their"
+  ]);
+  function getSceneTemplate(id){
+    return SCENE_TEMPLATES[id] || null;
+  }
+  function sceneDefaultExpected(){
+    const t = getSceneTemplate(activeSceneId) || getSceneTemplate((activeSceneId||"").toLowerCase());
+    return t ? t.user : "";
+  }
   let turns = [];                     // normalized turns
   let turnIdx = 0;
   let lastTts = null;
@@ -1439,7 +1460,8 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
     const fillText = t.fill && t.fill.trim() ? t.fill : guessFillFromSentence(t.en);
     fillTitle.textContent = "填空提示";
-    fillEn.textContent = fillText || "Can I get a ____ , please?";
+    const defExp = sceneDefaultExpected();
+    fillEn.textContent = fillText || (defExp ? guessFillFromSentence(defExp) : guessFillFromSentence(t.en));
     fillHint.textContent = t.hint && t.hint.trim()
       ? t.hint
       : "先用「填空」完成一句，再改成你自己的說法。";
@@ -1833,11 +1855,14 @@ try{showReport();}catch(e){}
     activeSceneId = id;
     activeSceneTitle = title || id;
 
-    const url = new URL("/talk/" + encodeURIComponent(id) + ".json", location.origin).toString();
+    const file = encodeURIComponent(id) + ".json";
     const fallback = [
-      url,
-      new URL("./" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /talk/
-      new URL("../talk/" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /checklist/
+      new URL("/EduEnglish/data/" + file, location.origin).toString(),
+      new URL("/EduEnglish/talk/" + file, location.origin).toString(),
+      new URL("/talk/" + file, location.origin).toString(),
+      new URL("./" + file, location.href).toString(), // if talk.html in /talk/
+      new URL("../talk/" + file, location.href).toString(),
+      new URL("../EduEnglish/data/" + file, location.href).toString(),
     ];
     try{
       activeScene = await fetchJsonAny(fallback);
@@ -1854,9 +1879,21 @@ try{showReport();}catch(e){}
       if(missionText) missionText.innerHTML = "<b>"+escapeHtml(head)+"</b>" + (sub?(" <span class=\"sub\">"+escapeHtml(sub)+"</span>"):"") + (extra?(" <span class=\"sub\">"+escapeHtml(extra.trim())+"</span>"):"");
 
     }catch(e){
-      showToast("找不到場景 JSON：" + id);
-      turns = [{en:"Scene JSON not found.", zh:"找不到場景 JSON（請確認檔案放在 /talk/）", level:"A1"}];
+      // Fallback: no JSON available -> use scene template so the app still works
+      const tpl = getSceneTemplate(String(id||"").toLowerCase());
+      const ai = tpl?.ai || "Let's practice a short conversation.";
+      const zh = tpl?.zh || "我們來練習一段簡短對話。";
+      const user = tpl?.user || "I'm ready.";
+      turns = [
+        { role:"AI", en: ai, zh: zh, level:"A1" },
+        { role:"USER", en: user, zh: "", level:"A1" },
+      ];
+      activeScene = { id, title_en: title||id, turns };
+      currentSceneJson = activeScene;
       turnIdx = 0;
+      if(fileTag) fileTag.textContent = (activeSceneId ? (activeSceneId + ".json") : "");
+      // 更新任務頭
+      if(missionText) missionText.innerHTML = "<b>"+escapeHtml(activeSceneTitle)+"</b>";
       updateUI();
       return;
     }
