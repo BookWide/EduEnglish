@@ -1457,50 +1457,168 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   function makeCloze(expectedEn){
     const s = (expectedEn||"").trim();
     if(!s) return {cloze:"", answer:"", options:[]};
-    // pick a target word: prefer numbers, then last content word
-    const tokens = s.replace(/[?!.]/g,"").split(/\s+/).filter(Boolean);
+
+    // ---- stop/polite/time words we never want to blank ----
+    const STOP = new Set([
+      "a","an","the","this","that","these","those","my","your","his","her","our","their",
+      "i","you","he","she","we","they","me","him","her","us","them",
+      "am","is","are","was","were","be","been","being",
+      "do","does","did","done","doing",
+      "have","has","had",
+      "can","could","will","would","shall","should","may","might","must",
+      "to","of","in","on","at","for","from","with","and","or","but","so","because","as",
+      "what","where","when","why","who","whom","which","how",
+      "there","here","then","now","also","too","very","really","just",
+      "please","thanks","thank","sorry","okay","ok","yeah","yes","no"
+    ]);
+    const TIME = new Set([
+      "today","tomorrow","yesterday","morning","afternoon","evening","night",
+      "monday","tuesday","wednesday","thursday","friday","saturday","sunday",
+      "jan","january","feb","february","mar","march","apr","april","may","jun","june",
+      "jul","july","aug","august","sep","sept","september","oct","october","nov","november","dec","december"
+    ]);
+
+    // ---- scene-aware priority words (small, stable) ----
+    const SCENE_PRI = {
+      coffee_shop: ["coffee","latte","tea","espresso","cappuccino","americano","milk","sugar","size","small","medium","large","iced","hot","cup"],
+      directions:  ["left","right","straight","block","blocks","corner","turn","cross","intersection","avenue","street","station"],
+      mobile_plan: ["data","plan","phone","mobile","carrier","minutes","monthly","bill","contract","roaming","sim","eSIM"],
+      airport:     ["gate","terminal","passport","boarding","ticket","baggage","luggage","counter","check-in","security","flight"],
+      business_meeting:["meeting","agenda","schedule","report","proposal","deadline","client","project","budget","contract"],
+    };
+    const pri = (activeSceneId && SCENE_PRI[activeSceneId]) ? SCENE_PRI[activeSceneId] : [];
+    const priSet = new Set(pri.map(w=>w.toLowerCase()));
+
+    // ---- tokenize ----
+    const rawTokens = s.replace(/[“”"()]/g," ").replace(/[?!.]/g,"").split(/\s+/).filter(Boolean);
+    const clean = rawTokens.map(t => t.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9'-]+$/g,""));
+    const low = clean.map(t => (t||"").toLowerCase());
+
+    // ---- choose target ----
     let target = "";
-    // number?
-    for(const tk of tokens){
-      if(/\d/.test(tk)){ target = tk; break; }
+    // 1) numbers are useful (directions, plans), but avoid dates like 2024-... handled naturally
+    for(const tk of clean){
+      if(tk && /\d/.test(tk)){ target = tk; break; }
     }
+
+    // 2) score candidates (prefer nouns-ish: after article / after get/order/need/want)
     if(!target){
-      for(let i=tokens.length-1;i>=0;i--){
-        const tk = tokens[i].replace(/[^A-Za-z0-9'-]/g,"");
-        if(tk.length>=4 && !/^(this|that|with|have|your|what|where|when|could|would|please)$/i.test(tk)){
-          target = tokens[i];
-          break;
+      const AFTER_VERB = new Set(["get","order","need","want","buy","take","have","book","reserve","pay","use"]);
+      const AFTER_ART  = new Set(["a","an","the","this","that","my","your","some","any","one","two","three"]);
+      let best = {w:"", score:-1e9};
+
+      for(let i=0;i<clean.length;i++){
+        const w = clean[i];
+        const lw = low[i];
+        if(!w) continue;
+
+        // hard excludes
+        if(STOP.has(lw) || TIME.has(lw)) continue;
+
+        // base score
+        let score = 0;
+
+        // scene priority
+        if(priSet.has(lw)) score += 8;
+
+        // after article
+        const prev = (i>0) ? low[i-1] : "";
+        const prev2 = (i>1) ? low[i-2] : "";
+        if(AFTER_ART.has(prev)) score += 7;
+
+        // after verb patterns: "get a coffee", "need data", "take the first left"
+        if(AFTER_VERB.has(prev) || (AFTER_VERB.has(prev2) && AFTER_ART.has(prev))) score += 6;
+
+        // length & shape
+        if(w.length >= 4) score += 2;
+        if(/^[A-Za-z][A-Za-z'-]+$/.test(w)) score += 1;
+
+        // penalize adverbs ending with -ly
+        if(lw.endsWith("ly")) score -= 3;
+
+        // penalize very common fillers even if not in STOP
+        if(/^(good|great|nice|fine|sure|maybe)$/.test(lw)) score -= 3;
+
+        // prefer earlier noun slot (not the very last "please")
+        if(i === clean.length-1) score -= 2;
+
+        if(score > best.score){
+          best = {w: rawTokens[i], score};
         }
       }
-    }
-    if(!target) target = tokens[Math.max(0, tokens.length-1)];
 
-    // build cloze
+      target = best.w || "";
+    }
+
+    if(!target){
+      // final fallback: pick the longest non-stop token
+      let best = "";
+      for(let i=0;i<clean.length;i++){
+        const w = clean[i], lw = low[i];
+        if(!w) continue;
+        if(STOP.has(lw) || TIME.has(lw)) continue;
+        if(w.length > best.length) best = rawTokens[i];
+      }
+      target = best || rawTokens[rawTokens.length-1] || "";
+    }
+
+    // ---- build cloze ----
     const esc = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const cloze = s.replace(new RegExp('\\b'+esc+'\\b'), '____');
+    let cloze = s.replace(new RegExp('\\b'+esc+'\\b'), '____');
+    if(cloze === s){
+      // if regex word-boundary fails (hyphen etc.), do a simple replace once
+      cloze = s.replace(target, "____");
+    }
 
-    // distractor pool (small + stable)
-    const pool = ["gate","terminal","passport","boarding","information","coffee","small","large","help","today","tomorrow","please","thanks","baggage","counter","check-in"];
-    const lower = target.toLowerCase();
+    // ---- build options (3 total) ----
+    // pool per scene + generic (NO polite/time)
+    const GENERIC = ["coffee","tea","ticket","passport","gate","terminal","data","plan","phone","minutes","bill",
+                     "left","right","straight","block","corner","station","meeting","agenda","client","project","budget"];
+    const pool = [...pri, ...GENERIC].filter(w=>{
+      const lw = w.toLowerCase();
+      return !STOP.has(lw) && !TIME.has(lw);
+    });
+
+    const lower = (target||"").toLowerCase();
     const opts = [target];
-    for(const w of pool){
-      if(opts.length>=3) break;
-      if(w.toLowerCase()===lower) continue;
-      // keep similar type: if target is number, add numbers
-      if(/\d/.test(target)){
-        if(/\d/.test(w)) opts.push(w);
-      }else{
-        if(!/\d/.test(w)) opts.push(w);
+
+    // helper: add unique
+    const addOpt = (w)=>{
+      if(!w) return;
+      if(opts.length>=3) return;
+      if(opts.some(x => (x||"").toLowerCase() === (w||"").toLowerCase())) return;
+      opts.push(w);
+    };
+
+    if(/\d/.test(target)){
+      // for numbers: add nearby numbers
+      const n = parseInt(String(target).replace(/\D/g,""),10);
+      if(Number.isFinite(n)){
+        addOpt(String(n+1));
+        addOpt(String(n+2));
+      }
+    }else{
+      for(const w of pool){
+        if(opts.length>=3) break;
+        if(w.toLowerCase()===lower) continue;
+        addOpt(w);
       }
     }
-    // fallback for number
-    if(/\d/.test(target) && opts.length<3){
-      const n = parseInt(target.replace(/\D/g,""),10) || 12;
-      while(opts.length<3){
-        const cand = String(n + (opts.length===1?1:2));
-        if(!opts.includes(cand)) opts.push(cand);
+
+    // if still short, add safe generic distractors (never polite/time)
+    if(opts.length<3 && !/\d/.test(target)){
+      for(const w of ["coffee","ticket","data","left","right","project","budget"]){
+        if(opts.length>=3) break;
+        addOpt(w);
       }
     }
+
+    // shuffle options but keep stable enough
+    for(let i=opts.length-1;i>0;i--){
+      const j = Math.floor(Math.random()*(i+1));
+      const tmp = opts[i]; opts[i]=opts[j]; opts[j]=tmp;
+    }
+
     return {cloze, answer: target, options: opts};
   }
 
