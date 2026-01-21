@@ -731,7 +731,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
       // Input card becomes "your reply" (do NOT reveal the expected answer by default)
       fillTitle.textContent = "你的回覆";
-      const expected = (user?.en || "").trim();
+      const expected = ((user?.en || "").trim()) || guessExpectedFromAi(ai.en);
       // build cloze + options for low difficulty guidance
       const cl = makeCloze(expected);
       // default show cloze; user can press「提示」to reveal full expected answer temporarily
@@ -774,55 +774,133 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   
   // ---- dialogue guidance: cloze + options (A2-ish by default) ----
-  function makeCloze(expectedEn){
-    const s = (expectedEn||"").trim();
-    if(!s) return {cloze:"", answer:"", options:[]};
-    // pick a target word: prefer numbers, then last content word
-    const tokens = s.replace(/[?!.]/g,"").split(/\s+/).filter(Boolean);
-    let target = "";
-    // number?
-    for(const tk of tokens){
-      if(/\d/.test(tk)){ target = tk; break; }
-    }
-    if(!target){
-      for(let i=tokens.length-1;i>=0;i--){
-        const tk = tokens[i].replace(/[^A-Za-z0-9'-]/g,"");
-        if(tk.length>=4 && !/^(this|that|with|have|your|what|where|when|could|would|please)$/i.test(tk)){
-          target = tokens[i];
-          break;
-        }
-      }
-    }
-    if(!target) target = tokens[Math.max(0, tokens.length-1)];
+  // ===== Cloze (W1~W54 unified) =====
+// - Always generate ONE blank for easy shadowing
+// - Deterministic: no randomness (stable UX)
+function makeCloze(expectedEn){
+  const s0 = String(expectedEn||"").trim();
+  if(!s0) return { cloze:"", answer:"", options:[] };
 
-    // build cloze
-    const esc = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const cloze = s.replace(new RegExp('\\b'+esc+'\\b'), '____');
+  // Keep punctuation for display, but pick target from word tokens
+  const words = s0.match(/[A-Za-z0-9']+/g) || [];
+  const stop = new Set([
+    "i","you","he","she","we","they","me","him","her","us","them",
+    "a","an","the","this","that","these","those",
+    "to","for","of","in","on","at","with","from","into","over","under","about",
+    "is","am","are","was","were","be","been","being",
+    "do","does","did","done","doing",
+    "can","could","will","would","shall","should","may","might","must",
+    "have","has","had",
+    "please","thanks","thank","hi","hello","hey","ok","okay"
+  ]);
 
-    // distractor pool (small + stable)
-    const pool = ["gate","terminal","passport","boarding","information","coffee","small","large","help","today","tomorrow","please","thanks","baggage","counter","check-in"];
-    const lower = target.toLowerCase();
-    const opts = [target];
-    for(const w of pool){
-      if(opts.length>=3) break;
-      if(w.toLowerCase()===lower) continue;
-      // keep similar type: if target is number, add numbers
-      if(/\d/.test(target)){
-        if(/\d/.test(w)) opts.push(w);
-      }else{
-        if(!/\d/.test(w)) opts.push(w);
-      }
-    }
-    // fallback for number
-    if(/\d/.test(target) && opts.length<3){
-      const n = parseInt(target.replace(/\D/g,""),10) || 12;
-      while(opts.length<3){
-        const cand = String(n + (opts.length===1?1:2));
-        if(!opts.includes(cand)) opts.push(cand);
-      }
-    }
-    return {cloze, answer: target, options: opts};
+  // 1) Prefer numbers (easy & meaningful)
+  let target = "";
+  for(const w of words){
+    if(/\d/.test(w)){ target = w; break; }
   }
+
+  // 2) Prefer the noun after a/an/the or key prepositions (to/for/with)
+  if(!target){
+    const raw = s0.split(/\s+/);
+    for(let i=0;i<raw.length-1;i++){
+      const a = raw[i].replace(/[^A-Za-z']/g,"").toLowerCase();
+      const bRaw = raw[i+1].replace(/[^A-Za-z0-9']/g,"");
+      const b = bRaw.toLowerCase();
+      if(!bRaw) continue;
+      if((a==="a"||a==="an"||a==="the"||a==="to"||a==="for"||a==="with") && bRaw.length>=3 && !stop.has(b)){
+        target = bRaw;
+        break;
+      }
+    }
+  }
+
+  // 3) Fallback: last content-ish word (len>=3, not stopword)
+  if(!target){
+    for(let i=words.length-1;i>=0;i--){
+      const w = words[i];
+      const wl = w.toLowerCase();
+      if(w.length>=3 && !stop.has(wl) && !/^\d+$/.test(w)){
+        target = w;
+        break;
+      }
+    }
+  }
+
+  // 4) Final fallback
+  if(!target) target = words[words.length-1] || "";
+
+  // Replace ONLY the first exact word occurrence (case-insensitive boundary)
+  const esc = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re1 = new RegExp("\\b" + esc + "\\b", "i");
+  const cloze = s0.replace(re1, "____");
+
+  // Options (stable small set)
+  const lower = target.toLowerCase();
+  const map = {
+    "plan":["plan","package","option"],
+    "data":["data","info","details"],
+    "problem":["problem","issue","mistake"],
+    "phone":["phone","mobile","device"],
+    "ticket":["ticket","pass","booking"],
+    "time":["time","today","tomorrow"],
+    "price":["price","cost","fee"]
+  };
+
+  let options = [];
+  if(/\d/.test(target)){
+    const n = parseInt(String(target).replace(/[^\d]/g,""),10);
+    if(Number.isFinite(n)){
+      options = [String(n), String(n+1), String(Math.max(0,n-1))];
+    }else{
+      options = [target, "1", "2"];
+    }
+  }else if(map[lower]){
+    options = map[lower].slice();
+  }else{
+    const pool = ["plan","data","problem","phone","price","time","ticket","address","email","name","number","today","tomorrow"];
+    options = [target];
+    for(const w of pool){
+      if(options.length>=3) break;
+      if(w.toLowerCase()===lower) continue;
+      options.push(w);
+    }
+  }
+
+  // de-dup + keep max 3
+  const seen = new Set();
+  options = options.filter(x=>{
+    const k = String(x).trim();
+    if(!k) return false
+    const kl = k.toLowerCase();
+    if(seen.has(kl)) return false;
+    seen.add(kl);
+    return true;
+  }).slice(0,3);
+
+  return { cloze, answer: target, options };
+}
+
+// If a scene JSON does NOT provide a USER suggested reply after AI,
+// we still give learners a cloze-able starter sentence.
+function guessExpectedFromAi(aiEn){
+  const s = String(aiEn||"").trim();
+  if(!s) return "";
+  const low = s.toLowerCase();
+
+  // Simple, reliable templates (A1 friendly)
+  if(/\?$/.test(s)){
+    if(low.startsWith("can you")) return "Yes, I can.";
+    if(low.startsWith("could you")) return "Sure, I can.";
+    if(low.startsWith("do you")) return "Yes, I do.";
+    if(low.startsWith("are you")) return "Yes, I am.";
+    if(low.startsWith("is it")) return "Yes, it is.";
+    if(low.includes("what") || low.includes("where") || low.includes("when")) return "I'm not sure.";
+    return "Okay.";
+  }
+  // Statement → short acknowledgement
+  return "Okay.";
+}
 
   function ensureFillOpts(){
     let el = document.getElementById("fillOpts");
@@ -873,7 +951,8 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     // expected is the first USER turn right after current AI turn
     const aiIdx = turnIdx;
     const user = (turns[aiIdx+1] && turns[aiIdx+1].role==="USER") ? turns[aiIdx+1] : expectedAfter(aiIdx);
-    return (user && user.en) ? user.en : "";
+    const s = (user && user.en) ? String(user.en).trim() : "";
+    return s || guessExpectedFromAi((turns[aiIdx] && turns[aiIdx].en) ? turns[aiIdx].en : "");
   }
 
 function guessFillFromSentence(en){
@@ -1064,6 +1143,15 @@ try{showReport();}catch(e){}
     }
 
     turns = normalizeTurns(activeScene);
+
+// --- Validate (W1~W54): ensure USER suggested replies exist ---
+// If not, learner still gets a cloze starter via guessExpectedFromAi()
+try{
+  const hasUser = Array.isArray(turns) && turns.some(t=>t && t.role==="USER" && String(t.en||"").trim());
+  if(!hasUser){
+    console.warn("[Talk] Scene has no USER suggested replies. Using AI-based fallback cloze.");
+  }
+}catch(_e){}
     if(!turns.length){
       turns = [{en:"(No turns found in JSON)", zh:"JSON 沒有 turns/dialogue/lines/items 陣列", level: String(activeScene?.meta?.level || "A1")}];
     }
@@ -1452,6 +1540,14 @@ if(!firstId){
   btnSave.addEventListener("click", saveLine);
 
   btnFill.addEventListener("click", ()=>{
+    if(talkMode==="dialogue"){
+      const expected = (currentExpectedEn()||"").trim();
+      if(expected){
+        const cl = makeCloze(expected);
+        fillEn.textContent = cl.cloze || expected;
+        renderFillOptions(cl);
+      }
+    }
     fillCard.scrollIntoView({behavior:"smooth", block:"start"});
     fillInput.focus();
   });
