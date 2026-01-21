@@ -1132,6 +1132,59 @@ body{line-height:1.1}
 </div>
 
 <script>
+// === BookWide: robust JSON loader (avoid 404 breakage) ===
+async function fetchJsonFirst(urls){
+  let lastErr = null;
+  for(const u of urls){
+    try{
+      const r = await fetch(u, { cache: "no-store" });
+      if(!r.ok) { lastErr = new Error("HTTP "+r.status+" "+u); continue; }
+      return await r.json();
+    }catch(e){ lastErr = e; }
+  }
+  throw lastErr || new Error("All JSON candidates failed");
+}
+
+function sceneCandidates(sceneId){
+  if(!sceneId) return [];
+  const raw = String(sceneId).trim();
+  const file = raw.endsWith(".json") ? raw : (raw + ".json");
+  // allow passing full path in scene
+  const direct = file.startsWith("/") ? [file] : [];
+  const base = file.startsWith("/") ? file.slice(1) : file;
+  // try several likely folders (keep order)
+  return [
+    ...direct,
+    "/EduEnglish/data/" + base,
+    "/EduEnglish/data/talk/" + base,
+    "/EduEnglish/talk/" + base,
+    "/talk/" + base,
+    "/" + base,
+  ];
+}
+
+
+// === Cloze: FORCE expected user line for every AI turn (W1–W54) ===
+function generateTeachingReply(aiEn){
+  const s = (aiEn||"").trim();
+  if(!s) return "Okay.";
+  if(/\?\s*$/.test(s)){
+    if(/\bwhen\b/i.test(s)) return "It started yesterday.";
+    if(/\bwhere\b/i.test(s)) return "It happened at home.";
+    if(/\bhow\b/i.test(s)) return "It happened suddenly.";
+    if(/\bwhy\b/i.test(s)) return "Because something went wrong.";
+    return "Yes. It started yesterday.";
+  }
+  return "Okay, got it.";
+}
+function getExpectedUserLine(aiEn, userTurn){
+  if(userTurn && userTurn.en && String(userTurn.en).trim()) return String(userTurn.en).trim();
+  return generateTeachingReply(aiEn);
+}
+
+
+
+
 /* =============================
    Talk weekly learner console
    - Reads ./talk/index.json
@@ -1202,7 +1255,7 @@ let __tvWatch = null;
   const INDEX_URL = new URL("/EduEnglish/talk/index.json", location.origin).toString();
   const FALLBACK_INDEX_URLS = [
     // Most likely deployments first (reduces noisy 404s)
-    new URL("/EduEnglish/data/weekly-index.json", location.href).toString(),          // talk.html at site root, data in /talk/
+    new URL("./talk/index.json", location.href).toString(),          // talk.html at site root, data in /talk/
     new URL("./EduEnglish/talk/index.json", location.href).toString(), // repo folder kept under site root
     new URL("./index.json", location.href).toString(),              // talk.html and index.json same folder
     new URL("/talk/index.json", location.origin).toString(),        // absolute /talk/
@@ -1382,20 +1435,13 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       if(aiIdx >= turns.length) aiIdx = Math.max(0, turns.length-1);
       const ai = turns[aiIdx] || {en:"—",zh:"",level:"A1",role:"AI"};
       const user = expectedAfter(aiIdx);
-      const expectedUserEn = getExpectedUserLine(ai.en, user);
-      const clozeText = (user && user.fill && String(user.fill).trim()) ? String(user.fill).trim() : guessFillFromSentence(expectedUserEn);
-
-      lineEn.textContent = ai.en || "—";
+    const expectedUserEn = getExpectedUserLine(ai.en, user);
+    const clozeText = (user && user.fill && String(user.fill).trim()) ? String(user.fill).trim() : guessFillFromSentence(expectedUserEn);
+lineEn.textContent = ai.en || "—";
       const li = document.getElementById("lineEnInline"); if(li) li.textContent = ai.en || "—";
       lineZh.textContent = ai.zh ? ai.zh : " ";
       const lz = document.getElementById("lineZhInline"); if(lz) lz.textContent = ai.zh ? ai.zh : " ";
       levBadge.textContent = ai.level || "A1";
-
-      // FORCE cloze at first sight (no USER in JSON -> auto teaching reply)
-      if(typeof fillTitle!=="undefined" && fillTitle) fillTitle.textContent = "填空提示";
-      if(typeof fillEn!=="undefined" && fillEn) fillEn.textContent = clozeText || "It started _____.";
-      if(typeof fillHint!=="undefined" && fillHint) fillHint.textContent = "先照填空念一次，再換成你自己的說法。";
-
 
       // Input card becomes "your reply" (do NOT reveal the expected answer by default)
       fillTitle.textContent = "你的回覆";
@@ -1403,7 +1449,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       // build cloze + options for low difficulty guidance
       const cl = makeCloze(expected);
       // default show cloze; user can press「提示」to reveal full expected answer temporarily
-      fillEn.textContent = expected ? (cl.cloze || "請輸入你的回覆…") : "請輸入你的回覆…";
+      fillEn.textContent = clozeText || fillEn.textContent || "It started _____.";
       renderFillOptions(cl);
       fillHint.textContent = "對話模式：AI 先說一句，等你回覆（語音或輸入）才會進下一句。按「提示」可顯示完整建議句。";
       // do not auto-clear while typing
@@ -1673,27 +1719,6 @@ async function speak(text){
       if(isAI(t)) break;
       return t; // first user-like turn after AI
     }
-
-
-  // === Cloze: FORCE expected user line for every AI turn (W1–W54) ===
-  function generateTeachingReply(aiEn){
-    const s = (aiEn||"").trim();
-    if(!s) return "Okay.";
-    if(/\?\s*$/.test(s)){
-      if(/\bwhen\b/i.test(s)) return "It started yesterday.";
-      if(/\bwhere\b/i.test(s)) return "It happened at home.";
-      if(/\bhow\b/i.test(s)) return "It happened suddenly.";
-      if(/\bwhy\b/i.test(s)) return "Because something went wrong.";
-      return "Yes. It started yesterday.";
-    }
-    return "Okay, got it.";
-  }
-
-  function getExpectedUserLine(aiEn, userTurn){
-    if(userTurn && userTurn.en && String(userTurn.en).trim()) return String(userTurn.en).trim();
-    return generateTeachingReply(aiEn);
-  }
-
     return null;
   }
 
@@ -1928,6 +1953,19 @@ try{showReport();}catch(e){}
   if(lnkMeta) lnkMeta.addEventListener("click",(e)=>{ e.preventDefault(); showModalHtml("資訊", buildMetaHtml()); });
 
 async function init(){
+  /*AUTO_SCENE_FALLBACK*/
+  // If a scene is specified, try loading it directly (works even if index.json is missing)
+  const _sceneParam = (new URLSearchParams(location.search)).get("scene") || "";
+  const _sceneTry = sceneCandidates(_sceneParam);
+  if(_sceneTry.length){
+    try{
+      window.__BW_SCENE_DIRECT__ = await fetchJsonFirst(_sceneTry);
+    }catch(e){
+      // silently continue; will fallback to index-based logic if available
+      window.__BW_SCENE_DIRECT__ = null;
+    }
+  }
+
 
   // ===== Teacher picker init =====
   const selTeacher = document.getElementById("selTeacher");
@@ -2247,7 +2285,10 @@ if(!firstId){
   }, {passive:true});
 
   init();
-})();</script>
+}
+
+
+)();</script>
 
 <script>
 const TEACHER_AZURE_VOICE = {
