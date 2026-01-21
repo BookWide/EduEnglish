@@ -1222,10 +1222,8 @@ let __tvWatch = null;
 
 
   const INDEX_URL = new URL("/EduEnglish/talk/index.json", location.origin).toString();
-  const FALLBACK_INDEX_URLS = [
-    new URL("./index.json", location.href).toString(),              // if talk.html inside /talk/
-    new URL("../talk/index.json", location.href).toString(),        // if talk.html inside /checklist/
-  ];
+  // Paths are locked: do NOT guess or fallback to other locations.
+
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
   const LS_SAVED = "BW_TALK_SAVED_LINES";
@@ -1238,7 +1236,8 @@ let __tvWatch = null;
 const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const DAY = 24*60*60*1000;
-  const MAX_WEEKS = 999; // MVP
+  const MAX_WEEKS = 54; // total weeks in curriculum
+  let MAX_OPEN_WEEK = 8; // will be overridden by index.json if provided
   const ITEMS_PER_WEEK = 3;
 
   // UI refs
@@ -1317,7 +1316,41 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     throw lastErr || new Error("fetch failed");
   }
 
-  function getUserId(){
+  
+  function normalizeIndex(raw){
+    // Accept v2 (weeks[]) or legacy v1 (scenes[]). Convert to a unified internal shape.
+    if(!raw || typeof raw !== "object") return { weeks: [], max_open_week: 8 };
+    if(Array.isArray(raw.weeks)){
+      return raw;
+    }
+    // legacy v1
+    const scenes = Array.isArray(raw.scenes) ? raw.scenes : [];
+    const weeksMap = new Map();
+    for(const s of scenes){
+      const id = s.id || s.scene_id || s.key;
+      if(!id) continue;
+      const wk = getWeekFromId(id);
+      if(!wk) continue;
+      if(!weeksMap.has(wk)) weeksMap.set(wk, []);
+      weeksMap.get(wk).push({
+        type: (String(id).split(".")[1] || ""),
+        id: (String(id).split(".").slice(2).join(".") || id),
+        scene_id: id,
+        title: s.title || id,
+        level: s.level || s.lev || "",
+        file: id + ".json"
+      });
+    }
+    const allWeeks = Array.from(weeksMap.keys()).sort((a,b)=>a-b);
+    const maxWeek = allWeeks.length ? allWeeks[allWeeks.length-1] : 8;
+    const weeks = [];
+    for(let w=1; w<=maxWeek; w++){
+      const items = weeksMap.get(w) || [];
+      weeks.push({ week:w, open:(w<=8), items });
+    }
+    return { schema:"bookwide.talk.index.v2", base_path:"/EduEnglish/talk/", max_open_week:8, weeks };
+  }
+function getUserId(){
     // from guard (preferred), else fallback stored value
     try{
       return (window.BW_USER_ID || localStorage.getItem("BW_USER_ID") || "").toString();
@@ -1360,7 +1393,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     const weekMs = WEEK_DAYS * DAY;
     const passed = diff / weekMs; // 0.0, 1.0, 2.0...
     const w = Math.floor(passed + ADVANCE_WEEKS) + 1;
-    return Math.max(1, Math.min(MAX_WEEKS, w));
+    return Math.max(1, Math.min(MAX_OPEN_WEEK, w));
   }
 
   // ---- turns normalize (defensive) ----
@@ -1750,16 +1783,13 @@ try{showReport();}catch(e){}
     showToast("已收藏");
   }
 
-  async function loadSceneById(id, title){
+  async function loadSceneById(id, title, file){
     activeSceneId = id;
     activeSceneTitle = title || id;
 
-    const url = new URL("/talk/" + encodeURIComponent(id) + ".json", location.origin).toString();
-    const fallback = [
-      url,
-      new URL("./" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /talk/
-      new URL("../talk/" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /checklist/
-    ];
+    const filename = (file && String(file).trim()) ? String(file).trim() : (String(id).trim() + ".json");
+    const url = new URL("/EduEnglish/talk/" + filename, location.origin).toString();
+    const fallback = [url];
     try{
       activeScene = await fetchJsonAny(fallback);
       currentSceneJson = activeScene;
@@ -1795,6 +1825,28 @@ try{showReport();}catch(e){}
 
   function buildWeekMap(){
     byWeek = new Map();
+    // v2: {weeks:[{week,open,items:[{scene_id,title,level,file}]}]}
+    const weeksArr = (indexData && Array.isArray(indexData.weeks)) ? indexData.weeks : [];
+    if(weeksArr.length){
+      for(const w of weeksArr){
+        const wk = Number(w.week);
+        if(!wk) continue;
+        const items = Array.isArray(w.items) ? w.items : [];
+        if(!byWeek.has(wk)) byWeek.set(wk, []);
+        for(const it of items){
+          const id = it.scene_id || it.id || it.key;
+          if(!id) continue;
+          byWeek.get(wk).push({
+            id,
+            title: it.title || id,
+            level: it.level || it.lev || "",
+            file: it.file || (id + ".json")
+          });
+        }
+      }
+      return;
+    }
+    // legacy fallback (should be normalized already, but keep safe)
     const scenes = (indexData && Array.isArray(indexData.scenes)) ? indexData.scenes : [];
     for(const s of scenes){
       const id = s.id || s.scene_id || s.key;
@@ -1802,8 +1854,9 @@ try{showReport();}catch(e){}
       const wk = getWeekFromId(id);
       if(!wk) continue;
       if(!byWeek.has(wk)) byWeek.set(wk, []);
-      byWeek.get(wk).push({id, title: s.title || id, level: s.level || s.lev || ""});
+      byWeek.get(wk).push({id, title: s.title || id, level: s.level || s.lev || "", file: id + ".json"});
     }
+  }
     // stable sort
     for(const [wk, arr] of byWeek){
       arr.sort((a,b)=>String(a.id).localeCompare(String(b.id)));
@@ -1892,7 +1945,7 @@ try{showReport();}catch(e){}
           activeWeek = wk;
           localStorage.setItem(LS_LAST_SCENE, it.id);
           closeModal();
-          loadSceneById(it.id, it.title);
+          loadSceneById(it.id, it.title, it.file);
         });
         row.appendChild(left);
         row.appendChild(btn);
@@ -1982,12 +2035,14 @@ async function init(){
     try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
     // load index.json
     try{
-      indexData = await fetchJsonAny([INDEX_URL, ...FALLBACK_INDEX_URLS]);
+      indexData = await fetchJsonAny([INDEX_URL]);
+      indexData = normalizeIndex(indexData);
     }catch(e){
       indexData = { scenes: [] };
       showToast("讀不到 talk/index.json");
     }
 
+    MAX_OPEN_WEEK = Math.max(1, Math.min(MAX_WEEKS, Number(indexData?.max_open_week || 8)));
     buildWeekMap();
     renderPicker();
 
@@ -2106,7 +2161,7 @@ if(!firstId){
       updateUI();
       return;
     }
-    await loadSceneById(firstId, firstTitle);
+    await loadSceneById(firstId, firstTitle, null);
   }
 
   // -------- events --------
