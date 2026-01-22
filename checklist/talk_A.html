@@ -1,9 +1,128 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
+<!-- ===== BookWide Guard (Talk: subscription required) ===== -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  // BookWide Supabase public config (global)
+  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+  const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+  window.SUPABASE_URL = SUPABASE_URL;
+  window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
+</script>
+<script>
+(async function() {
+  try {
+    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    });
+
+    // --- require login ---
+    const { data: sess } = await supabase.auth.getSession();
+    const session = sess && sess.session;
+    if (!session || !session.user) {
+      const red = encodeURIComponent(location.pathname + location.search + location.hash);
+      location.replace('/account/login.html?redirect=' + red);
+      return;
+    }
+
+    const user = session.user;
+    const uid = user.id;
+    const email = (user.email || '').toLowerCase();
+
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
+
+    // --- read profile (best effort) ---
+    const { data: prof, error: perr } = await supabase
+      .from('profiles')
+      .select('id, expires_at, is_paused')
+      .eq('id', uid)
+      .maybeSingle();
+
+    // 如果 profiles 讀不到（RLS / row 不存在），不要直接判死刑：改用 orders 當 fallback
+    const paused = !!(prof && prof.is_paused);
+    const pexp = prof && prof.expires_at ? String(prof.expires_at).slice(0,10) : '';
+
+    // --- orders fallback (handle test accounts recreated with new uid) ---
+    let oexp = '';
+    let opaid = '';
+    let ocreated = '';
+    let hasPaid = false;
+    try {
+      // 1) by user_id (best)
+      const r1 = await supabase
+        .from('orders')
+        .select('status,expires_at,paid_at,created_at')
+        .eq('user_id', u.id)
+        .order('created_at', { ascending:false })
+        .limit(1);
+      if (!r1.error && r1.data && r1.data.length) {
+        const row = r1.data[0];
+        if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
+        if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
+        if (row?.paid_at) opaid = String(row.paid_at);
+        if (row?.created_at) ocreated = String(row.created_at);
+      } else {
+        // 2) fallback by email (covers cases where order created before account was recreated)
+        const r2 = await supabase
+          .from('orders')
+          .select('status,expires_at,paid_at,created_at')
+          .eq('email', u.email)
+          .order('created_at', { ascending:false })
+          .limit(1);
+        if (!r2.error && r2.data && r2.data.length) {
+          const row = r2.data[0];
+          if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
+          if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
+          if (row?.paid_at) opaid = String(row.paid_at);
+          if (row?.created_at) ocreated = String(row.created_at);
+        }
+      }
+    } catch (e) {}
+
+    // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
+    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
+  // (fixed) today already defined above
+    let ok = (pe && pe >= today) || (oexp && oexp >= today);
+    if (!ok && hasPaid) {
+      // paid_at/created_at within last 400 days => treat as valid
+      const base = (opaid || ocreated || '').slice(0,10);
+      if (base) {
+        const t0 = new Date(base + 'T00:00:00Z').getTime();
+        const t1 = Date.now();
+        const days = (t1 - t0) / 86400000;
+        if (days >= 0 && days <= 400) ok = true;
+      } else {
+        ok = true;
+      }
+    }
+    // --- decide ---
+    const ok = (!paused) && (
+      (pexp && pexp >= today) ||
+      (oexp && oexp >= today)
+    );
+
+    window.BW_SUB_OK = ok;
+    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
+    window.BW_PROFILE_OK = !perr;
+
+    if (!ok) {
+      location.replace('/account/subscription.html');
+      return;
+    }
+  } catch (e) {
+    location.replace('/account/subscription.html?err=guard');
+  }
+})();
+</script>
+<!-- ===== /BookWide Guard ===== -->
+
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-<title>Talk A Admin｜BookWide</title>
+<title>Talk（每週口說）｜BookWide</title>
 <style>
 :root{
   --bg:#f4f6fb; --card:#fff; --ink:#0b1220; --muted:#5b667a; --line:#e6eaf0;
@@ -39,6 +158,8 @@ a{color:inherit}
   border:1px solid var(--line); background:#fff; border-radius:999px; padding:10px 12px;
   display:flex; align-items:center; gap:8px; font-weight:800;
 }
+.pill select{border:none;background:transparent;font:inherit;color:inherit;outline:none;padding:0 2px;}
+.pill .meta{margin-right:6px;opacity:.75;font-size:12px;}
 .pill .meta{font-size:12px; color:var(--muted); font-weight:700}
 .grid{display:grid; grid-template-columns:1fr; gap:14px; padding:14px}
 .hero{padding:14px}
@@ -930,7 +1051,6 @@ body{line-height:1.1}
 .fileTag { display: none !important; }
 </style>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <div class="wrap">
@@ -938,8 +1058,8 @@ body{line-height:1.1}
     <div class="leftTop">
       <button class="btnIcon" id="btnBack" aria-label="返回">←</button>
       <div>
-        <div class="brandTitle">Talk A（管理）</div>
-        <div class="sub" id="subTitle">Admin · Browser Speech</div>
+        <div class="brandTitle">Talk</div>
+        <div class="sub" id="subTitle">每週口說 · Browser Speech</div>
       </div>
     </div>
     <div class="rightTop">
@@ -948,6 +1068,15 @@ body{line-height:1.1}
         <span class="meta" id="scenePickLabel">選擇情境</span>
         <span aria-hidden="true">▾</span>
       </button>
+
+        <label class="pill" title="選擇老師">
+          <span class="meta">Teacher</span>
+          <select id="selTeacher" aria-label="Teacher">
+                        <option value="Diana.mp4">Diana</option>
+            <option value="Emma.mp4">Emma</option>
+            <option value="Sophia.mp4">Sophia</option>
+          </select>
+        </label>
       <button class="smallBtn" id="btnReplay">重播</button>
       <span class="fileTag" id="fileTag"></span>
     </div>
@@ -957,7 +1086,7 @@ body{line-height:1.1}
     <div class="hero card">
       <div class="heroRow">
         <div class="avatar" aria-label="AI 老師頭像">
-          <video id="teacherVideo" class="teacherMedia" src="https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/avatars/talk.mp4" autoplay muted loop playsinline webkit-playsinline></video>
+          <video id="teacherVideo" class="teacherMedia" autoplay muted playsinline webkit-playsinline></video>
           <span class="dot" id="dotLive"></span>
         </div>
         <div class="heroText">
@@ -1032,63 +1161,65 @@ body{line-height:1.1}
    - Unlock week by time since first use (localStorage)
    - Loads ./talk/<id>.json
    ============================= */
-
-/* ================= Admin Gate =================
-   - login required
-   - admin = profiles.is_admin OR email allowlist
-   ============================================ */
-const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOx';
-const ADMIN_EMAILS = new Set(['pmktools@gmail.com','384246452@qq.com']);
-
-const supa = window.supa ?? supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
-});
-window.supa = supa;
-
-async function requireAdmin(){
-  try{
-    const { data } = await supa.auth.getSession();
-    const user = data.session?.user || null;
-
-    if(!user){
-      const next = encodeURIComponent(location.pathname + location.search + location.hash);
-      location.href = '/login.html?next=' + next;
-      return false;
-    }
-
-    let isAdmin = false;
-
-    // DB flag (preferred)
-    try{
-      const { data: p, error } = await supa.from('profiles').select('is_admin').eq('id', user.id).maybeSingle();
-      if(!error && p?.is_admin === true) isAdmin = true;
-    }catch(_e){}
-
-    // Email fallback (works even if profiles blocked)
-    const email = (user.email || '').toLowerCase();
-    if(!isAdmin && email && ADMIN_EMAILS.has(email)) isAdmin = true;
-
-    if(!isAdmin){
-      alert('此頁僅限管理員使用');
-      location.href = '/account/learning-dashboard.html';
-      return false;
-    }
-    return true;
-  }catch(e){
-    console.error(e);
-    alert('此頁僅限管理員使用');
-    location.href = '/account/learning-dashboard.html';
-    return false;
-  }
-}
-/* ================= /Admin Gate ================= */
-
 (function(){
   const $ = (id)=>document.getElementById(id);
   const toastEl = $("toast");
   const mask = $("mask");
   const modalBody = $("modalBody");
+  // ===== Teacher video speak-sync (stop loop, play only while TTS speaking) =====
+  const __teacherVideo = document.getElementById("teacherVideo");
+  
+  // ===== Teacher (Supabase Storage) =====
+  const TEACHER_BASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/talk/teacher/";
+  function normalizeTeacherFile(v){
+    const s = String(v||"").trim();
+    if(!s) return "teacher.mp4";
+    if(!s.toLowerCase().endsWith(".mp4")) return s + ".mp4";
+    return s;
+  }
+  function getTeacherFromURL(){
+    const u = new URL(location.href);
+    return (u.searchParams.get("teacher") || u.searchParams.get("t") || "");
+  }
+  function setTeacher(file){
+    const f = normalizeTeacherFile(file);
+    try{ localStorage.setItem("bw_teacher_file", f); }catch(_ ){}
+    const el = document.getElementById("selTeacher");
+    if(el) el.value = f;
+    if(__teacherVideo){
+      __teacherVideo.src = TEACHER_BASE_URL + encodeURIComponent(f) + "?v=" + Date.now();
+      __teacherVideo.load();
+    }
+  }
+let __tvWatch = null;
+
+  function __tvStop(){
+    try{
+      if(!__teacherVideo) return;
+      try{ __teacherVideo.pause(); }catch(_){}
+      try{ __teacherVideo.currentTime = 0; }catch(_){}
+    }catch(_){}
+  }
+  function __tvStart(){
+    try{
+      if(!__teacherVideo) return;
+      __teacherVideo.loop = false;
+      __teacherVideo.muted = true;
+      __teacherVideo.playsInline = true;
+      if(__teacherVideo.readyState >= 2){
+        try{ __teacherVideo.currentTime = 0; }catch(_){}
+      }
+      const p = __teacherVideo.play();
+      if(p && typeof p.catch === "function") p.catch(()=>{});
+    }catch(_){}
+  }
+  try{
+    if(__teacherVideo){
+      __teacherVideo.loop = false;
+      __teacherVideo.addEventListener("ended", __tvStop, {passive:true});
+    }
+  }catch(e){}
+
 
   const INDEX_URL = new URL("/talk/index.json", location.origin).toString();
   const FALLBACK_INDEX_URLS = [
@@ -1110,6 +1241,9 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   const MAX_WEEKS = 999; // MVP
   const ITEMS_PER_WEEK = 3;
 
+
+  // Admin checklist view: unlock all weeks (for /checklist/ or talk_A.html)
+  const IS_ADMIN_VIEW = /\/checklist\//.test(location.pathname) || /talk_A\.html/i.test(location.pathname);
   // UI refs
   const weekLabel = $("weekLabel");
   const scenePickLabel = $("scenePickLabel");
@@ -1143,7 +1277,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   // State
   let indexData = null;               // {scenes:[]}
   let byWeek = new Map();             // weekNo -> scenes[]
-  let unlockedWeek = MAX_WEEKS;          // computed (Admin default)
+  let unlockedWeek = 1;               // computed
   let talkMode = "dialogue";          // "dialogue" or "shadow"
   let activeWeek = 1;
   let activeSceneId = null;
@@ -1152,8 +1286,8 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   let turns = [];                     // normalized turns
   let turnIdx = 0;
   let lastTts = null;
-
-  // -------- utils --------
+  let lastTtsAt = 0;
+// -------- utils --------
   function showToast(msg){
     toastEl.textContent = msg;
     toastEl.style.display = "block";
@@ -1186,18 +1320,51 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     throw lastErr || new Error("fetch failed");
   }
 
-  function ensureStartTs(){
-    let ts = Number(localStorage.getItem(LS_START)||"0");
+  function getUserId(){
+    // from guard (preferred), else fallback stored value
+    try{
+      return (window.BW_USER_ID || localStorage.getItem("BW_USER_ID") || "").toString();
+    }catch(e){ return ""; }
+  }
+
+  // anchor per user (so different learners unlock by their own start)
+  const LS_ANCHOR_BASE = "BW_TALK_ANCHOR_TS_";
+  const LS_EXPIRES_BASE = "BW_TALK_EXPIRES_AT_";
+
+  // 課程週期設定
+  const WEEK_DAYS = 7;        // 每週 = 7 天（固定）
+  const ADVANCE_WEEKS = 0.5;  // 提前 unlock（0.5 = 提前半週）
+
+  function ensureAnchorTs(){
+    const uid = getUserId() || "anon";
+    const k = LS_ANCHOR_BASE + uid;
+    let ts = 0;
+    try{ ts = Number(localStorage.getItem(k)||"0"); }catch(e){ ts = 0; }
+
+    // If subscription expires_at exists, we can detect first-time after subscribe:
+    // store a copy of expires_at; if user renews later, we keep anchor (do not reset).
+    const expNow = (()=>{ try{ return (window.BW_SUB_EXPIRES_AT || localStorage.getItem("BW_SUB_EXPIRES_AT") || "").toString(); }catch(e){ return ""; }})();
+    try{
+      const expKey = LS_EXPIRES_BASE + uid;
+      const expOld = localStorage.getItem(expKey) || "";
+      if(expNow && !expOld) localStorage.setItem(expKey, expNow);
+    }catch(_e){}
+
     if(!ts){
       ts = Date.now();
-      localStorage.setItem(LS_START, String(ts));
+      try{ localStorage.setItem(k, String(ts)); }catch(e){}
     }
     return ts;
   }
 
   function computeUnlockedWeek(){
-    // Admin: 永遠全解鎖
-    return MAX_WEEKS;
+    if(IS_ADMIN_VIEW) return MAX_WEEKS;
+    const ts = ensureAnchorTs();
+    const diff = Date.now() - ts;
+    const weekMs = WEEK_DAYS * DAY;
+    const passed = diff / weekMs; // 0.0, 1.0, 2.0...
+    const w = Math.floor(passed + ADVANCE_WEEKS) + 1;
+    return Math.max(1, Math.min(MAX_WEEKS, w));
   }
 
   // ---- turns normalize (defensive) ----
@@ -1211,7 +1378,10 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       const hasUser = !t.en && (t.hint_en || t.hint_zh);
       const en = (t.en ?? (hasUser ? t.hint_en : "") ?? t.english ?? t.text ?? '').toString().trim();
       const zh = (t.zh ?? (hasUser ? t.hint_zh : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
-      const role = ((t.role ?? t.speaker ?? '').toString().trim()) || (hasUser ? "USER" : "AI");
+      let role = (((t.role ?? t.speaker ?? '').toString().trim()) || (hasUser ? "USER" : "AI"));
+      // normalize legacy roles
+      if (/^student$/i.test(role)) role = 'USER';
+      if (/^teacher$/i.test(role)) role = 'AI';
       const level = (t.level ?? t.cefr ?? '').toString().trim() || 'A1';
       const hint = (t.hint ?? '').toString().trim();
       const fill = (t.fill ?? t.blank ?? '').toString();
@@ -1246,13 +1416,19 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
       // Input card becomes "your reply" (do NOT reveal the expected answer by default)
       fillTitle.textContent = "你的回覆";
-      const expected = (user?.en || "").trim();
+      let expected = (user?.en || "").trim();
+      let expectedSrc = "json";
+      if(!expected){
+        expected = synthUserFromAI(ai.en||"", activeSceneId||"");
+        expectedSrc = "generated";
+        console.warn("[Talk] 缺 USER 建議句：請補 JSON（不再自動生成）", { sceneId: activeSceneId, ai: ai.en });
+      }
       // build cloze + options for low difficulty guidance
       const cl = makeCloze(expected);
       // default show cloze; user can press「提示」to reveal full expected answer temporarily
       fillEn.textContent = expected ? (cl.cloze || "請輸入你的回覆…") : "請輸入你的回覆…";
       renderFillOptions(cl);
-      fillHint.textContent = "對話模式：AI 先說一句，等你回覆（語音或輸入）才會進下一句。按「提示」可顯示完整建議句。";
+      fillHint.textContent = "對話模式：AI 先說一句，等你回覆（語音或輸入）才會進下一句。按「提示」可顯示完整建議句。" + (expectedSrc==="generated" ? "  ⚠ 缺 USER 建議句：已用規則生成，請補 JSON。" : "");
       // do not auto-clear while typing
       // top labels
       weekLabel.textContent = "W" + String(activeWeek);
@@ -1289,7 +1465,42 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   
   // ---- dialogue guidance: cloze + options (A2-ish by default) ----
-  function makeCloze(expectedEn){
+  
+  // ====== STRICT data guard: no silent fallback ======
+  // 如果 JSON 沒有 USER 建議句，我們不「默默失敗」：
+  // 1) 仍用規則生成一條可挖空的句子（保命線：挖空一定出）
+  // 2) 同時在 UI/Console 明確警告，提醒你去補 JSON
+  function synthUserFromAI(aiEn, sceneId){
+    const s = (aiEn||"").trim();
+    if(!s) return "—";
+    const lower = s.toLowerCase();
+    const isQ = /\?$/.test(s);
+    // scene hint
+    const sid = (sceneId||"").toLowerCase();
+    const isDir = sid.includes("direction");
+    const isAirport = sid.includes("airport");
+    const isCoffee = sid.includes("coffee");
+    // Deterministic templates (no randomness)
+    if(isQ){
+      if(isDir && (lower.includes("where") || lower.includes("how do i get"))){
+        return "It's over there.";
+      }
+      if(isAirport && (lower.includes("passport") || lower.includes("boarding") || lower.includes("gate"))){
+        return "Sure. Let me check that for you.";
+      }
+      if(isCoffee && (lower.includes("would you like") || lower.includes("what can i get"))){
+        return "I'd like a coffee, please.";
+      }
+      if(lower.startsWith("can i") || lower.startsWith("could i") || lower.startsWith("may i")){
+        return "Yes, please.";
+      }
+      return "Sure.";
+    }
+    // If AI is giving a model sentence, we let user shadow it (stable & predictable)
+    return s;
+  }
+
+function makeCloze(expectedEn){
     const s = (expectedEn||"").trim();
     if(!s) return {cloze:"", answer:"", options:[]};
     // pick a target word: prefer numbers, then last content word
@@ -1404,20 +1615,106 @@ function guessFillFromSentence(en){
     return s.replace(target, "____");
   }
 
-  async function speak(text){
+  
+  // ===== Azure TTS Switch =====
+  const USE_AZURE_TTS = true; // 改成 false 可退回 Browser Speech
+  const AZURE_TTS_ENDPOINT = `${SUPABASE_URL}/functions/v1/azure-tts`;
+
+  // 每位老師固定一個 Azure voice（明顯區分）
+  const TEACHER_AZURE_VOICE = {
+    "Diana": "en-GB-LibbyNeural",
+    "Emma": "en-AU-NatashaNeural",
+    "Sophia": "en-US-AriaNeural"
+  };
+
+  // 每位老師的語速/音高（更好分辨）
+  const TEACHER_TTS_STYLE = {
+    "Diana": { rate: "-2%", pitch: "+10%" },
+    "Emma":  { rate: "+6%", pitch: "+2%" },
+    "Sophia":{ rate: "0%",  pitch: "-6%" }
+  };
+
+  let __ttsAudio = null;
+  let __ttsBlobUrl = null;
+
+async function speak(text){
     try{
-      if(!("speechSynthesis" in window)) return;
-      window.speechSynthesis.cancel();
+      const now = Date.now();
+      if (text && text === lastTts && (now - lastTtsAt) < 800) return; // 防止重複發聲
+      lastTtsAt = now;
+      lastTts = text;
+
+      // --- stop any previous audio ---
+      try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(e){}
+      try{ if(__ttsAudio){ __ttsAudio.pause(); __ttsAudio.currentTime = 0; } }catch(e){}
+      try{ if(__ttsBlobUrl){ URL.revokeObjectURL(__ttsBlobUrl); } }catch(e){}
+      __ttsAudio = null;
+      __ttsBlobUrl = null;
+
+      __tvStart();
+
+      // ===== Azure TTS (Edge Function) =====
+      if (USE_AZURE_TTS){
+        const sel = document.getElementById("selTeacher");
+        const raw = sel ? String(sel.value||"") : "";
+        const key = raw.toLowerCase();
+        const base = key.split('/').pop();
+        const name = base.replace(/\.mp4$/,'');
+        const cap = name ? (name.charAt(0).toUpperCase() + name.slice(1)) : raw;
+
+        const voice = (TEACHER_AZURE_VOICE[raw] || TEACHER_AZURE_VOICE[cap] || TEACHER_AZURE_VOICE[base] || "en-US-AriaNeural");
+        const st = (TEACHER_TTS_STYLE[raw] || TEACHER_TTS_STYLE[cap] || TEACHER_TTS_STYLE[base] || { rate: "0%", pitch: "0%" });
+
+        const r = await fetch(AZURE_TTS_ENDPOINT, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": "Bearer " + SUPABASE_ANON_KEY
+          },
+          body: JSON.stringify({ text, voice, rate: st.rate, pitch: st.pitch })
+        });
+
+        if(!r.ok){
+          const t = await r.text().catch(()=> "");
+          console.warn("[azure-tts] failed:", r.status, t.slice(0,200));
+          throw new Error("azure-tts " + r.status);
+        }
+
+        const blob = await r.blob();
+        __ttsBlobUrl = URL.createObjectURL(blob);
+        __ttsAudio = new Audio(__ttsBlobUrl);
+
+        __ttsAudio.onended = ()=>{
+          __tvStop();
+          try{ if(__ttsBlobUrl) URL.revokeObjectURL(__ttsBlobUrl); }catch(e){}
+          __ttsAudio = null;
+          __ttsBlobUrl = null;
+        };
+        __ttsAudio.onerror = ()=>{
+          __tvStop();
+        };
+
+        await __ttsAudio.play();
+        return;
+      }
+
+      // ===== Fallback: Browser Speech =====
+      if(!("speechSynthesis" in window)){ __tvStop(); return; }
       const u = new SpeechSynthesisUtterance(text);
       u.lang = "en-US";
       u.rate = 1.0;
-      lastTts = text;
       window.speechSynthesis.speak(u);
-    }catch(e){}
+      u.onend = ()=>{ __tvStop(); };
+      u.onerror = ()=>{ __tvStop(); };
+    }catch(e){
+      try{ __tvStop(); }catch(_){}
+    }
   }
 
   function stopSpeak(){
     try{ window.speechSynthesis.cancel(); }catch(e){}
+    __tvStop();
   }
 
   function isAI(t){ return !!t && (t.role||'AI') !== 'USER'; }
@@ -1445,6 +1742,7 @@ function guessFillFromSentence(en){
       speak(currentTurn().en); // only speak AI turns
     }else{
       showToast("本情境完成 ✅");
+try{showReport();}catch(e){}
     }
   }
 
@@ -1525,7 +1823,60 @@ function guessFillFromSentence(en){
       const list = byWeek.get(wk) || [];
       if(!list.length) continue;
 
-      const locked = wk > unlockedWeek;
+      
+  // ===== 最小 UX 修正：只顯示「本週」＋「下一週提示」，其餘(包含往前週)一律不顯示 =====
+  if(!IS_ADMIN_VIEW && wk !== unlockedWeek && wk !== unlockedWeek + 1) continue;
+
+  if(!IS_ADMIN_VIEW && wk === unlockedWeek + 1){
+    const g = document.createElement("div");
+    g.className = "group";
+    const head = document.createElement("div");
+    head.className = "gHead";
+    head.innerHTML = `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`;
+    g.appendChild(head);
+
+    const row = document.createElement("div");
+    row.className = "item";
+    row.innerHTML = `
+      <div>
+        <div class="name">下一週即將解鎖</div>
+        <p class="sub">完成本週口說任務後，系統會自動開放 Week ${wk}</p>
+      </div>
+      <button class="ghost" style="height:42px;font-size:15px" disabled>尚未</button>
+    `;
+    g.appendChild(row);
+    modalBody.appendChild(g);
+    continue;
+  }
+// ===== UX：只顯示到「本週 + 下一週提示」=====
+      if(!IS_ADMIN_VIEW && wk > unlockedWeek + 1) continue;
+
+      // 下一週：只顯示一行提示，不列出三條
+      if(!IS_ADMIN_VIEW && wk === unlockedWeek + 1){
+        const g = document.createElement("div");
+        g.className = "group";
+        const head = document.createElement("div");
+        head.className = "gHead";
+        head.innerHTML = `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`;
+        g.appendChild(head);
+
+        const row = document.createElement("div");
+        row.className = "item";
+        row.innerHTML = `
+          <div>
+            <div class="name">下一週即將解鎖</div>
+            <p class="sub">完成本週口說任務後，系統會自動開放 Week ${wk}</p>
+          </div>
+          <button class="ghost" style="height:42px;font-size:15px" disabled>尚未</button>
+        `;
+        g.appendChild(row);
+
+        modalBody.appendChild(g);
+        continue;
+      }
+
+
+      const locked = (!IS_ADMIN_VIEW && wk !== unlockedWeek);// checklist view unlocks all
       const g = document.createElement("div");
       g.className = "group";
       const head = document.createElement("div");
@@ -1614,13 +1965,23 @@ function guessFillFromSentence(en){
   if(lnkMeta) lnkMeta.addEventListener("click",(e)=>{ e.preventDefault(); showModalHtml("資訊", buildMetaHtml()); });
 
 async function init(){
+
+  // ===== Teacher picker init =====
+  const selTeacher = document.getElementById("selTeacher");
+  if(selTeacher){
+    selTeacher.addEventListener("change", ()=> setTeacher(selTeacher.value));
+  }
+  let savedT = "";
+  try{ savedT = localStorage.getItem("bw_teacher_file") || ""; }catch(_){}
+  const urlT = getTeacherFromURL();
+  setTeacher(urlT || savedT || (selTeacher ? selTeacher.value : "teacher.mp4"));
     getOverrides();
     unlockedWeek = computeUnlockedWeek();
 
     // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
-    activeWeek = (savedWeek>=1 && savedWeek<=MAX_WEEKS) ? savedWeek : unlockedWeek;
+    activeWeek = unlockedWeek;// 強制當週為主，避免選到已鎖週
 
     // 模式：對話(dialogue) / 跟讀(shadow)
     try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
@@ -1713,7 +2074,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek;
+          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
           try{ localStorage.setItem(LS_LAST_SCENE, mapped.id); }catch(_e){}
         }
@@ -1730,7 +2091,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          activeWeek = Number(mapped.week)||activeWeek;
+          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
         }
       }else{
@@ -1895,7 +2256,140 @@ if(!firstId){
     if(mask.style.display==="flex" && inModal) return;
     // otherwise prevent overscroll
   }, {passive:true});
-  (async()=>{ const ok = await requireAdmin(); if(ok) init(); })();
+
+  init();
 })();</script>
+
+<script>
+const TEACHER_AZURE_VOICE = {
+  "diana.mp4":  "en-US-AvaNeural",
+  "emma.mp4":   "en-US-AriaNeural",
+  "sophia.mp4": "en-GB-SoniaNeural"
+};
+function getTeacherVoice(teacherKey){
+  const t = (teacherKey||'').toString().trim().toLowerCase();
+  // Azure voices
+  if(t==='diana') return 'en-US-AnaNeural';
+  if(t==='emma') return 'en-US-AriaNeural';
+  if(t==='sophia') return 'en-AU-NatashaNeural';
+  // fallback: Emma
+  return 'en-US-AriaNeural';
+}
+
+const TEACHER_TTS_STYLE = {
+  "diana.mp4":  { rate: "-2%", pitch: "+10%" },
+  "emma.mp4":   { rate: "+6%", pitch: "+2%" },
+  "sophia.mp4": { rate: "0%",  pitch: "-6%" }
+};
+function getTeacherStyle(sel){
+  const key=(sel && sel.value? sel.value: "").toLowerCase();
+  return TEACHER_TTS_STYLE[key] || { rate: "0%", pitch: "0%" };
+}
+
+function getTeacherVoice(sel){
+  const key = (sel && sel.value ? sel.value : "").toLowerCase();
+  return TEACHER_AZURE_VOICE[key] || "en-US-JennyNeural";
+}
+</script>
+
+
+
+<!-- ===== Learning Report Modal (LOCKED) ===== -->
+<div id="bwReportMask" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:9999">
+  <div style="position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+              width:min(92vw,420px);background:#fff;border-radius:22px;padding:18px 18px 16px;">
+    <div style="text-align:center;font-size:20px;font-weight:700;margin-top:4px">
+      <span style="font-size:28px">⭐ ⭐ ⭐</span><br/>很棒!
+    </div>
+    <div style="text-align:center;color:#666;margin:6px 0 10px">買一杯咖啡</div>
+    <div style="display:flex;gap:10px;justify-content:space-between;margin:10px 0">
+      <div style="flex:1;text-align:center"><b id="rActive">50%</b><div style="color:#777;font-size:12px">主動練習</div></div>
+      <div style="flex:1;text-align:center"><b id="rPron">53%</b><div style="color:#777;font-size:12px">發音</div></div>
+      <div style="flex:1;text-align:center"><b id="rWords">116</b><div style="color:#777;font-size:12px">單字數</div></div>
+    </div>
+    <div style="text-align:center;margin:6px 0 14px">
+      <div style="font-size:12px;color:#777">完整度</div>
+      <div style="font-size:28px;font-weight:700" id="rComplete">65</div>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button onclick="closeReport()" style="flex:1;border-radius:14px;border:1px solid #e5e7eb;padding:10px;background:#fff">關閉</button>
+      <button onclick="closeReport()" style="flex:1;border-radius:14px;border:none;padding:10px;background:#2563eb;color:#fff">繼續</button>
+    </div>
+  </div>
+</div>
+<script>
+function showReport(){ document.getElementById('bwReportMask').style.display='block';
+  try{bwSaveTalkDailyScore();
+  try{ if(typeof totalScore!=='undefined'){ BW_commitTalkScore(totalScore);} }catch(e){}
+}catch(e){} }
+function closeReport(){ document.getElementById('bwReportMask').style.display='none'; }
+</script>
+<!-- ===== End Learning Report ===== -->
+
+
+<script>
+function bwSaveTalkDailyScore(){
+  try{
+    const d = new Date();
+    const key = d.toISOString().slice(0,10); // UTC key
+    const twKey = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // Taiwan key
+    const score = (function(){
+      const el = document.getElementById('rComplete');
+      const v = el ? Number(String(el.textContent||'').trim()) : NaN;
+      return Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 65;
+    })();
+    const active = (function(){
+      const el = document.getElementById('rActive');
+      if(!el) return null;
+      const t = String(el.textContent||'').replace('%','').trim();
+      const v = Number(t);
+      return Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : null;
+    })();
+    const pron = (function(){
+      const el = document.getElementById('rPron');
+      if(!el) return null;
+      const t = String(el.textContent||'').replace('%','').trim();
+      const v = Number(t);
+      return Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : null;
+    })();
+    const words = (function(){
+      const el = document.getElementById('rWords');
+      if(!el) return null;
+      const v = Number(String(el.textContent||'').trim());
+      return Number.isFinite(v) ? Math.max(0, Math.min(9999, Math.round(v))) : null;
+    })();
+
+    let obj = {};
+    const raw = localStorage.getItem('bwTalkScores');
+    if(raw){ try{ obj = JSON.parse(raw)||{}; }catch(e){ obj = {}; } }
+    obj[key] = { score, active, pron, words, updated_at: new Date().toISOString() };
+    if (twKey && twKey !== key) obj[twKey] = obj[key];
+    localStorage.setItem('bwTalkScores', JSON.stringify(obj));
+  }catch(e){}
+}
+</script>
+
+
+<!-- ===== BW TALK SCORE → DASHBOARD BRIDGE (LOCKED) ===== -->
+<script>
+(function(){
+  const KEY = "BW_DAILY_SCORE_MAP";
+  const TZ = "Asia/Taipei";
+  function todayKey(){
+    return new Date().toLocaleDateString("en-CA",{ timeZone: TZ });
+  }
+  window.BW_commitTalkScore = function(score){
+    try{
+      const day = todayKey();
+      const map = JSON.parse(localStorage.getItem(KEY) || "{}");
+      map[day] = (Number(map[day]) || 0) + Number(score || 0);
+      localStorage.setItem(KEY, JSON.stringify(map));
+      console.log("[BW SCORE SAVED]", day, map[day]);
+    }catch(e){ console.error(e); }
+  };
+})();
+</script>
+<!-- ===== /BW TALK SCORE → DASHBOARD BRIDGE ===== -->
+
 </body>
 </html>
