@@ -4,118 +4,118 @@
 <!-- ===== BookWide Guard (Talk: subscription required) ===== -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-  // BookWide Supabase public config (global)
+/*
+  Guard goals:
+  1) 必須已登入 (Supabase auth session)
+  2) 必須訂閱有效 (profiles.expires_at 或 orders.expires_at / paid)
+  3) 不重複宣告 const，避免 Console: "Identifier ... already been declared"
+*/
+(function(){
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
   const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
   window.SUPABASE_URL = SUPABASE_URL;
   window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
-</script>
-<script>
-(async function() {
-  try {
-    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
-    });
-
-    // --- require login ---
-    const { data: sess } = await supabase.auth.getSession();
-    const session = sess && sess.session;
-    if (!session || !session.user) {
-      const red = encodeURIComponent(location.pathname + location.search + location.hash);
-      location.replace('/account/login.html?redirect=' + red);
-      return;
+  function ymdTaipei(){
+    // 以台灣日期為準，避免跨日誤判
+    try{
+      return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' });
+    }catch(_){
+      return new Date().toISOString().slice(0,10);
     }
+  }
 
-    const user = session.user;
-    const uid = user.id;
-    const email = (user.email || '').toLowerCase();
+  async function run(){
+    try{
+      const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: { persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
+      });
 
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
+      // 1) require login
+      const { data: sess, error: sErr } = await sb.auth.getSession();
+      const session = sess && sess.session;
+      if(sErr || !session || !session.user){
+        const red = encodeURIComponent(location.pathname + location.search + location.hash);
+        location.replace('/account/login.html?redirect=' + red);
+        return;
+      }
 
-    // --- read profile (best effort) ---
-    const { data: prof, error: perr } = await supabase
-      .from('profiles')
-      .select('id, expires_at, is_paused')
-      .eq('id', uid)
-      .maybeSingle();
+      const u = session.user;
+      const uid = u.id;
+      const email = String(u.email || '').toLowerCase();
+      const today = ymdTaipei();
 
-    // 如果 profiles 讀不到（RLS / row 不存在），不要直接判死刑：改用 orders 當 fallback
-    const paused = !!(prof && prof.is_paused);
-    const pexp = prof && prof.expires_at ? String(prof.expires_at).slice(0,10) : '';
+      // 2) profile (best effort)
+      let paused = false;
+      let pexp = '';
+      try{
+        const r = await sb.from('profiles').select('expires_at,is_paused').eq('id', uid).maybeSingle();
+        if(!r.error && r.data){
+          paused = !!r.data.is_paused;
+          if(r.data.expires_at) pexp = String(r.data.expires_at).slice(0,10);
+        }
+      }catch(_){}
 
-    // --- orders fallback (handle test accounts recreated with new uid) ---
-    let oexp = '';
-    let opaid = '';
-    let ocreated = '';
-    let hasPaid = false;
-    try {
-      // 1) by user_id (best)
-      const r1 = await supabase
-        .from('orders')
-        .select('status,expires_at,paid_at,created_at')
-        .eq('user_id', u.id)
-        .order('created_at', { ascending:false })
-        .limit(1);
-      if (!r1.error && r1.data && r1.data.length) {
-        const row = r1.data[0];
-        if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
-        if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
-        if (row?.paid_at) opaid = String(row.paid_at);
-        if (row?.created_at) ocreated = String(row.created_at);
-      } else {
-        // 2) fallback by email (covers cases where order created before account was recreated)
-        const r2 = await supabase
-          .from('orders')
+      // 3) orders fallback
+      let oexp = '';
+      let hasPaid = false;
+      let paidBase = '';
+      try{
+        // by user_id
+        const r1 = await sb.from('orders')
           .select('status,expires_at,paid_at,created_at')
-          .eq('email', u.email)
+          .eq('user_id', uid)
           .order('created_at', { ascending:false })
           .limit(1);
-        if (!r2.error && r2.data && r2.data.length) {
-          const row = r2.data[0];
-          if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
-          if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
-          if (row?.paid_at) opaid = String(row.paid_at);
-          if (row?.created_at) ocreated = String(row.created_at);
+        let row = (!r1.error && r1.data && r1.data.length) ? r1.data[0] : null;
+
+        // by email
+        if(!row && email){
+          const r2 = await sb.from('orders')
+            .select('status,expires_at,paid_at,created_at')
+            .eq('email', email)
+            .order('created_at', { ascending:false })
+            .limit(1);
+          row = (!r2.error && r2.data && r2.data.length) ? r2.data[0] : null;
+        }
+
+        if(row){
+          if(row.status) hasPaid = String(row.status).toLowerCase() === 'paid';
+          if(row.expires_at) oexp = String(row.expires_at).slice(0,10);
+          paidBase = String(row.paid_at || row.created_at || '').slice(0,10);
+        }
+      }catch(_){}
+
+      // 4) decide
+      let ok = false;
+      if(!paused){
+        if((pexp && pexp >= today) || (oexp && oexp >= today)) ok = true;
+
+        // paid but missing expires_at -> allow if paid within last 400 days
+        if(!ok && hasPaid){
+          if(paidBase){
+            const t0 = new Date(paidBase + 'T00:00:00Z').getTime();
+            const days = (Date.now() - t0) / 86400000;
+            if(days >= 0 && days <= 400) ok = true;
+          }else{
+            ok = true;
+          }
         }
       }
-    } catch (e) {}
 
-    // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
-    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    const today = new Date().toISOString().slice(0,10);
-    let ok = (pe && pe >= today) || (oexp && oexp >= today);
-    if (!ok && hasPaid) {
-      // paid_at/created_at within last 400 days => treat as valid
-      const base = (opaid || ocreated || '').slice(0,10);
-      if (base) {
-        const t0 = new Date(base + 'T00:00:00Z').getTime();
-        const t1 = Date.now();
-        const days = (t1 - t0) / 86400000;
-        if (days >= 0 && days <= 400) ok = true;
-      } else {
-        ok = true;
+      window.BW_SUB_OK = ok;
+      window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
+
+      if(!ok){
+        location.replace('/account/subscription.html');
+        return;
       }
+    }catch(_e){
+      location.replace('/account/subscription.html?err=guard');
     }
-    // --- decide ---
-    const ok = (!paused) && (
-      (pexp && pexp >= today) ||
-      (oexp && oexp >= today)
-    );
-
-    window.BW_SUB_OK = ok;
-    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
-    window.BW_PROFILE_OK = !perr;
-
-    if (!ok) {
-      location.replace('/account/subscription.html');
-      return;
-    }
-  } catch (e) {
-    location.replace('/account/subscription.html?err=guard');
   }
+
+  run();
 })();
 </script>
 <!-- ===== /BookWide Guard ===== -->
@@ -1221,10 +1221,11 @@ let __tvWatch = null;
   }catch(e){}
 
 
-  const INDEX_URL = new URL("/EduEnglish/talk/index.json", location.origin).toString();
-  const FALLBACK_INDEX_URLS = [
-    new URL("./index.json", location.href).toString(),              // if talk.html inside /talk/
-    new URL("../talk/index.json", location.href).toString(),        // if talk.html inside /checklist/
+  // ===== index.json locations (support both /EduEnglish/talk.html and /talk.html) =====
+  const INDEX_URLS = [
+    new URL("./talk/index.json", location.href).toString(),             // if this file is /EduEnglish/talk.html -> /EduEnglish/talk/index.json
+    new URL("/EduEnglish/talk/index.json", location.origin).toString(), // explicit
+    new URL("/talk/index.json", location.origin).toString()             // if deployed to /talk/
   ];
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
@@ -1238,7 +1239,8 @@ let __tvWatch = null;
 const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const DAY = 24*60*60*1000;
-  const MAX_WEEKS = 999; // MVP
+  const MAX_WEEKS = 54; // total weeks in curriculum
+  let MAX_OPEN_WEEK = 8; // will be overridden by index.json if provided
   const ITEMS_PER_WEEK = 3;
 
   // UI refs
@@ -1317,7 +1319,41 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     throw lastErr || new Error("fetch failed");
   }
 
-  function getUserId(){
+  
+  function normalizeIndex(raw){
+    // Accept v2 (weeks[]) or legacy v1 (scenes[]). Convert to a unified internal shape.
+    if(!raw || typeof raw !== "object") return { weeks: [], max_open_week: 8 };
+    if(Array.isArray(raw.weeks)){
+      return raw;
+    }
+    // legacy v1
+    const scenes = Array.isArray(raw.scenes) ? raw.scenes : [];
+    const weeksMap = new Map();
+    for(const s of scenes){
+      const id = s.id || s.scene_id || s.key;
+      if(!id) continue;
+      const wk = getWeekFromId(id);
+      if(!wk) continue;
+      if(!weeksMap.has(wk)) weeksMap.set(wk, []);
+      weeksMap.get(wk).push({
+        type: (String(id).split(".")[1] || ""),
+        id: (String(id).split(".").slice(2).join(".") || id),
+        scene_id: id,
+        title: s.title || id,
+        level: s.level || s.lev || "",
+        file: id + ".json"
+      });
+    }
+    const allWeeks = Array.from(weeksMap.keys()).sort((a,b)=>a-b);
+    const maxWeek = allWeeks.length ? allWeeks[allWeeks.length-1] : 8;
+    const weeks = [];
+    for(let w=1; w<=maxWeek; w++){
+      const items = weeksMap.get(w) || [];
+      weeks.push({ week:w, open:(w<=8), items });
+    }
+    return { schema:"bookwide.talk.index.v2", base_path:"/EduEnglish/talk/", max_open_week:8, weeks };
+  }
+function getUserId(){
     // from guard (preferred), else fallback stored value
     try{
       return (window.BW_USER_ID || localStorage.getItem("BW_USER_ID") || "").toString();
@@ -1360,7 +1396,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     const weekMs = WEEK_DAYS * DAY;
     const passed = diff / weekMs; // 0.0, 1.0, 2.0...
     const w = Math.floor(passed + ADVANCE_WEEKS) + 1;
-    return Math.max(1, Math.min(MAX_WEEKS, w));
+    return Math.max(1, Math.min(MAX_OPEN_WEEK, w));
   }
 
   // ---- turns normalize (defensive) ----
@@ -1463,7 +1499,91 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   // 如果 JSON 沒有 USER 建議句，我們不「默默失敗」：
   // 1) 仍用規則生成一條可挖空的句子（保命線：挖空一定出）
   // 2) 同時在 UI/Console 明確警告，提醒你去補 JSON
-  function synthUserFromAI(aiEn, sceneId){
+  
+  // ===== Auto-expand for short templates (W5+ files currently have only 1 pair -> 1/1) =====
+  // If a scene has too few turns, we expand it into a practical multi-round practice set (deterministic, no randomness).
+  function expandIfTiny(sceneId, turns){
+    try{
+      const t = Array.isArray(turns) ? turns.filter(Boolean) : [];
+      if(t.length >= 6) return t; // already multi-turn
+      const sid = String(sceneId||"").toLowerCase();
+      const base = sid.split(".").pop(); // coffee_shop / hotel_checkin ...
+      const bank = {
+        coffee_shop: [
+          ["Let's practice: Coffee Shop. Please repeat this sentence.", "I'd like to order a coffee."],
+          ["What would you like to drink?", "Can I get a latte, please?"],
+          ["What size would you like?", "A medium, please."],
+          ["Would you like it hot or iced?", "Iced, please."],
+          ["Anything else?", "That's all, thank you."],
+          ["Your total is five dollars.", "Here you go."],
+          ["Would you like a receipt?", "Yes, please."],
+          ["Please wait over there.", "Sure."],
+          ["Your drink is ready.", "Thank you!"],
+          ["Have a great day!", "You too!"]
+        ],
+        hotel_checkin: [
+          ["Let's practice: Hotel Check-in. Please repeat this sentence.", "I'd like to check in, please."],
+          ["Welcome. Do you have a reservation?", "Yes, it's under my name."],
+          ["May I see your passport or ID?", "Sure. Here it is."],
+          ["How many nights will you be staying?", "Two nights."],
+          ["Would you like a single or double room?", "A double room, please."],
+          ["Can you fill out this form?", "Of course."],
+          ["Your room number is 1208.", "Great, thank you."],
+          ["Breakfast is from 7 to 10 a.m.", "Good to know."],
+          ["Here is your key card.", "Thanks."],
+          ["Enjoy your stay!", "Thank you!"]
+        ],
+        restaurant_order: [
+          ["Let's practice: Restaurant. Please repeat this sentence.", "I'd like to order, please."],
+          ["Are you ready to order?", "Yes. I'll have the chicken, please."],
+          ["How would you like it cooked?", "Medium, please."],
+          ["Would you like soup or salad?", "Salad, please."],
+          ["Any drinks for you today?", "Just water, please."],
+          ["Do you have any allergies?", "No, I don't."],
+          ["Would you like dessert?", "Not today, thank you."],
+          ["Could we get the bill, please?", "Sure."],
+          ["Would you like to pay by card?", "Yes, by card."],
+          ["Thank you for coming!", "Thanks!"]
+        ],
+        airport: [
+          ["Let's practice: Airport. Please repeat this sentence.", "I'd like to check in for my flight."],
+          ["May I see your passport?", "Sure. Here it is."],
+          ["Do you have any bags to check?", "Yes, one bag."],
+          ["Please place your bag on the scale.", "Okay."],
+          ["Here is your boarding pass.", "Thank you."],
+          ["Your gate is A12.", "Got it."],
+          ["Security is to your left.", "Thanks for the help."],
+          ["Do you have any liquids?", "No."],
+          ["Please remove your laptop.", "Okay."],
+          ["Have a nice flight!", "Thank you!"]
+        ],
+        business_meeting: [
+          ["Let's practice: Business Meeting. Please repeat this sentence.", "I'd like to discuss the agenda."],
+          ["Shall we start the meeting?", "Yes, let's begin."],
+          ["Can you share the latest update?", "Sure. Here's the progress."],
+          ["What are the next steps?", "We will finalize the plan."],
+          ["Do you have any concerns?", "One concern is the timeline."],
+          ["Can we adjust the schedule?", "Yes, we can move it to next week."],
+          ["Who will be responsible for this task?", "I'll take care of it."],
+          ["Let's confirm the deadline.", "The deadline is Friday."],
+          ["Any other questions?", "No, that's all."],
+          ["Thanks everyone.", "Thank you."]
+        ]
+      };
+      const pairs = bank[base] || bank.coffee_shop;
+
+      const out = [];
+      for(const [aiEn, userEn] of pairs){
+        out.push({ role:"AI", en: aiEn, zh:"" });
+        out.push({ role:"USER", en:"", zh:"", hint_en: userEn, hint_zh:"" , expected_en: userEn });
+      }
+      return out;
+    }catch(_e){
+      return turns;
+    }
+  }
+
+function synthUserFromAI(aiEn, sceneId){
     const s = (aiEn||"").trim();
     if(!s) return "—";
     const lower = s.toLowerCase();
@@ -1750,16 +1870,13 @@ try{showReport();}catch(e){}
     showToast("已收藏");
   }
 
-  async function loadSceneById(id, title){
+  async function loadSceneById(id, title, file){
     activeSceneId = id;
     activeSceneTitle = title || id;
 
-    const url = new URL("/talk/" + encodeURIComponent(id) + ".json", location.origin).toString();
-    const fallback = [
-      url,
-      new URL("./" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /talk/
-      new URL("../talk/" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /checklist/
-    ];
+    const filename = (file && String(file).trim()) ? String(file).trim() : (String(id).trim() + ".json");
+    const url = new URL("/EduEnglish/talk/" + filename, location.origin).toString();
+    const fallback = [url];
     try{
       activeScene = await fetchJsonAny(fallback);
       currentSceneJson = activeScene;
@@ -1782,7 +1899,7 @@ try{showReport();}catch(e){}
       return;
     }
 
-    turns = normalizeTurns(activeScene);
+    turns = expandIfTiny(activeSceneId, normalizeTurns(activeScene));
     if(!turns.length){
       turns = [{en:"(No turns found in JSON)", zh:"JSON 沒有 turns/dialogue/lines/items 陣列", level: String(activeScene?.meta?.level || "A1")}];
     }
@@ -1795,6 +1912,28 @@ try{showReport();}catch(e){}
 
   function buildWeekMap(){
     byWeek = new Map();
+    // v2: {weeks:[{week,open,items:[{scene_id,title,level,file}]}]}
+    const weeksArr = (indexData && Array.isArray(indexData.weeks)) ? indexData.weeks : [];
+    if(weeksArr.length){
+      for(const w of weeksArr){
+        const wk = Number(w.week);
+        if(!wk) continue;
+        const items = Array.isArray(w.items) ? w.items : [];
+        if(!byWeek.has(wk)) byWeek.set(wk, []);
+        for(const it of items){
+          const id = it.scene_id || it.id || it.key;
+          if(!id) continue;
+          byWeek.get(wk).push({
+            id,
+            title: it.title || id,
+            level: it.level || it.lev || "",
+            file: it.file || (id + ".json")
+          });
+        }
+      }
+      return;
+    }
+    // legacy fallback (should be normalized already, but keep safe)
     const scenes = (indexData && Array.isArray(indexData.scenes)) ? indexData.scenes : [];
     for(const s of scenes){
       const id = s.id || s.scene_id || s.key;
@@ -1802,8 +1941,9 @@ try{showReport();}catch(e){}
       const wk = getWeekFromId(id);
       if(!wk) continue;
       if(!byWeek.has(wk)) byWeek.set(wk, []);
-      byWeek.get(wk).push({id, title: s.title || id, level: s.level || s.lev || ""});
+      byWeek.get(wk).push({id, title: s.title || id, level: s.level || s.lev || "", file: id + ".json"});
     }
+  }
     // stable sort
     for(const [wk, arr] of byWeek){
       arr.sort((a,b)=>String(a.id).localeCompare(String(b.id)));
@@ -1892,7 +2032,7 @@ try{showReport();}catch(e){}
           activeWeek = wk;
           localStorage.setItem(LS_LAST_SCENE, it.id);
           closeModal();
-          loadSceneById(it.id, it.title);
+          loadSceneById(it.id, it.title, it.file);
         });
         row.appendChild(left);
         row.appendChild(btn);
@@ -1982,12 +2122,14 @@ async function init(){
     try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
     // load index.json
     try{
-      indexData = await fetchJsonAny([INDEX_URL, ...FALLBACK_INDEX_URLS]);
+      indexData = await fetchJsonAny([INDEX_URL]);
+      indexData = normalizeIndex(indexData);
     }catch(e){
       indexData = { scenes: [] };
       showToast("讀不到 talk/index.json");
     }
 
+    MAX_OPEN_WEEK = Math.max(1, Math.min(MAX_WEEKS, Number(indexData?.max_open_week || 8)));
     buildWeekMap();
     renderPicker();
 
@@ -2106,7 +2248,7 @@ if(!firstId){
       updateUI();
       return;
     }
-    await loadSceneById(firstId, firstTitle);
+    await loadSceneById(firstId, firstTitle, null);
   }
 
   // -------- events --------
