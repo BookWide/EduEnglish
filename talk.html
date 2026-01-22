@@ -4,72 +4,58 @@
 <!-- ===== BookWide Guard (Talk: subscription required) ===== -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-/*
-  Guard goals:
-  1) 必須已登入 (Supabase auth session)
-  2) 必須訂閱有效 (profiles.expires_at 或 orders.expires_at / paid)
-  3) 不重複宣告 const，避免 Console: "Identifier ... already been declared"
-*/
 (function(){
+  // Supabase public config (declare ONCE)
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
   const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
   window.SUPABASE_URL = SUPABASE_URL;
   window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
 
-  function ymdTaipei(){
-    // 以台灣日期為準，避免跨日誤判
-    try{
-      return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' });
-    }catch(_){
-      return new Date().toISOString().slice(0,10);
-    }
-  }
-
-  async function run(){
+  async function runGuard(){
     try{
       const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
         auth: { persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
       });
 
-      // 1) require login
-      const { data: sess, error: sErr } = await sb.auth.getSession();
-      const session = sess && sess.session;
-      if(sErr || !session || !session.user){
+      const sessRes = await sb.auth.getSession();
+      const session = sessRes && sessRes.data && sessRes.data.session;
+      if(!session || !session.user){
         const red = encodeURIComponent(location.pathname + location.search + location.hash);
         location.replace('/account/login.html?redirect=' + red);
         return;
       }
 
-      const u = session.user;
-      const uid = u.id;
-      const email = String(u.email || '').toLowerCase();
-      const today = ymdTaipei();
+      const user = session.user;
+      const uid = user.id;
+      const email = (user.email || '').toLowerCase();
+      window.BW_USER_ID = uid;
+      try{ localStorage.setItem('BW_USER_ID', uid); }catch(_){}
 
-      // 2) profile (best effort)
+      const today = new Date().toLocaleDateString('en-CA', { timeZone:'Asia/Taipei' }); // YYYY-MM-DD
+
+      // 1) profiles (best effort)
       let paused = false;
       let pexp = '';
       try{
-        const r = await sb.from('profiles').select('expires_at,is_paused').eq('id', uid).maybeSingle();
-        if(!r.error && r.data){
-          paused = !!r.data.is_paused;
-          if(r.data.expires_at) pexp = String(r.data.expires_at).slice(0,10);
+        const pr = await sb.from('profiles').select('expires_at,is_paused').eq('id', uid).maybeSingle();
+        if(!pr.error && pr.data){
+          paused = !!pr.data.is_paused;
+          pexp = pr.data.expires_at ? String(pr.data.expires_at).slice(0,10) : '';
         }
       }catch(_){}
 
-      // 3) orders fallback
-      let oexp = '';
+      // 2) orders fallback (by user_id then email)
       let hasPaid = false;
-      let paidBase = '';
+      let oexp = '';
       try{
-        // by user_id
         const r1 = await sb.from('orders')
           .select('status,expires_at,paid_at,created_at')
           .eq('user_id', uid)
           .order('created_at', { ascending:false })
           .limit(1);
+
         let row = (!r1.error && r1.data && r1.data.length) ? r1.data[0] : null;
 
-        // by email
         if(!row && email){
           const r2 = await sb.from('orders')
             .select('status,expires_at,paid_at,created_at')
@@ -80,42 +66,32 @@
         }
 
         if(row){
-          if(row.status) hasPaid = String(row.status).toLowerCase() === 'paid';
-          if(row.expires_at) oexp = String(row.expires_at).slice(0,10);
-          paidBase = String(row.paid_at || row.created_at || '').slice(0,10);
+          hasPaid = String(row.status||'').toLowerCase() === 'paid';
+          oexp = row.expires_at ? String(row.expires_at).slice(0,10) : '';
         }
       }catch(_){}
 
-      // 4) decide
-      let ok = false;
-      if(!paused){
-        if((pexp && pexp >= today) || (oexp && oexp >= today)) ok = true;
-
-        // paid but missing expires_at -> allow if paid within last 400 days
-        if(!ok && hasPaid){
-          if(paidBase){
-            const t0 = new Date(paidBase + 'T00:00:00Z').getTime();
-            const days = (Date.now() - t0) / 86400000;
-            if(days >= 0 && days <= 400) ok = true;
-          }else{
-            ok = true;
-          }
-        }
-      }
+      // decision
+      const ok = (!paused) && (
+        (pexp && pexp >= today) ||
+        (oexp && oexp >= today) ||
+        (hasPaid && (!pexp && !oexp)) // paid but missing expires_at: allow to avoid false kicks
+      );
 
       window.BW_SUB_OK = ok;
       window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
+      try{ localStorage.setItem('BW_SUB_EXPIRES_AT', window.BW_SUB_EXPIRES_AT || ''); }catch(_){}
 
       if(!ok){
         location.replace('/account/subscription.html');
         return;
       }
-    }catch(_e){
+    }catch(e){
       location.replace('/account/subscription.html?err=guard');
     }
   }
 
-  run();
+  runGuard();
 })();
 </script>
 <!-- ===== /BookWide Guard ===== -->
@@ -1221,12 +1197,9 @@ let __tvWatch = null;
   }catch(e){}
 
 
-  // ===== index.json locations (support both /EduEnglish/talk.html and /talk.html) =====
-  const INDEX_URLS = [
-    new URL("./talk/index.json", location.href).toString(),             // if this file is /EduEnglish/talk.html -> /EduEnglish/talk/index.json
-    new URL("/EduEnglish/talk/index.json", location.origin).toString(), // explicit
-    new URL("/talk/index.json", location.origin).toString()             // if deployed to /talk/
-  ];
+  const INDEX_URL = new URL("/EduEnglish/talk/index.json", location.origin).toString();
+  // Paths are locked: do NOT guess or fallback to other locations.
+
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
   const LS_SAVED = "BW_TALK_SAVED_LINES";
@@ -1499,91 +1472,7 @@ function getUserId(){
   // 如果 JSON 沒有 USER 建議句，我們不「默默失敗」：
   // 1) 仍用規則生成一條可挖空的句子（保命線：挖空一定出）
   // 2) 同時在 UI/Console 明確警告，提醒你去補 JSON
-  
-  // ===== Auto-expand for short templates (W5+ files currently have only 1 pair -> 1/1) =====
-  // If a scene has too few turns, we expand it into a practical multi-round practice set (deterministic, no randomness).
-  function expandIfTiny(sceneId, turns){
-    try{
-      const t = Array.isArray(turns) ? turns.filter(Boolean) : [];
-      if(t.length >= 6) return t; // already multi-turn
-      const sid = String(sceneId||"").toLowerCase();
-      const base = sid.split(".").pop(); // coffee_shop / hotel_checkin ...
-      const bank = {
-        coffee_shop: [
-          ["Let's practice: Coffee Shop. Please repeat this sentence.", "I'd like to order a coffee."],
-          ["What would you like to drink?", "Can I get a latte, please?"],
-          ["What size would you like?", "A medium, please."],
-          ["Would you like it hot or iced?", "Iced, please."],
-          ["Anything else?", "That's all, thank you."],
-          ["Your total is five dollars.", "Here you go."],
-          ["Would you like a receipt?", "Yes, please."],
-          ["Please wait over there.", "Sure."],
-          ["Your drink is ready.", "Thank you!"],
-          ["Have a great day!", "You too!"]
-        ],
-        hotel_checkin: [
-          ["Let's practice: Hotel Check-in. Please repeat this sentence.", "I'd like to check in, please."],
-          ["Welcome. Do you have a reservation?", "Yes, it's under my name."],
-          ["May I see your passport or ID?", "Sure. Here it is."],
-          ["How many nights will you be staying?", "Two nights."],
-          ["Would you like a single or double room?", "A double room, please."],
-          ["Can you fill out this form?", "Of course."],
-          ["Your room number is 1208.", "Great, thank you."],
-          ["Breakfast is from 7 to 10 a.m.", "Good to know."],
-          ["Here is your key card.", "Thanks."],
-          ["Enjoy your stay!", "Thank you!"]
-        ],
-        restaurant_order: [
-          ["Let's practice: Restaurant. Please repeat this sentence.", "I'd like to order, please."],
-          ["Are you ready to order?", "Yes. I'll have the chicken, please."],
-          ["How would you like it cooked?", "Medium, please."],
-          ["Would you like soup or salad?", "Salad, please."],
-          ["Any drinks for you today?", "Just water, please."],
-          ["Do you have any allergies?", "No, I don't."],
-          ["Would you like dessert?", "Not today, thank you."],
-          ["Could we get the bill, please?", "Sure."],
-          ["Would you like to pay by card?", "Yes, by card."],
-          ["Thank you for coming!", "Thanks!"]
-        ],
-        airport: [
-          ["Let's practice: Airport. Please repeat this sentence.", "I'd like to check in for my flight."],
-          ["May I see your passport?", "Sure. Here it is."],
-          ["Do you have any bags to check?", "Yes, one bag."],
-          ["Please place your bag on the scale.", "Okay."],
-          ["Here is your boarding pass.", "Thank you."],
-          ["Your gate is A12.", "Got it."],
-          ["Security is to your left.", "Thanks for the help."],
-          ["Do you have any liquids?", "No."],
-          ["Please remove your laptop.", "Okay."],
-          ["Have a nice flight!", "Thank you!"]
-        ],
-        business_meeting: [
-          ["Let's practice: Business Meeting. Please repeat this sentence.", "I'd like to discuss the agenda."],
-          ["Shall we start the meeting?", "Yes, let's begin."],
-          ["Can you share the latest update?", "Sure. Here's the progress."],
-          ["What are the next steps?", "We will finalize the plan."],
-          ["Do you have any concerns?", "One concern is the timeline."],
-          ["Can we adjust the schedule?", "Yes, we can move it to next week."],
-          ["Who will be responsible for this task?", "I'll take care of it."],
-          ["Let's confirm the deadline.", "The deadline is Friday."],
-          ["Any other questions?", "No, that's all."],
-          ["Thanks everyone.", "Thank you."]
-        ]
-      };
-      const pairs = bank[base] || bank.coffee_shop;
-
-      const out = [];
-      for(const [aiEn, userEn] of pairs){
-        out.push({ role:"AI", en: aiEn, zh:"" });
-        out.push({ role:"USER", en:"", zh:"", hint_en: userEn, hint_zh:"" , expected_en: userEn });
-      }
-      return out;
-    }catch(_e){
-      return turns;
-    }
-  }
-
-function synthUserFromAI(aiEn, sceneId){
+  function synthUserFromAI(aiEn, sceneId){
     const s = (aiEn||"").trim();
     if(!s) return "—";
     const lower = s.toLowerCase();
@@ -1899,7 +1788,7 @@ try{showReport();}catch(e){}
       return;
     }
 
-    turns = expandIfTiny(activeSceneId, normalizeTurns(activeScene));
+    turns = normalizeTurns(activeScene);
     if(!turns.length){
       turns = [{en:"(No turns found in JSON)", zh:"JSON 沒有 turns/dialogue/lines/items 陣列", level: String(activeScene?.meta?.level || "A1")}];
     }
