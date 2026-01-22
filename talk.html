@@ -4,116 +4,118 @@
 <!-- ===== BookWide Guard (Talk: subscription required) ===== -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-/**
- * BookWide Guard (Talk)
- * - Require Supabase login
- * - Require active subscription (profiles.expires_at) OR (orders.expires_at) OR (paid order without expires_at => allow for safety)
- * - Avoid PostgREST 400 by NOT ordering/selecting unknown columns
- */
-(function(){
+  // BookWide Supabase public config (global)
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
   const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
   window.SUPABASE_URL = SUPABASE_URL;
   window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
+</script>
+<script>
+(async function() {
+  try {
+    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-  const toYMD_TW = () => new Date().toLocaleDateString('en-CA', { timeZone:'Asia/Taipei' }); // YYYY-MM-DD
+    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+    });
 
-  (async () => {
-    try{
-      const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-        auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
-      });
+    // --- require login ---
+    const { data: sess } = await supabase.auth.getSession();
+    const session = sess && sess.session;
+    if (!session || !session.user) {
+      const red = encodeURIComponent(location.pathname + location.search + location.hash);
+      location.replace('/account/login.html?redirect=' + red);
+      return;
+    }
 
-      // 1) Require login
-      const { data: sess } = await supabase.auth.getSession();
-      const session = sess && sess.session;
-      if(!session || !session.user){
-        const red = encodeURIComponent(location.pathname + location.search + location.hash);
-        location.replace('/account/login.html?redirect=' + red);
-        return;
-      }
-      const user = session.user;
-      const uid = user.id;
-      const email = (user.email || '').toLowerCase();
-      const today = toYMD_TW();
+    const user = session.user;
+    const uid = user.id;
+    const email = (user.email || '').toLowerCase();
 
-      // 2) profiles (best effort)
-      let paused = false;
-      let pexp = '';
-      try{
-        const { data: prof } = await supabase
-          .from('profiles')
-          .select('expires_at,is_paused')
-          .eq('id', uid)
-          .maybeSingle();
-        paused = !!(prof && prof.is_paused);
-        pexp = (prof && prof.expires_at) ? String(prof.expires_at).slice(0,10) : '';
-      }catch(e){}
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
 
-      // 3) orders fallback (avoid 400: do NOT order, and only select columns we expect)
-      let oexp = '';
-      let hasPaid = false;
+    // --- read profile (best effort) ---
+    const { data: prof, error: perr } = await supabase
+      .from('profiles')
+      .select('id, expires_at, is_paused')
+      .eq('id', uid)
+      .maybeSingle();
 
-      const pickBest = (rows) => {
-        if(!Array.isArray(rows) || !rows.length) return null;
-        // Prefer row with latest expires_at; if none, prefer any paid row
-        const norm = (x)=> (x ? String(x).slice(0,10) : '');
-        const paid = (r)=> String(r?.status||'').toLowerCase()==='paid';
-        let best = null;
-        for(const r of rows){
-          if(!best) best = r;
-          const be = norm(best.expires_at);
-          const re = norm(r.expires_at);
-          if(re && (!be || re > be)) best = r;
-          else if(!be && !re && paid(r) && !paid(best)) best = r;
-        }
-        return best;
-      };
+    // 如果 profiles 讀不到（RLS / row 不存在），不要直接判死刑：改用 orders 當 fallback
+    const paused = !!(prof && prof.is_paused);
+    const pexp = prof && prof.expires_at ? String(prof.expires_at).slice(0,10) : '';
 
-      try{
-        // by user_id
-        const r1 = await supabase
+    // --- orders fallback (handle test accounts recreated with new uid) ---
+    let oexp = '';
+    let opaid = '';
+    let ocreated = '';
+    let hasPaid = false;
+    try {
+      // 1) by user_id (best)
+      const r1 = await supabase
+        .from('orders')
+        .select('status,expires_at,paid_at,created_at')
+        .eq('user_id', u.id)
+        .order('created_at', { ascending:false })
+        .limit(1);
+      if (!r1.error && r1.data && r1.data.length) {
+        const row = r1.data[0];
+        if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
+        if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
+        if (row?.paid_at) opaid = String(row.paid_at);
+        if (row?.created_at) ocreated = String(row.created_at);
+      } else {
+        // 2) fallback by email (covers cases where order created before account was recreated)
+        const r2 = await supabase
           .from('orders')
-          .select('status,expires_at,paid_at')
-          .eq('user_id', uid)
-          .limit(50);
-        let best = (!r1.error) ? pickBest(r1.data) : null;
-
-        // by email (covers account recreated / legacy orders)
-        if(!best){
-          const r2 = await supabase
-            .from('orders')
-            .select('status,expires_at,paid_at')
-            .eq('email', email)
-            .limit(50);
-          best = (!r2.error) ? pickBest(r2.data) : null;
+          .select('status,expires_at,paid_at,created_at')
+          .eq('email', u.email)
+          .order('created_at', { ascending:false })
+          .limit(1);
+        if (!r2.error && r2.data && r2.data.length) {
+          const row = r2.data[0];
+          if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
+          if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
+          if (row?.paid_at) opaid = String(row.paid_at);
+          if (row?.created_at) ocreated = String(row.created_at);
         }
+      }
+    } catch (e) {}
 
-        if(best){
-          hasPaid = String(best.status||'').toLowerCase()==='paid';
-          oexp = best.expires_at ? String(best.expires_at).slice(0,10) : '';
-        }
-      }catch(e){}
-
-      // 4) Decide
-      let ok = !paused && ((pexp && pexp >= today) || (oexp && oexp >= today));
-
-      // Paid but no expires_at => allow (prevents paid users being kicked by missing data)
-      if(!ok && !paused && hasPaid && !oexp && !pexp){
+    // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
+    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
+    const today = new Date().toISOString().slice(0,10);
+    let ok = (pe && pe >= today) || (oexp && oexp >= today);
+    if (!ok && hasPaid) {
+      // paid_at/created_at within last 400 days => treat as valid
+      const base = (opaid || ocreated || '').slice(0,10);
+      if (base) {
+        const t0 = new Date(base + 'T00:00:00Z').getTime();
+        const t1 = Date.now();
+        const days = (t1 - t0) / 86400000;
+        if (days >= 0 && days <= 400) ok = true;
+      } else {
         ok = true;
       }
-
-      window.BW_SUB_OK = ok;
-      window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
-
-      if(!ok){
-        location.replace('/account/subscription.html');
-        return;
-      }
-    }catch(e){
-      location.replace('/account/subscription.html?err=guard');
     }
-  })();
+    // --- decide ---
+    const ok = (!paused) && (
+      (pexp && pexp >= today) ||
+      (oexp && oexp >= today)
+    );
+
+    window.BW_SUB_OK = ok;
+    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
+    window.BW_PROFILE_OK = !perr;
+
+    if (!ok) {
+      location.replace('/account/subscription.html');
+      return;
+    }
+  } catch (e) {
+    location.replace('/account/subscription.html?err=guard');
+  }
 })();
 </script>
 <!-- ===== /BookWide Guard ===== -->
@@ -1363,22 +1365,150 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   // ---- turns normalize (defensive) ----
   function normalizeTurns(raw){
-    const arr = Array.isArray(raw)
-      ? raw
-      : (raw && (raw.turns || raw.dialogue) ? (raw.turns || raw.dialogue) : []);
-    return (arr||[]).map(t=>{
+    // Accept multiple schema shapes:
+    // 1) raw is an array of turns
+    // 2) raw.turns / raw.dialogue / raw.lines / raw.items
+    // 3) raw.dialogues (pair-based) -> flatten into AI/USER turns
+    const pickArr = (obj, key)=> (obj && Array.isArray(obj[key])) ? obj[key] : null;
+
+    // --- 3) dialogues[] (pair-based) ---
+    function flattenDialogues(dialogues){
+      const out = [];
+      const getObj = (d, keys)=>{
+        for(const k of keys){
+          if(d && (k in d) && d[k]!=null) return d[k];
+        }
+        return null;
+      };
+      const toTurn = (val, role, base)=>{
+        if(val==null) return null;
+        let t = {};
+        if(typeof val === "string"){
+          t = { en: val };
+        }else if(typeof val === "object"){
+          t = {
+            en: (val.en ?? val.english ?? val.text ?? val.say ?? val.line ?? "").toString(),
+            zh: (val.zh ?? val.tw ?? val.cn ?? val.chinese ?? "").toString(),
+            level: (val.level ?? val.cefr ?? "").toString(),
+            hint: (val.hint ?? val.tip ?? "").toString(),
+            fill: (val.fill ?? val.blank ?? "").toString(),
+            answer: (val.answer ?? "").toString(),
+          };
+        }else{
+          t = { en: String(val) };
+        }
+        // inherit common fields
+        if(base){
+          if(!t.level && base.level) t.level = String(base.level);
+        }
+        t.en = (t.en||"").toString().trim();
+        t.zh = (t.zh||"").toString().trim();
+        t.role = role;
+        t.level = (t.level||"").toString().trim() || "A1";
+        t.hint = (t.hint||"").toString().trim();
+        t.fill = (t.fill||"").toString();
+        t.answer = (t.answer||"").toString().trim();
+        return t.en ? t : null;
+      };
+
+      for(const d0 of (dialogues||[])){
+        if(d0==null) continue;
+
+        // Some content may nest: {turns:[...]} or {dialogue:[...]}
+        if(typeof d0 === "object"){
+          const nested = pickArr(d0,"turns") || pickArr(d0,"dialogue") || pickArr(d0,"lines") || pickArr(d0,"items");
+          if(nested){
+            out.push(...normalizeTurns(nested));
+            continue;
+          }
+        }
+
+        const base = (typeof d0==="object" && d0) ? d0 : {};
+        // AI keys
+        const aiVal = (typeof d0==="object")
+          ? getObj(d0, ["ai","AI","teacher","bot","assistant","system","prompt","q","question","say","line","en","english","text"])
+          : d0;
+        // USER keys (expected response)
+        const userVal = (typeof d0==="object")
+          ? getObj(d0, ["user","USER","student","you","expected","reply","answer","a","response","target","hint_en","hint"])
+          : null;
+
+        // If object contains only hint_en/hint_zh (user expected), treat it as USER
+        const isUserOnly = (typeof d0==="object") && !("en" in d0) && (("hint_en" in d0) || ("hint_zh" in d0));
+        if(isUserOnly){
+          const u = {
+            en: (d0.hint_en||"").toString(),
+            zh: (d0.hint_zh||"").toString(),
+            level: (d0.level||d0.cefr||"").toString(),
+            hint: (d0.hint||"").toString(),
+            fill: (d0.fill||d0.blank||"").toString(),
+            answer: (d0.answer||"").toString(),
+          };
+          const ut = toTurn(u, "USER", base);
+          if(ut) out.push(ut);
+          continue;
+        }
+
+        const aiT = toTurn(aiVal, "AI", base);
+        if(aiT) out.push(aiT);
+
+        // If userVal is actually an object with en empty but hint_en exists, convert properly
+        if(userVal!=null){
+          let uVal = userVal;
+          if(typeof userVal==="object" && userVal && !userVal.en && (userVal.hint_en || userVal.hint_zh)){
+            uVal = { en: userVal.hint_en||"", zh: userVal.hint_zh||"", level: userVal.level||"", hint: userVal.hint||"", fill: userVal.fill||userVal.blank||"", answer: userVal.answer||"" };
+          }
+          const uT = toTurn(uVal, "USER", base);
+          if(uT) out.push(uT);
+        }
+      }
+
+      return out;
+    }
+
+    // --- 1/2) array or common array fields ---
+    let arr = null;
+    if(Array.isArray(raw)) arr = raw;
+    else if(raw && typeof raw === "object"){
+      arr = pickArr(raw,"turns") || pickArr(raw,"dialogue") || pickArr(raw,"lines") || pickArr(raw,"items");
+      if(!arr && Array.isArray(raw.dialogues)){
+        return flattenDialogues(raw.dialogues);
+      }
+    }
+    arr = arr || [];
+
+    // If the picked array itself is a dialogues-like structure, flatten it
+    if(arr && !Array.isArray(raw) && raw && typeof raw==="object" && Array.isArray(raw.dialogues) && arr===raw.dialogues){
+      return flattenDialogues(arr);
+    }
+
+    // Map turn items into normalized turn objects
+    const normalized = (arr||[]).map(t=>{
       if(!t) return null;
-      const hasAI = !!(t.en || t.zh || t.english || t.text);
-      const hasUser = !t.en && (t.hint_en || t.hint_zh);
-      const en = (t.en ?? (hasUser ? t.hint_en : "") ?? t.english ?? t.text ?? '').toString().trim();
-      const zh = (t.zh ?? (hasUser ? t.hint_zh : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
-      const role = ((t.role ?? t.speaker ?? '').toString().trim()) || (hasUser ? "USER" : "AI");
+
+      // Support {role:"AI"/"USER", en, zh} or {speaker:"AI"} etc.
+      const role = ((t.role ?? t.speaker ?? t.who ?? '').toString().trim()) || "AI";
+
+      // Some datasets put expected user reply in hint_en/hint_zh without en
+      const hasUserHint = (!t.en && (t.hint_en || t.hint_zh));
+      const en = (t.en ?? (hasUserHint ? t.hint_en : "") ?? t.english ?? t.text ?? '').toString().trim();
+      const zh = (t.zh ?? (hasUserHint ? t.hint_zh : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
       const level = (t.level ?? t.cefr ?? '').toString().trim() || 'A1';
-      const hint = (t.hint ?? '').toString().trim();
+      const hint = (t.hint ?? t.tip ?? '').toString().trim();
       const fill = (t.fill ?? t.blank ?? '').toString();
       const answer = (t.answer ?? '').toString().trim();
-      return { en, zh, role, level, hint, fill, answer };
+
+      // If the record looks like user-expected (no en, but hint_en), force role USER
+      const finalRole = hasUserHint ? "USER" : (role || "AI");
+
+      return { en, zh, role: finalRole, level, hint, fill, answer };
     }).filter(x=>x && x.en);
+
+    // If raw has dialogues and we didn't return early, also try flatten (better than empty)
+    if(!normalized.length && raw && typeof raw==="object" && Array.isArray(raw.dialogues)){
+      return flattenDialogues(raw.dialogues);
+    }
+    return normalized;
   }
 
   function getOverrides(){
@@ -1425,8 +1555,12 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       weekLabel.textContent = "W" + String(activeWeek);
       scenePickLabel.textContent = activeSceneTitle ? activeSceneTitle : "選擇情境";
       sceneTitle.textContent = activeSceneTitle ? activeSceneTitle : "載入中…";
-      const progMax = Math.max(1, Math.ceil(turns.length/2));
-      const progNow = Math.min(progMax, Math.floor(aiIdx/2)+1);
+      // progress is counted by AI turns (1/N), not by raw array length
+      const progMax = Math.max(1, turns.filter(t=>String(t.role||'AI').toUpperCase()==='AI').length || Math.ceil(turns.length/2) || 1);
+      const progNow = Math.max(1, Math.min(progMax,
+        turns.slice(0, Math.max(0, Math.min(aiIdx, turns.length-1))+1)
+             .filter(t=>String(t.role||'AI').toUpperCase()==='AI').length
+      ));
       sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${progNow}/${progMax}`;
       return;
     }
@@ -1781,10 +1915,11 @@ try{showReport();}catch(e){}
     }
 
     turns = normalizeTurns(activeScene);
-    if(!turns.length){
-      turns = [{en:"(No turns found in JSON)", zh:"JSON 沒有 turns/dialogue/lines/items 陣列", level: String(activeScene?.meta?.level || "A1")}];
-    }
-    turnIdx = 0;
+    \1    // Start at first AI turn (so progress shows 1/N and dialogue flow works)
+    turnIdx = (()=>{
+      const i = turns.findIndex(t=>String(t.role||'AI').toUpperCase()==='AI');
+      return (i>=0)? i : 0;
+    })();
     fillInput.value = "";
     updateUI();
     // autoplay first line
@@ -2257,9 +2392,7 @@ const TEACHER_AZURE_VOICE = {
   "emma.mp4":   "en-US-AriaNeural",
   "sophia.mp4": "en-GB-SoniaNeural"
 };
-function getTeacherVoice(fileName){
-  return TEACHER_AZURE_VOICE[fileName] || "en-US-AriaNeural";
-}
+function getTeacherVoice
 const TEACHER_TTS_STYLE = {
   "diana.mp4":  { rate: "-2%", pitch: "+10%" },
   "emma.mp4":   { rate: "+6%", pitch: "+2%" },
