@@ -56,7 +56,7 @@
       const r1 = await supabase
         .from('orders')
         .select('status,expires_at,paid_at,created_at')
-        .eq('user_id', u.id)
+        .eq('user_id', uid)
         .order('created_at', { ascending:false })
         .limit(1);
       if (!r1.error && r1.data && r1.data.length) {
@@ -70,7 +70,7 @@
         const r2 = await supabase
           .from('orders')
           .select('status,expires_at,paid_at,created_at')
-          .eq('email', u.email)
+          .eq('email', email)
           .order('created_at', { ascending:false })
           .limit(1);
         if (!r2.error && r2.data && r2.data.length) {
@@ -85,9 +85,11 @@
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
     // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    const today = new Date().toISOString().slice(0,10);
-    let ok = (pe && pe >= today) || (oexp && oexp >= today);
-    if (!ok && hasPaid) {
+    let ok = (!paused) && (
+      (pexp && pexp >= today) ||
+      (oexp && oexp >= today)
+    );
+    if (!ok && !paused && hasPaid) {
       // paid_at/created_at within last 400 days => treat as valid
       const base = (opaid || ocreated || '').slice(0,10);
       if (base) {
@@ -99,12 +101,6 @@
         ok = true;
       }
     }
-    // --- decide ---
-    const ok = (!paused) && (
-      (pexp && pexp >= today) ||
-      (oexp && oexp >= today)
-    );
-
     window.BW_SUB_OK = ok;
     window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
     window.BW_PROFILE_OK = !perr;
@@ -1364,151 +1360,81 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   }
 
   // ---- turns normalize (defensive) ----
+  // ---- turns normalize (defensive) ----
   function normalizeTurns(raw){
     // Accept multiple schema shapes:
-    // 1) raw is an array of turns
-    // 2) raw.turns / raw.dialogue / raw.lines / raw.items
-    // 3) raw.dialogues (pair-based) -> flatten into AI/USER turns
-    const pickArr = (obj, key)=> (obj && Array.isArray(obj[key])) ? obj[key] : null;
+    // 1) raw.turns / raw.dialogue / raw.lines / raw.items  (flat turns)
+    // 2) raw.dialogues[] (pair-based AI/USER dialogues) -> flatten to turns
+    const out = [];
+    const push = (t)=>{ if(t && t.en && String(t.en).trim()) out.push(t); };
 
-    // --- 3) dialogues[] (pair-based) ---
-    function flattenDialogues(dialogues){
-      const out = [];
-      const getObj = (d, keys)=>{
-        for(const k of keys){
-          if(d && (k in d) && d[k]!=null) return d[k];
-        }
-        return null;
-      };
-      const toTurn = (val, role, base)=>{
-        if(val==null) return null;
-        let t = {};
-        if(typeof val === "string"){
-          t = { en: val };
-        }else if(typeof val === "object"){
-          t = {
-            en: (val.en ?? val.english ?? val.text ?? val.say ?? val.line ?? "").toString(),
-            zh: (val.zh ?? val.tw ?? val.cn ?? val.chinese ?? "").toString(),
-            level: (val.level ?? val.cefr ?? "").toString(),
-            hint: (val.hint ?? val.tip ?? "").toString(),
-            fill: (val.fill ?? val.blank ?? "").toString(),
-            answer: (val.answer ?? "").toString(),
-          };
-        }else{
-          t = { en: String(val) };
-        }
-        // inherit common fields
-        if(base){
-          if(!t.level && base.level) t.level = String(base.level);
-        }
-        t.en = (t.en||"").toString().trim();
-        t.zh = (t.zh||"").toString().trim();
-        t.role = role;
-        t.level = (t.level||"").toString().trim() || "A1";
-        t.hint = (t.hint||"").toString().trim();
-        t.fill = (t.fill||"").toString();
-        t.answer = (t.answer||"").toString().trim();
-        return t.en ? t : null;
-      };
+    const normOne = (t)=>{
+      if(!t) return null;
+      // Some JSON uses USER suggestion in hint_en/hint_zh (no t.en).
+      const hasUser = (!t.en && (t.hint_en || t.hint_zh || t.expected_en || t.expected_zh));
+      const en = (t.en ?? (hasUser ? (t.hint_en ?? t.expected_en) : "") ?? t.english ?? t.text ?? '').toString().trim();
+      const zh = (t.zh ?? (hasUser ? (t.hint_zh ?? t.expected_zh) : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
+      const role = ((t.role ?? t.speaker ?? t.from ?? '').toString().trim()) || (hasUser ? "USER" : "AI");
+      const level = (t.level ?? t.cefr ?? raw?.level ?? raw?.meta?.level ?? '').toString().trim() || 'A1';
+      const hint = (t.hint ?? '').toString().trim();
+      const fill = (t.fill ?? t.blank ?? '').toString();
+      const answer = (t.answer ?? '').toString().trim();
+      return { en, zh, role: String(role).toUpperCase(), level, hint, fill, answer };
+    };
 
-      for(const d0 of (dialogues||[])){
-        if(d0==null) continue;
+    // (A) pair-based dialogues[]
+    const pairs = raw && Array.isArray(raw.dialogues) ? raw.dialogues : null;
+    if(pairs){
+      for(const p of pairs){
+        if(!p) continue;
+        // common shapes:
+        // {ai:{en,zh}, user:{en,zh}}
+        // {ai_en, ai_zh, user_en, user_zh}
+        // {assistant_en, user_en, ...}
+        const lvl = (p.level ?? p.cefr ?? raw?.level ?? raw?.meta?.level ?? '').toString().trim() || 'A1';
 
-        // Some content may nest: {turns:[...]} or {dialogue:[...]}
-        if(typeof d0 === "object"){
-          const nested = pickArr(d0,"turns") || pickArr(d0,"dialogue") || pickArr(d0,"lines") || pickArr(d0,"items");
-          if(nested){
-            out.push(...normalizeTurns(nested));
-            continue;
-          }
-        }
+        const aiObj = p.ai ?? p.assistant ?? p.teacher ?? p.bot ?? null;
+        const usObj = p.user ?? p.student ?? p.you ?? null;
 
-        const base = (typeof d0==="object" && d0) ? d0 : {};
-        // AI keys
-        const aiVal = (typeof d0==="object")
-          ? getObj(d0, ["ai","AI","teacher","bot","assistant","system","prompt","q","question","say","line","en","english","text"])
-          : d0;
-        // USER keys (expected response)
-        const userVal = (typeof d0==="object")
-          ? getObj(d0, ["user","USER","student","you","expected","reply","answer","a","response","target","hint_en","hint"])
-          : null;
+        const aiEn = (
+          (typeof aiObj === 'string') ? aiObj :
+          (aiObj && (aiObj.en ?? aiObj.english ?? aiObj.text)) ??
+          (p.ai_en ?? p.assistant_en ?? p.teacher_en ?? p.prompt_en ?? p.q_en ?? p.en ?? p.text) ??
+          ''
+        ).toString().trim();
+        const aiZh = (
+          (aiObj && typeof aiObj === 'object' && (aiObj.zh ?? aiObj.chinese ?? aiObj.tw ?? aiObj.cn)) ??
+          (p.ai_zh ?? p.assistant_zh ?? p.teacher_zh ?? p.prompt_zh ?? p.q_zh ?? p.zh) ??
+          ''
+        ).toString().trim();
 
-        // If object contains only hint_en/hint_zh (user expected), treat it as USER
-        const isUserOnly = (typeof d0==="object") && !("en" in d0) && (("hint_en" in d0) || ("hint_zh" in d0));
-        if(isUserOnly){
-          const u = {
-            en: (d0.hint_en||"").toString(),
-            zh: (d0.hint_zh||"").toString(),
-            level: (d0.level||d0.cefr||"").toString(),
-            hint: (d0.hint||"").toString(),
-            fill: (d0.fill||d0.blank||"").toString(),
-            answer: (d0.answer||"").toString(),
-          };
-          const ut = toTurn(u, "USER", base);
-          if(ut) out.push(ut);
-          continue;
-        }
+        const usEn = (
+          (typeof usObj === 'string') ? usObj :
+          (usObj && (usObj.en ?? usObj.english ?? usObj.text)) ??
+          (p.user_en ?? p.student_en ?? p.answer_en ?? p.expected_en ?? p.a_en) ??
+          ''
+        ).toString().trim();
+        const usZh = (
+          (usObj && typeof usObj === 'object' && (usObj.zh ?? usObj.chinese ?? usObj.tw ?? usObj.cn)) ??
+          (p.user_zh ?? p.student_zh ?? p.answer_zh ?? p.expected_zh ?? p.a_zh) ??
+          ''
+        ).toString().trim();
 
-        const aiT = toTurn(aiVal, "AI", base);
-        if(aiT) out.push(aiT);
-
-        // If userVal is actually an object with en empty but hint_en exists, convert properly
-        if(userVal!=null){
-          let uVal = userVal;
-          if(typeof userVal==="object" && userVal && !userVal.en && (userVal.hint_en || userVal.hint_zh)){
-            uVal = { en: userVal.hint_en||"", zh: userVal.hint_zh||"", level: userVal.level||"", hint: userVal.hint||"", fill: userVal.fill||userVal.blank||"", answer: userVal.answer||"" };
-          }
-          const uT = toTurn(uVal, "USER", base);
-          if(uT) out.push(uT);
-        }
+        if(aiEn) push({ en: aiEn, zh: aiZh, role: 'AI', level: lvl, hint:'', fill:'', answer:'' });
+        if(usEn) push({ en: usEn, zh: usZh, role: 'USER', level: lvl, hint:'', fill:'', answer:'' });
       }
-
       return out;
     }
 
-    // --- 1/2) array or common array fields ---
-    let arr = null;
-    if(Array.isArray(raw)) arr = raw;
-    else if(raw && typeof raw === "object"){
-      arr = pickArr(raw,"turns") || pickArr(raw,"dialogue") || pickArr(raw,"lines") || pickArr(raw,"items");
-      if(!arr && Array.isArray(raw.dialogues)){
-        return flattenDialogues(raw.dialogues);
-      }
+    // (B) flat arrays
+    const arr = Array.isArray(raw)
+      ? raw
+      : (raw && (raw.turns || raw.dialogue || raw.lines || raw.items) ? (raw.turns || raw.dialogue || raw.lines || raw.items) : []);
+    for(const t of (arr||[])){
+      const n = normOne(t);
+      if(n && n.en) push(n);
     }
-    arr = arr || [];
-
-    // If the picked array itself is a dialogues-like structure, flatten it
-    if(arr && !Array.isArray(raw) && raw && typeof raw==="object" && Array.isArray(raw.dialogues) && arr===raw.dialogues){
-      return flattenDialogues(arr);
-    }
-
-    // Map turn items into normalized turn objects
-    const normalized = (arr||[]).map(t=>{
-      if(!t) return null;
-
-      // Support {role:"AI"/"USER", en, zh} or {speaker:"AI"} etc.
-      const role = ((t.role ?? t.speaker ?? t.who ?? '').toString().trim()) || "AI";
-
-      // Some datasets put expected user reply in hint_en/hint_zh without en
-      const hasUserHint = (!t.en && (t.hint_en || t.hint_zh));
-      const en = (t.en ?? (hasUserHint ? t.hint_en : "") ?? t.english ?? t.text ?? '').toString().trim();
-      const zh = (t.zh ?? (hasUserHint ? t.hint_zh : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
-      const level = (t.level ?? t.cefr ?? '').toString().trim() || 'A1';
-      const hint = (t.hint ?? t.tip ?? '').toString().trim();
-      const fill = (t.fill ?? t.blank ?? '').toString();
-      const answer = (t.answer ?? '').toString().trim();
-
-      // If the record looks like user-expected (no en, but hint_en), force role USER
-      const finalRole = hasUserHint ? "USER" : (role || "AI");
-
-      return { en, zh, role: finalRole, level, hint, fill, answer };
-    }).filter(x=>x && x.en);
-
-    // If raw has dialogues and we didn't return early, also try flatten (better than empty)
-    if(!normalized.length && raw && typeof raw==="object" && Array.isArray(raw.dialogues)){
-      return flattenDialogues(raw.dialogues);
-    }
-    return normalized;
+    return out;
   }
 
   function getOverrides(){
@@ -1555,13 +1481,18 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       weekLabel.textContent = "W" + String(activeWeek);
       scenePickLabel.textContent = activeSceneTitle ? activeSceneTitle : "選擇情境";
       sceneTitle.textContent = activeSceneTitle ? activeSceneTitle : "載入中…";
-      // progress is counted by AI turns (1/N), not by raw array length
-      const progMax = Math.max(1, turns.filter(t=>String(t.role||'AI').toUpperCase()==='AI').length || Math.ceil(turns.length/2) || 1);
-      const progNow = Math.max(1, Math.min(progMax,
-        turns.slice(0, Math.max(0, Math.min(aiIdx, turns.length-1))+1)
-             .filter(t=>String(t.role||'AI').toUpperCase()==='AI').length
-      ));
-      sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${progNow}/${progMax}`;
+      const aiTotal = Math.max(1, turns.filter(t=>String(t.role||'AI').toUpperCase()==='AI').length);
+      const aiNow = (()=>{
+        let n = 0;
+        for(let k=0;k<turns.length;k++){
+          if(String(turns[k]?.role||'AI').toUpperCase()==='AI'){
+            n++;
+            if(k>=aiIdx) break;
+          }
+        }
+        return Math.min(aiTotal, Math.max(1, n||1));
+      })();
+      sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${aiNow}/${aiTotal}`;
       return;
     }
 
@@ -1915,11 +1846,13 @@ try{showReport();}catch(e){}
     }
 
     turns = normalizeTurns(activeScene);
-    \1    // Start at first AI turn (so progress shows 1/N and dialogue flow works)
-    turnIdx = (()=>{
+    if(!turns.length){
+      turns = [{en:"(No turns found in JSON)", zh:"JSON 沒有 turns/dialogue/lines/items 陣列", level: String(activeScene?.meta?.level || "A1")}];
+    }
+    turnIdx = (talkMode === "dialogue") ? (()=>{
       const i = turns.findIndex(t=>String(t.role||'AI').toUpperCase()==='AI');
       return (i>=0)? i : 0;
-    })();
+    })() : 0;
     fillInput.value = "";
     updateUI();
     // autoplay first line
