@@ -55,7 +55,7 @@
       const r1 = await supabase
         .from('orders')
         .select('status,expires_at,paid_at,created_at')
-        .eq('user_id', u.id)
+        .eq('user_id', uid)
         .order('created_at', { ascending:false })
         .limit(1);
       if (!r1.error && r1.data && r1.data.length) {
@@ -69,7 +69,7 @@
         const r2 = await supabase
           .from('orders')
           .select('status,expires_at,paid_at,created_at')
-          .eq('email', u.email)
+          .eq('email', email)
           .order('created_at', { ascending:false })
           .limit(1);
         if (!r2.error && r2.data && r2.data.length) {
@@ -83,35 +83,35 @@
     } catch (e) {}
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
-    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-    const today_sub = new Date().toISOString().slice(0,10);
-    let ok = (pe && pe >= today_sub) || (oexp && oexp >= today_sub);
-    if (!ok && hasPaid) {
-      // paid_at/created_at within last 400 days => treat as valid
-      const base = (opaid || ocreated || '').slice(0,10);
-      if (base) {
-        const t0 = new Date(base + 'T00:00:00Z').getTime();
-        const t1 = Date.now();
-        const days = (t1 - t0) / 86400000;
-        if (days >= 0 && days <= 400) ok = true;
-      } else {
-        ok = true;
-      }
-    }
-    // --- decide ---
-    ok = (!paused) && (
-      (pexp && pexp >= today) ||
-      (oexp && oexp >= today)
-    );
+// Apply a loose recency check (<= 400 days) using paid_at/created_at if available.
+let okPaidNoExp = false;
+if (hasPaid && !oexp) {
+  const base = (opaid || ocreated || '').slice(0,10);
+  if (base) {
+    const t0 = new Date(base + 'T00:00:00Z').getTime();
+    const t1 = Date.now();
+    const days = (t1 - t0) / 86400000;
+    if (days >= 0 && days <= 400) okPaidNoExp = true;
+  } else {
+    okPaidNoExp = true;
+  }
+}
 
-    window.BW_SUB_OK = ok;
-    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
-    window.BW_PROFILE_OK = !perr;
+// --- decide ---
+const ok = (!paused) && (
+  (pexp && pexp >= today) ||
+  (oexp && oexp >= today) ||
+  okPaidNoExp
+);
 
-    if (!ok) {
-      location.replace('/account/subscription.html');
-      return;
-    }
+window.BW_SUB_OK = ok;
+window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
+window.BW_PROFILE_OK = !perr;
+
+if (!ok) {
+  location.replace('/account/subscription.html');
+  return;
+}
   } catch (e) {
     location.replace('/account/subscription.html?err=guard');
   }
