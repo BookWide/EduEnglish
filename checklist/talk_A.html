@@ -100,7 +100,7 @@
       }
     }
     // --- decide ---
-    const ok = (!paused) && (
+    ok = (!paused) && (
       (pexp && pexp >= today) ||
       (oexp && oexp >= today)
     );
@@ -1302,35 +1302,8 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     mask.style.display = "none";
     mask.setAttribute("aria-hidden","true");
   }
-  function normalizeSceneIdToFile(id){
-  const s = String(id||"").trim();
-  // New scheme in index.json: "w01-1.scene" => file "w01_01.json"
-  let m = s.match(/^w(\d{2})-(\d{1,2})\.scene$/i);
-  if(m){
-    const wk = m[1];
-    const day = String(parseInt(m[2],10)).padStart(2,"0");
-    return `w${wk}_${day}`;
-  }
-  // Accept both "w01.1.scene" / "w01-1.scene" if any ".scene" suffix
-  m = s.match(/^w(\d{2})[\._-](\d{1,2})\b/i);
-  if(m && s.toLowerCase().includes(".scene")){
-    const wk = m[1];
-    const day = String(parseInt(m[2],10)).padStart(2,"0");
-    return `w${wk}_${day}`;
-  }
-  // Already file-style id like "w01_01" or legacy ids like "w05.challenge.airport"
-  return s;
-}
-
-function getWeekFromId(id){
-  const s = String(id||"");
-  // support: w01-1.scene / w01_01 / w01.3 / w05.core.xxx
-  let m = s.match(/^w(\d{2})[\._-]/i);
-  if(!m) m = s.match(/^w(\d{2})\b/i);
-  return m ? parseInt(m[1],10) : null;
-}
-
-)\./i);
+  function getWeekFromId(id){
+    const m = String(id||"").match(/^w(\d{2})\./i);
     return m ? parseInt(m[1],10) : null;
   }
   function safeText(v){ return (v==null) ? "" : String(v); }
@@ -1784,21 +1757,41 @@ try{showReport();}catch(e){}
     showToast("已收藏");
   }
 
-  async function loadSceneById(id, title, fileId){
+  async function loadSceneById(id, title){
     activeSceneId = id;
-    const _fileId = (fileId || normalizeSceneIdToFile(id));
     activeSceneTitle = title || id;
 
-    const url = new URL("/talk/" + encodeURIComponent(_fileId) + ".json", location.origin).toString();
+  // ===== id -> filename mapper (supports w01-1.scene -> w01_01.json) =====
+  function sceneIdToFile(id){
+    const s = String(id||"").trim();
+    if(!s) return "";
+    // new index id like: w01-1.scene
+    let m = s.match(/^w(\d{2})-(\d+)\.scene$/i);
+    if(m){
+      const w = m[1];
+      const d = String(parseInt(m[2],10)).padStart(2,"0");
+      return `w${w}_${d}.json`;
+    }
+    // already in new filename style without extension
+    m = s.match(/^w(\d{2})_(\d{2})$/i);
+    if(m) return `${s}.json`;
+    // if id already endsWith .json, keep
+    if(s.toLowerCase().endsWith(".json")) return s;
+    return `${s}.json`;
+  }
+
+
+        const fileName = sceneIdToFile(id);
+    const url = new URL("/talk/" + encodeURIComponent(fileName), location.origin).toString();
     const fallback = [
       url,
-      new URL("./" + encodeURIComponent(_fileId) + ".json", location.href).toString(), // if talk.html in /talk/
-      new URL("../talk/" + encodeURIComponent(_fileId) + ".json", location.href).toString(), // if talk.html in /checklist/
+      new URL("./" + encodeURIComponent(sceneIdToFile(id)), location.href).toString(), // if talk.html in /talk/
+      new URL("../talk/" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /checklist/
     ];
     try{
       activeScene = await fetchJsonAny(fallback);
       currentSceneJson = activeScene;
-      if(fileTag) fileTag.textContent = (_fileId ? (_fileId + ".json") : "");
+      if(fileTag)       fileTag.textContent = activeSceneId ? sceneIdToFile(activeSceneId) : "";
       // 任務文字：優先 title_zh/title_en，其次用 scene / id
       const tz = safeText(activeScene?.title_zh || activeScene?.titleZh || "");
       const te = safeText(activeScene?.title_en || activeScene?.titleEn || "");
@@ -1829,28 +1822,15 @@ try{showReport();}catch(e){}
   }
 
   function buildWeekMap(){
-  byWeek = new Map();
-  const scenes = (indexData && Array.isArray(indexData.scenes)) ? indexData.scenes : [];
-  for(const s of scenes){
-    const idRaw = s.id || s.scene_id || s.key;
-    if(!idRaw) continue;
-    const wk = (s.week!=null && !isNaN(Number(s.week))) ? Number(s.week) : getWeekFromId(idRaw);
-    if(!wk) continue;
-    const idFile = normalizeSceneIdToFile(idRaw);
-    if(!byWeek.has(wk)) byWeek.set(wk, []);
-    byWeek.get(wk).push({
-      id: idRaw,
-      fileId: idFile,
-      title: s.title || s.title_en || s.title_zh || idRaw,
-      level: s.level || s.lev || ""
-    });
-  }
-  for(const [wk, arr] of byWeek){
-    arr.sort((a,b)=> String(a.fileId||a.id).localeCompare(String(b.fileId||b.id)));
-  }
-}
-
-);
+    byWeek = new Map();
+    const scenes = (indexData && Array.isArray(indexData.scenes)) ? indexData.scenes : [];
+    for(const s of scenes){
+      const id = s.id || s.scene_id || s.key;
+      if(!id) continue;
+      const wk = getWeekFromId(id);
+      if(!wk) continue;
+      if(!byWeek.has(wk)) byWeek.set(wk, []);
+      byWeek.get(wk).push({id, title: s.title || id, level: s.level || s.lev || ""});
     }
     // stable sort
     for(const [wk, arr] of byWeek){
