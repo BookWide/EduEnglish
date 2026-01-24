@@ -2,7 +2,36 @@
 <html lang="zh-Hant">
 <head>
 <!-- ===== BookWide Guard (Talk: subscription required) ===== -->
+
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+(async () => {
+  const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+  const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || '';
+
+  const ADMIN_EMAILS = ['pmktools@gmail.com'];
+
+  const supabase = window.supabase.createClient(
+    SUPABASE_URL,
+    SUPABASE_ANON_KEY
+  );
+
+  const { data: { session } } = await supabase.auth.getSession();
+
+  if (!session || !session.user) {
+    alert('請先登入管理員帳號');
+    location.replace('/index.html');
+    return;
+  }
+
+  if (!ADMIN_EMAILS.includes(session.user.email)) {
+    alert('無管理權限');
+    location.replace('/index.html');
+    return;
+  }
+})();
+</script>
+
 <script>
   // BookWide Supabase public config (global)
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
@@ -13,9 +42,8 @@
 <script>
 (async function() {
   try {
-    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-
+    const SUPABASE_URL = window.SUPABASE_URL;
+    const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY;
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     });
@@ -84,28 +112,28 @@
     } catch (e) {}
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
-    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-  // (fixed) today already defined above
-    let ok = (pe && pe >= today) || (oexp && oexp >= today);
-    if (!ok && hasPaid) {
-      // paid_at/created_at within last 400 days => treat as valid
-      const base = (opaid || ocreated || '').slice(0,10);
-      if (base) {
-        const t0 = new Date(base + 'T00:00:00Z').getTime();
-        const t1 = Date.now();
-        const days = (t1 - t0) / 86400000;
-        if (days >= 0 && days <= 400) ok = true;
-      } else {
-        ok = true;
-      }
-    }
-    // --- decide ---
-    const ok = (!paused) && (
-      (pexp && pexp >= today) ||
-      (oexp && oexp >= today)
-    );
+// We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
+const today_sub = new Date().toISOString().slice(0,10);
 
-    window.BW_SUB_OK = ok;
+// Base validity from profile/orders expires_at (YYYY-MM-DD)
+let ok = (!paused) && (
+  (pexp && pexp >= today) ||
+  (oexp && oexp >= today)
+);
+
+// Safety: if paid order exists but expires_at is missing, allow access for a limited recency window
+if (!ok && hasPaid) {
+  const base = (opaid || ocreated || '').slice(0,10);
+  if (base) {
+    const t0 = new Date(base + 'T00:00:00Z').getTime();
+    const t1 = Date.now();
+    const days = (t1 - t0) / 86400000;
+    if (days >= 0 && days <= 400) ok = true;
+  } else {
+    ok = true;
+  }
+}
+window.BW_SUB_OK = ok;
     window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
     window.BW_PROFILE_OK = !perr;
 
@@ -1221,11 +1249,8 @@ let __tvWatch = null;
   }catch(e){}
 
 
-  const INDEX_URL = new URL("/talk/index.json", location.origin).toString();
-  const FALLBACK_INDEX_URLS = [
-    new URL("./index.json", location.href).toString(),              // if talk.html inside /talk/
-    new URL("../talk/index.json", location.href).toString(),        // if talk.html inside /checklist/
-  ];
+  const INDEX_URL = "/talk/index.json";
+const FALLBACK_INDEX_URLS = [];
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
   const LS_SAVED = "BW_TALK_SAVED_LINES";
@@ -1241,9 +1266,6 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   const MAX_WEEKS = 999; // MVP
   const ITEMS_PER_WEEK = 3;
 
-
-  // Admin checklist view: unlock all weeks (for /checklist/ or talk_A.html)
-  const IS_ADMIN_VIEW = /\/checklist\//.test(location.pathname) || /talk_A\.html/i.test(location.pathname);
   // UI refs
   const weekLabel = $("weekLabel");
   const scenePickLabel = $("scenePickLabel");
@@ -1358,7 +1380,6 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   }
 
   function computeUnlockedWeek(){
-    if(IS_ADMIN_VIEW) return MAX_WEEKS;
     const ts = ensureAnchorTs();
     const diff = Date.now() - ts;
     const weekMs = WEEK_DAYS * DAY;
@@ -1368,27 +1389,61 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   }
 
   // ---- turns normalize (defensive) ----
-  function normalizeTurns(raw){
-    const arr = Array.isArray(raw)
-      ? raw
-      : (raw && (raw.turns || raw.dialogue) ? (raw.turns || raw.dialogue) : []);
+  
+function normalizeTurns(raw){
+    // Accept these shapes:
+    // 1) [ {en/zh/role/...} ]
+    // 2) { turns:[...], dialogue:[...], lines:[...], items:[...] }
+    // Prefer the first NON-EMPTY array in priority order, so we don't get trapped by turns:[] while dialogue:[...] exists.
+    let arr = [];
+    if(Array.isArray(raw)){
+      arr = raw;
+    }else if(raw && typeof raw === "object"){
+      const pick = (k)=>{
+        const v = raw[k];
+        return Array.isArray(v) && v.length ? v : null;
+      };
+      arr = pick("turns") || pick("dialogue") || pick("lines") || pick("items") || [];
+      // If arrays exist but empty, still allow the first existing one (to avoid throwing)
+      if(!arr.length){
+        const v1 = Array.isArray(raw.turns) ? raw.turns : null;
+        const v2 = Array.isArray(raw.dialogue) ? raw.dialogue : null;
+        const v3 = Array.isArray(raw.lines) ? raw.lines : null;
+        const v4 = Array.isArray(raw.items) ? raw.items : null;
+        arr = v1 || v2 || v3 || v4 || [];
+      }
+    }
+
     return (arr||[]).map(t=>{
       if(!t) return null;
-      const hasAI = !!(t.en || t.zh || t.english || t.text);
-      const hasUser = !t.en && (t.hint_en || t.hint_zh);
-      const en = (t.en ?? (hasUser ? t.hint_en : "") ?? t.english ?? t.text ?? '').toString().trim();
-      const zh = (t.zh ?? (hasUser ? t.hint_zh : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
-      let role = (((t.role ?? t.speaker ?? '').toString().trim()) || (hasUser ? "USER" : "AI"));
-      // normalize legacy roles
-      if (/^student$/i.test(role)) role = 'USER';
-      if (/^teacher$/i.test(role)) role = 'AI';
-      const level = (t.level ?? t.cefr ?? '').toString().trim() || 'A1';
+
+      // support {role:'assistant'|'user', text:'...'}
+      const text = (t.text ?? t.english ?? t.en ?? "").toString();
+      const en = (t.en ?? t.english ?? t.text ?? '').toString().trim();
+      const zh = (t.zh ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
+
+      // role normalization for dialogue mode
+      let roleRaw = ((t.role ?? t.speaker ?? '').toString().trim()) || "";
+      let role = roleRaw;
+      if(!role){
+        // if hints exist, treat as USER (old shape)
+        role = (!t.en && (t.hint_en || t.hint_zh)) ? "USER" : "AI";
+      }else{
+        const r = roleRaw.toLowerCase();
+        if(r === "assistant" || r === "ai" || r === "bot" || r === "system") role = "AI";
+        else if(r === "user" || r === "student" || r === "learner") role = "USER";
+        else role = roleRaw; // keep
+      }
+
+      const level = (t.level ?? t.cefr ?? raw?.meta?.level ?? raw?.meta?.cefr ?? '').toString().trim() || 'A1';
       const hint = (t.hint ?? '').toString().trim();
       const fill = (t.fill ?? t.blank ?? '').toString();
       const answer = (t.answer ?? '').toString().trim();
+
       return { en, zh, role, level, hint, fill, answer };
     }).filter(x=>x && x.en);
   }
+
 
   function getOverrides(){
     return { weekOverride: null, sceneOverride: null };
@@ -1421,7 +1476,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
       if(!expected){
         expected = synthUserFromAI(ai.en||"", activeSceneId||"");
         expectedSrc = "generated";
-        console.warn("[Talk] 缺 USER 建議句：請補 JSON（不再自動生成）", { sceneId: activeSceneId, ai: ai.en });
+        console.warn("[Talk] 缺 USER 建議句：已用規則生成（請補 JSON）", { sceneId: activeSceneId, ai: ai.en });
       }
       // build cloze + options for low difficulty guidance
       const cl = makeCloze(expected);
@@ -1825,9 +1880,9 @@ try{showReport();}catch(e){}
 
       
   // ===== 最小 UX 修正：只顯示「本週」＋「下一週提示」，其餘(包含往前週)一律不顯示 =====
-  if(!IS_ADMIN_VIEW && wk !== unlockedWeek && wk !== unlockedWeek + 1) continue;
+  if(wk !== unlockedWeek && wk !== unlockedWeek + 1) continue;
 
-  if(!IS_ADMIN_VIEW && wk === unlockedWeek + 1){
+  if(wk === unlockedWeek + 1){
     const g = document.createElement("div");
     g.className = "group";
     const head = document.createElement("div");
@@ -1849,10 +1904,10 @@ try{showReport();}catch(e){}
     continue;
   }
 // ===== UX：只顯示到「本週 + 下一週提示」=====
-      if(!IS_ADMIN_VIEW && wk > unlockedWeek + 1) continue;
+      if(wk > unlockedWeek + 1) continue;
 
       // 下一週：只顯示一行提示，不列出三條
-      if(!IS_ADMIN_VIEW && wk === unlockedWeek + 1){
+      if(wk === unlockedWeek + 1){
         const g = document.createElement("div");
         g.className = "group";
         const head = document.createElement("div");
@@ -1876,7 +1931,7 @@ try{showReport();}catch(e){}
       }
 
 
-      const locked = (!IS_ADMIN_VIEW && wk !== unlockedWeek);// checklist view unlocks all
+      const locked = wk !== unlockedWeek;// 只解鎖當週，其餘全部鎖住
       const g = document.createElement("div");
       g.className = "group";
       const head = document.createElement("div");
@@ -2135,6 +2190,8 @@ if(!firstId){
       if(!expected){ showToast("本句沒有建議回覆"); return; }
       // temporarily reveal the full expected sentence
       fillEn.textContent = expected;
+      // speak the full expected sentence
+      speak(expected);
       showToast("已顯示提示（完整句）");
       // auto revert to cloze after 3 seconds
       clearTimeout(window.__bwHintTimer);
@@ -2266,16 +2323,6 @@ const TEACHER_AZURE_VOICE = {
   "emma.mp4":   "en-US-AriaNeural",
   "sophia.mp4": "en-GB-SoniaNeural"
 };
-function getTeacherVoice(teacherKey){
-  const t = (teacherKey||'').toString().trim().toLowerCase();
-  // Azure voices
-  if(t==='diana') return 'en-US-AnaNeural';
-  if(t==='emma') return 'en-US-AriaNeural';
-  if(t==='sophia') return 'en-AU-NatashaNeural';
-  // fallback: Emma
-  return 'en-US-AriaNeural';
-}
-
 const TEACHER_TTS_STYLE = {
   "diana.mp4":  { rate: "-2%", pitch: "+10%" },
   "emma.mp4":   { rate: "+6%", pitch: "+2%" },
