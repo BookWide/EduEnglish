@@ -11,110 +11,57 @@
   window.SUPABASE_ANON_KEY = SUPABASE_ANON_KEY;
 </script>
 <script>
-(async function() {
-  try {
-    const SUPABASE_URL = window.SUPABASE_URL;
-    const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY;
-    const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+(function(){
+  // expose keys to other scripts
+  window.SUPABASE_URL = window.SUPABASE_URL || 'https://jeajrwpmrgczimmrflxo.supabase.co';
+  window.SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || (window.SUPABASE_ANON_KEY || '');
+  // patch createClient: singleton + allow missing key
+  function patchCreateClient(){
+    if(!window.supabase || !window.supabase.createClient) return;
+    if(window.__BW_CREATECLIENT_PATCHED__) return;
+    window.__BW_CREATECLIENT_PATCHED__ = true;
+    const orig = window.supabase.createClient.bind(window.supabase);
+    let singleton = null;
+    window.supabase.createClient = function(url, key, opts){
+      const finalUrl = url || window.SUPABASE_URL;
+      const finalKey = key || window.SUPABASE_ANON_KEY;
+      if(singleton) return singleton;
+      singleton = orig(finalUrl, finalKey, opts);
+      return singleton;
+    };
+  }
+
+  async function main(){
+    patchCreateClient();
+    const sb = window.supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     });
+    window.supabaseClient = sb;
 
-    // --- require login ---
-    const { data: sess } = await supabase.auth.getSession();
+    const { data: sess } = await sb.auth.getSession();
     const session = sess && sess.session;
-    if (!session || !session.user) {
+    if(!session || !session.user){
       const red = encodeURIComponent(location.pathname + location.search + location.hash);
       location.replace('/account/login.html?redirect=' + red);
       return;
     }
 
-    const user = session.user;
-    const uid = user.id;
-    const email = (user.email || '').toLowerCase();
+    const email = String(session.user.email || '').toLowerCase();
+    const ADMIN_EMAILS = ['pmktools@gmail.com']; // ✅ 需要更多 admin 就加在這裡
+    const isAdmin = ADMIN_EMAILS.includes(email);
 
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
-
-    // --- read profile (best effort) ---
-    const { data: prof, error: perr } = await supabase
-      .from('profiles')
-      .select('id, expires_at, is_paused')
-      .eq('id', uid)
-      .maybeSingle();
-
-    // 如果 profiles 讀不到（RLS / row 不存在），不要直接判死刑：改用 orders 當 fallback
-    const paused = !!(prof && prof.is_paused);
-    const pexp = prof && prof.expires_at ? String(prof.expires_at).slice(0,10) : '';
-
-    // --- orders fallback (handle test accounts recreated with new uid) ---
-    let oexp = '';
-    let opaid = '';
-    let ocreated = '';
-    let hasPaid = false;
-    try {
-      // 1) by user_id (best)
-      const r1 = await supabase
-        .from('orders')
-        .select('status,expires_at,paid_at,created_at')
-        .eq('user_id', u.id)
-        .order('created_at', { ascending:false })
-        .limit(1);
-      if (!r1.error && r1.data && r1.data.length) {
-        const row = r1.data[0];
-        if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
-        if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
-        if (row?.paid_at) opaid = String(row.paid_at);
-        if (row?.created_at) ocreated = String(row.created_at);
-      } else {
-        // 2) fallback by email (covers cases where order created before account was recreated)
-        const r2 = await supabase
-          .from('orders')
-          .select('status,expires_at,paid_at,created_at')
-          .eq('email', u.email)
-          .order('created_at', { ascending:false })
-          .limit(1);
-        if (!r2.error && r2.data && r2.data.length) {
-          const row = r2.data[0];
-          if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
-          if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
-          if (row?.paid_at) opaid = String(row.paid_at);
-          if (row?.created_at) ocreated = String(row.created_at);
-        }
-      }
-    } catch (e) {}
-
-    // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
-// We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-const today_sub = new Date().toISOString().slice(0,10);
-
-// Base validity from profile/orders expires_at (YYYY-MM-DD)
-let ok = (!paused) && (
-  (pexp && pexp >= today) ||
-  (oexp && oexp >= today)
-);
-
-// Safety: if paid order exists but expires_at is missing, allow access for a limited recency window
-if (!ok && hasPaid) {
-  const base = (opaid || ocreated || '').slice(0,10);
-  if (base) {
-    const t0 = new Date(base + 'T00:00:00Z').getTime();
-    const t1 = Date.now();
-    const days = (t1 - t0) / 86400000;
-    if (days >= 0 && days <= 400) ok = true;
-  } else {
-    ok = true;
-  }
-}
-window.BW_SUB_OK = ok;
-    window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
-    window.BW_PROFILE_OK = !perr;
-
-    if (!ok) {
-      location.replace('/account/subscription.html');
+    if(!isAdmin){
+      alert('此頁僅限管理員');
+      location.replace('/');
       return;
     }
-  } catch (e) {
-    location.replace('/account/subscription.html?err=guard');
+
+    window.BW_IS_ADMIN = true;
+    window.BW_USER_ID = session.user.id;
+    try{ localStorage.setItem('BW_USER_ID', session.user.id); }catch(e){}
   }
+
+  main().catch(()=>{});
 })();
 </script>
 <!-- ===== /BookWide Guard ===== -->
@@ -1220,67 +1167,8 @@ let __tvWatch = null;
   }catch(e){}
 
 
-  const INDEX_URL = "/talk/index.json";
-const FALLBACK_INDEX_URLS = [];
-
-  function normalizeIndex(raw){
-    try{
-      // already in expected format
-      if(raw && Array.isArray(raw.scenes)) return raw;
-
-      // schema: { weeks: [ {week:"W01", items:[{id, filename, slug, title?}, ...]} , ... ] }
-      if(raw && Array.isArray(raw.weeks)){
-        const scenes = [];
-        for(const w of raw.weeks){
-          const wkStr = String(w?.week || "").trim(); // "W01"
-          const wkNum = Number((wkStr.match(/(\d{1,3})/)||[])[1] || 0) || 0;
-          const items = Array.isArray(w?.items) ? w.items : [];
-          for(const it of items){
-            const filename = String(it?.filename || it?.file || "").trim();
-            const base = filename ? filename.replace(/\.json$/i,"") : String(it?.id||"").trim();
-            const id = base || String(it?.id||"").trim();
-            if(!id) continue;
-            const slug = String(it?.slug || "").trim();
-            const t = String(it?.title || it?.name || "").trim();
-            const title = t || (slug ? slug.replace(/[_-]+/g," ").replace(/\b\w/g, m=>m.toUpperCase()) : id);
-            scenes.push({
-              id,
-              title,
-              week: wkNum || undefined,
-              level: "",
-              file: filename ? (filename.startsWith("/") ? filename : ("/talk/" + filename)) : ("/talk/" + id + ".json"),
-              slug: slug || undefined,
-              legacy_id: it?.id || undefined
-            });
-          }
-        }
-        return { scenes, schema: raw?.schema || "weeks_v1", source: "weeks" };
-      }
-
-      // schema: { items:[...] } or plain array
-      if(Array.isArray(raw)){
-        return { scenes: raw.map((s)=>({
-          id: s?.id || s?.scene_id || s?.key || "",
-          title: s?.title || s?.name || (s?.id||""),
-          level: s?.level || s?.lev || "",
-          file: s?.file || s?.url || (s?.id ? ("/talk/"+String(s.id)+".json") : "")
-        })).filter(x=>x.id) };
-      }
-      if(raw && Array.isArray(raw.items)){
-        return { scenes: raw.items.map((s)=>({
-          id: s?.id || s?.scene_id || s?.key || "",
-          title: s?.title || s?.name || (s?.id||""),
-          level: s?.level || s?.lev || "",
-          file: s?.file || s?.url || (s?.id ? ("/talk/"+String(s.id)+".json") : "")
-        })).filter(x=>x.id) };
-      }
-
-      return { scenes: [] };
-    }catch(e){
-      return { scenes: [] };
-    }
-  }
-
+  const INDEX_URL = "/talk/index.json?v=" + Date.now();
+const FALLBACK_INDEX_URLS = ["/talk/index.json"];
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
   const LS_SAVED = "BW_TALK_SAVED_LINES";
@@ -1346,6 +1234,16 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
     clearTimeout(showToast._t);
     showToast._t = setTimeout(()=>toastEl.style.display="none", 1800);
   }
+
+  function setInlineStatus(msg){
+    try{
+      const el = document.getElementById("lineEnInline") || document.getElementById("lineEn");
+      const zh = document.getElementById("lineZhInline") || document.getElementById("lineZh");
+      if(el) el.textContent = msg;
+      if(zh) zh.textContent = msg;
+    }catch(_){}
+  }
+
   function openModal(){
     mask.style.display = "flex";
     mask.setAttribute("aria-hidden","false");
@@ -1410,8 +1308,7 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   }
 
   function computeUnlockedWeek(){
-    // Admin: unlock ALL weeks
-    return MAX_WEEKS;
+    return 999; // UNLOCK ALL WEEKS
   }
 
   // ---- turns normalize (defensive) ----
@@ -1900,64 +1797,40 @@ try{showReport();}catch(e){}
 
   function renderPicker(){
     modalBody.innerHTML = "";
+    const isAdmin = !!window.BW_IS_ADMIN;
     for(let wk=1; wk<=MAX_WEEKS; wk++){
       const list = byWeek.get(wk) || [];
-      if(!list.length) continue;
-
-      
-  // ===== 最小 UX 修正：只顯示「本週」＋「下一週提示」，其餘(包含往前週)一律不顯示 =====
-  if(wk !== unlockedWeek && wk !== unlockedWeek + 1) continue;
-
-  if(wk === unlockedWeek + 1){
-    const g = document.createElement("div");
-    g.className = "group";
-    const head = document.createElement("div");
-    head.className = "gHead";
-    head.innerHTML = `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`;
-    g.appendChild(head);
-
-    const row = document.createElement("div");
-    row.className = "item";
-    row.innerHTML = `
-      <div>
-        <div class="name">下一週即將解鎖</div>
-        <p class="sub">完成本週口說任務後，系統會自動開放 Week ${wk}</p>
-      </div>
-      <button class="ghost" style="height:42px;font-size:15px" disabled>尚未</button>
-    `;
-    g.appendChild(row);
-    modalBody.appendChild(g);
+   if(!isAdmin){
+       if(!list.length) continue;
+  
+        
+    // ===== 最小 UX 修正：只顯示「本週」＋「下一週提示」，其餘(包含往前週)一律不顯示 =====
+    if(wk !== unlockedWeek && wk !== unlockedWeek + 1) continue;
+  
+    if(wk === unlockedWeek + 1){
+      const g = document.createElement("div");
+      g.className = "group";
+      const head = document.createElement("div");
+      head.className = "gHead";
+      head.innerHTML = `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`;
+      g.appendChild(head);
+  
+      const row = document.createElement("div");
+      row.className = "item";
+      row.innerHTML = `
+        <div>
+          <div class="name">下一週即將解鎖</div>
+          <p class="sub">完成本週口說任務後，系統會自動開放 Week ${wk}</p>
+        </div>
+        <button class="ghost" style="height:42px;font-size:15px" disabled>尚未</button>
+      `;
+      g.appendChild(row);
+      mo
+  }
+dalBody.appendChild(g);
     continue;
   }
-// ===== UX：只顯示到「本週 + 下一週提示」=====
-      if(wk > unlockedWeek + 1) continue;
-
-      // 下一週：只顯示一行提示，不列出三條
-      if(wk === unlockedWeek + 1){
-        const g = document.createElement("div");
-        g.className = "group";
-        const head = document.createElement("div");
-        head.className = "gHead";
-        head.innerHTML = `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`;
-        g.appendChild(head);
-
-        const row = document.createElement("div");
-        row.className = "item";
-        row.innerHTML = `
-          <div>
-            <div class="name">下一週即將解鎖</div>
-            <p class="sub">完成本週口說任務後，系統會自動開放 Week ${wk}</p>
-          </div>
-          <button class="ghost" style="height:42px;font-size:15px" disabled>尚未</button>
-        `;
-        g.appendChild(row);
-
-        modalBody.appendChild(g);
-        continue;
-      }
-
-
-      const locked = wk !== unlockedWeek;// 只解鎖當週，其餘全部鎖住
+const locked = isAdmin ? false : (wk !== unlockedWeek); // admin 全開，其它只解鎖當週
       const g = document.createElement("div");
       g.className = "group";
       const head = document.createElement("div");
@@ -2058,9 +1931,8 @@ async function init(){
   setTeacher(urlT || savedT || (selTeacher ? selTeacher.value : "teacher.mp4"));
     getOverrides();
     unlockedWeek = computeUnlockedWeek();
-    // Admin: force unlock all weeks
-    unlockedWeek = MAX_WEEKS;
-// 用 localStorage 記住上次的週；沒有就用目前已解鎖週
+
+    // 用 localStorage 記住上次的週；沒有就用目前已解鎖週
     let savedWeek = 0;
     try { savedWeek = Number(localStorage.getItem("talk_active_week") || "0"); } catch(e){}
     activeWeek = unlockedWeek;// 強制當週為主，避免選到已鎖週
@@ -2072,7 +1944,6 @@ async function init(){
     // load index.json
     try{
       indexData = await fetchJsonAny([INDEX_URL, ...FALLBACK_INDEX_URLS]);
-      indexData = normalizeIndex(indexData);
     }catch(e){
       indexData = { scenes: [] };
       showToast("讀不到 talk/index.json");
