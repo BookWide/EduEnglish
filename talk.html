@@ -1360,24 +1360,61 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   }
 
   // ---- turns normalize (defensive) ----
-  function normalizeTurns(raw){
-    const arr = Array.isArray(raw)
-      ? raw
-      : (raw && (raw.turns || raw.dialogue) ? (raw.turns || raw.dialogue) : []);
+  
+function normalizeTurns(raw){
+    // Accept these shapes:
+    // 1) [ {en/zh/role/...} ]
+    // 2) { turns:[...], dialogue:[...], lines:[...], items:[...] }
+    // Prefer the first NON-EMPTY array in priority order, so we don't get trapped by turns:[] while dialogue:[...] exists.
+    let arr = [];
+    if(Array.isArray(raw)){
+      arr = raw;
+    }else if(raw && typeof raw === "object"){
+      const pick = (k)=>{
+        const v = raw[k];
+        return Array.isArray(v) && v.length ? v : null;
+      };
+      arr = pick("turns") || pick("dialogue") || pick("lines") || pick("items") || [];
+      // If arrays exist but empty, still allow the first existing one (to avoid throwing)
+      if(!arr.length){
+        const v1 = Array.isArray(raw.turns) ? raw.turns : null;
+        const v2 = Array.isArray(raw.dialogue) ? raw.dialogue : null;
+        const v3 = Array.isArray(raw.lines) ? raw.lines : null;
+        const v4 = Array.isArray(raw.items) ? raw.items : null;
+        arr = v1 || v2 || v3 || v4 || [];
+      }
+    }
+
     return (arr||[]).map(t=>{
       if(!t) return null;
-      const hasAI = !!(t.en || t.zh || t.english || t.text);
-      const hasUser = !t.en && (t.hint_en || t.hint_zh);
-      const en = (t.en ?? (hasUser ? t.hint_en : "") ?? t.english ?? t.text ?? '').toString().trim();
-      const zh = (t.zh ?? (hasUser ? t.hint_zh : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
-      const role = ((t.role ?? t.speaker ?? '').toString().trim()) || (hasUser ? "USER" : "AI");
-      const level = (t.level ?? t.cefr ?? '').toString().trim() || 'A1';
+
+      // support {role:'assistant'|'user', text:'...'}
+      const text = (t.text ?? t.english ?? t.en ?? "").toString();
+      const en = (t.en ?? t.english ?? t.text ?? '').toString().trim();
+      const zh = (t.zh ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
+
+      // role normalization for dialogue mode
+      let roleRaw = ((t.role ?? t.speaker ?? '').toString().trim()) || "";
+      let role = roleRaw;
+      if(!role){
+        // if hints exist, treat as USER (old shape)
+        role = (!t.en && (t.hint_en || t.hint_zh)) ? "USER" : "AI";
+      }else{
+        const r = roleRaw.toLowerCase();
+        if(r === "assistant" || r === "ai" || r === "bot" || r === "system") role = "AI";
+        else if(r === "user" || r === "student" || r === "learner") role = "USER";
+        else role = roleRaw; // keep
+      }
+
+      const level = (t.level ?? t.cefr ?? raw?.meta?.level ?? raw?.meta?.cefr ?? '').toString().trim() || 'A1';
       const hint = (t.hint ?? '').toString().trim();
       const fill = (t.fill ?? t.blank ?? '').toString();
       const answer = (t.answer ?? '').toString().trim();
+
       return { en, zh, role, level, hint, fill, answer };
     }).filter(x=>x && x.en);
   }
+
 
   function getOverrides(){
     return { weekOverride: null, sceneOverride: null };
