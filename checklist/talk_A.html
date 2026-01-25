@@ -809,7 +809,7 @@ let __tvWatch = null;
 
 
   const INDEX_URL = "/talk/index.json";
-const FALLBACK_INDEX_URLS = [];
+const FALLBACK_INDEX_URLS = ["../talk/index.json", "./../talk/index.json"];
 
   function normalizeIndex(raw){
     try{
@@ -844,17 +844,48 @@ const FALLBACK_INDEX_URLS = [];
         }
         return { scenes, schema: raw?.schema || "weeks_v1", source: "weeks" };
       }
+// schema: { items:[...] } or plain array
+if(Array.isArray(raw)){
+  // Accept your current index.json shape:
+  // [ {id, week:"W01", lesson, filename, file, title_zh, scene}, ... ]
+  return {
+    scenes: raw.map((s)=> {
+      const id = (s?.id || s?.scene_id || s?.key || "").toString().trim();
+      if(!id) return null;
 
-      // schema: { items:[...] } or plain array
-      if(Array.isArray(raw)){
-        return { scenes: raw.map((s)=>({
-          id: s?.id || s?.scene_id || s?.key || "",
-          title: s?.title || s?.name || (s?.id||""),
-          level: s?.level || s?.lev || "",
-          file: s?.file || s?.url || (s?.id ? ("/talk/"+String(s.id)+".json") : "")
-        })).filter(x=>x.id) };
+      // title: prefer title_zh (your data), then title/name, else id
+      const title = (s?.title_zh || s?.title || s?.name || id).toString().trim();
+
+      // week: prefer explicit "week" field like "W01"/"W108", else parse from id "w01.xxx"
+      let week = null;
+      const wField = (s?.week || "").toString().trim();
+      const m1 = wField.match(/(\d{1,3})/);
+      if(m1) week = parseInt(m1[1],10);
+
+      if(!week){
+        const m2 = id.match(/^w(\d{1,3})\./i);
+        if(m2) week = parseInt(m2[1],10);
       }
-      if(raw && Array.isArray(raw.items)){
+
+      // file: prefer absolute file, else /talk/<filename>, else /talk/<id>.json
+      let file = (s?.file || s?.url || "").toString().trim();
+      if(!file){
+        const fn = (s?.filename || "").toString().trim();
+        if(fn) file = fn.startsWith("/") ? fn : ("/talk/" + fn);
+      }
+      if(!file) file = "/talk/" + id + ".json";
+
+      return {
+        id,
+        title,
+        week: week || undefined,
+        level: (s?.level || s?.lev || "").toString(),
+        file
+      };
+    }).filter(x=>x && x.id)
+  };
+}
+if(raw && Array.isArray(raw.items)){
         return { scenes: raw.items.map((s)=>({
           id: s?.id || s?.scene_id || s?.key || "",
           title: s?.title || s?.name || (s?.id||""),
@@ -945,7 +976,7 @@ const DAY = 24*60*60*1000;
     mask.setAttribute("aria-hidden","true");
   }
   function getWeekFromId(id){
-    const m = String(id||"").match(/^w(\d{2})\./i);
+    const m = String(id||"").match(/^w(\d{1,3})\./i);
     return m ? parseInt(m[1],10) : null;
   }
   function safeText(v){ return (v==null) ? "" : String(v); }
@@ -957,7 +988,7 @@ const DAY = 24*60*60*1000;
         const res = await fetch(u, {cache:"no-cache"});
         if(!res.ok) throw new Error("HTTP "+res.status);
         return await res.json();
-      }catch(e){ lastErr = e; }
+      }catch(e){ lastErr = e; try{ console.warn('[Talk] fetch failed', u, e); }catch(_e){} }
     }
     throw lastErr || new Error("fetch failed");
   }
