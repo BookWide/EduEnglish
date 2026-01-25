@@ -13,8 +13,9 @@
 <script>
 (async function() {
   try {
-    const SUPABASE_URL = window.SUPABASE_URL;
-    const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY;
+    const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+
     const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
       auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
     });
@@ -83,28 +84,28 @@
     } catch (e) {}
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
-// We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
-const today_sub = new Date().toISOString().slice(0,10);
+    // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
+  // (fixed) today already defined above
+    let ok = (pe && pe >= today) || (oexp && oexp >= today);
+    if (!ok && hasPaid) {
+      // paid_at/created_at within last 400 days => treat as valid
+      const base = (opaid || ocreated || '').slice(0,10);
+      if (base) {
+        const t0 = new Date(base + 'T00:00:00Z').getTime();
+        const t1 = Date.now();
+        const days = (t1 - t0) / 86400000;
+        if (days >= 0 && days <= 400) ok = true;
+      } else {
+        ok = true;
+      }
+    }
+    // --- decide ---
+    const ok = (!paused) && (
+      (pexp && pexp >= today) ||
+      (oexp && oexp >= today)
+    );
 
-// Base validity from profile/orders expires_at (YYYY-MM-DD)
-let ok = (!paused) && (
-  (pexp && pexp >= today) ||
-  (oexp && oexp >= today)
-);
-
-// Safety: if paid order exists but expires_at is missing, allow access for a limited recency window
-if (!ok && hasPaid) {
-  const base = (opaid || ocreated || '').slice(0,10);
-  if (base) {
-    const t0 = new Date(base + 'T00:00:00Z').getTime();
-    const t1 = Date.now();
-    const days = (t1 - t0) / 86400000;
-    if (days >= 0 && days <= 400) ok = true;
-  } else {
-    ok = true;
-  }
-}
-window.BW_SUB_OK = ok;
+    window.BW_SUB_OK = ok;
     window.BW_SUB_EXPIRES_AT = (pexp && pexp >= today) ? pexp : (oexp || null);
     window.BW_PROFILE_OK = !perr;
 
@@ -1220,67 +1221,11 @@ let __tvWatch = null;
   }catch(e){}
 
 
-  const INDEX_URL = "../talk/index.json?v=" + Date.now();;
-const FALLBACK_INDEX_URLS = [];
-
-  function normalizeIndex(raw){
-    try{
-      // already in expected format
-      if(raw && Array.isArray(raw.scenes)) return raw;
-
-      // schema: { weeks: [ {week:"W01", items:[{id, filename, slug, title?}, ...]} , ... ] }
-      if(raw && Array.isArray(raw.weeks)){
-        const scenes = [];
-        for(const w of raw.weeks){
-          const wkStr = String(w?.week || "").trim(); // "W01"
-          const wkNum = Number((wkStr.match(/(\d{1,3})/)||[])[1] || 0) || 0;
-          const items = Array.isArray(w?.items) ? w.items : [];
-          for(const it of items){
-            const filename = String(it?.filename || it?.file || "").trim();
-            const base = filename ? filename.replace(/\.json$/i,"") : String(it?.id||"").trim();
-            const id = base || String(it?.id||"").trim();
-            if(!id) continue;
-            const slug = String(it?.slug || "").trim();
-            const t = String(it?.title || it?.name || "").trim();
-            const title = t || (slug ? slug.replace(/[_-]+/g," ").replace(/\b\w/g, m=>m.toUpperCase()) : id);
-            scenes.push({
-              id,
-              title,
-              week: wkNum || undefined,
-              level: "",
-              file: filename ? (filename.startsWith("/") ? filename : ("/talk/" + filename)) : ("/talk/" + id + ".json"),
-              slug: slug || undefined,
-              legacy_id: it?.id || undefined
-            });
-          }
-        }
-        return { scenes, schema: raw?.schema || "weeks_v1", source: "weeks" };
-      }
-
-      // schema: { items:[...] } or plain array
-      if(Array.isArray(raw)){
-        return { scenes: raw.map((s)=>({
-          id: s?.id || s?.scene_id || s?.key || "",
-          title: s?.title || s?.name || (s?.id||""),
-          level: s?.level || s?.lev || "",
-          file: s?.file || s?.url || (s?.id ? ("/talk/"+String(s.id)+".json") : "")
-        })).filter(x=>x.id) };
-      }
-      if(raw && Array.isArray(raw.items)){
-        return { scenes: raw.items.map((s)=>({
-          id: s?.id || s?.scene_id || s?.key || "",
-          title: s?.title || s?.name || (s?.id||""),
-          level: s?.level || s?.lev || "",
-          file: s?.file || s?.url || (s?.id ? ("/talk/"+String(s.id)+".json") : "")
-        })).filter(x=>x.id) };
-      }
-
-      return { scenes: [] };
-    }catch(e){
-      return { scenes: [] };
-    }
-  }
-
+  const INDEX_URL = new URL("/talk/index.json", location.origin).toString();
+  const FALLBACK_INDEX_URLS = [
+    new URL("./index.json", location.href).toString(),              // if talk.html inside /talk/
+    new URL("../talk/index.json", location.href).toString(),        // if talk.html inside /checklist/
+  ];
 
   const LS_START = "BW_TALK_LEARNER_START_TS";
   const LS_SAVED = "BW_TALK_SAVED_LINES";
@@ -1293,9 +1238,14 @@ const FALLBACK_INDEX_URLS = [];
 const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   const DAY = 24*60*60*1000;
-  const MAX_WEEKS = 999; // MVP
+  let MAX_WEEKS = 999; 
+  let MAX_WEEK_FROM_INDEX = 0; // index.json 偵測最大週
+// MVP
   const ITEMS_PER_WEEK = 3;
 
+
+  // Admin checklist view: unlock all weeks (for /checklist/ or talk_A.html)
+  const IS_ADMIN_VIEW = /\/checklist\//.test(location.pathname) || /talk_A\.html/i.test(location.pathname);
   // UI refs
   const weekLabel = $("weekLabel");
   const scenePickLabel = $("scenePickLabel");
@@ -1328,7 +1278,8 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
 
   // State
   let indexData = null;               // {scenes:[]}
-  let byWeek = new Map();             // weekNo -> scenes[]
+  let byWeek = new Map();
+    let maxW = 0;             // weekNo -> scenes[]
   let unlockedWeek = 1;               // computed
   let talkMode = "dialogue";          // "dialogue" or "shadow"
   let activeWeek = 1;
@@ -1410,65 +1361,37 @@ const LS_LAST_SCENE = "BW_TALK_LAST_SCENE";
   }
 
   function computeUnlockedWeek(){
-  return 999; // UNLOCK ALL WEEKS (admin)
-}
+    if(IS_ADMIN_VIEW) return MAX_WEEKS;
+    const ts = ensureAnchorTs();
+    const diff = Date.now() - ts;
+    const weekMs = WEEK_DAYS * DAY;
+    const passed = diff / weekMs; // 0.0, 1.0, 2.0...
+    const w = Math.floor(passed + ADVANCE_WEEKS) + 1;
+    return Math.max(1, Math.min(MAX_WEEKS, w));
+  }
 
   // ---- turns normalize (defensive) ----
-  
-function normalizeTurns(raw){
-    // Accept these shapes:
-    // 1) [ {en/zh/role/...} ]
-    // 2) { turns:[...], dialogue:[...], lines:[...], items:[...] }
-    // Prefer the first NON-EMPTY array in priority order, so we don't get trapped by turns:[] while dialogue:[...] exists.
-    let arr = [];
-    if(Array.isArray(raw)){
-      arr = raw;
-    }else if(raw && typeof raw === "object"){
-      const pick = (k)=>{
-        const v = raw[k];
-        return Array.isArray(v) && v.length ? v : null;
-      };
-      arr = pick("turns") || pick("dialogue") || pick("lines") || pick("items") || [];
-      // If arrays exist but empty, still allow the first existing one (to avoid throwing)
-      if(!arr.length){
-        const v1 = Array.isArray(raw.turns) ? raw.turns : null;
-        const v2 = Array.isArray(raw.dialogue) ? raw.dialogue : null;
-        const v3 = Array.isArray(raw.lines) ? raw.lines : null;
-        const v4 = Array.isArray(raw.items) ? raw.items : null;
-        arr = v1 || v2 || v3 || v4 || [];
-      }
-    }
-
+  function normalizeTurns(raw){
+    const arr = Array.isArray(raw)
+      ? raw
+      : (raw && (raw.turns || raw.dialogue) ? (raw.turns || raw.dialogue) : []);
     return (arr||[]).map(t=>{
       if(!t) return null;
-
-      // support {role:'assistant'|'user', text:'...'}
-      const text = (t.text ?? t.english ?? t.en ?? "").toString();
-      const en = (t.en ?? t.english ?? t.text ?? '').toString().trim();
-      const zh = (t.zh ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
-
-      // role normalization for dialogue mode
-      let roleRaw = ((t.role ?? t.speaker ?? '').toString().trim()) || "";
-      let role = roleRaw;
-      if(!role){
-        // if hints exist, treat as USER (old shape)
-        role = (!t.en && (t.hint_en || t.hint_zh)) ? "USER" : "AI";
-      }else{
-        const r = roleRaw.toLowerCase();
-        if(r === "assistant" || r === "ai" || r === "bot" || r === "system") role = "AI";
-        else if(r === "user" || r === "student" || r === "learner") role = "USER";
-        else role = roleRaw; // keep
-      }
-
-      const level = (t.level ?? t.cefr ?? raw?.meta?.level ?? raw?.meta?.cefr ?? '').toString().trim() || 'A1';
+      const hasAI = !!(t.en || t.zh || t.english || t.text);
+      const hasUser = !t.en && (t.hint_en || t.hint_zh);
+      const en = (t.en ?? (hasUser ? t.hint_en : "") ?? t.english ?? t.text ?? '').toString().trim();
+      const zh = (t.zh ?? (hasUser ? t.hint_zh : "") ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
+      let role = (((t.role ?? t.speaker ?? '').toString().trim()) || (hasUser ? "USER" : "AI"));
+      // normalize legacy roles
+      if (/^student$/i.test(role)) role = 'USER';
+      if (/^teacher$/i.test(role)) role = 'AI';
+      const level = (t.level ?? t.cefr ?? '').toString().trim() || 'A1';
       const hint = (t.hint ?? '').toString().trim();
       const fill = (t.fill ?? t.blank ?? '').toString();
       const answer = (t.answer ?? '').toString().trim();
-
       return { en, zh, role, level, hint, fill, answer };
     }).filter(x=>x && x.en);
   }
-
 
   function getOverrides(){
     return { weekOverride: null, sceneOverride: null };
@@ -1501,7 +1424,7 @@ function normalizeTurns(raw){
       if(!expected){
         expected = synthUserFromAI(ai.en||"", activeSceneId||"");
         expectedSrc = "generated";
-        console.warn("[Talk] 缺 USER 建議句：已用規則生成（請補 JSON）", { sceneId: activeSceneId, ai: ai.en });
+        console.warn("[Talk] 缺 USER 建議句：請補 JSON（不再自動生成）", { sceneId: activeSceneId, ai: ai.en });
       }
       // build cloze + options for low difficulty guidance
       const cl = makeCloze(expected);
@@ -1888,74 +1811,165 @@ try{showReport();}catch(e){}
       if(!id) continue;
       const wk = getWeekFromId(id);
       if(!wk) continue;
+      if(wk>maxW) maxW = wk;
       if(!byWeek.has(wk)) byWeek.set(wk, []);
       byWeek.get(wk).push({id, title: s.title || id, level: s.level || s.lev || ""});
     }
+    MAX_WEEK_FROM_INDEX = maxW || MAX_WEEK_FROM_INDEX;
+    if(MAX_WEEK_FROM_INDEX) MAX_WEEKS = MAX_WEEK_FROM_INDEX;
+
     // stable sort
     for(const [wk, arr] of byWeek){
       arr.sort((a,b)=>String(a.id).localeCompare(String(b.id)));
     }
   }
 
-  function escapeHtml(s){
-  try{
-    return String(s)
-      .replace(/&/g,"&amp;")
-      .replace(/</g,"&lt;")
-      .replace(/>/g,"&gt;")
-      .replace(/"/g,"&quot;")
-      .replace(/'/g,"&#39;");
-  }catch(e){
-    return "";
-  }
-}
-
-function renderPicker(){
+  function renderPicker(){
     modalBody.innerHTML = "";
     for(let wk=1; wk<=MAX_WEEKS; wk++){
       const list = byWeek.get(wk) || [];
       if(!list.length) continue;
 
-      const locked = wk > unlockedWeek; // unlockedWeek=999 => all open
+      
+  // ===== 最小 UX 修正：只顯示「本週」＋「下一週提示」，其餘(包含往前週)一律不顯示 =====
+  if(!IS_ADMIN_VIEW && wk !== unlockedWeek && wk !== unlockedWeek + 1) continue;
+
+  if(!IS_ADMIN_VIEW && wk === unlockedWeek + 1){
+    const g = document.createElement("div");
+    g.className = "group";
+    const head = document.createElement("div");
+    head.className = "gHead";
+    head.innerHTML = `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`;
+    g.appendChild(head);
+
+    const row = document.createElement("div");
+    row.className = "item";
+    row.innerHTML = `
+      <div>
+        <div class="name">下一週即將解鎖</div>
+        <p class="sub">完成本週口說任務後，系統會自動開放 Week ${wk}</p>
+      </div>
+      <button class="ghost" style="height:42px;font-size:15px" disabled>尚未</button>
+    `;
+    g.appendChild(row);
+    modalBody.appendChild(g);
+    continue;
+  }
+// ===== UX：只顯示到「本週 + 下一週提示」=====
+      if(!IS_ADMIN_VIEW && wk > unlockedWeek + 1) continue;
+
+      // 下一週：只顯示一行提示，不列出三條
+      if(!IS_ADMIN_VIEW && wk === unlockedWeek + 1){
+        const g = document.createElement("div");
+        g.className = "group";
+        const head = document.createElement("div");
+        head.className = "gHead";
+        head.innerHTML = `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`;
+        g.appendChild(head);
+
+        const row = document.createElement("div");
+        row.className = "item";
+        row.innerHTML = `
+          <div>
+            <div class="name">下一週即將解鎖</div>
+            <p class="sub">完成本週口說任務後，系統會自動開放 Week ${wk}</p>
+          </div>
+          <button class="ghost" style="height:42px;font-size:15px" disabled>尚未</button>
+        `;
+        g.appendChild(row);
+
+        modalBody.appendChild(g);
+        continue;
+      }
+
+
+      const locked = (!IS_ADMIN_VIEW && wk !== unlockedWeek);// checklist view unlocks all
       const g = document.createElement("div");
       g.className = "group";
-
       const head = document.createElement("div");
       head.className = "gHead";
-      head.innerHTML = locked
-        ? `<div>Week ${wk}</div><div class="lock">🔒 尚未解鎖</div>`
-        : `<div>Week ${wk}</div><div class="lock">✅ 可練習</div>`;
+      head.innerHTML = `<div>Week ${wk}</div><div class="lock">${locked ? "🔒 尚未解鎖" : "✅ 可練習"}</div>`;
       g.appendChild(head);
 
       for(const it of list){
         const row = document.createElement("div");
         row.className = "item";
-
         const left = document.createElement("div");
-        left.innerHTML = `<div class="name">${escapeHtml(it.title || it.id)}</div><p class="sub">${escapeHtml(it.id)}${it.level?(" · "+escapeHtml(it.level)):""}</p>`;
-
+        left.innerHTML = `<div class="name">${escapeHtml(it.title)}</div><p class="sub">${escapeHtml(it.id)}${it.level?(" · "+escapeHtml(it.level)):""}</p>`;
         const btn = document.createElement("button");
         btn.className = locked ? "ghost" : "primary";
         btn.style.height = "42px";
         btn.style.fontSize = "15px";
         btn.textContent = locked ? "尚未" : "開始";
         btn.disabled = locked;
-
         btn.addEventListener("click", ()=>{
           activeWeek = wk;
           localStorage.setItem(LS_LAST_SCENE, it.id);
           closeModal();
-          loadSceneById(it.id, it.title || it.id);
+          loadSceneById(it.id, it.title);
         });
-
         row.appendChild(left);
         row.appendChild(btn);
         g.appendChild(row);
       }
-
       modalBody.appendChild(g);
     }
   }
+
+  function escapeHtml(s){
+    return String(s||"").replace(/[&<>"]/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+  }
+
+  // bottom tiny links (reference)
+  function showModalHtml(title, inner){
+    modalBody.innerHTML = '<div style="font-weight:900; margin-bottom:10px">'+escapeHtml(title)+'</div>' + inner;
+    openModal();
+  }
+  function escapeHtml(s){
+    return String(s??"").replace(/[&<>"']/g, c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
+  }
+  function buildDialogueHtml(){
+    const d = (currentSceneJson && Array.isArray(currentSceneJson.dialogue)) ? currentSceneJson.dialogue : [];
+    if(!d.length) return '<div class="sub">（此情境沒有 dialogue）</div>';
+    return d.map((x,i)=>{
+      const who = escapeHtml(x.speaker||x.role||"");
+      const en = escapeHtml(x.en||"");
+      const zh = escapeHtml(x.zh||"");
+      return '<div style="padding:10px 0;border-bottom:1px solid var(--line)"><div style="font-weight:800">'+(i+1)+'. '+who+'</div><div>'+en+'</div><div class="sub" style="margin-top:4px">'+zh+'</div></div>';
+    }).join("");
+  }
+  function buildRoleHtml(){
+    const r = (currentSceneJson && currentSceneJson.role) ? currentSceneJson.role : {};
+    const aiName = escapeHtml(r.ai_name || "AI");
+    const aiRole = escapeHtml(r.ai_role || "");
+    const scene = escapeHtml(currentSceneJson?.scene || "");
+    const lvl = escapeHtml(currentSceneJson?.level || "");
+    return [
+      '<div style="display:grid; gap:8px">',
+      '<div><b>AI：</b>'+aiName+(aiRole?(' · '+aiRole):'')+'</div>',
+      scene ? ('<div><b>情境：</b>'+scene+'</div>') : '',
+      lvl ? ('<div><b>等級：</b>'+lvl+'</div>') : '',
+      '</div>'
+    ].join("");
+  }
+  function buildMetaHtml(){
+    const id = escapeHtml(currentSceneJson?.id || activeSceneId || "");
+    const track = escapeHtml(currentSceneJson?.track || "");
+    const week = escapeHtml(currentSceneJson?.week ?? "");
+    const modes = Array.isArray(currentSceneJson?.training_modes) ? currentSceneJson.training_modes.join(", ") : "";
+    return [
+      '<div style="display:grid; gap:8px">',
+      id?('<div><b>ID：</b>'+id+'</div>'):'',
+      week?('<div><b>Week：</b>'+week+'</div>'):'',
+      track?('<div><b>Track：</b>'+track+'</div>'):'',
+      modes?('<div><b>Modes：</b>'+escapeHtml(modes)+'</div>'):'',
+      '<div class="sub">（提示：右上會顯示目前載入的 JSON 檔名）</div>',
+      '</div>'
+    ].join("");
+  }
+  if(lnkRole) lnkRole.addEventListener("click",(e)=>{ e.preventDefault(); showModalHtml("主角", buildRoleHtml()); });
+  if(lnkDialog) lnkDialog.addEventListener("click",(e)=>{ e.preventDefault(); showModalHtml("範例對話", buildDialogueHtml()); });
+  if(lnkMeta) lnkMeta.addEventListener("click",(e)=>{ e.preventDefault(); showModalHtml("資訊", buildMetaHtml()); });
 
 async function init(){
 
@@ -1983,13 +1997,16 @@ async function init(){
     // load index.json
     try{
       indexData = await fetchJsonAny([INDEX_URL, ...FALLBACK_INDEX_URLS]);
-      indexData = normalizeIndex(indexData);
     }catch(e){
       indexData = { scenes: [] };
       showToast("讀不到 talk/index.json");
     }
 
     buildWeekMap();
+      if (IS_ADMIN_VIEW && MAX_WEEK_FROM_INDEX){
+        unlockedWeek = MAX_WEEK_FROM_INDEX;
+        activeWeek = MAX_WEEK_FROM_INDEX;
+      }
     renderPicker();
 
     // pick scene
@@ -2103,7 +2120,7 @@ async function init(){
 
     // --- resolved ---
 if(!firstId){
-      turns = [{en:"", zh:"", level:"A1"}];
+      turns = [{en:"No scenes in index.json", zh:"請先把 w01..w08 的 JSON 與 talk/index.json 放在 /talk/ 目錄", level:"A1"}];
       updateUI();
       return;
     }
@@ -2129,8 +2146,6 @@ if(!firstId){
       if(!expected){ showToast("本句沒有建議回覆"); return; }
       // temporarily reveal the full expected sentence
       fillEn.textContent = expected;
-      // speak the full expected sentence
-      speak(expected);
       showToast("已顯示提示（完整句）");
       // auto revert to cloze after 3 seconds
       clearTimeout(window.__bwHintTimer);
@@ -2262,6 +2277,16 @@ const TEACHER_AZURE_VOICE = {
   "emma.mp4":   "en-US-AriaNeural",
   "sophia.mp4": "en-GB-SoniaNeural"
 };
+function getTeacherVoice(teacherKey){
+  const t = (teacherKey||'').toString().trim().toLowerCase();
+  // Azure voices
+  if(t==='diana') return 'en-US-AnaNeural';
+  if(t==='emma') return 'en-US-AriaNeural';
+  if(t==='sophia') return 'en-AU-NatashaNeural';
+  // fallback: Emma
+  return 'en-US-AriaNeural';
+}
+
 const TEACHER_TTS_STYLE = {
   "diana.mp4":  { rate: "-2%", pitch: "+10%" },
   "emma.mp4":   { rate: "+6%", pitch: "+2%" },
