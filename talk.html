@@ -1432,39 +1432,151 @@ function speakJA(text){
     window.speechSynthesis.speak(u);
   }catch(e){}
 }
+
+/* === TALK MOBILE FINAL helpers v1 === */
+function __stripLatin(s){ return (s||"").replace(/[A-Za-z0-9]/g,""); }
+function __hasKana(s){ return /[\u3040-\u30ff]/.test(s||""); } // hiragana/katakana
+function __keepZh(s){
+  // keep CJK ideographs + punctuation/spaces, drop kana + latin
+  let out = (s||"")
+    .replace(/[\u3040-\u30ff]/g,"")  // drop kana
+    .replace(/[A-Za-z0-9]/g,"")      // drop latin/digits
+    .replace(/\s+/g," ")
+    .trim();
+  return out;
+}
+function __keepJa(s){
+  // keep kana + CJK (kanji) + punctuation/spaces, drop latin
+  let out = (s||"")
+    .replace(/[A-Za-z0-9]/g,"")
+    .replace(/\s+/g," ")
+    .trim();
+  return out;
+}
+function splitZhJa(raw){
+  const r = (raw||"").toString().trim();
+  if(!r) return { zh:"", ja:"" };
+
+  // If already has explicit labels, keep as-is
+  if(/(^|\n)\s*(中|中文|ZH)\s*[:：]/.test(r) || /(^|\n)\s*(日|日文|JA)\s*[:：]/.test(r)){
+    // best-effort parse
+    const lines = r.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+    let zh="", ja="";
+    for(const line of lines){
+      if(/^(中|中文|ZH)\s*[:：]/.test(line)) zh = line.replace(/^(中|中文|ZH)\s*[:：]\s*/,"").trim();
+      else if(/^(日|日文|JA)\s*[:：]/.test(line)) ja = line.replace(/^(日|日文|JA)\s*[:：]\s*/,"").trim();
+    }
+    return {zh, ja};
+  }
+
+  // Heuristic: if kana exists, split into kana-containing segments (JA) vs others (ZH)
+  const parts = r.split(/\n+|\s*[｜|]+\s*|\s*\/\s*/).map(s=>s.trim()).filter(Boolean);
+
+  let jaParts=[], zhParts=[];
+  for(const p of parts){
+    if(__hasKana(p)){
+      const ja = __keepJa(p);
+      if(ja) jaParts.push(ja);
+    }else{
+      const zh = __keepZh(p);
+      if(zh) zhParts.push(zh);
+    }
+  }
+
+  // If everything went to JA (because kanji-only), fall back to ZH as well
+  if(!zhParts.length && !jaParts.length){
+    const z = __keepZh(r);
+    return { zh: z, ja: "" };
+  }
+  if(!zhParts.length){
+    // also try derive a ZH line from removing latin from whole string
+    const z = __keepZh(r);
+    if(z) zhParts.push(z);
+  }
+  if(!jaParts.length && __hasKana(r)){
+    const j = __keepJa(r);
+    if(j) jaParts.push(j);
+  }
+
+  return {
+    zh: zhParts.join(" / "),
+    ja: jaParts.join(" / ")
+  };
+}
+
+/* Browser TTS: always English only for teacher */
+function browserSpeakEN(text){
+  try{
+    if(!text) return;
+    if(!('speechSynthesis' in window)) return;
+    const u = new SpeechSynthesisUtterance(String(text));
+    u.lang = 'en-US';
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    // pick a voice if available (best-effort)
+    try{
+      const voices = speechSynthesis.getVoices ? speechSynthesis.getVoices() : [];
+      const prefer = (voices||[]).find(v=>/en-US/i.test(v.lang||"")) || (voices||[]).find(v=>/en/i.test(v.lang||""));
+      if(prefer) u.voice = prefer;
+    }catch(_){}
+    try{ window.speechSynthesis.cancel(); }catch(_){}
+    window.speechSynthesis.speak(u);
+  }catch(_){}
+}
+/* === end TALK MOBILE FINAL helpers v1 === */
+
 function renderZhJa(containerEl, zhText){
   if(!containerEl) return;
   const raw = (zhText||"").toString().trim();
   if(!raw){ containerEl.textContent=""; containerEl.style.display="none"; return; }
   containerEl.style.display = "";
 
-  // Mobile Lite: plain text + safe multi-line (no extra buttons)
+  // Mobile Lite: show clean zh/ja lines (no English mix), tap-to-show handled by CSS
   if(MOBILE_LITE){
-    const parts = raw.split(/\n+|\s*[｜|]+\s*|\s*\/\s*/).map(s=>s.trim()).filter(Boolean);
+    const r = splitZhJa(raw);
+    const out = [];
+    if(r.zh) out.push("中：" + r.zh);
+    if(r.ja) out.push("日：" + r.ja);
     containerEl.style.whiteSpace = "pre-line";
-    containerEl.textContent = (parts.length>1 ? parts.join("\n") : raw);
+    containerEl.textContent = out.length ? out.join("
+") : raw;
     return;
   }
 
-  // Desktop: show text + optional JA speak button
+  // Desktop: show separated lines + optional JA speak button
   containerEl.innerHTML = "";
-  const wrap = document.createElement("div");
-  wrap.className = "zh-line";
-  const span = document.createElement("span");
-  span.textContent = raw;
-  wrap.appendChild(span);
+  const r = splitZhJa(raw);
+  const lines = [];
+  if(r.zh) lines.push({label:"中：", text:r.zh});
+  if(r.ja) lines.push({label:"日：", text:r.ja});
 
-  const ja = extractJapanese(raw);
-  if(ja){
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "jaSpeakBtn";
-    btn.title = "朗讀日文";
-    btn.textContent = "🔊";
-    btn.addEventListener("click", (ev)=>{ ev.stopPropagation(); speakJA(ja); });
-    wrap.appendChild(btn);
+  if(!lines.length){
+    const wrap = document.createElement("div");
+    wrap.className = "zh-line";
+    wrap.textContent = raw;
+    containerEl.appendChild(wrap);
+    return;
   }
-  containerEl.appendChild(wrap);
+
+  lines.forEach((ln, idx)=>{
+    const wrap = document.createElement("div");
+    wrap.className = "zh-line";
+    const span = document.createElement("span");
+    span.textContent = ln.label + ln.text;
+    wrap.appendChild(span);
+
+    // Only attach JA speak on the Japanese line
+    if(ln.label.startsWith("日") && ln.text){
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "jaSpeakBtn";
+      btn.title = "朗讀日文";
+      btn.textContent = "🔊";
+      btn.addEventListener("click", (ev)=>{ ev.stopPropagation(); speakJA(ln.text); });
+      wrap.appendChild(btn);
+    }
+    containerEl.appendChild(wrap);
+  });
 }
 
 function updateUI(){
@@ -1733,7 +1845,12 @@ async function speak(text){
 
       __tvStart();
 
+      /* TALK MOBILE FINAL: azure fallback */
+      let __spoke = false;
+
+
       if (USE_AZURE_TTS){
+        try{
         const sel = document.getElementById("selTeacher");
         const raw = sel ? String(sel.value||"") : "";
         const key = raw.toLowerCase();
@@ -1783,6 +1900,7 @@ async function speak(text){
       u.lang = "en-US";
       u.rate = 1.0;
       window.speechSynthesis.speak(u);
+        __spoke = true;
       u.onend = ()=>{ __tvStop(); };
       u.onerror = ()=>{ __tvStop(); };
     }catch(e){
