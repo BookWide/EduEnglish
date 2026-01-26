@@ -432,7 +432,27 @@
       margin-top:4px;
       padding-right:4px;
     }
-  </style>
+  
+
+    .path-info{
+      display:flex;
+      align-items:center;
+      flex-wrap:wrap;
+      gap:10px;
+      margin: -6px 0 14px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .path-info .dot{
+      width:8px;
+      height:8px;
+      border-radius:999px;
+      background: var(--brand);
+      box-shadow: 0 0 0 4px rgba(37,99,235,.12);
+    }
+    .path-info b{ color: var(--ink); }
+
+</style>
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -455,6 +475,7 @@
 
   <main>
     <h1>學習控制台</h1>
+    <div id="pathInfo" class="path-info">載入中...</div>
 
     <div class="layout" id="dashLayout">
       <!-- 左側：繼續播放 / 最近看過 / 今日複習 -->
@@ -493,6 +514,17 @@
             <div class="empty-tip">載入中...</div>
           </div>
         </section>
+
+    <!-- 今日口說任務 -->
+    <section class="card" id="todayTalkCard" style="margin-top:14px;">
+      <div class="card-head">
+        <div class="title">今日口說任務</div>
+        <div class="tag" title="AI Speaking">AI Speak</div>
+      </div>
+      <div id="talkList" class="review-list"></div>
+      <div id="talkEmpty" class="empty-tip" style="display:none;">本日尚未安排口說任務。</div>
+    </section>
+
       </div>
 
       <!-- 右側：排行榜分享 / 學習曲線 / 金榜排行 -->
@@ -531,17 +563,164 @@
   </main>
 </div>
 
-<!-- Supabase JS SDK -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-<script>
+<!-- Supabase JS SDK (ESM) -->
+<script type="module">
+  import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
   const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
   const SUPABASE_ANON_KEY =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
-  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  const VIDEO_INDEX_URL = "../data/index-all.json";
+/* ===== Talk level-week (B1 starts at W11; you said W16 is B1) ===== */
+function levelFromWeek(week){
+  const w = Number(week||0);
+  if (!w) return 'A1';
+  if (w <= 10) return 'A1';
+  if (w <= 20) return 'B1';
+  if (w <= 30) return 'B2';
+  if (w <= 40) return 'C1';
+  return 'C2';
+}
+
+
+const CEFR_ORDER = ['A1','A2','B1','B2','C1','C2'];
+function rankLevel(lv){
+  const s = String(lv||'').toUpperCase().trim();
+  const i = CEFR_ORDER.indexOf(s);
+  return i<0 ? 0 : i;
+}
+function getUserCefrLevel(){
+  // 1) BW_CEFR_BEST.level
+  try{
+    const bestRaw = localStorage.getItem('BW_CEFR_BEST');
+    if(bestRaw){
+      const best = JSON.parse(bestRaw);
+      if(best && best.level) return String(best.level).toUpperCase();
+    }
+  }catch(_e){}
+
+  // 2) 相容舊 key
+  const lv = localStorage.getItem('BW_CEFR_LEVEL') || localStorage.getItem('BW_TALK_LEVEL') || '';
+  if(lv) return String(lv).toUpperCase();
+
+  return '';
+}
+async function getTalkLevelWeek(user){
+  // 1) 本機最高等級（優先）：BW_CEFR_BEST.week_cap / week
+  try{
+    const bestRaw = localStorage.getItem('BW_CEFR_BEST');
+    if(bestRaw){
+      const best = JSON.parse(bestRaw);
+      const wc = Number(best.week_cap || best.week || 0);
+      if(wc) return wc;
+    }
+  }catch(_e){}
+
+  // 2) 相容舊 key
+  const cap = Number(localStorage.getItem('BW_LEVEL_WEEK_CAP') || 0);
+  if(cap) return cap;
+  const ls = Number(localStorage.getItem('BW_TALK_LEVEL_WEEK') || 0);
+  if(ls) return ls;
+
+  // 3) 最後才問 Supabase
+  try{
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('talk_level_week')
+      .eq('id', user.id)
+      .maybeSingle();
+    if (!error && data && data.talk_level_week) return Number(data.talk_level_week);
+  }catch(_e){}
+
+  return 0;
+}
+
+
+    // expose for debugging
+  window.supabaseClient = supabase;
+const VIDEO_INDEX_URL = "../data/index-all.json";
+  const WEEKLY_INDEX_URL = "../data/weekly-index.json";
   let videoIndexMap = {};
+  let WEEKLY_INDEX = null;
+
+  // ====== safe html ======
+  function escapeHtml(str){
+    if(str === null || str === undefined) return "";
+    return String(str)
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;")
+      .replace(/'/g,"&#039;");
+  }
+
+
+
+    function pickTodayTalkFromWeeklyIndex(weekly){
+  if(!weekly || !Array.isArray(weekly.weeks)) return null;
+
+  const today = new Date();
+  const dow = today.getDay(); // 0(日)~6(六)
+
+  // 沿用你原本就有的本週計算
+  const weekIndex = getWeekIndex();
+  const weeks = weekly.weeks;
+  const week = weeks[(weekIndex % weeks.length + weeks.length) % weeks.length];
+
+  if(!week || !Array.isArray(week.talks) || week.talks.length === 0) return null;
+
+  const talks = week.talks;
+  const pick = talks[dow % talks.length];
+
+  return {
+    scene: pick.scene,
+    title: pick.title || 'AI Speaking',
+    level: pick.level || '',
+    week: week.global_week,
+    cover: ''
+  };
+}
+
+function renderTodayTalk(tasks){
+    const list = document.getElementById("talkList");
+    const empty = document.getElementById("talkEmpty");
+    if(!list || !empty) return;
+
+    // allow passing a single task object
+    const arr = Array.isArray(tasks) ? tasks : (tasks ? [tasks] : []);
+
+    const valid = arr.filter(t => t && (t.scene || t.slug || t.id));
+    if(!valid.length){
+      list.innerHTML = "";
+      empty.style.display = "";
+      return;
+    }
+    empty.style.display = "none";
+
+    list.innerHTML = valid.slice(0,3).map(task=>{
+      const scene = task.scene || task.slug || task.id || "";
+      const title = task.title || task.name || "AI Speak";
+      const level = task.level ? String(task.level) : "";
+      const cover = task.cover ? String(task.cover) : "";
+      const week = Number(task.week||0) || 0;
+      const weekStr = week ? `W${week}` : "";
+      const sub = [task.scene_title || task.sceneTitle || "", weekStr, level].filter(Boolean).join(" · ");
+
+      return `
+        <div class="review-item" data-jump="talk" data-scene="${encodeURIComponent(scene)}" data-week="${encodeURIComponent(String(week||""))}">
+          <div class="review-thumb">
+            ${cover ? `<img src="${cover}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:800;background:#eef2ff;color:#1d4ed8;">talk</div>`}
+          </div>
+          <div class="review-meta">
+            <div class="t">${escapeHtml(title)}</div>
+            <div class="s">${escapeHtml(sub)}</div>
+          </div>
+        </div>
+      `;
+    }).join("");
+  }
+
   let curveChart = null;
 
   async function loadVideoIndex(){
@@ -568,6 +747,225 @@
     const cover_path = idx.cover_path || `assets/${cat}/${slug}.jpg`;
     return { cat, title, cover_path };
   }
+
+const PLAN_MAX_WEEKS = {
+  trial: 4,
+  month: 4,
+  half: 27,
+  half_year: 27,
+  year: 54,
+  annual: 54
+};
+
+// 內容庫週數可能會持續增加（TALK 可到 108、PLAYER 也會擴充）
+// Dashboard 只依 weekly-index.json 的 weeks.length 當作「目前可用內容上限」
+const CONTENT_MAX_WEEKS_FALLBACK = 54;
+function getContentMaxWeeks(){
+  try{
+    const n = WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) ? WEEKLY_INDEX.weeks.length : 0;
+    return n || CONTENT_MAX_WEEKS_FALLBACK;
+  }catch(_e){
+    return CONTENT_MAX_WEEKS_FALLBACK;
+  }
+}
+
+
+
+// ---------- 課表：slug -> 來源週（Phase 1-② 顯示用） ----------
+function weekOfSlug(slug){
+  try{
+    if(!slug || !WEEKLY_INDEX || !Array.isArray(WEEKLY_INDEX.weeks)) return null;
+    const weeks = WEEKLY_INDEX.weeks;
+    if(!weeks.length) return null;
+
+    const currentWeek = (getWeekIndex() + 1) || 1;
+    let bestWeek = null;
+    let bestDist = 1e9;
+
+    for(let i=0;i<weeks.length;i++){
+      const w = weeks[i];
+      const vids = (w && Array.isArray(w.videos)) ? w.videos : null;
+      if(!vids) continue;
+      if(vids.some(v => (v && v.slug) === slug)){
+        const weekNo = i + 1;
+        const dist = Math.abs(weekNo - currentWeek);
+        if(dist < bestDist){
+          bestDist = dist;
+          bestWeek = weekNo;
+          if(dist == 0) break;
+        }
+      }
+    }
+    return bestWeek;
+  }catch(e){
+    return null;
+  }
+}
+
+function normalizePaidYears(n){
+  const v = Number(n||0);
+  if(!Number.isFinite(v) || v < 1) return 1;
+  return Math.floor(v);
+}
+
+function getPlanMaxWeeks(plan, paidYears){
+  const p = String(plan||'').toLowerCase();
+  if(p === 'year' || p === 'annual'){
+    const years = normalizePaidYears(paidYears);
+    return 54 * years;
+  }
+  return PLAN_MAX_WEEKS[p] || 4;
+}
+
+function getUrlParams(){
+  const out = {};
+  try{
+    const usp = new URLSearchParams(window.location.search);
+    for(const [k,v] of usp.entries()){
+      out[k] = v;
+    }
+  }catch(e){}
+  return out;
+}
+
+function getSubscriptionContext(){
+  const params = getUrlParams();
+
+  // 1️⃣ 先看網址參數（方便測試：?plan=year&start=2025-01-15）
+  let plan  = params.plan || params.sub_plan || null;
+  let start = params.start || params.sub_start || null;
+
+  // 2️⃣ 再看 localStorage（和首頁 index.html 共用同一組 key）
+  if(!plan){
+    try{ plan = localStorage.getItem("bwSubPlan") || null; }catch(e){}
+  }
+  if(!start){
+    try{ start = localStorage.getItem("bwSubStart") || null; }catch(e){}
+  }
+
+  if(!plan || !PLAN_MAX_WEEKS[plan]){
+    plan = "month";
+  }
+
+  let startDate = null;
+  if(start){
+    const d = new Date(start);
+    if(!Number.isNaN(d.getTime())){
+      startDate = d;
+    }
+  }
+
+  if(!startDate){
+    const today = new Date();
+    startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  }
+
+
+  // 3️⃣ paid_years（年方案續約累積）
+  // - 先看網址參數：?years=2（方便測試）
+  // - 再看 localStorage：bwPaidYears
+  let paidYears = params.years || params.paid_years || params.paidYears || null;
+  if(!paidYears){
+    try{ paidYears = localStorage.getItem("bwPaidYears") || null; }catch(e){}
+  }
+  paidYears = normalizePaidYears(paidYears);
+
+  return { plan, startDate, paidYears };
+}
+
+function getWeekIndex(){
+  const { plan, startDate, paidYears } = getSubscriptionContext();
+  const today = new Date();
+
+  startDate.setHours(0,0,0,0);
+  today.setHours(0,0,0,0);
+
+  const diffDays = Math.floor((today.getTime() - startDate.getTime()) / 86400000);
+  let weekNumber = Math.floor(diffDays / 7) + 1;
+
+  if(weekNumber < 1) weekNumber = 1;
+
+  const planMax = getPlanMaxWeeks(plan, paidYears);
+  const contentMax = getContentMaxWeeks();
+  const maxWeek = Math.min(planMax, contentMax);
+  if(weekNumber > maxWeek) weekNumber = maxWeek;
+
+  const weekIndex = weekNumber - 1;
+  console.debug("[dashboard weekly] plan=%s paidYears=%d start=%s weekNumber=%d index=%d maxWeek=%d contentMax=%d",
+    plan,
+    (paidYears||1),
+    startDate.toISOString().slice(0,10),
+    weekNumber,
+    weekIndex,
+    maxWeek,
+    contentMax
+  );
+  return weekIndex;
+}
+
+function calcRawWeekNumber(startDate){
+  const today = new Date();
+  const s = new Date(startDate.getTime());
+  s.setHours(0,0,0,0);
+  today.setHours(0,0,0,0);
+  const diffDays = Math.floor((today.getTime() - s.getTime()) / 86400000);
+  let weekNumber = Math.floor(diffDays / 7) + 1;
+  if(weekNumber < 1) weekNumber = 1;
+  return weekNumber;
+}
+
+function updatePathInfo(){
+  const el = document.getElementById('pathInfo');
+  if(!el) return;
+
+  const ctx = getSubscriptionContext();
+  const plan = ctx.plan;
+  const startDate = ctx.startDate;
+  const paidYears = ctx.paidYears;
+
+  const contentMax = getContentMaxWeeks();
+  const planMax = getPlanMaxWeeks(plan, paidYears);
+  const capWeek = Math.min(planMax, contentMax);
+
+  const rawWeek = calcRawWeekNumber(startDate);
+  const currentWeek = Math.min(rawWeek, capWeek);
+
+  const p = String(plan||'').toLowerCase();
+  const isYear = (p === 'year' || p === 'annual');
+  const planLabel = isYear ? '年方案' : '月方案';
+  const yearsLabel = isYear ? ('第 ' + String(paidYears) + ' 年') : '';
+
+  el.innerHTML = ''
+    + '<span class="dot"></span>'
+    + '<span>學習進度：<b>第 ' + currentWeek + ' 週</b> / 可用至 <b>第 ' + capWeek + ' 週</b>'
+    + (yearsLabel ? ('（' + yearsLabel + '）') : '')
+    + '</span>'
+    + '<span style="opacity:.75;">｜內容庫：' + contentMax + ' 週｜方案：' + planLabel + '</span>';
+}
+
+
+async function loadWeeklyIndex(){
+  if(WEEKLY_INDEX !== null) return;
+  try{
+    const res = await fetch(WEEKLY_INDEX_URL + "?v=20251124");
+    if(!res.ok){
+      console.warn("weekly-index.json 載入失敗，今日複習改用 watch_logs");
+      WEEKLY_INDEX = null;
+      return;
+    }
+    const data = await res.json();
+    if(!data || !Array.isArray(data.weeks)){
+      console.warn("weekly-index.json 格式不正確，今日複習改用 watch_logs");
+      WEEKLY_INDEX = null;
+      return;
+    }
+    WEEKLY_INDEX = data;
+  }catch(e){
+    console.error("loadWeeklyIndex error", e);
+    WEEKLY_INDEX = null;
+  }
+}
+
 
   function storageUrl(path){
     if(!path) return "";
@@ -627,7 +1025,7 @@
       <div class="cont-meta">
         <div class="title">${title}</div>
         <div class="sub">
-          上次進度 ${pct}%　${updated ? `更新：${updated}` : ""}
+          上次進度 ${pct}%　${updated ? `更新：${updated}` : ""}${item.source_week ? ` · 課表第 ${item.source_week} 週` : ""}
         </div>
         <div class="progress-wrap">
           <div class="bar"><span style="width:${pct}%;"></span></div>
@@ -664,7 +1062,7 @@
             <div class="recent-title">${title}</div>
           </div>
           <div class="recent-meta">
-            ${pct ? `進度 ${pct}%` : ""}${pct && updated ? " · " : ""}${updated || ""}
+            ${pct ? `進度 ${pct}%` : ""}${pct && updated ? " · " : ""}${updated || ""}${v.source_week ? ` · 第 ${v.source_week} 週` : ""}
           </div>
         </li>
       `;
@@ -689,7 +1087,7 @@
           </div>
           <div class="review-info">
             <div>${title}</div>
-            <small>${cat}</small>
+            <small>${cat}${v.source_week ? ` · 第 ${v.source_week} 週` : ""}</small>
           </div>
         </div>
       `;
@@ -806,8 +1204,9 @@
       if(error) throw error;
 
       const rows = Array.isArray(data) ? data : [];
-      rows.sort((a,b) => (b.total_score || 0) - (a.total_score || 0));
-      const top10 = rows.slice(0,10);
+      rows.forEach(r=>{ const ws=Math.round(r.watch_sec||0); const qp=Math.round(r.quiz_score||0); r._watch_pts=Math.floor(ws/30); r._total_pts=r._watch_pts+qp; });
+      rows.sort((a,b) => (b._total_pts || 0) - (a._total_pts || 0));
+const top10 = rows.slice(0,10);
 
       if(!top10.length){
         box.innerHTML = `<div class="empty-tip">最近 7 天尚無資料。</div>`;
@@ -825,7 +1224,7 @@
               const shortName =
                 row.display_name ||
                 (email ? email.replace(/@.*/,"") : "匿名學員");
-              const total = Math.round(row.total_score || 0);
+              const total = Math.round(row._total_pts || 0);
               const watchSec = Math.round(row.watch_sec || 0);
               const quizScore = Math.round(row.quiz_score || 0);
               const meClass = email === myEmail ? " rank-me" : "";
@@ -835,7 +1234,7 @@
                   <span class="rank-name">${shortName}</span>
                   <span class="rank-score">${total} 分</span>
                   <span class="rank-meta">
-                    觀看 ${watchSec} 秒 · 測驗 ${quizScore} 分
+                    觀看 ${watchSec} 秒（${Math.floor(watchSec/30)} 分） · 測驗 ${quizScore} 分
                   </span>
                 </li>
               `;
@@ -859,7 +1258,8 @@
     const { data: logs, error: lErr } = await supabase
       .from("watch_logs")
       .select("*")
-      .eq("email", userEmail)
+      .eq("user_id", user.id)
+
       .order("updated_at", { ascending:false });
 
     if(lErr){
@@ -888,15 +1288,101 @@
     const { data: quizLogs, error: qErr } = await supabase
       .from("quiz_logs")
       .select("email,score,created_at")
-      .eq("email", userEmail)
+      .eq("user_id", user.id)
+
       .order("created_at",{ ascending:false });
 
     if(qErr){
       console.error("quiz_logs error", qErr);
     }
 
-    // 今日複習：未完成
-    const todayReview = logsFilled.filter(r => (r.progress_pct || 0) < 100);
+    // 先嘗試載入 weekly-index.json，從本週 15 支影片中隨機推薦 3 支
+    await loadWeeklyIndex();
+    updatePathInfo();
+
+
+    // Phase 1-②：補上「來源週」供 UI 顯示
+    if(WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks)){
+      for(const r of logsFilled){
+        if(!r.source_week) r.source_week = weekOfSlug(r.slug);
+      }
+    }
+
+    
+    // 今日口說任務（由 weekly-index.json 自動決定）
+    // 規則：使用者等級 >= 任務等級 才能做；並用「已解鎖週上限」決定可用內容。
+    const talkWeekCap = await getTalkLevelWeek(user); // 來自評測（本機最高）或 profiles
+    const userLevel = getUserCefrLevel() || (talkWeekCap ? levelFromWeek(talkWeekCap) : 'A1');
+
+    // 週別：以「訂閱週」為主，但不可超過解鎖上限
+    let weekIndex = getWeekIndex();
+    if(talkWeekCap){
+      const capIndex = Math.max(0, Number(talkWeekCap) - 1);
+      if(weekIndex > capIndex) weekIndex = capIndex;
+    }
+    const weekNo = weekIndex + 1;
+
+        // 口說任務：顯示「本週三條」（core / variation / challenge）
+    let todayTalks = [];
+    if(WEEKLY_INDEX){
+      const weeksArr = Array.isArray(WEEKLY_INDEX.weeks) ? WEEKLY_INDEX.weeks : [];
+      if(weeksArr.length){
+        const target = weeksArr[(weekIndex % weeksArr.length + weeksArr.length) % weeksArr.length];
+        const talks = (target && Array.isArray(target.talks)) ? target.talks : [];
+        const ur = rankLevel(userLevel);
+
+        // 依原本順序列出，若有等級門檻則先過濾；過濾後為空就退回全列
+        let pool = talks.filter(t => rankLevel(t.level || t.cefr || '') <= ur);
+        if(!pool.length) pool = talks;
+
+        todayTalks = pool.map(t => ({
+          kind:'talk',
+          week: weekNo,
+          scene: t.scene || t.slug || t.id || '',
+          title: t.title || t.name || 'AI Speak',
+          level: t.level || t.cefr || userLevel,
+          cover: t.cover || t.poster || t.image || ''
+        })).filter(x => x.scene);
+
+        // 若 weekly-index.json 沒有 talks（或 talks 為空），就不硬塞假資料
+      }
+    }
+
+    renderTodayTalk(todayTalks);
+let todayReview = [];
+    if(WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) && WEEKLY_INDEX.weeks.length){
+      const weekIndex = getWeekIndex();
+      const weeksArr = WEEKLY_INDEX.weeks;
+      const target = weeksArr[(weekIndex % weeksArr.length + weeksArr.length) % weeksArr.length];
+      if(target && Array.isArray(target.videos)){
+        const weeklyList = target.videos.map(v => {
+          const slug = v.slug;
+          if(!slug) return null;
+          const meta = metaFromIndex(slug);
+          return {
+            slug,
+            video_slug: slug,
+            category: v.category || meta.cat,
+            video_category: v.category || meta.cat,
+            title: meta.title,
+            video_title: meta.title,
+            cover_path: meta.cover_path,
+            source_week: (weekIndex + 1)
+          };
+        }).filter(Boolean);
+
+        if(weeklyList.length){
+          // 隨機打散，取前 3 支當作「今日複習」
+          weeklyList.sort(() => Math.random() - 0.5);
+          todayReview = weeklyList.slice(0, 3);
+        }
+      }
+    }
+
+    // 如果 weekly-index 無法使用，退回舊邏輯：從未完成紀錄中推薦
+    if(!todayReview.length){
+      todayReview = logsFilled.filter(r => (r.progress_pct || 0) < 100);
+    }
 
     // 繼續播放
     let continueItem = null;
@@ -936,10 +1422,15 @@
         byCat[cat] = Math.max(0, Math.min(100, avg));
       });
 
-      // 當日總分：watch_sec + quiz_score
+      // 當日總分：watchScore + quiz_score + talk_score（watchScore 由秒數換算）
+      // 規則：每 30 秒 = 1 分（可調）
       const watchSecDay = dayLogs.reduce((a,c)=> a + (c.duration_sec || 0), 0);
+      const watchScoreDay = Math.floor((watchSecDay || 0) / 30);
       const quizScoreDay = dayQuiz.reduce((a,c)=> a + (c.score || 0), 0);
-      const totalScoreDay = watchSecDay + quizScoreDay;
+      const talkMap = JSON.parse(localStorage.getItem('BW_DAILY_SCORE_MAP') || '{}');
+      const twKey = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' });
+      const talkScoreDay = Number(talkMap[twKey] || 0) || 0;
+      const totalScoreDay = watchScoreDay + quizScoreDay + talkScoreDay;
 
       const label =
         i===0 ? "今天" :
@@ -1028,13 +1519,1281 @@
     document.getElementById("userEmail").textContent = user.email || "";
     document.getElementById("userPill").style.display = "flex";
 
+    // 顯示：目前週數 / cap（Phase 1）
+    updatePathInfo();
+
     loadDashboard(user);
   }
 
   init();
+
+  // click: talk card
+  document.addEventListener("click", (e)=>{
+    const el = e.target.closest("[data-jump='talk']");
+    if(!el) return;
+
+    const weekRaw = (el.dataset.week || "").trim();
+    const week = Number(weekRaw||0) || 0;
+
+    const scene = decodeURIComponent(el.dataset.scene || "");
+
+    // 優先帶 week，同時把 scene 一起帶過去（避免 talk.html 只停在 week 1 預設情境）
+    if(week){
+      const qs = new URLSearchParams();
+      qs.set("week", String(week));
+      if(scene) qs.set("scene", scene);
+      window.location.href = `/talk.html?${qs.toString()}`;
+      return;
+    }
+
+    if(scene){
+      window.location.href = `/talk.html?scene=${encodeURIComponent(scene)}`;
+    }
+  });
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
