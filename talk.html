@@ -2500,75 +2500,86 @@ function startRec(){
     if(__recBusy) return;
     __recBusy = true;
 
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if(!SR){
-      __recBusy = false;
-      showToast("此瀏覽器不支援語音辨識");
-      return;
-    }
-
-    // Hard reset previous recognizer
-    if(rec){
-      try{ rec.onresult = rec.onerror = rec.onend = null; }catch(_){}
-      try{ rec.abort && rec.abort(); }catch(_){}
-      try{ rec.stop && rec.stop(); }catch(_){}
-    }
-
-    rec = new SR();
-    try{ rec.lang = "en-US"; }catch(_){}
-    try{ rec.interimResults = false; }catch(_){}
-    try{ rec.continuous = false; }catch(_){}
-    try{ rec.maxAlternatives = 1; }catch(_){}
-
-    // UI: red dot while listening
-    try{ $("dotLive").style.background = "#ef4444"; }catch(_){}
-
-    // Watchdog: iOS sometimes never fires end/error -> force stop to avoid "red dot stuck"
-    if(startRec.__tm) { try{ clearTimeout(startRec.__tm); }catch(_){ } }
-    startRec.__tm = setTimeout(()=>{
-      try{ rec && rec.abort && rec.abort(); }catch(_){}
-      try{ rec && rec.stop && rec.stop(); }catch(_){}
-      __recBusy = false;
-      try{ $("dotLive").style.background = "#22c55e"; }catch(_){}
-      showToast("語音辨識逾時，請再試一次");
-    }, 9000);
-
-    const done = ()=>{
-      __recBusy = false;
-      try{ if(startRec.__tm){ clearTimeout(startRec.__tm); startRec.__tm=null; } }catch(_){}
-      try{ $("dotLive").style.background = "#22c55e"; }catch(_){}
-    };
-
-    rec.onresult = (ev)=>{
-      done();
-      const said = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) ? ev.results[0][0].transcript : "";
-      if(!said.trim()){
-        showToast("沒有聽清楚，請再說一次");
+    // Give iOS a moment to really stop speechSynthesis before starting SR (prevents "red dot stuck")
+    const kickoff = ()=>{
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if(!SR){
+        __recBusy = false;
+        showToast("此瀏覽器不支援語音辨識");
         return;
       }
-      // put into input and submit (dialogue mode)
-      fillInput.value = said.trim();
-      if(!MOBILE_SIMPLE) showToast("你說： " + said.trim());
-      // auto send fast (mobile = 0ms)
-      setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, MOBILE_SIMPLE ? 0 : 200);
+
+      // Hard reset previous recognizer
+      if(rec){
+        try{ rec.onresult = rec.onerror = rec.onend = null; }catch(_){}
+        try{ rec.abort && rec.abort(); }catch(_){}
+        try{ rec.stop && rec.stop(); }catch(_){}
+      }
+
+      rec = new SR();
+      try{ rec.lang = "en-US"; }catch(_){}
+      try{ rec.interimResults = false; }catch(_){}
+      try{ rec.continuous = false; }catch(_){}
+      try{ rec.maxAlternatives = 1; }catch(_){}
+
+      // UI: red dot while listening
+      try{ $("dotLive").style.background = "#ef4444"; }catch(_){}
+
+      // Watchdog: iOS sometimes never fires end/error -> force stop to avoid "red dot stuck"
+      if(startRec.__tm) { try{ clearTimeout(startRec.__tm); }catch(_){ } }
+      startRec.__tm = setTimeout(()=>{
+        try{ rec && rec.abort && rec.abort(); }catch(_){}
+        try{ rec && rec.stop && rec.stop(); }catch(_){}
+        __recBusy = false;
+        try{ $("dotLive").style.background = "#22c55e"; }catch(_){}
+        showToast("語音辨識逾時，請再試一次");
+      }, 9000);
+
+      const done = ()=>{
+        __recBusy = false;
+        try{ if(startRec.__tm){ clearTimeout(startRec.__tm); startRec.__tm=null; } }catch(_){}
+        try{ $("dotLive").style.background = "#22c55e"; }catch(_){}
+      };
+
+      // Extra: if speech ends but onresult never comes, onend will release.
+      rec.onresult = (ev)=>{
+        done();
+        const said = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) ? ev.results[0][0].transcript : "";
+        if(!said.trim()){
+          showToast("沒有聽清楚，請再說一次");
+          return;
+        }
+        // put into input and submit (dialogue mode)
+        fillInput.value = said.trim();
+
+        // Ensure no TTS overlaps with submit
+        try{ window.__bwStopAllAudio && window.__bwStopAllAudio(); }catch(e){}
+
+        if(!MOBILE_SIMPLE) showToast("你說： " + said.trim());
+        // auto send fast (mobile = 0ms)
+        setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, MOBILE_SIMPLE ? 0 : 200);
+      };
+
+      rec.onerror = (ev)=>{
+        done();
+        const code = (ev && ev.error) ? String(ev.error) : "";
+        if(code==="no-speech") showToast("沒聽到聲音，請再說一次");
+        else if(code==="aborted") showToast("已取消，請再按一次");
+        else if(code==="not-allowed" || code==="service-not-allowed") showToast("麥克風未允許：請到 Safari 設定開啟麥克風");
+        else showToast("語音辨識失敗");
+      };
+
+      rec.onend = ()=>{ done(); };
+
+      try{ rec.start(); }
+      catch(e){
+        done();
+        showToast("語音辨識無法啟動");
+      }
     };
 
-    rec.onerror = (ev)=>{
-      // common iOS errors: "aborted" / "no-speech" -> don't keep red dot
-      done();
-      const code = (ev && ev.error) ? String(ev.error) : "";
-      if(code==="no-speech") showToast("沒聽到聲音，請再說一次");
-      else if(code==="not-allowed" || code==="service-not-allowed") showToast("麥克風未允許：請到 Safari 設定開啟麥克風");
-      else showToast("語音辨識失敗");
-    };
-
-    rec.onend = ()=>{ done(); };
-
-    try{ rec.start(); }
-    catch(e){
-      done();
-      showToast("語音辨識無法啟動");
-    }
+    // 180ms is enough for iOS speechSynthesis.cancel() to settle
+    setTimeout(kickoff, 180);
   }
   btnMic.addEventListener("click", startRec);
 
