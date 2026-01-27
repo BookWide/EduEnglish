@@ -1063,8 +1063,6 @@ label.pill[title="選擇老師"] .meta{display:none !important;}
    ============================= */
 (function(){
   const $ = (id)=>document.getElementById(id);
-  const MOBILE_SIMPLE = window.matchMedia && window.matchMedia('(max-width:520px)').matches;
-
   const toastEl = $("toast");
   const mask = $("mask");
   const modalBody = $("modalBody");
@@ -1283,6 +1281,7 @@ function tuneRecognitionForMobile(rec){
     try{ rec.lang = "en-US"; }catch(_){}
     try{ rec.interimResults = false; }catch(_){}
     try{ rec.continuous = false; }catch(_){}
+    try{ rec.maxAlternatives = 1; }catch(_){}
   }catch(_e){}
 }
 
@@ -1291,11 +1290,24 @@ function hardenRecognition(rec){
   try{
     if(!rec) return;
     const isMobile = window.matchMedia && window.matchMedia("(max-width:520px)").matches;
-    if(!isMobile) return;
-    // basic safe settings only; retries handled in startRec watchdog
-    try{ rec.lang = "en-US"; }catch(_){}
-    try{ rec.interimResults = false; }catch(_){}
-    try{ rec.continuous = false; }catch(_){}
+    const isiOS = (typeof isIOS === "function") ? isIOS() : false;
+    if(!(isMobile || isiOS)) return;
+
+    tuneRecognitionForMobile(rec);
+
+    let retry = 0;
+    const MAX_RETRY = 1;
+    const origOnError = rec.onerror;
+    rec.onerror = function(ev){
+      try{ origOnError && origOnError(ev); }catch(_){}
+      const code = (ev && ev.error) ? String(ev.error) : "";
+      if((isMobile || isiOS) && retry < MAX_RETRY && (
+        code==="no-speech" || code==="aborted" || code==="audio-capture" || code==="network" || code==="service-not-allowed"
+      )){
+        retry++;
+        setTimeout(()=>{ try{ rec.start(); }catch(_e){} }, 350);
+      }
+    };
   }catch(_e){}
 }
 
@@ -1369,16 +1381,29 @@ function setupIOSMicFallback(){
   try{
     const mic = document.getElementById("btnMic");
     if(!mic) return;
-    if(isIOS() && !hasSpeechRec()){
-      // iOS Safari/Chrome iOS: Web Speech Recognition often unsupported.
-      mic.title = "iPhone Safari 不支援語音辨識，改用鍵盤輸入";
+
+    if(isIOS()){
+      // iOS: Web Speech Recognition is unstable/limited. Use iOS keyboard dictation instead (most reliable).
+      mic.title = "iPhone：請用鍵盤麥克風輸入（最穩）";
+      mic.style.opacity = "0.92";
+      if(mic.dataset.iosDictationBound==="1") return;
+      mic.dataset.iosDictationBound = "1";
+
       mic.addEventListener("click", (e)=>{
-        e.preventDefault();
-        try{ showToast("iPhone 語音辨識不支援：請用『輸入』或直接點輸入框"); }catch(_){}
-        const inp = document.getElementById("fillInput");
-        if(inp) { inp.focus(); }
-      }, {passive:false});
-      // Optional: visually indicate disabled mic without removing layout
+        try{ e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); }catch(_){}
+        try{ if(typeof stopSpeak==="function") stopSpeak(); }catch(_){}
+        try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
+        try{ $("dotLive").style.background = "#ef4444"; }catch(_){}
+        const inp = document.getElementById("fillInput") || document.getElementById("qInput") || document.querySelector('input,textarea');
+        if(inp){
+          try{ inp.focus({preventScroll:true}); }catch(_e){ try{ inp.focus(); }catch(__){} }
+        }
+        try{ showToast("iPhone：請點鍵盤麥克風說話（或直接打字）"); }catch(_){}
+        // auto restore dot after a short moment (we cannot detect iOS dictation end reliably)
+        setTimeout(()=>{ try{ $("dotLive").style.background = "#22c55e"; }catch(_e){} }, 1200);
+      }, true); // capture: block other handlers
+    }else if(!hasSpeechRec()){
+      mic.title = "此瀏覽器不支援語音辨識";
       mic.style.opacity = "0.55";
     }
   }catch(_e){}
@@ -1676,7 +1701,7 @@ function updateUI(){
       sceneTitle.textContent = activeSceneTitle ? activeSceneTitle : "載入中…";
       const progMax = Math.max(1, Math.ceil(turns.length/2));
       const progNow = Math.min(progMax, Math.floor(aiIdx/2)+1);
-      sceneSub.textContent = MOBILE_SIMPLE ? `CVC · ${progNow}/${progMax}` : `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${progNow}/${progMax}`;
+      sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${progNow}/${progMax}`;
     placeProgressUnderEnglish();
       return;
     }
@@ -1699,7 +1724,7 @@ function updateUI(){
     weekLabel.textContent = "W" + String(activeWeek);
     scenePickLabel.textContent = activeSceneTitle ? activeSceneTitle : "選擇情境";
     sceneTitle.textContent = activeSceneTitle ? activeSceneTitle : "載入中…";
-    sceneSub.textContent = MOBILE_SIMPLE ? `CVC · ${turnIdx+1}/${Math.max(1,turns.length)}` : `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${turnIdx+1}/${Math.max(1,turns.length)}`;
+    sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${turnIdx+1}/${Math.max(1,turns.length)}`;
     placeProgressUnderEnglish();
   }
 
@@ -1824,7 +1849,6 @@ function makeCloze(expectedEn){
       // Mobile tap handler (iOS Safari: do NOT preventDefault on touchstart, it can cancel click)
       let lastTouch = 0;
       const applyOpt = ()=>{
-        try{ window.__bwStopAllAudio && window.__bwStopAllAudio(); }catch(e){}
         const expected = (currentExpectedEn()||"").trim();
         if(!expected){
           fillInput.value = opt;
@@ -1898,16 +1922,6 @@ function guessFillFromSentence(en){
 
   let __ttsAudio = null;
   let __ttsBlobUrl = null;
-
-  // Stop all TTS / audio immediately (used by mic + option taps to avoid overlap)
-  function stopAllAudio(){
-    try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(e){}
-    try{ if(__ttsAudio){ __ttsAudio.pause(); __ttsAudio.currentTime = 0; } }catch(e){}
-    try{ if(__ttsBlobUrl){ URL.revokeObjectURL(__ttsBlobUrl); } }catch(e){}
-    __ttsAudio = null;
-    __ttsBlobUrl = null;
-  }
-  window.__bwStopAllAudio = stopAllAudio;
 
 async function speak(text){
     try{
@@ -2448,7 +2462,7 @@ if(!firstId){
       const said = (fillInput.value || "").trim();
       if(!said){ showToast("請先輸入你的回覆"); return; }
       // speak user's reply (optional)
-      if(!MOBILE_SIMPLE){ try{ await speak(said); }catch(e){} } else { try{ speak(said); }catch(e){} }
+      try{ await speak(said); }catch(e){}
       // clear input but keep the guidance panel
       fillInput.value = "";
       showToast("已送出 ✅");
@@ -2491,108 +2505,93 @@ if(!firstId){
   });
 
   // Speech recognition
-  let rec = null;
-  let __recBusy = false;
-  
-function startRec(){
-    // stop any teacher/user TTS first to avoid audio conflict with mic
-    try{ window.__bwStopAllAudio && window.__bwStopAllAudio(); }catch(e){}
-    if(__recBusy) return;
-    __recBusy = true;
+  // Speech recognition
+let rec = null;
+let recTimer = null;
 
-    const IS_IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent||"");
-    // iPhone Safari WebSpeech SR is unreliable; use iOS keyboard dictation instead (most stable)
-    if(IS_IOS){
-      try{ $("dotLive").style.background = "#22c55e"; }catch(_){}
-      __recBusy = false;
-      try{ fillInput && fillInput.focus(); }catch(_){}
-      showToast("iPhone：請點輸入框→按鍵盤麥克風🎤聽寫（最穩定）");
+function clearRecTimer(){
+  if(recTimer){ try{ clearTimeout(recTimer); }catch(_e){} recTimer=null; }
+}
+
+function startRec(){
+  // Always stop TTS first to avoid audio conflict / iOS freeze
+  try{ if(typeof stopSpeak==="function") stopSpeak(); }catch(_){}
+  try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
+
+  // iOS: use keyboard dictation (stable) instead of Web SpeechRecognition
+  if(typeof isIOS==="function" && isIOS()){
+    try{ $("dotLive").style.background = "#ef4444"; }catch(_){}
+    const inp = document.getElementById("fillInput");
+    if(inp){
+      try{ inp.focus({preventScroll:true}); }catch(_e){ try{ inp.focus(); }catch(__){} }
+    }
+    try{ showToast("iPhone：請點鍵盤麥克風說話（或直接打字）"); }catch(_){}
+    setTimeout(()=>{ try{ $("dotLive").style.background = "#22c55e"; }catch(_e){} }, 1200);
+    return;
+  }
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR){
+    showToast("此瀏覽器不支援語音辨識");
+    return;
+  }
+
+  try{
+    if(rec){ try{ rec.onresult=null; rec.onerror=null; rec.onend=null; rec.stop(); }catch(_e){} }
+  }catch(_e){}
+
+  rec = new SR();
+  tuneRecognitionForMobile(rec);
+  hardenRecognition(rec);
+
+  $("dotLive").style.background = "#ef4444";
+
+  clearRecTimer();
+  // If no result quickly, stop to avoid "red dot stuck"
+  recTimer = setTimeout(()=>{
+    try{ rec && rec.stop && rec.stop(); }catch(_e){}
+    try{ $("dotLive").style.background = "#22c55e"; }catch(_e){}
+    try{ showToast("聽不到聲音，請再按一次麥克風"); }catch(_){}
+  }, 6500);
+
+  rec.onresult = (ev)=>{
+    clearRecTimer();
+    const said = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) ? ev.results[0][0].transcript : "";
+    $("dotLive").style.background = "#22c55e";
+    if(!said.trim()){
+      showToast("沒有聽清楚，請再說一次");
       return;
     }
+    // put into input and submit (dialogue mode)
+    fillInput.value = said.trim();
+    showToast("你說： " + said.trim());
+    // auto send -> advance to next AI
+    setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 220);
+  };
 
-    // Give iOS a moment to really stop speechSynthesis before starting SR (prevents "red dot stuck")
-    const kickoff = ()=>{
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if(!SR){
-        __recBusy = false;
-        showToast("此瀏覽器不支援語音辨識");
-        return;
-      }
+  rec.onerror = (ev)=>{
+    clearRecTimer();
+    $("dotLive").style.background = "#22c55e";
+    const code = (ev && ev.error) ? String(ev.error) : "";
+    if(code==="no-speech"){
+      showToast("沒聽到聲音，請靠近麥克風再試一次");
+    }else{
+      showToast("語音辨識失敗");
+    }
+  };
 
-      // Hard reset previous recognizer
-      if(rec){
-        try{ rec.onresult = rec.onerror = rec.onend = null; }catch(_){}
-        try{ rec.abort && rec.abort(); }catch(_){}
-        try{ rec.stop && rec.stop(); }catch(_){}
-      }
+  rec.onend = ()=>{
+    clearRecTimer();
+    $("dotLive").style.background = "#22c55e";
+  };
 
-      rec = new SR();
-      try{ rec.lang = "en-US"; }catch(_){}
-      try{ rec.interimResults = false; }catch(_){}
-      try{ rec.continuous = false; }catch(_){}
-      try{ rec.maxAlternatives = 1; }catch(_){}
-
-      // UI: red dot while listening
-      try{ $("dotLive").style.background = "#ef4444"; }catch(_){}
-
-      // Watchdog: iOS sometimes never fires end/error -> force stop to avoid "red dot stuck"
-      if(startRec.__tm) { try{ clearTimeout(startRec.__tm); }catch(_){ } }
-      startRec.__tm = setTimeout(()=>{
-        try{ rec && rec.abort && rec.abort(); }catch(_){}
-        try{ rec && rec.stop && rec.stop(); }catch(_){}
-        __recBusy = false;
-        try{ $("dotLive").style.background = "#22c55e"; }catch(_){}
-        showToast("語音辨識逾時，請再試一次");
-      }, 9000);
-
-      const done = ()=>{
-        __recBusy = false;
-        try{ if(startRec.__tm){ clearTimeout(startRec.__tm); startRec.__tm=null; } }catch(_){}
-        try{ $("dotLive").style.background = "#22c55e"; }catch(_){}
-      };
-
-      // Extra: if speech ends but onresult never comes, onend will release.
-      rec.onresult = (ev)=>{
-        done();
-        const said = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) ? ev.results[0][0].transcript : "";
-        if(!said.trim()){
-          showToast("沒有聽清楚，請再說一次");
-          return;
-        }
-        // put into input and submit (dialogue mode)
-        fillInput.value = said.trim();
-
-        // Ensure no TTS overlaps with submit
-        try{ window.__bwStopAllAudio && window.__bwStopAllAudio(); }catch(e){}
-
-        if(!MOBILE_SIMPLE) showToast("你說： " + said.trim());
-        // auto send fast (mobile = 0ms)
-        setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, MOBILE_SIMPLE ? 0 : 200);
-      };
-
-      rec.onerror = (ev)=>{
-        done();
-        const code = (ev && ev.error) ? String(ev.error) : "";
-        if(code==="no-speech") showToast("沒聽到聲音，請再說一次");
-        else if(code==="aborted") showToast("已取消，請再按一次");
-        else if(code==="not-allowed" || code==="service-not-allowed") showToast("麥克風未允許：請到 Safari 設定開啟麥克風");
-        else showToast("語音辨識失敗");
-      };
-
-      rec.onend = ()=>{ done(); };
-
-      try{ rec.start(); }
-      catch(e){
-        done();
-        showToast("語音辨識無法啟動");
-      }
-    };
-
-    // 180ms is enough for iOS speechSynthesis.cancel() to settle
-    setTimeout(kickoff, 180);
+  try{ rec.start(); }catch(e){
+    clearRecTimer();
+    $("dotLive").style.background = "#22c55e";
+    showToast("語音辨識無法啟動");
   }
-  btnMic.addEventListener("click", startRec);
-
+}
+btnMic.addEventListener("click", startRec);
 
   // Avoid iOS rubber band scroll / keep stable
   document.addEventListener("touchmove", (e)=>{
