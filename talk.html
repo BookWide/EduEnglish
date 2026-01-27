@@ -1381,7 +1381,6 @@ function setupIOSMicFallback(){
   try{
     const mic = document.getElementById("btnMic");
     if(!mic) return;
-    try{ mic.disabled = false; mic.style.pointerEvents = "auto"; mic.style.touchAction="manipulation"; }catch(_e){}
     if(isIOS() && !hasSpeechRec()){
       // iOS Safari/Chrome iOS: Web Speech Recognition often unsupported.
       mic.title = "iPhone Safari 不支援語音辨識，改用鍵盤輸入";
@@ -1911,46 +1910,6 @@ function guessFillFromSentence(en){
   let __ttsAudio = null;
   let __ttsBlobUrl = null;
 
-
-  // ===== Mobile Safari audio unlock (required for iPhone autoplay restrictions) =====
-  let __audioUnlocked = false;
-  function __primeAudioUnlock(){
-    if(__audioUnlocked) return;
-    const prime = async ()=>{
-      try{
-        // AudioContext resume
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if(AC){
-          const ac = new AC();
-          try{ await ac.resume(); }catch(_){}
-          try{
-            const buf = ac.createBuffer(1, 1, 22050);
-            const src = ac.createBufferSource();
-            src.buffer = buf;
-            src.connect(ac.destination);
-            try{ src.start(0); }catch(_){}
-          }catch(_){}
-        }
-      }catch(_){}
-      try{
-        // Also try a muted HTMLAudioElement "tick"
-        const a = new Audio();
-        a.muted = true;
-        a.playsInline = true;
-        // tiny silent mp3 data uri (very small). If it fails, that's okay.
-        a.src = "data:audio/mpeg;base64,//uQZAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=";
-        try{ await a.play(); }catch(_){}
-        try{ a.pause(); }catch(_){}
-      }catch(_){}
-      __audioUnlocked = true;
-      // remove listeners
-      try{ document.removeEventListener("touchend", prime, true); }catch(_){}
-      try{ document.removeEventListener("click", prime, true); }catch(_){}
-    };
-    // first user gesture will unlock
-    document.addEventListener("touchend", prime, true);
-    document.addEventListener("click", prime, true);
-  }
 async function speak(text){
     try{
       const now = Date.now();
@@ -2009,32 +1968,7 @@ async function speak(text){
           __tvStop();
         };
 
-        try{
-          __ttsAudio.playsInline = true;
-          __ttsAudio.preload = "auto";
-          await __ttsAudio.play();
-          __audioUnlocked = true;
-        }catch(err){
-          // iPhone Safari often blocks programmatic audio unless user has interacted.
-          console.warn("[tts] play blocked:", err);
-          __tvStop();
-          try{ showToast("手機需先點一下畫面才可播放老師聲音（iPhone 限制）"); }catch(_){ try{ toast("手機需先點一下畫面才可播放老師聲音（iPhone 限制）"); }catch(_e){} }
-          const a = __ttsAudio;
-          const once = async ()=>{
-            try{
-              __audioUnlocked = true;
-              await a.play();
-            }catch(e2){
-              console.warn("[tts] retry still blocked:", e2);
-            }finally{
-              try{ document.removeEventListener("click", once, true); }catch(_){}
-              try{ document.removeEventListener("touchend", once, true); }catch(_){}
-            }
-          };
-          document.addEventListener("click", once, true);
-          document.addEventListener("touchend", once, true);
-          return;
-        }
+        await __ttsAudio.play();
         return;
       }
 
@@ -2760,8 +2694,7 @@ function bwSaveTalkDailyScore(){
 
   // Find mic button (common ids/classes in your file)
   function findMicBtn(){
-    return document.getElementById("btnMic")
-      || document.getElementById("micBtn")
+    return document.getElementById("micBtn")
       || document.querySelector("[data-role='mic']")
       || document.querySelector(".micBtn")
       || document.querySelector("button[aria-label*='mic' i]")
@@ -2771,16 +2704,13 @@ function bwSaveTalkDailyScore(){
   // If SpeechRecognition isn't supported on iOS Safari, don't "fail" instantly — guide user.
   function installFallbackIfNeeded(){
     const mic = findMicBtn();
-    try{ __primeAudioUnlock && __primeAudioUnlock(); }catch(_){ }
     const input = document.getElementById("fillInput") || document.querySelector("input,textarea");
     if(!mic) return;
-    try{ mic.disabled = false; mic.style.pointerEvents = "auto"; mic.style.touchAction="manipulation"; }catch(_e){}
 
     // Guard double-start on mobile taps
     mic.__bwBusy = false;
 
     mic.addEventListener("click", async (e)=>{
-      try{ __primeAudioUnlock && __primeAudioUnlock(); }catch(_){ }
       if(!IOS) return; // only adjust iOS behaviour
       if(mic.__bwBusy) { try{e.preventDefault();}catch(_){ } return; }
       mic.__bwBusy = true;
@@ -2831,5 +2761,72 @@ function bwSaveTalkDailyScore(){
   }
 })();
 </script>
+
+<script>
+/* ===========================
+   SINGLE TURN LOOP (LOCKED)
+   - Teacher: GREEN only
+   - Student: RED only while voice detected after mic click
+   - Silence -> GREEN + trigger next teacher
+   =========================== */
+(function(){
+  const $ = (id)=>document.getElementById(id);
+  const dot = $("dotLive");
+  const btnMic = $("btnMic");
+  function setGreen(){ if(dot){ dot.style.background="#22c55e"; dot.style.boxShadow="0 0 0 4px rgba(34,197,94,.15)"; } }
+  function setRed(){ if(dot){ dot.style.background="#ef4444"; dot.style.boxShadow="0 0 0 4px rgba(239,68,68,.18)"; } }
+
+  let ac=null, stream=null, analyser=null, data=null, raf=0;
+  let active=false, speechSeen=false, lastVoice=0;
+  const THRESH=0.035, SILENCE_MS=550;
+
+  async function start(){
+    if(active) return;
+    active=true; speechSeen=false; lastVoice=Date.now(); setGreen();
+    stream = await navigator.mediaDevices.getUserMedia({audio:true});
+    ac = new (window.AudioContext||window.webkitAudioContext)();
+    const src = ac.createMediaStreamSource(stream);
+    analyser = ac.createAnalyser(); analyser.fftSize=1024;
+    src.connect(analyser); data=new Uint8Array(analyser.fftSize);
+    const loop=()=>{
+      if(!active) return;
+      analyser.getByteTimeDomainData(data);
+      let s=0; for(let i=0;i<data.length;i++){ const v=(data[i]-128)/128; s+=v*v; }
+      const rms=Math.sqrt(s/data.length), now=Date.now();
+      if(rms>THRESH){ speechSeen=true; lastVoice=now; setRed(); }
+      else if(speechSeen && (now-lastVoice)>SILENCE_MS){ finish(); return; }
+      raf=requestAnimationFrame(loop);
+    };
+    raf=requestAnimationFrame(loop);
+  }
+
+  function stop(){
+    try{ if(raf) cancelAnimationFrame(raf); }catch(e){}
+    raf=0;
+    try{ if(stream) stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+    try{ if(ac) ac.close(); }catch(e){}
+    stream=null; ac=null; analyser=null; data=null;
+  }
+
+  function triggerNext(){
+    setGreen();
+    const names=["nextTurn","goNext","sendUserReply","submitUser","teacherSpeakNext","runTeacherTurn","advanceDialog"];
+    for(const n of names){ try{ if(typeof window[n]==="function"){ window[n](""); return; } }catch(e){} }
+    const btnSend=$("btnSendFill"); if(btnSend){ btnSend.click(); return; }
+    const btnReplay=$("btnReplay"); if(btnReplay){ btnReplay.click(); }
+  }
+
+  function finish(){
+    if(!active) return;
+    active=false; stop(); setGreen(); triggerNext();
+  }
+
+  if(btnMic){
+    btnMic.onclick=(e)=>{ try{ e.preventDefault(); e.stopPropagation(); }catch(_){} active?finish():start(); };
+  }
+  setGreen();
+})();
+</script>
+
 </body>
 </html>
