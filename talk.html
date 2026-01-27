@@ -1124,6 +1124,12 @@ let __tvWatch = null;
 
 
   const INDEX_URL = "/talk/index.json";
+
+  // ===== Mobile STT (Supabase Edge Function) =====
+  // Mobile uses record->upload->Whisper (stable). Desktop keeps browser SpeechRecognition.
+  const MOBILE_STT_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/talk-stt";
+  window.BW_MOBILE_STT = true;
+
 const FALLBACK_INDEX_URLS = [];
 
   function normalizeIndex(raw){
@@ -1381,6 +1387,7 @@ function setupIOSMicFallback(){
   try{
     const mic = document.getElementById("btnMic");
     if(!mic) return;
+    if(window.BW_MOBILE_STT) return; // iOS uses backend STT, do not disable mic
     if(isIOS() && !hasSpeechRec()){
       // iOS Safari/Chrome iOS: Web Speech Recognition often unsupported.
       mic.title = "iPhone Safari 不支援語音辨識，改用鍵盤輸入";
@@ -2533,9 +2540,127 @@ if(!firstId){
     };
     try{ rec.start(); }catch(e){ showToast("語音辨識無法啟動"); }
   }
-  btnMic.addEventListener("click", startRec);
+  
+  // ===== Mic handler: Desktop SpeechRecognition, Mobile record->talk-stt =====
+  async function mobileRecordToText(){
+    if(__recBusy) return;
+    __recBusy = true;
+    try{ $("dotLive").style.background = "#ef4444"; }catch(_){}
+    try{ btnMic.disabled = true; }catch(_){}
 
-  // Avoid iOS rubber band scroll / keep stable
+    // pick best mime for this browser
+    let mime = "";
+    try{
+      if(window.MediaRecorder && MediaRecorder.isTypeSupported){
+        const prefs = [
+          "audio/webm;codecs=opus",
+          "audio/webm",
+          "audio/mp4",
+          "audio/mpeg"
+        ];
+        for(const t of prefs){
+          try{ if(MediaRecorder.isTypeSupported(t)){ mime = t; break; } }catch(_){}
+        }
+      }
+    }catch(_){}
+    let stream = null;
+    let rec = null;
+    let chunks = [];
+    const stopAfterMs = 6000; // MVP: short & stable for mobile
+    const startedAt = Date.now();
+
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }catch(e){
+      showToast("無法取得麥克風權限");
+      return;
+    }
+
+    try{
+      rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    }catch(e){
+      // fallback: try without mime
+      try{ rec = new MediaRecorder(stream); }catch(_e){
+        showToast("此瀏覽器不支援錄音");
+        return;
+      }
+    }
+
+    const cleanup = ()=>{
+      try{ if(stream){ stream.getTracks().forEach(t=>{ try{ t.stop(); }catch(_){}}); } }catch(_){}
+      try{ btnMic.disabled = false; }catch(_){}
+      try{ $("dotLive").style.background = "#22c55e"; }catch(_){}
+      __recBusy = false;
+    };
+
+    const blobToText = async (blob)=>{
+      try{
+        if(!blob || blob.size < 800){
+          showToast("錄音太短");
+          return;
+        }
+        showToast("辨識中…");
+        const res = await fetch(MOBILE_STT_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": blob.type || "audio/webm",
+            "X-Filename": (blob.type && blob.type.includes("mp4")) ? "speech.m4a" : "speech.webm"
+          },
+          body: blob
+        });
+        const data = await res.json().catch(()=>({}));
+        const said = (data && data.text) ? String(data.text).trim() : "";
+        if(!res.ok || !said){
+          showToast("語音辨識失敗");
+          return;
+        }
+        fillInput.value = said;
+        if(!MOBILE_SIMPLE) showToast("你說： " + said);
+        setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 0);
+      }catch(e){
+        showToast("語音辨識失敗");
+      }
+    };
+
+    rec.ondataavailable = (ev)=>{ try{ if(ev.data && ev.data.size) chunks.push(ev.data); }catch(_){ } };
+    rec.onerror = ()=>{ showToast("錄音失敗"); cleanup(); };
+    rec.onstop = async ()=>{
+      try{
+        const blob = new Blob(chunks, { type: rec && rec.mimeType ? rec.mimeType : (mime||"audio/webm") });
+        await blobToText(blob);
+      }finally{
+        cleanup();
+      }
+    };
+
+    try{
+      rec.start();
+      // auto stop after fixed duration (stable MVP)
+      setTimeout(()=>{
+        try{
+          if(rec && rec.state === "recording"){
+            rec.stop();
+          }
+        }catch(_){}
+      }, stopAfterMs);
+    }catch(e){
+      showToast("錄音無法啟動");
+      cleanup();
+      return;
+    }
+  }
+
+  // Override mic click
+  btnMic.addEventListener("click", ()=>{
+    const isMobile = window.matchMedia && window.matchMedia("(max-width:520px)").matches;
+    if(isMobile){
+      mobileRecordToText();
+    }else{
+      startRec();
+    }
+  });
+
+// Avoid iOS rubber band scroll / keep stable
   document.addEventListener("touchmove", (e)=>{
     // allow scrolling only inside modal body
     const inModal = e.target && (e.target.closest && e.target.closest("#modalBody"));
