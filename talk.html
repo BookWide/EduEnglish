@@ -2461,14 +2461,15 @@ if(!firstId){
     if(talkMode === "dialogue"){
       const said = (fillInput.value || "").trim();
       if(!said){ showToast("請先輸入你的回覆"); return; }
-      // speak user's reply (optional)
-      try{ await speak(said); }catch(e){}
+  // NOTE: Teacher never repeats student's sentence (A locked)
       // clear input but keep the guidance panel
       fillInput.value = "";
       showToast("已送出 ✅");
       // advance to NEXT AI line (skip USER expected line)
       await nextTurn();
-      return;
+            // release for next student turn
+      TURN_LOCKED = false;
+return;
     }
     // non-dialogue (fill practice)
     const said = (fillInput.value || "").trim();
@@ -2509,24 +2510,39 @@ if(!firstId){
 let rec = null;
 let recTimer = null;
 
+
+// ===== Round-control locks (Mobile stable) =====
+let REC_ACTIVE = false;       // currently listening
+let TURN_LOCKED = false;      // this student turn already submitted
+let IGNORE_NEXT_END = false;  // guard duplicate onend on mobile
 function clearRecTimer(){
   if(recTimer){ try{ clearTimeout(recTimer); }catch(_e){} recTimer=null; }
 }
 
 function startRec(){
+  // Guard: prevent double-start / re-entry on mobile
+  if(REC_ACTIVE || TURN_LOCKED) return;
+
   try{ $("dotLive").style.background = "#ef4444"; }catch(_e){}
   try{ const ae=document.activeElement; if(ae && (ae.tagName==='INPUT'||ae.tagName==='TEXTAREA')) ae.blur(); }catch(_e){}
 
-  // Always stop TTS first to avoid audio conflict / iOS freeze
+  // Always stop TTS + teacher video first (so teacher does NOT talk while student is recording)
   try{ if(typeof stopSpeak==="function") stopSpeak(); }catch(_){}
   try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_){}
+  try{ if(typeof __tvStop==="function") __tvStop(); }catch(_){}
 
-  
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if(!SR){
+    REC_ACTIVE = false;
+    TURN_LOCKED = false;
+    IGNORE_NEXT_END = false;
     showToast("此瀏覽器不支援語音辨識");
     return;
   }
+
+  REC_ACTIVE = true;
+  TURN_LOCKED = false;
+  IGNORE_NEXT_END = false;
 
   try{
     if(rec){ try{ rec.onresult=null; rec.onerror=null; rec.onend=null; rec.stop(); }catch(_e){} }
@@ -2543,26 +2559,41 @@ function startRec(){
   recTimer = setTimeout(()=>{
     try{ rec && rec.stop && rec.stop(); }catch(_e){}
     try{ $("dotLive").style.background = "#22c55e"; }catch(_e){}
+    REC_ACTIVE = false;
     try{ showToast("聽不到聲音，請再按一次麥克風"); }catch(_){}
   }, 6500);
 
   rec.onresult = (ev)=>{
     clearRecTimer();
+    if(TURN_LOCKED) return;
+
     const said = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) ? ev.results[0][0].transcript : "";
     $("dotLive").style.background = "#22c55e";
-    if(!said.trim()){
+
+    const txt = (said||"").trim();
+    if(!txt){
       showToast("沒有聽清楚，請再說一次");
       return;
     }
-    // put into input and submit (dialogue mode)
-    fillInput.value = said.trim();
-    showToast("你說： " + said.trim());
-    // auto send -> advance to next AI
-    setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 220);
+
+    // Lock this turn: prevent duplicate onresult/onend from mobile browsers
+    TURN_LOCKED = true;
+    REC_ACTIVE = false;
+    IGNORE_NEXT_END = true;
+
+    // Put into input and submit (dialogue mode)
+    fillInput.value = txt;
+    showToast("你說： " + txt);
+
+    // Auto send -> advance to next AI (exactly once)
+    setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 120);
   };
 
   rec.onerror = (ev)=>{
     clearRecTimer();
+    REC_ACTIVE = false;
+    // allow user to try again
+    TURN_LOCKED = false;
     $("dotLive").style.background = "#22c55e";
     const code = (ev && ev.error) ? String(ev.error) : "";
     if(code==="no-speech"){
@@ -2574,11 +2605,17 @@ function startRec(){
 
   rec.onend = ()=>{
     clearRecTimer();
+    // Mobile browsers sometimes fire onend twice; ignore the immediate follow-up after a valid result
+    if(IGNORE_NEXT_END){ IGNORE_NEXT_END = false; return; }
+    REC_ACTIVE = false;
     $("dotLive").style.background = "#22c55e";
   };
 
   try{ rec.start(); }catch(e){
     clearRecTimer();
+    REC_ACTIVE = false;
+    TURN_LOCKED = false;
+    IGNORE_NEXT_END = false;
     $("dotLive").style.background = "#22c55e";
     showToast("語音辨識無法啟動");
   }
