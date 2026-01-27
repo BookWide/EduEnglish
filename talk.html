@@ -2548,43 +2548,8 @@ if(!firstId){
     try{ $("dotLive").style.background = "#ef4444"; }catch(_){}
     try{ btnMic.disabled = true; }catch(_){}
 
-    // pick best mime for this browser
-    let mime = "";
-    try{
-      if(window.MediaRecorder && MediaRecorder.isTypeSupported){
-        const prefs = [
-          "audio/webm;codecs=opus",
-          "audio/webm",
-          "audio/mp4",
-          "audio/mpeg"
-        ];
-        for(const t of prefs){
-          try{ if(MediaRecorder.isTypeSupported(t)){ mime = t; break; } }catch(_){}
-        }
-      }
-    }catch(_){}
+    const stopAfterMs = 6500; // mobile MVP: fixed short recording
     let stream = null;
-    let rec = null;
-    let chunks = [];
-    const stopAfterMs = 6000; // MVP: short & stable for mobile
-    const startedAt = Date.now();
-
-    try{
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    }catch(e){
-      showToast("無法取得麥克風權限");
-      return;
-    }
-
-    try{
-      rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-    }catch(e){
-      // fallback: try without mime
-      try{ rec = new MediaRecorder(stream); }catch(_e){
-        showToast("此瀏覽器不支援錄音");
-        return;
-      }
-    }
 
     const cleanup = ()=>{
       try{ if(stream){ stream.getTracks().forEach(t=>{ try{ t.stop(); }catch(_){}}); } }catch(_){}
@@ -2595,19 +2560,28 @@ if(!firstId){
 
     const blobToText = async (blob)=>{
       try{
-        if(!blob || blob.size < 800){
+        if(!blob || blob.size < 1200){
           showToast("錄音太短");
           return;
         }
         showToast("辨識中…");
+        const ctrl = new AbortController();
+        const to = setTimeout(()=>{ try{ ctrl.abort(); }catch(_){} }, 25000);
+
+        const filename = (blob.type && blob.type.includes("wav")) ? "speech.wav"
+                       : (blob.type && blob.type.includes("mp4")) ? "speech.m4a"
+                       : "speech.webm";
+
         const res = await fetch(MOBILE_STT_URL, {
           method: "POST",
           headers: {
             "Content-Type": blob.type || "audio/webm",
-            "X-Filename": (blob.type && blob.type.includes("mp4")) ? "speech.m4a" : "speech.webm"
+            "X-Filename": filename
           },
-          body: blob
-        });
+          body: blob,
+          signal: ctrl.signal
+        }).finally(()=>clearTimeout(to));
+
         const data = await res.json().catch(()=>({}));
         const said = (data && data.text) ? String(data.text).trim() : "";
         if(!res.ok || !said){
@@ -2616,17 +2590,123 @@ if(!firstId){
         }
         fillInput.value = said;
         if(!MOBILE_SIMPLE) showToast("你說： " + said);
-        setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 0);
+        setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 150);
       }catch(e){
         showToast("語音辨識失敗");
       }
     };
 
-    rec.ondataavailable = (ev)=>{ try{ if(ev.data && ev.data.size) chunks.push(ev.data); }catch(_){ } };
-    rec.onerror = ()=>{ showToast("錄音失敗"); cleanup(); };
-    rec.onstop = async ()=>{
+    // ---- iOS / no-MediaRecorder fallback: WebAudio -> WAV ----
+    const recordWavFromStream = async (s, ms)=>{
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) throw new Error("no AudioContext");
+      const ac = new AC();
+      const src = ac.createMediaStreamSource(s);
+      const bufSize = 4096;
+      const proc = ac.createScriptProcessor(bufSize, 1, 1);
+      const chunks = [];
+      proc.onaudioprocess = (ev)=>{
+        try{
+          const input = ev.inputBuffer.getChannelData(0);
+          // copy to normal array (Float32Array slice)
+          chunks.push(new Float32Array(input));
+        }catch(_){}
+      };
+      src.connect(proc);
+      proc.connect(ac.destination);
+
+      await new Promise((resolve)=>setTimeout(resolve, ms));
+
+      try{ proc.disconnect(); }catch(_){}
+      try{ src.disconnect(); }catch(_){}
+      try{ ac.close(); }catch(_){}
+
+      // flatten
+      let length = 0;
+      for(const c of chunks) length += c.length;
+      const samples = new Float32Array(length);
+      let offset = 0;
+      for(const c of chunks){ samples.set(c, offset); offset += c.length; }
+
+      // encode WAV 16-bit PCM mono
+      const sampleRate = ac.sampleRate || 48000;
+      const bytesPerSample = 2;
+      const blockAlign = 1 * bytesPerSample;
+      const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
+      const view = new DataView(buffer);
+
+      const writeStr = (off, str)=>{ for(let i=0;i<str.length;i++) view.setUint8(off+i, str.charCodeAt(i)); };
+      writeStr(0, "RIFF");
+      view.setUint32(4, 36 + samples.length * bytesPerSample, true);
+      writeStr(8, "WAVE");
+      writeStr(12, "fmt ");
+      view.setUint32(16, 16, true);      // PCM
+      view.setUint16(20, 1, true);       // PCM
+      view.setUint16(22, 1, true);       // mono
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * blockAlign, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, 16, true);      // bits
+      writeStr(36, "data");
+      view.setUint32(40, samples.length * bytesPerSample, true);
+
+      let idx = 44;
+      for(let i=0;i<samples.length;i++){
+        let s16 = Math.max(-1, Math.min(1, samples[i]));
+        s16 = s16 < 0 ? s16 * 0x8000 : s16 * 0x7fff;
+        view.setInt16(idx, s16, true);
+        idx += 2;
+      }
+      return new Blob([buffer], { type: "audio/wav" });
+    };
+
+    // ---- Get mic permission ----
+    try{
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }catch(e){
+      showToast("無法取得麥克風權限");
+      cleanup();
+      return;
+    }
+
+    // ---- Try MediaRecorder first (Android/Chrome/etc) ----
+    let mr = null;
+    let mime = "";
+    try{
+      if(window.MediaRecorder && MediaRecorder.isTypeSupported){
+        const prefs = ["audio/webm;codecs=opus","audio/webm","audio/mp4"];
+        for(const t of prefs){
+          try{ if(MediaRecorder.isTypeSupported(t)){ mime = t; break; } }catch(_){}
+        }
+      }
+      if(window.MediaRecorder){
+        mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      }
+    }catch(_){
+      mr = null;
+    }
+
+    // ---- If no MediaRecorder, record WAV ----
+    if(!mr){
       try{
-        const blob = new Blob(chunks, { type: rec && rec.mimeType ? rec.mimeType : (mime||"audio/webm") });
+        showToast("錄音中…");
+        const wav = await recordWavFromStream(stream, stopAfterMs);
+        await blobToText(wav);
+      }catch(e){
+        showToast("此瀏覽器不支援錄音");
+      }finally{
+        cleanup();
+      }
+      return;
+    }
+
+    // ---- MediaRecorder path ----
+    let chunks = [];
+    mr.ondataavailable = (ev)=>{ try{ if(ev.data && ev.data.size) chunks.push(ev.data); }catch(_){ } };
+    mr.onerror = ()=>{ showToast("錄音失敗"); cleanup(); };
+    mr.onstop = async ()=>{
+      try{
+        const blob = new Blob(chunks, { type: mr && mr.mimeType ? mr.mimeType : (mime||"audio/webm") });
         await blobToText(blob);
       }finally{
         cleanup();
@@ -2634,12 +2714,12 @@ if(!firstId){
     };
 
     try{
-      rec.start();
-      // auto stop after fixed duration (stable MVP)
+      showToast("錄音中…");
+      mr.start();
       setTimeout(()=>{
         try{
-          if(rec && rec.state === "recording"){
-            rec.stop();
+          if(mr && mr.state === "recording"){
+            mr.stop();
           }
         }catch(_){}
       }, stopAfterMs);
