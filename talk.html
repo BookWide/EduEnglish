@@ -1124,12 +1124,6 @@ let __tvWatch = null;
 
 
   const INDEX_URL = "/talk/index.json";
-
-  // ===== Mobile STT (Supabase Edge Function) =====
-  // Mobile uses record->upload->Whisper (stable). Desktop keeps browser SpeechRecognition.
-  const MOBILE_STT_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/talk-stt";
-  window.BW_MOBILE_STT = true;
-
 const FALLBACK_INDEX_URLS = [];
 
   function normalizeIndex(raw){
@@ -1271,53 +1265,56 @@ function mobileFixProgressText(){
     if(!sub) return;
     const t = (sub.textContent||"").trim();
     const m = t.match(/(\d+\s*\/\s*\d+)/);
-    if(m){
-      sub.textContent = m[1].replace(/\s+/g,'');
-    }
-    // ensure visible
+    if(m) sub.textContent = m[1].replace(/\s+/g,'');
     sub.style.display = "block";
   }catch(_e){}
 }
 
-
-// ===== Mobile: reduce mic jank while "red dot" listening =====
+// ===== Mobile: make SpeechRecognition less picky & less likely to freeze =====
 function tuneRecognitionForMobile(rec){
   try{
     if(!rec) return;
-    if(!(window.matchMedia && window.matchMedia("(max-width:520px)").matches)) return;
-    // Avoid rapid interim callbacks that freeze UI
+    const isMobile = window.matchMedia && window.matchMedia("(max-width:520px)").matches;
+    if(!isMobile) return;
+
+    try{ rec.lang = "en-US"; }catch(_){}
     try{ rec.interimResults = false; }catch(_){}
+    try{ rec.continuous = false; }catch(_){}
+    try{ rec.maxAlternatives = 3; }catch(_){}
 
+    // Auto-stop if the mic gets stuck listening forever (common on mobile)
+    try{
+      clearTimeout(rec.__bwAutoStop);
+      rec.__bwAutoStop = setTimeout(()=>{ try{ rec.stop(); }catch(_e){} }, 6500);
+    }catch(_e){}
+  }catch(_e){}
+}
 
-// ===== Mobile: improve iOS speech recognition reliability =====
-function hardenRecognition(rec){
+// ===== Mobile: relax "speech error" handling (retry instead of failing) =====
+function hardenRecognition(rec, onGiveUp){
   try{
     if(!rec) return;
     const isMobile = window.matchMedia && window.matchMedia("(max-width:520px)").matches;
-    if(isMobile){
-      try{ rec.lang = "en-US"; }catch(_){}
-      try{ rec.interimResults = false; }catch(_){}
-      try{ rec.continuous = false; }catch(_){}
-    }
+    const MAX_RETRY = isMobile ? 2 : 0;
     let retry = 0;
-    const MAX_RETRY = isMobile ? 1 : 0;
+
     const origOnError = rec.onerror;
     rec.onerror = function(ev){
       try{ origOnError && origOnError(ev); }catch(_){}
       const code = (ev && ev.error) ? String(ev.error) : "";
-      if(isMobile && retry < MAX_RETRY && (code==="no-speech" || code==="aborted" || code==="audio-capture" || code==="network")){
+      // On mobile, treat these as "try again" instead of "hard fail"
+      if(isMobile && retry < MAX_RETRY && (code==="no-speech" || code==="aborted" || code==="audio-capture" || code==="network" || code==="not-allowed")){
         retry++;
-        setTimeout(()=>{ try{ rec.start(); }catch(_e){} }, 350);
+        setTimeout(()=>{ try{ rec.start(); }catch(_e){} }, 380);
+        return;
       }
+      try{ onGiveUp && onGiveUp(code); }catch(_e){}
     };
   }catch(_e){}
 }
-    try{ rec.continuous = false; }catch(_){}
-  }catch(_e){}
-}
-
 
 // ===== Mobile: prevent viewport jump when sending fill sentence =====
+
 function focusNoScroll(el){
   try{
     if(!el) return;
@@ -1387,7 +1384,6 @@ function setupIOSMicFallback(){
   try{
     const mic = document.getElementById("btnMic");
     if(!mic) return;
-    if(window.BW_MOBILE_STT) return; // iOS uses backend STT, do not disable mic
     if(isIOS() && !hasSpeechRec()){
       // iOS Safari/Chrome iOS: Web Speech Recognition often unsupported.
       mic.title = "iPhone Safari 不支援語音辨識，改用鍵盤輸入";
@@ -2514,6 +2510,8 @@ if(!firstId){
     rec.lang = "en-US";
     rec.interimResults = false;
     rec.maxAlternatives = 1;
+    tuneRecognitionForMobile(rec);
+
     $("dotLive").style.background = "#ef4444";
     rec.onresult = (ev)=>{
       __recBusy = false;
@@ -2529,218 +2527,32 @@ if(!firstId){
       // auto send fast
       setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, MOBILE_SIMPLE ? 0 : 200);
     };
-    rec.onerror = ()=>{
+    rec.onerror = (ev)=>{
       __recBusy = false;
       $("dotLive").style.background = "#22c55e";
-      showToast("語音辨識失敗");
+      const code = (ev && ev.error) ? String(ev.error) : "";
+      if(MOBILE_SIMPLE && (code==="no-speech" || code==="aborted" || code==="audio-capture" || code==="network")){
+        showToast("沒聽到，請再說一次");
+      }else{
+        showToast("語音辨識失敗");
+      }
     };
+    // mobile: retry some common errors instead of hard-failing
+    hardenRecognition(rec, (code)=>{
+      __recBusy = false;
+      $("dotLive").style.background = "#22c55e";
+      if(MOBILE_SIMPLE) showToast("沒聽到，請再說一次");
+      else showToast("語音辨識失敗");
+    });
     rec.onend = ()=>{
       __recBusy = false;
       $("dotLive").style.background = "#22c55e";
     };
     try{ rec.start(); }catch(e){ showToast("語音辨識無法啟動"); }
   }
-  
-  // ===== Mic handler: Desktop SpeechRecognition, Mobile record->talk-stt =====
-  async function mobileRecordToText(){
-    if(__recBusy) return;
-    __recBusy = true;
-    try{ $("dotLive").style.background = "#ef4444"; }catch(_){}
-    try{ btnMic.disabled = true; }catch(_){}
+  btnMic.addEventListener("click", startRec);
 
-    const stopAfterMs = 6500; // mobile MVP: fixed short recording
-    let stream = null;
-
-    const cleanup = ()=>{
-      try{ if(stream){ stream.getTracks().forEach(t=>{ try{ t.stop(); }catch(_){}}); } }catch(_){}
-      try{ btnMic.disabled = false; }catch(_){}
-      try{ $("dotLive").style.background = "#22c55e"; }catch(_){}
-      __recBusy = false;
-    };
-
-    const blobToText = async (blob)=>{
-      try{
-        if(!blob || blob.size < 1200){
-          showToast("錄音太短");
-          return;
-        }
-        showToast("辨識中…");
-        const ctrl = new AbortController();
-        const to = setTimeout(()=>{ try{ ctrl.abort(); }catch(_){} }, 25000);
-
-        const filename = (blob.type && blob.type.includes("wav")) ? "speech.wav"
-                       : (blob.type && blob.type.includes("mp4")) ? "speech.m4a"
-                       : "speech.webm";
-
-        const res = await fetch(MOBILE_STT_URL, {
-          method: "POST",
-          headers: {
-            "Content-Type": blob.type || "audio/webm",
-            "X-Filename": filename
-          },
-          body: blob,
-          signal: ctrl.signal
-        }).finally(()=>clearTimeout(to));
-
-        const data = await res.json().catch(()=>({}));
-        const said = (data && data.text) ? String(data.text).trim() : "";
-        if(!res.ok || !said){
-          showToast("語音辨識失敗");
-          return;
-        }
-        fillInput.value = said;
-        if(!MOBILE_SIMPLE) showToast("你說： " + said);
-        setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 150);
-      }catch(e){
-        showToast("語音辨識失敗");
-      }
-    };
-
-    // ---- iOS / no-MediaRecorder fallback: WebAudio -> WAV ----
-    const recordWavFromStream = async (s, ms)=>{
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if(!AC) throw new Error("no AudioContext");
-      const ac = new AC();
-      const src = ac.createMediaStreamSource(s);
-      const bufSize = 4096;
-      const proc = ac.createScriptProcessor(bufSize, 1, 1);
-      const chunks = [];
-      proc.onaudioprocess = (ev)=>{
-        try{
-          const input = ev.inputBuffer.getChannelData(0);
-          // copy to normal array (Float32Array slice)
-          chunks.push(new Float32Array(input));
-        }catch(_){}
-      };
-      src.connect(proc);
-      proc.connect(ac.destination);
-
-      await new Promise((resolve)=>setTimeout(resolve, ms));
-
-      try{ proc.disconnect(); }catch(_){}
-      try{ src.disconnect(); }catch(_){}
-      try{ ac.close(); }catch(_){}
-
-      // flatten
-      let length = 0;
-      for(const c of chunks) length += c.length;
-      const samples = new Float32Array(length);
-      let offset = 0;
-      for(const c of chunks){ samples.set(c, offset); offset += c.length; }
-
-      // encode WAV 16-bit PCM mono
-      const sampleRate = ac.sampleRate || 48000;
-      const bytesPerSample = 2;
-      const blockAlign = 1 * bytesPerSample;
-      const buffer = new ArrayBuffer(44 + samples.length * bytesPerSample);
-      const view = new DataView(buffer);
-
-      const writeStr = (off, str)=>{ for(let i=0;i<str.length;i++) view.setUint8(off+i, str.charCodeAt(i)); };
-      writeStr(0, "RIFF");
-      view.setUint32(4, 36 + samples.length * bytesPerSample, true);
-      writeStr(8, "WAVE");
-      writeStr(12, "fmt ");
-      view.setUint32(16, 16, true);      // PCM
-      view.setUint16(20, 1, true);       // PCM
-      view.setUint16(22, 1, true);       // mono
-      view.setUint32(24, sampleRate, true);
-      view.setUint32(28, sampleRate * blockAlign, true);
-      view.setUint16(32, blockAlign, true);
-      view.setUint16(34, 16, true);      // bits
-      writeStr(36, "data");
-      view.setUint32(40, samples.length * bytesPerSample, true);
-
-      let idx = 44;
-      for(let i=0;i<samples.length;i++){
-        let s16 = Math.max(-1, Math.min(1, samples[i]));
-        s16 = s16 < 0 ? s16 * 0x8000 : s16 * 0x7fff;
-        view.setInt16(idx, s16, true);
-        idx += 2;
-      }
-      return new Blob([buffer], { type: "audio/wav" });
-    };
-
-    // ---- Get mic permission ----
-    try{
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    }catch(e){
-      showToast("無法取得麥克風權限");
-      cleanup();
-      return;
-    }
-
-    // ---- Try MediaRecorder first (Android/Chrome/etc) ----
-    let mr = null;
-    let mime = "";
-    try{
-      if(window.MediaRecorder && MediaRecorder.isTypeSupported){
-        const prefs = ["audio/webm;codecs=opus","audio/webm","audio/mp4"];
-        for(const t of prefs){
-          try{ if(MediaRecorder.isTypeSupported(t)){ mime = t; break; } }catch(_){}
-        }
-      }
-      if(window.MediaRecorder){
-        mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-      }
-    }catch(_){
-      mr = null;
-    }
-
-    // ---- If no MediaRecorder, record WAV ----
-    if(!mr){
-      try{
-        showToast("錄音中…");
-        const wav = await recordWavFromStream(stream, stopAfterMs);
-        await blobToText(wav);
-      }catch(e){
-        showToast("此瀏覽器不支援錄音");
-      }finally{
-        cleanup();
-      }
-      return;
-    }
-
-    // ---- MediaRecorder path ----
-    let chunks = [];
-    mr.ondataavailable = (ev)=>{ try{ if(ev.data && ev.data.size) chunks.push(ev.data); }catch(_){ } };
-    mr.onerror = ()=>{ showToast("錄音失敗"); cleanup(); };
-    mr.onstop = async ()=>{
-      try{
-        const blob = new Blob(chunks, { type: mr && mr.mimeType ? mr.mimeType : (mime||"audio/webm") });
-        await blobToText(blob);
-      }finally{
-        cleanup();
-      }
-    };
-
-    try{
-      showToast("錄音中…");
-      mr.start();
-      setTimeout(()=>{
-        try{
-          if(mr && mr.state === "recording"){
-            mr.stop();
-          }
-        }catch(_){}
-      }, stopAfterMs);
-    }catch(e){
-      showToast("錄音無法啟動");
-      cleanup();
-      return;
-    }
-  }
-
-  // Override mic click
-  btnMic.addEventListener("click", ()=>{
-    const isMobile = window.matchMedia && window.matchMedia("(max-width:520px)").matches;
-    if(isMobile){
-      mobileRecordToText();
-    }else{
-      startRec();
-    }
-  });
-
-// Avoid iOS rubber band scroll / keep stable
+  // Avoid iOS rubber band scroll / keep stable
   document.addEventListener("touchmove", (e)=>{
     // allow scrolling only inside modal body
     const inModal = e.target && (e.target.closest && e.target.closest("#modalBody"));
