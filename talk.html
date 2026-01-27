@@ -1265,56 +1265,53 @@ function mobileFixProgressText(){
     if(!sub) return;
     const t = (sub.textContent||"").trim();
     const m = t.match(/(\d+\s*\/\s*\d+)/);
-    if(m) sub.textContent = m[1].replace(/\s+/g,'');
+    if(m){
+      sub.textContent = m[1].replace(/\s+/g,'');
+    }
+    // ensure visible
     sub.style.display = "block";
   }catch(_e){}
 }
 
-// ===== Mobile: make SpeechRecognition less picky & less likely to freeze =====
+
+// ===== Mobile: reduce mic jank while "red dot" listening =====
 function tuneRecognitionForMobile(rec){
   try{
     if(!rec) return;
-    const isMobile = window.matchMedia && window.matchMedia("(max-width:520px)").matches;
-    if(!isMobile) return;
-
-    try{ rec.lang = "en-US"; }catch(_){}
+    if(!(window.matchMedia && window.matchMedia("(max-width:520px)").matches)) return;
+    // Avoid rapid interim callbacks that freeze UI
     try{ rec.interimResults = false; }catch(_){}
-    try{ rec.continuous = false; }catch(_){}
-    try{ rec.maxAlternatives = 3; }catch(_){}
 
-    // Auto-stop if the mic gets stuck listening forever (common on mobile)
-    try{
-      clearTimeout(rec.__bwAutoStop);
-      rec.__bwAutoStop = setTimeout(()=>{ try{ rec.stop(); }catch(_e){} }, 6500);
-    }catch(_e){}
-  }catch(_e){}
-}
 
-// ===== Mobile: relax "speech error" handling (retry instead of failing) =====
-function hardenRecognition(rec, onGiveUp){
+// ===== Mobile: improve iOS speech recognition reliability =====
+function hardenRecognition(rec){
   try{
     if(!rec) return;
     const isMobile = window.matchMedia && window.matchMedia("(max-width:520px)").matches;
-    const MAX_RETRY = isMobile ? 2 : 0;
+    if(isMobile){
+      try{ rec.lang = "en-US"; }catch(_){}
+      try{ rec.interimResults = false; }catch(_){}
+      try{ rec.continuous = false; }catch(_){}
+    }
     let retry = 0;
-
+    const MAX_RETRY = isMobile ? 1 : 0;
     const origOnError = rec.onerror;
     rec.onerror = function(ev){
       try{ origOnError && origOnError(ev); }catch(_){}
       const code = (ev && ev.error) ? String(ev.error) : "";
-      // On mobile, treat these as "try again" instead of "hard fail"
-      if(isMobile && retry < MAX_RETRY && (code==="no-speech" || code==="aborted" || code==="audio-capture" || code==="network" || code==="not-allowed")){
+      if(isMobile && retry < MAX_RETRY && (code==="no-speech" || code==="aborted" || code==="audio-capture" || code==="network")){
         retry++;
-        setTimeout(()=>{ try{ rec.start(); }catch(_e){} }, 380);
-        return;
+        setTimeout(()=>{ try{ rec.start(); }catch(_e){} }, 350);
       }
-      try{ onGiveUp && onGiveUp(code); }catch(_e){}
     };
   }catch(_e){}
 }
+    try{ rec.continuous = false; }catch(_){}
+  }catch(_e){}
+}
+
 
 // ===== Mobile: prevent viewport jump when sending fill sentence =====
-
 function focusNoScroll(el){
   try{
     if(!el) return;
@@ -1384,6 +1381,7 @@ function setupIOSMicFallback(){
   try{
     const mic = document.getElementById("btnMic");
     if(!mic) return;
+    try{ mic.disabled = false; mic.style.pointerEvents = "auto"; mic.style.touchAction="manipulation"; }catch(_e){}
     if(isIOS() && !hasSpeechRec()){
       // iOS Safari/Chrome iOS: Web Speech Recognition often unsupported.
       mic.title = "iPhone Safari 不支援語音辨識，改用鍵盤輸入";
@@ -1913,6 +1911,46 @@ function guessFillFromSentence(en){
   let __ttsAudio = null;
   let __ttsBlobUrl = null;
 
+
+  // ===== Mobile Safari audio unlock (required for iPhone autoplay restrictions) =====
+  let __audioUnlocked = false;
+  function __primeAudioUnlock(){
+    if(__audioUnlocked) return;
+    const prime = async ()=>{
+      try{
+        // AudioContext resume
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if(AC){
+          const ac = new AC();
+          try{ await ac.resume(); }catch(_){}
+          try{
+            const buf = ac.createBuffer(1, 1, 22050);
+            const src = ac.createBufferSource();
+            src.buffer = buf;
+            src.connect(ac.destination);
+            try{ src.start(0); }catch(_){}
+          }catch(_){}
+        }
+      }catch(_){}
+      try{
+        // Also try a muted HTMLAudioElement "tick"
+        const a = new Audio();
+        a.muted = true;
+        a.playsInline = true;
+        // tiny silent mp3 data uri (very small). If it fails, that's okay.
+        a.src = "data:audio/mpeg;base64,//uQZAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA=";
+        try{ await a.play(); }catch(_){}
+        try{ a.pause(); }catch(_){}
+      }catch(_){}
+      __audioUnlocked = true;
+      // remove listeners
+      try{ document.removeEventListener("touchend", prime, true); }catch(_){}
+      try{ document.removeEventListener("click", prime, true); }catch(_){}
+    };
+    // first user gesture will unlock
+    document.addEventListener("touchend", prime, true);
+    document.addEventListener("click", prime, true);
+  }
 async function speak(text){
     try{
       const now = Date.now();
@@ -1971,7 +2009,32 @@ async function speak(text){
           __tvStop();
         };
 
-        await __ttsAudio.play();
+        try{
+          __ttsAudio.playsInline = true;
+          __ttsAudio.preload = "auto";
+          await __ttsAudio.play();
+          __audioUnlocked = true;
+        }catch(err){
+          // iPhone Safari often blocks programmatic audio unless user has interacted.
+          console.warn("[tts] play blocked:", err);
+          __tvStop();
+          try{ showToast("手機需先點一下畫面才可播放老師聲音（iPhone 限制）"); }catch(_){ try{ toast("手機需先點一下畫面才可播放老師聲音（iPhone 限制）"); }catch(_e){} }
+          const a = __ttsAudio;
+          const once = async ()=>{
+            try{
+              __audioUnlocked = true;
+              await a.play();
+            }catch(e2){
+              console.warn("[tts] retry still blocked:", e2);
+            }finally{
+              try{ document.removeEventListener("click", once, true); }catch(_){}
+              try{ document.removeEventListener("touchend", once, true); }catch(_){}
+            }
+          };
+          document.addEventListener("click", once, true);
+          document.addEventListener("touchend", once, true);
+          return;
+        }
         return;
       }
 
@@ -2510,8 +2573,6 @@ if(!firstId){
     rec.lang = "en-US";
     rec.interimResults = false;
     rec.maxAlternatives = 1;
-    tuneRecognitionForMobile(rec);
-
     $("dotLive").style.background = "#ef4444";
     rec.onresult = (ev)=>{
       __recBusy = false;
@@ -2527,23 +2588,11 @@ if(!firstId){
       // auto send fast
       setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, MOBILE_SIMPLE ? 0 : 200);
     };
-    rec.onerror = (ev)=>{
+    rec.onerror = ()=>{
       __recBusy = false;
       $("dotLive").style.background = "#22c55e";
-      const code = (ev && ev.error) ? String(ev.error) : "";
-      if(MOBILE_SIMPLE && (code==="no-speech" || code==="aborted" || code==="audio-capture" || code==="network")){
-        showToast("沒聽到，請再說一次");
-      }else{
-        showToast("語音辨識失敗");
-      }
+      showToast("語音辨識失敗");
     };
-    // mobile: retry some common errors instead of hard-failing
-    hardenRecognition(rec, (code)=>{
-      __recBusy = false;
-      $("dotLive").style.background = "#22c55e";
-      if(MOBILE_SIMPLE) showToast("沒聽到，請再說一次");
-      else showToast("語音辨識失敗");
-    });
     rec.onend = ()=>{
       __recBusy = false;
       $("dotLive").style.background = "#22c55e";
@@ -2711,7 +2760,8 @@ function bwSaveTalkDailyScore(){
 
   // Find mic button (common ids/classes in your file)
   function findMicBtn(){
-    return document.getElementById("micBtn")
+    return document.getElementById("btnMic")
+      || document.getElementById("micBtn")
       || document.querySelector("[data-role='mic']")
       || document.querySelector(".micBtn")
       || document.querySelector("button[aria-label*='mic' i]")
@@ -2721,13 +2771,16 @@ function bwSaveTalkDailyScore(){
   // If SpeechRecognition isn't supported on iOS Safari, don't "fail" instantly — guide user.
   function installFallbackIfNeeded(){
     const mic = findMicBtn();
+    try{ __primeAudioUnlock && __primeAudioUnlock(); }catch(_){ }
     const input = document.getElementById("fillInput") || document.querySelector("input,textarea");
     if(!mic) return;
+    try{ mic.disabled = false; mic.style.pointerEvents = "auto"; mic.style.touchAction="manipulation"; }catch(_e){}
 
     // Guard double-start on mobile taps
     mic.__bwBusy = false;
 
     mic.addEventListener("click", async (e)=>{
+      try{ __primeAudioUnlock && __primeAudioUnlock(); }catch(_){ }
       if(!IOS) return; // only adjust iOS behaviour
       if(mic.__bwBusy) { try{e.preventDefault();}catch(_){ } return; }
       mic.__bwBusy = true;
