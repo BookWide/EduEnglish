@@ -43,15 +43,6 @@ try{ if(MOBILE_LITE) document.documentElement.classList.add("mobileLite"); }catc
     const uid = user.id;
     const email = (user.email || '').toLowerCase();
 
-    // expose for Talk score -> Learn/Leaderboard bridge
-    window.__bwSupabase = supabase;
-    window.__bwUser = { id: uid, email: email };
-
-
-    // expose for cross-page score bridge
-    window.__bwSupabase = supabase;
-    window.__bwUser = { id: uid, email: email };
-
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // YYYY-MM-DD
 
     // --- read profile (best effort) ---
@@ -2072,7 +2063,6 @@ try{showReport();}catch(e){}
 
   async function loadSceneById(id, title){
     activeSceneId = id;
-    window.__bwSceneId = id;
     activeSceneTitle = title || id;
 
     const url = new URL("/talk/" + encodeURIComponent(id) + ".json", location.origin).toString();
@@ -2754,11 +2744,16 @@ function getTeacherVoice(sel){
   </div>
 </div>
 <script>
-function showReport(){ document.getElementById('bwReportMask').style.display='block';
-  try{bwSaveTalkDailyScore();
-  try{ if(typeof totalScore!=='undefined'){ BW_commitTalkScore(totalScore);} }catch(e){}
-}catch(e){} }
-function closeReport(){ document.getElementById('bwReportMask').style.display='none'; }
+function showReport(){
+  document.getElementById('bwReportMask').style.display='block';
+  try{
+    const s = bwSaveTalkDailyScore(); // returns 0..100 (default 65)
+    try{ if(typeof BW_commitTalkScore === 'function') BW_commitTalkScore(s); }catch(_){}
+  }catch(e){}
+}
+function closeReport(){
+  document.getElementById('bwReportMask').style.display='none';
+}
 </script>
 <!-- ===== End Learning Report ===== -->
 
@@ -2769,11 +2764,13 @@ function bwSaveTalkDailyScore(){
     const d = new Date();
     const key = d.toISOString().slice(0,10); // UTC key
     const twKey = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' }); // Taiwan key
-    const score = (function(){
+    const rawScore = (function(){
       const el = document.getElementById('rComplete');
       const v = el ? Number(String(el.textContent||'').trim()) : NaN;
       return Number.isFinite(v) ? Math.max(0, Math.min(100, Math.round(v))) : 65;
-    })();
+    })()
+    const score = Math.round((Number(rawScore)||0) * 0.1);
+;
     const active = (function(){
       const el = document.getElementById('rActive');
       if(!el) return null;
@@ -2801,7 +2798,8 @@ function bwSaveTalkDailyScore(){
     obj[key] = { score, active, pron, words, updated_at: new Date().toISOString() };
     if (twKey && twKey !== key) obj[twKey] = obj[key];
     localStorage.setItem('bwTalkScores', JSON.stringify(obj));
-  }catch(e){}
+    return score;
+}catch(e){}
 }
 </script>
 
@@ -2823,28 +2821,6 @@ function bwSaveTalkDailyScore(){
       map[day] = Math.max(prev, s);
       localStorage.setItem(KEY, JSON.stringify(map));
       console.log("[BW SCORE SAVED]", day, map[day]);
-      // also write to Supabase quiz_logs so Learn(金榜/曲線) can sum it server-side
-      try{
-        const sb = window.__bwSupabase;
-        const u  = window.__bwUser;
-        const savedKey = "BW_TALK_SCORE_SAVED_" + day;
-        if(sb && u && u.email && !localStorage.getItem(savedKey)){
-          localStorage.setItem(savedKey, "1");
-          (async()=>{
-            try{
-              const payload = { email: u.email, score: map[day], slug: (window.__bwSceneId||"talk"), category: "talk" };
-              // try with user_id first (dashboard filters by user_id)
-              let r = await sb.from("quiz_logs").insert(Object.assign({ user_id: u.id }, payload));
-              if(r && r.error && /column .*user_id/i.test(String(r.error.message||""))){
-                await sb.from("quiz_logs").insert(payload);
-              }
-            }catch(err){
-              console.error("[talk->quiz_logs] insert failed", err);
-            }
-          })();
-        }
-      }catch(e){ console.error(e); }
-
     }catch(e){ console.error(e); }
   };
 })();
