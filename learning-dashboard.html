@@ -452,12 +452,139 @@
     }
     .path-info b{ color: var(--ink); }
 
+
+    /* 今日口說任務（Talk） */
+    .card-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:8px;
+    }
+    .card-head .title{
+      font-size:16px;
+      font-weight:700;
+    }
+    .review-list{
+      display:grid;
+      grid-template-columns:minmax(0,1fr);
+      gap:10px;
+      margin-top:6px;
+    }
+    .review-meta .t{ font-weight:700; font-size:14px; }
+    .review-meta .s{ font-size:12px; color:var(--muted); margin-top:2px; }
+
 </style>
 
   <!-- Chart.js -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <!-- html2canvas for screenshot share -->
   <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
+<!-- TALK_SCORE_PATCH_START -->
+<script>
+(function(){
+  // Taipei date key YYYY-MM-DD
+  function tzDateKey(){
+    try{
+      const d = new Date();
+      // convert to Asia/Taipei using locale parts
+      const parts = new Intl.DateTimeFormat('en-CA', { timeZone:'Asia/Taipei', year:'numeric', month:'2-digit', day:'2-digit' }).format(d);
+      return parts; // en-CA gives YYYY-MM-DD
+    }catch(e){
+      const d = new Date();
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,'0');
+      const da = String(d.getDate()).padStart(2,'0');
+      return y+'-'+m+'-'+da;
+    }
+  }
+
+  function safeNum(v){ v = Number(v); return Number.isFinite(v) ? v : 0; }
+
+  function getTalkScoreToday(){
+    const key = tzDateKey();
+
+    // Preferred structured record: TALK_LAST_RESULT = {"date":"YYYY-MM-DD","score":65,...}
+    try{
+      const raw = localStorage.getItem('TALK_LAST_RESULT');
+      if(raw){
+        const obj = JSON.parse(raw);
+        if(obj && obj.date === key) return safeNum(obj.score);
+      }
+    }catch(e){}
+
+    // Simple per-day key: TALK_SCORE_YYYY-MM-DD
+    const k2 = 'TALK_SCORE_' + key;
+    const v2 = localStorage.getItem(k2);
+    if(v2 != null) return safeNum(v2);
+
+    // Generic keys used by earlier patches
+    const v3 = localStorage.getItem('TALK_SCORE_TODAY');
+    if(v3 != null) return safeNum(v3);
+
+    // If only pass flag exists and no score stored, assume pass threshold 65
+    const pass = localStorage.getItem('TALK_PASS_65');
+    if(pass === '1') return 65;
+
+    return 0;
+  }
+
+  // Expose for debugging if you need
+  window.__getTalkScoreToday = getTalkScoreToday;
+
+  // Monkey-patch common "today total score" getters if present.
+  // Many dashboards compute a "todayTotalScore" number before rendering circles/charts.
+  // We intercept by patching Number-producing functions named like getTodayScore / calcTodayScore.
+  function patchOnce(){
+    const add = getTalkScoreToday();
+
+    // If no talk score, do nothing.
+    if(!add) return;
+
+    // Patch a few likely globals if they exist.
+    const candidates = [
+      'getTodayTotalScore','calcTodayTotalScore','getTodayScore','calcTodayScore',
+      'todayTotalScore','todayScore','TODAY_SCORE'
+    ];
+
+    // 1) If todayTotalScore is a number variable, add to it once.
+    for(const name of candidates){
+      if(Object.prototype.hasOwnProperty.call(window, name) && typeof window[name] === 'number'){
+        if(!window.__talkAddedToTodayScore){
+          window[name] = window[name] + add;
+          window.__talkAddedToTodayScore = true;
+        }
+        return;
+      }
+    }
+
+    // 2) If there is a function, wrap it.
+    for(const name of candidates){
+      if(typeof window[name] === 'function' && !window[name].__talkWrapped){
+        const orig = window[name];
+        const wrapped = function(){
+          try{
+            const v = safeNum(orig.apply(this, arguments));
+            return v + add;
+          }catch(e){
+            return add;
+          }
+        };
+        wrapped.__talkWrapped = true;
+        window[name] = wrapped;
+        return;
+      }
+    }
+  }
+
+  // Run early and again after load (in case scripts define functions later)
+  patchOnce();
+  window.addEventListener('load', function(){ patchOnce(); });
+})();
+</script>
+<!-- TALK_SCORE_PATCH_END -->
+
 </head>
 <body>
 <div class="wrap">
@@ -519,7 +646,11 @@
     <section class="card" id="todayTalkCard" style="margin-top:14px;">
       <div class="card-head">
         <div class="title">今日口說任務</div>
-        <div class="tag" title="AI Speaking">AI Speak</div>
+        
+      <div class="empty-tip" style="padding:6px 0 2px;">
+        ⚠️ 手機上功能不如桌機（語音/自動播放限制較多），建議使用桌機操作。
+      </div>
+<div class="tag" title="AI Speaking">AI Speak</div>
       </div>
       <div id="talkList" class="review-list"></div>
       <div id="talkEmpty" class="empty-tip" style="display:none;">本日尚未安排口說任務。</div>
@@ -682,37 +813,43 @@ const VIDEO_INDEX_URL = "../data/index-all.json";
   };
 }
 
-function renderTodayTalk(task){
+function renderTodayTalk(tasks){
     const list = document.getElementById("talkList");
     const empty = document.getElementById("talkEmpty");
     if(!list || !empty) return;
 
-    if(!task || !task.scene){
+    // allow passing a single task object
+    const arr = Array.isArray(tasks) ? tasks : (tasks ? [tasks] : []);
+
+    const valid = arr.filter(t => t && (t.scene || t.slug || t.id));
+    if(!valid.length){
       list.innerHTML = "";
       empty.style.display = "";
       return;
     }
     empty.style.display = "none";
 
-    const title = task.title || "AI Speaking";
-    const level = task.level ? String(task.level) : "";
-    const cover = task.cover ? String(task.cover) : "";
-    const week = Number(task.week||0) || 0;
-    const weekStr = week ? `W${week}` : "";
-    const base = level ? `${level}${task.trial ? " · 試用" : ""}` : (task.trial ? "試用" : "");
-    const sub = [weekStr, base].filter(Boolean).join(" · ");
+    list.innerHTML = valid.slice(0,1).map(task=>{
+      const scene = task.scene || task.slug || task.id || "";
+      const title = task.title || task.name || "AI Speak";
+      const level = task.level ? String(task.level) : "";
+      const cover = task.cover ? String(task.cover) : "";
+      const week = Number(task.week||0) || 0;
+      const weekStr = week ? `W${week}` : "";
+      const sub = [task.scene_title || task.sceneTitle || "", weekStr, level].filter(Boolean).join(" · ");
 
-    list.innerHTML = `
-      <div class="review-item" data-jump="talk" data-scene="${encodeURIComponent(task.scene)}" data-week="${encodeURIComponent(task.week||"")}">
-        <div class="review-thumb">
-          ${cover ? `<img src="${cover}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:800;background:#eef2ff;color:#1d4ed8;">talk</div>`}
+      return `
+        <div class="review-item" data-jump="talk">
+          <div class="review-thumb">
+            ${cover ? `<img src="${cover}" alt="">` : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-weight:800;background:#eef2ff;color:#1d4ed8;">talk</div>`}
+          </div>
+          <div class="review-meta">
+            <div class="t">${escapeHtml(title)}</div>
+            <div class="s">${escapeHtml(sub)}</div>
+          </div>
         </div>
-        <div class="review-meta">
-          <div class="t">${escapeHtml(title)}</div>
-          <div class="s">${escapeHtml(sub)}</div>
-        </div>
-      </div>
-    `;
+      `;
+    }).join("");
   }
 
   let curveChart = null;
@@ -1198,8 +1335,9 @@ async function loadWeeklyIndex(){
       if(error) throw error;
 
       const rows = Array.isArray(data) ? data : [];
-      rows.sort((a,b) => (b.total_score || 0) - (a.total_score || 0));
-      const top10 = rows.slice(0,10);
+      rows.forEach(r=>{ const ws=Math.round(r.watch_sec||0); const qp=Math.round(r.quiz_score||0); r._watch_pts=Math.floor(ws/30); r._total_pts=r._watch_pts+qp; });
+      rows.sort((a,b) => (b._total_pts || 0) - (a._total_pts || 0));
+const top10 = rows.slice(0,10);
 
       if(!top10.length){
         box.innerHTML = `<div class="empty-tip">最近 7 天尚無資料。</div>`;
@@ -1217,7 +1355,7 @@ async function loadWeeklyIndex(){
               const shortName =
                 row.display_name ||
                 (email ? email.replace(/@.*/,"") : "匿名學員");
-              const total = Math.round(row.total_score || 0);
+              const total = Math.round(row._total_pts || 0);
               const watchSec = Math.round(row.watch_sec || 0);
               const quizScore = Math.round(row.quiz_score || 0);
               const meClass = email === myEmail ? " rank-me" : "";
@@ -1227,7 +1365,7 @@ async function loadWeeklyIndex(){
                   <span class="rank-name">${shortName}</span>
                   <span class="rank-score">${total} 分</span>
                   <span class="rank-meta">
-                    觀看 ${watchSec} 秒 · 測驗 ${quizScore} 分
+                    觀看 ${watchSec} 秒（${Math.floor(watchSec/30)} 分） · 測驗 ${quizScore} 分
                   </span>
                 </li>
               `;
@@ -1315,40 +1453,33 @@ async function loadWeeklyIndex(){
     }
     const weekNo = weekIndex + 1;
 
-    let todayTalk = null;
+        // 口說任務：顯示「本週三條」（core / variation / challenge）
+    let todayTalks = [];
     if(WEEKLY_INDEX){
-      // 優先：從當週 talks 取一支（依星期輪播）
       const weeksArr = Array.isArray(WEEKLY_INDEX.weeks) ? WEEKLY_INDEX.weeks : [];
       if(weeksArr.length){
         const target = weeksArr[(weekIndex % weeksArr.length + weeksArr.length) % weeksArr.length];
-        const talks = (target && Array.isArray(target.talks)) ? target.talks : null;
-        if(talks && talks.length){
-          const dow = (new Date()).getDay();
-          const ur = rankLevel(userLevel);
-          const allowed = talks.filter(t => rankLevel(t.level || t.cefr || '') <= ur);
-          const pool = allowed.length ? allowed : talks;
-          const pick = pool[dow % pool.length];
-          if(pick && (pick.scene || pick.slug || pick.id)){
-            todayTalk = {
-              kind:'talk',
-              week: weekNo,
-              scene: pick.scene || pick.slug || pick.id,
-              title: pick.title || pick.name || 'AI Speak',
-              level: pick.level || pick.cefr || userLevel,
-              trial:false,
-              cover: pick.cover || pick.poster || pick.image || ''
-            };
-          }
-        }
+        const talks = (target && Array.isArray(target.talks)) ? target.talks : [];
+        const ur = rankLevel(userLevel);
+
+        // 依原本順序列出，若有等級門檻則先過濾；過濾後為空就退回全列
+        let pool = talks.filter(t => rankLevel(t.level || t.cefr || '') <= ur);
+        if(!pool.length) pool = talks;
+
+        todayTalks = pool.map(t => ({
+          kind:'talk',
+          week: weekNo,
+          scene: t.scene || t.slug || t.id || '',
+          title: t.title || t.name || 'AI Speak',
+          level: t.level || t.cefr || userLevel,
+          cover: t.cover || t.poster || t.image || ''
+        })).filter(x => x.scene);
+
+        // 若 weekly-index.json 沒有 talks（或 talks 為空），就不硬塞假資料
       }
     }
 
-    if(!todayTalk){
-      todayTalk = pickTodayTalkFromWeeklyIndex(WEEKLY_INDEX, userLevel);
-      if(todayTalk) todayTalk.week = todayTalk.week || weekNo;
-    }
-
-    renderTodayTalk(todayTalk);
+    renderTodayTalk(todayTalks);
 let todayReview = [];
     if(WEEKLY_INDEX && Array.isArray(WEEKLY_INDEX.weeks) && WEEKLY_INDEX.weeks.length){
       const weekIndex = getWeekIndex();
@@ -1422,10 +1553,16 @@ let todayReview = [];
         byCat[cat] = Math.max(0, Math.min(100, avg));
       });
 
-      // 當日總分：watch_sec + quiz_score
+      // 當日總分：watchScore + quiz_score + talk_score（watchScore 由秒數換算）
+      // 規則：每 30 秒 = 1 分（可調）
       const watchSecDay = dayLogs.reduce((a,c)=> a + (c.duration_sec || 0), 0);
+      const watchScoreDay = Math.floor((watchSecDay || 0) / 30);
       const quizScoreDay = dayQuiz.reduce((a,c)=> a + (c.score || 0), 0);
-      const totalScoreDay = watchSecDay + quizScoreDay;
+            let talkMap = {};
+      try{ talkMap = JSON.parse(localStorage.getItem('BW_DAILY_SCORE_MAP') || '{}') || {}; }catch(e){ talkMap = {}; }
+      const twKey = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Taipei' });
+      const talkScoreDay = Math.max(0, Math.min(100, Number(talkMap[twKey] || 0) || 0));
+      const totalScoreDay = watchScoreDay + quizScoreDay + talkScoreDay;
 
       const label =
         i===0 ? "今天" :
@@ -1523,21 +1660,71 @@ let todayReview = [];
   init();
 
   // click: talk card
+  // ✅ 固定導向 Talk 主入口，不帶 week / scene
   document.addEventListener("click", (e)=>{
     const el = e.target.closest("[data-jump='talk']");
     if(!el) return;
-
-    const weekRaw = (el.dataset.week || "").trim();
-    const week = Number(weekRaw||0) || 0;
-    if(week){
-      window.location.href = `/talk.html?week=${encodeURIComponent(String(week))}`;
-      return;
-    }
-
-    const scene = decodeURIComponent(el.dataset.scene || "");
-    if(scene) window.location.href = `/talk.html?scene=${encodeURIComponent(scene)}`;
+    window.location.href = "/talk.html";
   });
 </script>
+
+<script>
+(function(){
+  function safeNum(v){ v = Number(v); return Number.isFinite(v) ? v : 0; }
+  function getTalkScore(){
+    return (window.__getTalkScoreToday ? safeNum(window.__getTalkScoreToday()) : 0);
+  }
+  function updateTodayBubble(){
+    const add = getTalkScore();
+    if(!add) return;
+
+    // Find elements that likely contain today's score number (common patterns)
+    // 1) elements with text "今天" nearby
+    const all = Array.from(document.querySelectorAll('body *'));
+    let target = null;
+
+    for(const el of all){
+      if(el && el.childElementCount===0){
+        const t = (el.textContent||'').trim();
+        if(t === '今天'){
+          // look for a previous sibling containing a number
+          const p = el.parentElement;
+          if(p){
+            const nums = Array.from(p.querySelectorAll('*')).filter(x=>x.childElementCount===0 && /^[0-9]+$/.test((x.textContent||'').trim()));
+            if(nums.length){
+              target = nums[0];
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // 2) fallback: find a single blue-circled number container often has aria-label or class including "today"
+    if(!target){
+      target = document.querySelector('[data-day="today"], .today, #todayScore, [aria-label*="今天"]');
+      if(target && target.childElementCount>0){
+        // use inner leaf
+        const leaf = Array.from(target.querySelectorAll('*')).find(x=>x.childElementCount===0 && /^[0-9]+$/.test((x.textContent||'').trim()));
+        if(leaf) target = leaf;
+      }
+    }
+
+    if(target && !target.__talkAdded){
+      const base = safeNum((target.textContent||'').trim());
+      target.textContent = String(base + add);
+      target.__talkAdded = true;
+    }
+  }
+
+  window.addEventListener('load', function(){
+    // delay a bit to ensure the dashboard rendered
+    setTimeout(updateTodayBubble, 300);
+    setTimeout(updateTodayBubble, 1200);
+  });
+})();
+</script>
+
 </body>
 </html>
 
