@@ -28,8 +28,10 @@
   .sectionTitle h2{margin:0;font-size:16px}
   .sectionTitle .meta{color:var(--muted);font-size:12px}
   table{width:100%;border-collapse:separate;border-spacing:0}
+  .tableWrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+  td,th{word-break:break-word}
   th,td{font-size:13px;padding:10px 10px;border-bottom:1px solid var(--line);vertical-align:top}
-  th{color:var(--muted);font-weight:700;text-align:left;background:#fafafa;position:sticky;top:56px;z-index:3}
+  th{color:var(--muted);font-weight:700;text-align:left;background:#fafafa;position:static}
   tr:hover td{background:#fcfcff}
   .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;font-size:12px;font-weight:800}
   .pill.ok{background:rgba(22,163,74,.10);color:var(--green)}
@@ -40,8 +42,59 @@
   .input{border:1px solid var(--line);border-radius:999px;padding:10px 12px;background:#fff;min-width:260px}
   .small{font-size:12px;color:var(--muted)}
   .grid2{display:grid;grid-template-columns:1fr;gap:12px}
-  @media (min-width:980px){ .grid2{grid-template-columns:1fr 1fr} }
-  .hide{display:none}
+    .hide{display:none}
+
+/* ===== Responsive table: avoid horizontal scrolling, prevent "covered" rows ===== */
+.table-wrap{ overflow-x:hidden; }
+.table-wrap table{ width:100%; table-layout:fixed; }
+.table-wrap th, .table-wrap td{ white-space:normal; word-break:break-word; }
+
+@media (max-width: 1024px){
+  /* remove min width that forces sideways scroll */
+  .table-wrap table{ min-width:0 !important; }
+  /* tighten spacing */
+  .table-wrap th, .table-wrap td{ padding:10px 10px; font-size:13px; }
+  /* hide least important column: "Order / Buyer" (4th col) */
+  .table-wrap thead th:nth-child(4),
+  .table-wrap tbody td:nth-child(4){ display:none; }
+}
+
+@media (max-width: 640px){
+  /* turn each row into a card */
+  .table-wrap{ max-height:none !important; overflow:visible !important; }
+  .table-wrap table, .table-wrap thead, .table-wrap tbody, .table-wrap th, .table-wrap td, .table-wrap tr{
+    display:block;
+    width:100%;
+  }
+  .table-wrap thead{ display:none; }
+  .table-wrap tr{
+    border:1px solid rgba(0,0,0,.06);
+    border-radius:12px;
+    padding:10px 12px;
+    margin:10px 0;
+    background:#fff;
+  }
+  .table-wrap td{
+    border:none !important;
+    padding:6px 0 !important;
+  }
+  .table-wrap td::before{
+    display:block;
+    font-size:12px;
+    color:var(--muted);
+    margin-bottom:2px;
+  }
+  /* labels for 4-column tables: 到期日 / 寄送狀態 / Email / Order */
+  #tbPending tr td:nth-child(1)::before{ content:"到期日"; }
+  #tbPending tr td:nth-child(2)::before{ content:"寄送狀態"; }
+  #tbPending tr td:nth-child(3)::before{ content:"Email"; }
+  #tbPending tr td:nth-child(4)::before{ content:"Order / Buyer"; }
+
+  #tbLogs tr td:nth-child(1)::before{ content:"時間"; }
+  #tbLogs tr td:nth-child(2)::before{ content:"結果"; }
+  #tbLogs tr td:nth-child(3)::before{ content:"Email"; }
+}
+
 </style>
 </head>
 <body>
@@ -53,6 +106,7 @@
     </div>
     <div style="margin-left:auto;display:flex;gap:10px;align-items:center">
       <button class="btn" id="btnRefresh">重新整理</button>
+      <button class="btn secondary" id="btnResendTest">補寄測試</button>
     </div>
   </div>
 
@@ -90,7 +144,7 @@
           <input id="q" class="input" placeholder="搜尋 Email / buyer_id / order_id…"/>
           <span class="small">提示：用 email_to 或 buyer_id 找</span>
         </div>
-        <div style="overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:12px">
+        <div class="table-wrap" style="overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:12px">
           <table>
             <thead>
               <tr>
@@ -113,7 +167,7 @@
           <div class="meta" id="logWindow">—</div>
         </div>
         <div class="small" style="margin-bottom:10px">若你的資料庫沒有 email_logs 或 RLS 擋住，這區會顯示「無法讀取」。</div>
-        <div style="overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:12px">
+        <div class="table-wrap" style="overflow:auto;max-height:520px;border:1px solid var(--line);border-radius:12px">
           <table>
             <thead>
               <tr>
@@ -359,6 +413,35 @@
   }
 
   document.getElementById("btnRefresh").addEventListener("click", ()=>loadAll());
+
+
+  async function runReminderNow(){
+    // 需要 CRON_SECRET 才能直接觸發（避免被外部亂打）
+    let secret = localStorage.getItem("BW_CRON_SECRET") || "";
+    if(!secret){
+      secret = prompt("請輸入 CRON_SECRET（只存本機 localStorage，不會上傳）\n\n用途：一鍵手動觸發 subscription-reminder 立即補寄/補跑。\n（輸入一次即可）","") || "";
+      if(!secret) return;
+      localStorage.setItem("BW_CRON_SECRET", secret);
+    }
+    const ok = confirm("確定要立即執行「subscription-reminder」？\n\n它會：\n- 補寄「到期前 7 天提醒」（尚未寄的）\n- 補寄「已到期通知」（尚未寄的）\n\n執行後本頁會自動刷新。");
+    if(!ok) return;
+
+    const url = `${SUPABASE_URL}/functions/v1/subscription-reminder`;
+    try{
+      const res = await fetch(url, { method:"POST", headers:{ "x-cron-secret": secret } });
+      const text = await res.text();
+      if(!res.ok){
+        alert("補寄執行失敗：" + res.status + "\n" + text);
+        return;
+      }
+      alert("補寄已觸發 ✅\n\n" + text);
+      await loadAll();
+    }catch(e){
+      alert("補寄執行錯誤：" + String(e));
+    }
+  }
+
+  document.getElementById("btnResendTest").addEventListener("click", ()=>runReminderNow());
   document.getElementById("q").addEventListener("input", (e)=>renderPending(e.target.value));
 
   loadAll();
