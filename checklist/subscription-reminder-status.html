@@ -416,28 +416,57 @@
 
 
   async function runReminderNow(){
-    // 需要 CRON_SECRET 才能直接觸發（避免被外部亂打）
+    // 不走瀏覽器 fetch（避免 CORS / header 驗證卡住）
+    // 改成：一鍵產生 SQL（用 pg_net 在 DB 端呼叫 Edge Function）
     let secret = localStorage.getItem("BW_CRON_SECRET") || "";
     if(!secret){
-      secret = prompt("請輸入 CRON_SECRET（只存本機 localStorage，不會上傳）\n\n用途：一鍵手動觸發 subscription-reminder 立即補寄/補跑。\n（輸入一次即可）","") || "";
+      secret = prompt("請輸入 CRON_SECRET（只存本機 localStorage，不會上傳）
+
+用途：產生 SQL，用 pg_net 觸發 subscription-reminder（DB 端呼叫，不走瀏覽器 fetch）。
+（輸入一次即可）","") || "";
       if(!secret) return;
       localStorage.setItem("BW_CRON_SECRET", secret);
     }
-    const ok = confirm("確定要立即執行「subscription-reminder」？\n\n它會：\n- 補寄「到期前 7 天提醒」（尚未寄的）\n- 補寄「已到期通知」（尚未寄的）\n\n執行後本頁會自動刷新。");
+
+    const ok = confirm("確定要產生「一鍵 SQL」來執行 subscription-reminder？
+
+你只要：
+1) 點【確定】→ 自動複製 SQL
+2) 打開 Supabase SQL Editor 貼上 → Run
+
+（這樣完全不會遇到 CORS）");
     if(!ok) return;
 
-    const url = `${SUPABASE_URL}/functions/v1/subscription-reminder`;
+    const fnUrl = `${SUPABASE_URL}/functions/v1/subscription-reminder`;
+    const sql = [
+`select
+  net.http_post(
+    url := '${fnUrl}',
+    headers := jsonb_build_object(
+      'x-cron-secret', '${'${secret}'}',
+      'content-type', 'application/json'
+    ),
+    body := '{}'::jsonb
+  ) as resp;`
+    ].join("
+");
+
+    // 代入 secret（避免模板字串跟 SQL 引號打架）
+    const finalSql = sql.replace("${secret}", secret.replace(/'/g, "''"));
+
+    // 顯示面板
+    const panel = document.getElementById("sqlPanel");
+    const ta = document.getElementById("sqlText");
+    ta.value = finalSql;
+    panel.style.display = "flex";
+
+    // 預先 copy
     try{
-      const res = await fetch(url, { method:"POST", headers:{ "x-cron-secret": secret } });
-      const text = await res.text();
-      if(!res.ok){
-        alert("補寄執行失敗：" + res.status + "\n" + text);
-        return;
-      }
-      alert("補寄已觸發 ✅\n\n" + text);
-      await loadAll();
+      await navigator.clipboard.writeText(finalSql);
+      toast("SQL 已複製 ✅ 直接去 Supabase SQL Editor 貼上 Run");
     }catch(e){
-      alert("補寄執行錯誤：" + String(e));
+      // 剪貼簿可能被瀏覽器擋，沒關係，讓使用者手動複製
+      toast("已產生 SQL（剪貼簿可能被瀏覽器擋住）→ 直接按面板的【複製】");
     }
   }
 
@@ -445,6 +474,63 @@
   document.getElementById("q").addEventListener("input", (e)=>renderPending(e.target.value));
 
   loadAll();
+
+  // ===== tiny toast =====
+  function toast(msg){
+    try{ alert(msg); }catch(e){ console.log(msg); }
+  }
+
+  // ===== SQL panel handlers =====
+  (function(){
+    const panel = document.getElementById("sqlPanel");
+    const close = ()=>{ panel.style.display="none"; };
+    document.getElementById("sqlClose").addEventListener("click", close);
+    panel.addEventListener("click", (e)=>{ if(e.target===panel) close(); });
+
+    const projectRef = (SUPABASE_URL||"").split("//")[1]?.split(".")[0] || "";
+    const sqlUrl = projectRef ? `https://supabase.com/dashboard/project/${projectRef}/sql/new` : "https://supabase.com/dashboard";
+    document.getElementById("openSqlEditor").href = sqlUrl;
+
+    document.getElementById("sqlCopy").addEventListener("click", async ()=>{
+      const txt = document.getElementById("sqlText").value || "";
+      try{
+        await navigator.clipboard.writeText(txt);
+        toast("已複製 ✅");
+      }catch(e){
+        toast("瀏覽器不允許剪貼簿，請手動全選複製");
+      }
+    });
+
+    document.getElementById("sqlDone").addEventListener("click", ()=>{
+      close();
+      location.reload();
+    });
+  })();
+
 </script>
+
+<!-- ===== SQL Trigger Panel (no CORS) ===== -->
+<div id="sqlPanel" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:9999; align-items:center; justify-content:center; padding:16px;">
+  <div style="width:min(920px, 96vw); background:#fff; border-radius:16px; box-shadow:0 10px 30px rgba(0,0,0,.25); overflow:hidden;">
+    <div style="display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid #eee;">
+      <div style="font-weight:800;">一鍵 SQL（貼到 Supabase SQL Editor → Run）</div>
+      <button id="sqlClose" style="border:none; background:transparent; font-size:22px; cursor:pointer;">✕</button>
+    </div>
+    <div style="padding:14px 16px;">
+      <div style="font-size:13px; color:#555; margin-bottom:8px;">
+        這段 SQL 會用 <b>pg_net (net.http_post)</b> 從資料庫端呼叫 Edge Function，完全不走瀏覽器 fetch，所以不會遇到 CORS。
+      </div>
+      <textarea id="sqlText" spellcheck="false" style="width:100%; height:220px; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size:12.5px; line-height:1.5; padding:12px; border:1px solid #e6e6e6; border-radius:12px; resize:vertical;"></textarea>
+      <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; justify-content:flex-end;">
+        <a id="openSqlEditor" target="_blank" rel="noopener" style="text-decoration:none;">
+          <button style="padding:10px 14px; border-radius:999px; border:1px solid #d7d7d7; background:#fff; cursor:pointer;">開啟 Supabase SQL Editor</button>
+        </a>
+        <button id="sqlCopy" style="padding:10px 14px; border-radius:999px; border:none; background:#0a7; color:#fff; cursor:pointer;">複製</button>
+        <button id="sqlDone" style="padding:10px 14px; border-radius:999px; border:none; background:#0b5; color:#fff; cursor:pointer;">我已 Run → 重新整理</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
