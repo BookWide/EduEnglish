@@ -170,6 +170,8 @@
         <div class="row">
           <button id="btnDownloadActiveJson" class="btn secondary" disabled>下載此 scene.json</button>
           <button id="btnDownloadActiveSrt" class="btn secondary" disabled>下載此 SRT</button>
+          <button id="btnGenImagesActive" class="btn" disabled>依 photo_prompt 生成圖片（本批次）</button>
+          <button id="btnClearGenImages" class="btn danger" disabled>清除生成圖片</button>
         </div>
       </div>
 
@@ -179,6 +181,27 @@
           <div class="chip" id="imgChip">尚未匯入圖片</div>
           <div class="chip" id="klingChip">Kling JSON 已就緒：否</div>
         </div>
+
+        <div class="two" style="margin-top:10px;">
+          <div class="field" style="margin-top:0;">
+            <label>OpenAI Images API（Supabase Edge Function）</label>
+            <input id="imgApiUrl" type="text" class="mono" value="https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/fos-generate-image" />
+            <div class="small">你已在 Supabase 設定 <span class="mono">OPENAI_API_KEY</span>。此頁只呼叫你的 Edge Function，不會暴露金鑰。</div>
+          </div>
+          <div class="field" style="margin-top:0;">
+            <label>圖片參數</label>
+            <div class="two" style="margin-top:0;">
+              <input id="imgModel" type="text" class="mono" value="gpt-image-1.5" />
+              <select id="imgSize" class="mono">
+                <option value="1024x1024" selected>1024x1024</option>
+                <option value="1024x1536">1024x1536</option>
+                <option value="1536x1024">1536x1024</option>
+              </select>
+            </div>
+            <div class="small">按「生成圖片」會依 cue 順序產出 <span class="mono">001.png</span>、<span class="mono">002.png</span>…（對齊 cue id）。</div>
+          </div>
+        </div>
+
 
         <div class="two">
           <div class="field">
@@ -255,6 +278,12 @@
   const btnDownloadActiveJson = $('btnDownloadActiveJson');
   const btnDownloadActiveSrt = $('btnDownloadActiveSrt');
 
+  const btnGenImagesActive = $('btnGenImagesActive');
+  const btnClearGenImages = $('btnClearGenImages');
+  const imgApiUrl = $('imgApiUrl');
+  const imgModel = $('imgModel');
+  const imgSize = $('imgSize');
+
   const dropImg = $('dropImg');
   const fileImgs = $('fileImgs');
   const notes = $('notes');
@@ -267,6 +296,7 @@
 
   let batches = [];
   let activeIndex = -1;
+  let isGenerating = false;
 
   const pad3 = (n)=>String(n).padStart(3,'0');
 
@@ -283,6 +313,35 @@
   function downloadText(filename, text, mime){
     downloadBlob(filename, new Blob([text], {type: mime || 'text/plain'}));
   }
+
+  function b64ToBlob(b64, mime){
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime || "image/png" });
+  }
+
+  async function genOneImage(prompt){
+    const url = (imgApiUrl && imgApiUrl.value) ? imgApiUrl.value.trim() : "";
+    if(!url) throw new Error("缺少圖片 API URL");
+    const model = (imgModel && imgModel.value) ? imgModel.value.trim() : "gpt-image-1.5";
+    const size = (imgSize && imgSize.value) ? imgSize.value : "1024x1024";
+
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type":"application/json" },
+      body: JSON.stringify({ prompt, model, size, background: "auto", moderation: "auto" })
+    });
+    const data = await r.json().catch(()=>null);
+    if(!r.ok){
+      const msg = data ? JSON.stringify(data) : (""+r.status);
+      throw new Error("生圖失敗：" + msg);
+    }
+    const b64 = data && (data.b64 || (data.data && data.data[0] && data.data[0].b64_json));
+    if(!b64) throw new Error("回傳缺少 b64");
+    return b64ToBlob(b64, "image/png");
+  }
+
   function normalizeLine(s){
     return (s||"").replace(/\uFEFF/g,'').replace(/\r/g,'').trimEnd();
   }
@@ -401,6 +460,8 @@
     if(!batches.length){
       batchStatus.innerHTML = "<b>狀態：</b>尚未匯入 SRT";
       btnBuildAll.disabled = true;
+    btnGenImagesActive.disabled = true;
+    btnClearGenImages.disabled = true;
       btnZipJsonOnly.disabled = true;
       btnZipAllWithImages.disabled = true;
       return;
@@ -421,7 +482,7 @@
           <div class="name">${pad3(idx+1)}｜${escapeHtml(b.name)}</div>
           <div class="meta">${b.cues.length} 段 · ${b.scene?.length? "scene.json ✅":"scene.json ❌"}</div>
         </div>
-        <div class="chip mono">${b.images?.length ? (b.images.length+" 張圖") : "0 張圖"}</div>
+        <div class="chip mono">${(b.imagesGenerated?.length||0) ? ((b.imagesGenerated.length)+" 張生圖") : ((b.images?.length ? (b.images.length+" 張圖") : "0 張圖"))}</div>
       `;
       div.addEventListener('click', ()=>setActive(idx));
       fileList.appendChild(div);
@@ -435,10 +496,13 @@
     const b = batches[idx];
     activeBadge.textContent = `${pad3(idx+1)}｜${b.name}`;
     cueChip.textContent = `字幕段數：${b.cues.length}`;
-    imgChip.textContent = `圖片：${b.images?.length||0} 張`;
+    imgChip.textContent = `圖片：${(b.imagesGenerated?.length||0) ? (b.imagesGenerated.length+' 張生圖') : ((b.images?.length||0)+' 張')}`;
     klingChip.textContent = `Kling JSON 已就緒：${(b.scene && b.scene.length) ? "是":"否"}`;
 
     btnDownloadActiveSrt.disabled = false;
+
+    btnGenImagesActive.disabled = !(b.scene && b.scene.length) || isGenerating;
+    btnClearGenImages.disabled = !((b.imagesGenerated && b.imagesGenerated.length) || false) || isGenerating;
 
     // show editor
     emptyEditor.style.display = "none";
@@ -519,6 +583,8 @@
     jsonOut.value = JSON.stringify(arr, null, 2);
     klingChip.textContent = `Kling JSON 已就緒：${arr.length ? "是":"否"}`;
     btnDownloadActiveJson.disabled = !(b.scene && b.scene.length);
+    btnGenImagesActive.disabled = !(b.scene && b.scene.length) || isGenerating;
+    btnClearGenImages.disabled = !((b.imagesGenerated && b.imagesGenerated.length) || false) || isGenerating;
     refreshLeftList();
     const hasAllScene = batches.length && batches.every(bb => bb.scene && bb.scene.length);
     btnZipJsonOnly.disabled = !hasAllScene;
@@ -532,7 +598,7 @@
     for(const f of list){
       const raw = await f.text();
       const cues = parseSrt(raw);
-      batches.push({ name: f.name, rawSrt: raw, cues, scene: [], images: [] });
+      batches.push({ name: f.name, rawSrt: raw, cues, scene: [], images: [], imagesGenerated: [] });
     }
     if(activeIndex === -1 && batches.length) activeIndex = 0;
     refreshLeftList();
@@ -558,7 +624,7 @@
   });
 
   btnResetAll.addEventListener('click', ()=>{
-    batches = []; activeIndex = -1;
+    batches = []; activeIndex = -1; isGenerating = false;
     refreshLeftList();
     activeBadge.textContent = "未選擇";
     cueChip.textContent = "尚未選擇 SRT";
@@ -567,6 +633,8 @@
     btnDownloadActiveJson.disabled = true;
     btnDownloadActiveSrt.disabled = true;
     btnBuildAll.disabled = true;
+    btnGenImagesActive.disabled = true;
+    btnClearGenImages.disabled = true;
     btnZipJsonOnly.disabled = true;
     btnZipAllWithImages.disabled = true;
     jsonOut.value = "";
@@ -605,6 +673,86 @@
     dropImg.addEventListener(evt, (e)=>{ e.preventDefault(); dropImg.style.borderColor = "rgba(170,183,214,.35)"; });
   });
   dropImg.addEventListener('drop', (e)=>{ setImagesForActive(e.dataTransfer.files); });
+
+
+  async function generateImagesForActive(){
+    if(activeIndex < 0) return;
+    const b = batches[activeIndex];
+    if(!b.scene || !b.scene.length) throw new Error("先產生 scene.json");
+    if(isGenerating) return;
+    isGenerating = true;
+    btnGenImagesActive.disabled = true;
+    btnClearGenImages.disabled = true;
+    rightStatus.innerHTML = `<b>狀態：</b>開始生圖…（0 / ${b.scene.length}）`;
+
+    const generated = [];
+    const failed = [];
+
+    try{
+      for(let i=0;i<b.scene.length;i++){
+        const s = b.scene[i];
+        const prompt = (s.photo_prompt || "").trim();
+        if(!prompt){
+          failed.push({id:s.id, reason:"empty prompt"});
+          rightStatus.innerHTML = `<b>狀態：</b>生圖中…（${i+1} / ${b.scene.length}）· 跳過空 prompt：${s.id}`;
+          continue;
+        }
+
+        try{
+          const blob = await genOneImage(prompt);
+          generated.push({ id: s.id, blob });
+          rightStatus.innerHTML = `<b>狀態：</b>生圖中…（${i+1} / ${b.scene.length}）· OK：${s.id}`;
+        }catch(err){
+          failed.push({id:s.id, reason: String(err)});
+          rightStatus.innerHTML = `<b>狀態：</b>生圖中…（${i+1} / ${b.scene.length}）· 失敗：${s.id}`;
+        }
+
+        // 小延遲，降低被限流機率
+        await new Promise(res=>setTimeout(res, 120));
+      }
+
+      // sort by id
+      generated.sort((a,b)=>a.id-b.id);
+      b.imagesGenerated = generated;
+
+      imgChip.textContent = `圖片：${generated.length} 張生圖`;
+      klingChip.textContent = `Kling JSON 已就緒：${(b.scene && b.scene.length) ? "是":"否"}`;
+      refreshLeftList();
+
+      if(failed.length){
+        const list = failed.slice(0,10).map(x=>x.id).join(", ");
+        rightStatus.innerHTML = `<b>狀態：</b>生圖完成：${generated.length}/${b.scene.length}（失敗 ${failed.length} 段：${list}${failed.length>10?"…":""}）`;
+      }else{
+        rightStatus.innerHTML = `<b>狀態：</b>生圖完成：${generated.length}/${b.scene.length}`;
+      }
+    }finally{
+      isGenerating = false;
+      btnGenImagesActive.disabled = !(b.scene && b.scene.length);
+      btnClearGenImages.disabled = !(b.imagesGenerated && b.imagesGenerated.length);
+    }
+  }
+
+  btnGenImagesActive.addEventListener('click', ()=>{
+    generateImagesForActive().catch(err=>{
+      rightStatus.innerHTML = `<b>狀態：</b>生圖失敗：${escapeHtml(String(err))}`;
+      isGenerating = false;
+      if(activeIndex>=0){
+        const b = batches[activeIndex];
+        btnGenImagesActive.disabled = !(b.scene && b.scene.length);
+        btnClearGenImages.disabled = !(b.imagesGenerated && b.imagesGenerated.length);
+      }
+    });
+  });
+
+  btnClearGenImages.addEventListener('click', ()=>{
+    if(activeIndex<0) return;
+    const b = batches[activeIndex];
+    b.imagesGenerated = [];
+    imgChip.textContent = `圖片：${(b.images?.length||0)} 張`;
+    refreshLeftList();
+    btnClearGenImages.disabled = true;
+    rightStatus.innerHTML = `<b>狀態：</b>已清除生成圖片（你仍可手動匯入圖片後打包）`;
+  });
 
   function sanitizeFolderName(s){ return (s||"batch").replace(/[\\/:*?"<>|]/g,"_").slice(0,80); }
   function guessExt(file){
@@ -646,14 +794,26 @@
       folder.file(b.name, b.rawSrt);
       folder.file("scene.json", JSON.stringify(klingArray(b.scene||[]), null, 2));
 
-      if(b.images && b.images.length){
+      if((b.imagesGenerated && b.imagesGenerated.length) || (b.images && b.images.length)){
         const imgF = folder.folder("images");
-        for (let i=0; i<b.images.length; i++){
-          const file = b.images[i];
-          const ext = guessExt(file);
-          const name = `${pad3(i+1)}${ext}`;
-          const buf = await file.arrayBuffer();
-          imgF.file(name, buf);
+
+        // 1) 優先：系統生成（對齊 cue id）
+        if(b.imagesGenerated && b.imagesGenerated.length){
+          const sorted = [...b.imagesGenerated].sort((a,b)=>a.id-b.id);
+          for(const it of sorted){
+            const name = `${pad3(it.id)}.png`;
+            const buf = await it.blob.arrayBuffer();
+            imgF.file(name, buf);
+          }
+        }else if(b.images && b.images.length){
+          // 2) 次選：手動匯入（依匯入順序 001/002…）
+          for (let i=0; i<b.images.length; i++){
+            const file = b.images[i];
+            const ext = guessExt(file);
+            const name = `${pad3(i+1)}${ext}`;
+            const buf = await file.arrayBuffer();
+            imgF.file(name, buf);
+          }
         }
       }
     }
