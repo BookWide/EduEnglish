@@ -74,7 +74,12 @@
     .two{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;}
     @media (max-width: 680px){ .two{grid-template-columns:1fr} }
     .kbd{display:inline-block;padding:2px 6px;border:1px solid rgba(170,183,214,.35);border-radius:6px;background: rgba(10,20,36,.5);font-size:11px;color: var(--muted);}
-  </style>
+  
+    .progressBar{height:10px;border-radius:999px;background:rgba(255,255,255,.10);overflow:hidden;border:1px solid rgba(255,255,255,.12)}
+    .progressFill{height:100%;background:linear-gradient(90deg, rgba(90,169,255,.9), rgba(73,255,200,.85));border-radius:999px;transition:width .2s ease}
+    .progressWrap{display:flex;align-items:center;gap:10px}
+
+</style>
 </head>
 <body>
 <header>
@@ -170,7 +175,9 @@
         <div class="row">
           <button id="btnDownloadActiveJson" class="btn secondary" disabled>下載此 scene.json</button>
           <button id="btnDownloadActiveSrt" class="btn secondary" disabled>下載此 SRT</button>
-          <button id="btnGenImagesActive" class="btn" disabled>依 photo_prompt 生成圖片（本批次）</button>
+          <button id="btnGenImagesActive" class="btn" disabled>先試跑 5 張（本批次）</button>
+          <button id="btnGenImagesAll" class="btn" disabled>一鍵慢速跑完（5張/批）</button>
+          <button id="btnStopGen" class="btn secondary" disabled>停止</button>
           <button id="btnClearGenImages" class="btn danger" disabled>清除生成圖片</button>
         </div>
       </div>
@@ -280,6 +287,10 @@
 
   const btnGenImagesActive = $('btnGenImagesActive');
   const btnClearGenImages = $('btnClearGenImages');
+  const btnGenImagesAll = $('btnGenImagesAll');
+  const btnStopGen = $('btnStopGen');
+  const genBar = $('genBar');
+  const genHint = $('genHint');
   const imgApiUrl = $('imgApiUrl');
   const imgModel = $('imgModel');
   const imgSize = $('imgSize');
@@ -297,6 +308,7 @@
   let batches = [];
   let activeIndex = -1;
   let isGenerating = false;
+  let stopRequested = false;
 
   const pad3 = (n)=>String(n).padStart(3,'0');
 
@@ -321,7 +333,13 @@
     return new Blob([bytes], { type: mime || "image/png" });
   }
 
-  async function genOneImage(prompt){
+  function setProgress(done, total){
+    const pct = total ? Math.round((done/total)*100) : 0;
+    if(genBar) genBar.style.width = pct + '%';
+    if(genHint) genHint.textContent = pct + '%';
+  }
+
+  async function genBatch(prompts){
     const url = (imgApiUrl && imgApiUrl.value) ? imgApiUrl.value.trim() : "";
     if(!url) throw new Error("缺少圖片 API URL");
     const model = (imgModel && imgModel.value) ? imgModel.value.trim() : "gpt-image-1.5";
@@ -330,16 +348,31 @@
     const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ prompt, model, size, background: "auto", moderation: "auto" })
+      body: JSON.stringify({ prompts, model, size, background: "auto", moderation: "auto" })
     });
+
     const data = await r.json().catch(()=>null);
     if(!r.ok){
       const msg = data ? JSON.stringify(data) : (""+r.status);
       throw new Error("生圖失敗：" + msg);
     }
-    const b64 = data && (data.b64 || (data.data && data.data[0] && data.data[0].b64_json));
-    if(!b64) throw new Error("回傳缺少 b64");
-    return b64ToBlob(b64, "image/png");
+
+    // Edge Function returns {images:[b64...]} OR legacy {b64:"..."}
+    const arr = data && (data.images || data.b64s || null);
+    if(Array.isArray(arr) && arr.length){
+      return arr.map(b64 => b64ToBlob(b64, "image/png"));
+    }
+
+    const single = data && (data.b64 || (data.data && data.data[0] && data.data[0].b64_json));
+    if(single){
+      return [b64ToBlob(single, "image/png")];
+    }
+    throw new Error("回傳缺少 images/b64");
+  }
+
+  async function genOneImage(prompt){
+    const blobs = await genBatch([prompt]);
+    return blobs[0];
   }
 
   function normalizeLine(s){
@@ -502,6 +535,8 @@
     btnDownloadActiveSrt.disabled = false;
 
     btnGenImagesActive.disabled = !(b.scene && b.scene.length) || isGenerating;
+    btnGenImagesAll.disabled = !(b.scene && b.scene.length) || isGenerating;
+    btnStopGen.disabled = !isGenerating;
     btnClearGenImages.disabled = !((b.imagesGenerated && b.imagesGenerated.length) || false) || isGenerating;
 
     // show editor
@@ -584,6 +619,8 @@
     klingChip.textContent = `Kling JSON 已就緒：${arr.length ? "是":"否"}`;
     btnDownloadActiveJson.disabled = !(b.scene && b.scene.length);
     btnGenImagesActive.disabled = !(b.scene && b.scene.length) || isGenerating;
+    btnGenImagesAll.disabled = !(b.scene && b.scene.length) || isGenerating;
+    btnStopGen.disabled = !isGenerating;
     btnClearGenImages.disabled = !((b.imagesGenerated && b.imagesGenerated.length) || false) || isGenerating;
     refreshLeftList();
     const hasAllScene = batches.length && batches.every(bb => bb.scene && bb.scene.length);
@@ -661,6 +698,9 @@
     const b = batches[activeIndex];
     b.images = Array.from(files || []).filter(f => f && f.type && f.type.startsWith("image/"));
     imgChip.textContent = `圖片：${b.images.length} 張`;
+    const totalTargets = b.cues.filter(c=> (b.scene?.find(s=>s.id===c.id)?.photo_prompt||'').trim() ).length;
+    const done = (b.imagesGenerated?.length||0);
+    setProgress(done, totalTargets || 1);
     refreshLeftList();
   }
 
@@ -676,63 +716,61 @@
 
 
   async function generateImagesForActive(){
+    // 先試跑：最多 5 張（跳過已生成）
     if(activeIndex < 0) return;
     const b = batches[activeIndex];
     if(!b.scene || !b.scene.length) throw new Error("先產生 scene.json");
     if(isGenerating) return;
-    isGenerating = true;
-    btnGenImagesActive.disabled = true;
-    btnClearGenImages.disabled = true;
-    rightStatus.innerHTML = `<b>狀態：</b>開始生圖…（0 / ${b.scene.length}）`;
 
-    const generated = [];
-    const failed = [];
+    const existing = new Set((b.imagesGenerated||[]).map(x=>x.id));
+    const pending = b.scene.filter(s => (s.photo_prompt||"").trim() && !existing.has(s.id));
+    const totalTargets = b.scene.filter(s => (s.photo_prompt||"").trim()).length;
+    const doneBefore = (b.imagesGenerated||[]).length;
+
+    if(!pending.length){
+      rightStatus.innerHTML = `<b>狀態：</b>已完成：${doneBefore}/${totalTargets}（沒有可生成的段落）`;
+      setProgress(doneBefore, totalTargets);
+      return;
+    }
+
+    const batch = pending.slice(0,5);
+    const prompts = batch.map(s => (s.photo_prompt||"").trim());
+
+    isGenerating = true;
+    stopRequested = false;
+    btnGenImagesActive.disabled = true;
+    btnGenImagesAll.disabled = true;
+    btnStopGen.disabled = false;
+    btnClearGenImages.disabled = true;
+
+    rightStatus.innerHTML = `<b>狀態：</b>試跑中…（本批次 ${batch.length} 張 / 5）`;
+    setProgress(doneBefore, totalTargets);
 
     try{
-      for(let i=0;i<b.scene.length;i++){
-        const s = b.scene[i];
-        const prompt = (s.photo_prompt || "").trim();
-        if(!prompt){
-          failed.push({id:s.id, reason:"empty prompt"});
-          rightStatus.innerHTML = `<b>狀態：</b>生圖中…（${i+1} / ${b.scene.length}）· 跳過空 prompt：${s.id}`;
-          continue;
-        }
-
-        try{
-          const blob = await genOneImage(prompt);
-          generated.push({ id: s.id, blob });
-          rightStatus.innerHTML = `<b>狀態：</b>生圖中…（${i+1} / ${b.scene.length}）· OK：${s.id}`;
-        }catch(err){
-          failed.push({id:s.id, reason: String(err)});
-          rightStatus.innerHTML = `<b>狀態：</b>生圖中…（${i+1} / ${b.scene.length}）· 失敗：${s.id}`;
-        }
-
-        // 小延遲，降低被限流機率
-        await new Promise(res=>setTimeout(res, 120));
+      const blobs = await genBatch(prompts); // blobs length == batch length
+      const out = b.imagesGenerated ? [...b.imagesGenerated] : [];
+      for(let i=0;i<batch.length;i++){
+        const id = batch[i].id;
+        out.push({ id, blob: blobs[i] });
       }
+      out.sort((a,b)=>a.id-b.id);
+      b.imagesGenerated = out;
 
-      // sort by id
-      generated.sort((a,b)=>a.id-b.id);
-      b.imagesGenerated = generated;
-
-      imgChip.textContent = `圖片：${generated.length} 張生圖`;
-      klingChip.textContent = `Kling JSON 已就緒：${(b.scene && b.scene.length) ? "是":"否"}`;
+      const done = b.imagesGenerated.length;
+      imgChip.textContent = `圖片：${done} 張生圖`;
       refreshLeftList();
-
-      if(failed.length){
-        const list = failed.slice(0,10).map(x=>x.id).join(", ");
-        rightStatus.innerHTML = `<b>狀態：</b>生圖完成：${generated.length}/${b.scene.length}（失敗 ${failed.length} 段：${list}${failed.length>10?"…":""}）`;
-      }else{
-        rightStatus.innerHTML = `<b>狀態：</b>生圖完成：${generated.length}/${b.scene.length}`;
-      }
+      rightStatus.innerHTML = `<b>狀態：</b>本次完成 ${batch.length} 張；累積 ${done}/${totalTargets}`;
+      setProgress(done, totalTargets);
     }finally{
       isGenerating = false;
+      btnStopGen.disabled = true;
       btnGenImagesActive.disabled = !(b.scene && b.scene.length);
+      btnGenImagesAll.disabled = !(b.scene && b.scene.length);
       btnClearGenImages.disabled = !(b.imagesGenerated && b.imagesGenerated.length);
     }
   }
 
-  btnGenImagesActive.addEventListener('click', ()=>{
+  btnGenImagesActive.addEventListener  btnGenImagesActive.addEventListener('click', ()=>{
     generateImagesForActive().catch(err=>{
       rightStatus.innerHTML = `<b>狀態：</b>生圖失敗：${escapeHtml(String(err))}`;
       isGenerating = false;
@@ -744,6 +782,86 @@
     });
   });
 
+
+  async function generateAllSlow(){
+    if(activeIndex < 0) return;
+    const b = batches[activeIndex];
+    if(!b.scene || !b.scene.length) throw new Error("先產生 scene.json");
+    if(isGenerating) return;
+
+    const totalTargets = b.scene.filter(s => (s.photo_prompt||"").trim()).length;
+
+    isGenerating = true;
+    stopRequested = false;
+    btnGenImagesActive.disabled = true;
+    btnGenImagesAll.disabled = true;
+    btnStopGen.disabled = false;
+    btnClearGenImages.disabled = true;
+
+    try{
+      while(true){
+        if(stopRequested){
+          const done = (b.imagesGenerated||[]).length;
+          rightStatus.innerHTML = `<b>狀態：</b>已停止（累積 ${done}/${totalTargets}）`;
+          setProgress(done, totalTargets);
+          break;
+        }
+
+        const existing = new Set((b.imagesGenerated||[]).map(x=>x.id));
+        const pending = b.scene.filter(s => (s.photo_prompt||"").trim() && !existing.has(s.id));
+        if(!pending.length){
+          const done = (b.imagesGenerated||[]).length;
+          rightStatus.innerHTML = `<b>狀態：</b>全數完成：${done}/${totalTargets}`;
+          setProgress(done, totalTargets);
+          break;
+        }
+
+        const batch = pending.slice(0,5);
+        const prompts = batch.map(s => (s.photo_prompt||"").trim());
+
+        const doneBefore = (b.imagesGenerated||[]).length;
+        rightStatus.innerHTML = `<b>狀態：</b>慢速生成中…（本批次 ${batch.length} 張 / 5）· 累積 ${doneBefore}/${totalTargets}`;
+        setProgress(doneBefore, totalTargets);
+
+        const blobs = await genBatch(prompts);
+
+        const out = b.imagesGenerated ? [...b.imagesGenerated] : [];
+        for(let i=0;i<batch.length;i++){
+          out.push({ id: batch[i].id, blob: blobs[i] });
+        }
+        out.sort((a,b)=>a.id-b.id);
+        b.imagesGenerated = out;
+
+        const done = b.imagesGenerated.length;
+        imgChip.textContent = `圖片：${done} 張生圖`;
+        refreshLeftList();
+        setProgress(done, totalTargets);
+
+        // 批次間隔（慢速）
+        await new Promise(res=>setTimeout(res, 900));
+      }
+    }catch(err){
+      const done = (b.imagesGenerated||[]).length;
+      rightStatus.innerHTML = `<b>狀態：</b>慢速生成中斷：${escapeHtml(String(err))}（累積 ${done}/${totalTargets}）`;
+      setProgress(done, totalTargets);
+    }finally{
+      isGenerating = false;
+      btnStopGen.disabled = true;
+      btnGenImagesActive.disabled = !(b.scene && b.scene.length);
+      btnGenImagesAll.disabled = !(b.scene && b.scene.length);
+      btnClearGenImages.disabled = !(b.imagesGenerated && b.imagesGenerated.length);
+    }
+  }
+
+  btnGenImagesAll.addEventListener('click', ()=>{
+    generateAllSlow();
+  });
+
+  btnStopGen.addEventListener('click', ()=>{
+    stopRequested = true;
+    btnStopGen.disabled = true;
+  });
+
   btnClearGenImages.addEventListener('click', ()=>{
     if(activeIndex<0) return;
     const b = batches[activeIndex];
@@ -752,6 +870,7 @@
     refreshLeftList();
     btnClearGenImages.disabled = true;
     rightStatus.innerHTML = `<b>狀態：</b>已清除生成圖片（你仍可手動匯入圖片後打包）`;
+    setProgress(0,1);
   });
 
   function sanitizeFolderName(s){ return (s||"batch").replace(/[\\/:*?"<>|]/g,"_").slice(0,80); }
