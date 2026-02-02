@@ -79,6 +79,36 @@
         <span id="status" class="small"></span>
       </div>
 
+      <div class="row" style="margin-top:10px; gap:10px; flex-wrap:wrap">
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span class="small" style="min-width:84px">MP3（TTS）</span>
+          <input id="apiKey" type="password" placeholder="貼上 OPENAI_API_KEY（只存在本機）" style="min-width:260px"/>
+          <select id="voice">
+            <option value="cedar">cedar（推薦）</option>
+            <option value="marin">marin（推薦）</option>
+            <option value="alloy">alloy</option>
+            <option value="ash">ash</option>
+            <option value="ballad">ballad</option>
+            <option value="coral">coral</option>
+            <option value="echo">echo</option>
+            <option value="fable">fable</option>
+            <option value="nova">nova</option>
+            <option value="onyx">onyx</option>
+            <option value="sage">sage</option>
+            <option value="shimmer">shimmer</option>
+            <option value="verse">verse</option>
+          </select>
+          <input id="ttsInstr" placeholder="可選：語氣指令（例：warm, clear, slow）" style="min-width:260px"/>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top:8px; gap:10px; flex-wrap:wrap">
+        <button id="mp3Selected" class="secondary" disabled>生 MP3（選取列）</button>
+        <button id="mp3All" class="secondary" disabled>批次生 MP3（前 <span id="mp3LimitLabel">10</span> 列）</button>
+        <input id="mp3Limit" type="number" min="1" max="500" value="10" style="width:90px"/>
+        <span id="mp3Prog" class="small"></span>
+      </div>
+
       <div class="hint" style="margin-top:10px">
         • 你可先用「每張 1 句」跑一版，再改成「2 / 3 句」重跑。<br/>
         • 生成的提示辭是「可直接貼到 GPT 生單張圖」的起手式；你要更精準風格，再在提示辭末尾加風格關鍵字即可。<br/>
@@ -133,8 +163,38 @@
   const tbody = document.querySelector("#tbl tbody");
   const promptBox = $("promptBox");
   const copyPromptBtn = $("copyPrompt");
+  const apiKeyInput = $("apiKey");
+  const voiceSel = $("voice");
+  const ttsInstrInput = $("ttsInstr");
+  const mp3SelectedBtn = $("mp3Selected");
+  const mp3AllBtn = $("mp3All");
+  const mp3LimitInput = $("mp3Limit");
+  const mp3LimitLabel = $("mp3LimitLabel");
+  const mp3Prog = $("mp3Prog");
 
   let current = { source_filename:"", short_name:"", per_scene:1, scenes:[] };
+
+  let selectedScene = null;
+
+  // 記住 API Key（只存本機 localStorage）
+  const KEY_LS = "BW_OPENAI_API_KEY";
+  if (apiKeyInput) {
+    apiKeyInput.value = localStorage.getItem(KEY_LS) || "";
+    apiKeyInput.addEventListener("change", ()=>{
+      const v = (apiKeyInput.value||"").trim();
+      if (v) localStorage.setItem(KEY_LS, v);
+      else localStorage.removeItem(KEY_LS);
+      refreshMp3Buttons();
+    });
+  }
+  if (mp3LimitInput) {
+    mp3LimitInput.addEventListener("input", ()=>{
+      const n = parseInt(mp3LimitInput.value, 10) || 10;
+      mp3LimitLabel.textContent = String(Math.max(1, n));
+      refreshMp3Buttons();
+    });
+  }
+
 
   function baseName(name) {
     return name.replace(/\.[^/.]+$/, "");
@@ -252,9 +312,11 @@
         <td>${escapeHtml(s.camera_prompt)}</td>
       `;
       tr.addEventListener("click", ()=>{
+        selectedScene = s;
         promptBox.value = s.photo_prompt;
         copyPromptBtn.disabled = false;
         status.innerHTML = `<span class="ok">已選取：</span><span class="mono">${s.id}</span>`;
+        refreshMp3Buttons();
       });
       tbody.appendChild(tr);
     }
@@ -262,6 +324,49 @@
 
   function escapeHtml(str) {
     return (str||"").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+  function refreshMp3Buttons() {
+    const keyOk = (apiKeyInput && (apiKeyInput.value||"").trim().length > 0);
+    const hasScenes = current && current.scenes && current.scenes.length > 0;
+    if (mp3SelectedBtn) mp3SelectedBtn.disabled = !(keyOk && selectedScene);
+    if (mp3AllBtn) mp3AllBtn.disabled = !(keyOk && hasScenes);
+  }
+
+  async function ttsToMp3(text, filename) {
+    const key = (apiKeyInput.value||"").trim();
+    if (!key) throw new Error("缺 OPENAI_API_KEY");
+    const payload = {
+      model: "gpt-4o-mini-tts",
+      voice: (voiceSel && voiceSel.value) ? voiceSel.value : "cedar",
+      input: text
+    };
+    const instr = (ttsInstrInput && ttsInstrInput.value) ? ttsInstrInput.value.trim() : "";
+    if (instr) payload.instructions = instr;
+
+    const resp = await fetch("https://api.openai.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + key,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!resp.ok) {
+      const msg = await resp.text().catch(()=> "");
+      throw new Error("TTS 失敗：" + resp.status + " " + (msg.slice(0, 200) || ""));
+    }
+    const buf = await resp.arrayBuffer();
+    const blob = new Blob([buf], {type:"audio/mpeg"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename.endsWith(".mp3") ? filename : (filename + ".mp3");
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 2000);
+  }
+
   }
 
   function download(filename, content, mime) {
@@ -296,6 +401,8 @@
     csvBtn.disabled = true;
     copyPromptBtn.disabled = true;
     promptBox.value = "";
+    selectedScene = null;
+    refreshMp3Buttons();
     tbody.innerHTML = "";
   });
 
@@ -316,9 +423,11 @@
     current.per_scene = perScene;
     current.scenes = buildScenes(entries, shortName, perScene, f.name);
 
+    selectedScene = null;
     renderTable(current.scenes);
     jsonBtn.disabled = false;
     csvBtn.disabled = false;
+    refreshMp3Buttons();
     status.innerHTML = `<span class="ok">完成：</span>${entries.length} 句 → ${current.scenes.length} 張（每張 ${perScene} 句）`;
   });
 
@@ -346,6 +455,52 @@
       status.innerHTML = `<span class="ok">已複製：</span>photo_prompt（fallback）`;
     }
   });
+
+  // ===== MP3 產生 =====
+  if (mp3LimitInput && mp3LimitLabel) {
+    mp3LimitLabel.textContent = mp3LimitInput.value || "10";
+    mp3LimitInput.addEventListener("input", ()=>{
+      mp3LimitLabel.textContent = mp3LimitInput.value || "10";
+    });
+  }
+
+  if (mp3SelectedBtn) {
+    mp3SelectedBtn.addEventListener("click", async ()=>{
+      try{
+        if (!selectedScene) return;
+        mp3Prog.textContent = "產生中… " + selectedScene.id;
+        await ttsToMp3(selectedScene.english, selectedScene.id + ".mp3");
+        mp3Prog.textContent = "完成：" + selectedScene.id + ".mp3";
+      }catch(e){
+        mp3Prog.textContent = "";
+        alert((e && e.message) ? e.message : String(e));
+      }
+    });
+  }
+
+  if (mp3AllBtn) {
+    mp3AllBtn.addEventListener("click", async ()=>{
+      try{
+        const limit = Math.max(1, Math.min(9999, parseInt(mp3LimitInput.value,10) || 10));
+        const arr = (current.scenes || []).slice(0, limit);
+        if (!arr.length) return;
+        let i = 0;
+        for (const s of arr) {
+          i++;
+          mp3Prog.textContent = `(${i}/${arr.length}) 產生中… ${s.id}`;
+          await ttsToMp3(s.english, s.id + ".mp3");
+        }
+        mp3Prog.textContent = `完成：已輸出 ${arr.length} 個 MP3`;
+      }catch(e){
+        mp3Prog.textContent = "";
+        alert((e && e.message) ? e.message : String(e));
+      }
+    });
+  }
+
+  // 初始化一次
+  refreshMp3Buttons();
+
 })();
 </script>
 </body>
