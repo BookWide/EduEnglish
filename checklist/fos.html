@@ -141,6 +141,15 @@
           </div>
         </div>
 
+        <div class="field" style="margin-top:10px;">
+          <label>單張提示／scene 合併句數（方便貼到 GPT 生單張圖）</label>
+          <select id="mergeN">
+            <option value="1" selected>1 句（每句一張）</option>
+            <option value="2">2 句（每兩句合併一張）</option>
+          </select>
+          <div class="small">此選項會影響：① 產生 scene.json 的段落切法、② 每列「複製單張提示」內容（可含兩句英文）。</div>
+        </div>
+
         <div class="status" id="batchStatus"><b>狀態：</b>尚未匯入 SRT</div>
 
         <div class="hr"></div>
@@ -266,12 +275,14 @@
 (function(){
   const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-  const $ = (id)=>document.getElementById(id);
+    const SAFE_SUFFIX = \"children's storybook illustration, wholesome, non-sexual, fully clothed, no nudity, no lingerie, no erotic content, no text\";
+const $ = (id)=>document.getElementById(id);
 
   const fileSrts = $('fileSrts');
   const dropSrt = $('dropSrt');
   const templateSel = $('template');
   const styleTail = $('styleTail');
+  const mergeSel = $('mergeN');
   const fileList = $('fileList');
   const batchStatus = $('batchStatus');
   const btnResetAll = $('btnResetAll');
@@ -314,6 +325,26 @@
 
   const pad3 = (n)=>String(n).padStart(3,'0');
 
+  function fnv1a32(str){
+    // 小型穩定 hash（不需 crypto，跨瀏覽器穩）
+    let h = 0x811c9dc5;
+    for (let i=0;i<str.length;i++){
+      h ^= str.charCodeAt(i);
+      h = (h + ((h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24))) >>> 0;
+    }
+    return ("00000000" + h.toString(16)).slice(-8);
+  }
+
+  function makeBatchId(filename, rawSrt){
+    // ✅ 來源檔名 + 內容 hash：檔名改了也能區分、同檔重匯也穩定
+    const base = (filename || "srt").replace(/\.[^.]+$/,"").replace(/\s+/g," ").trim();
+    const safe = base.replace(/[^a-zA-Z0-9\u4e00-\u9fa5 _-]/g,"").slice(0,40) || "srt";
+    const h = fnv1a32(rawSrt || "");
+    return `${safe}_${h}`; // 例：The Lion and the Mouse_a1b2c3d4
+  }
+
+
+
   function downloadBlob(filename, blob){
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -350,7 +381,7 @@
     const r = await fetch(url, {
       method: "POST",
       headers: { "Content-Type":"application/json", "Authorization": "Bearer " + SUPABASE_ANON_KEY },
-      body: JSON.stringify({ prompts, model, size, background: "auto", moderation: "auto" })
+      body: JSON.stringify({ prompts: (prompts||[]).map(p=> sanitizePrompt(p) + ", " + SAFE_SUFFIX), model, size, background: "auto", moderation: "auto" })
     });
 
     const data = await r.json().catch(()=>null);
@@ -377,14 +408,57 @@
     return blobs[0];
   }
 
+
+  async function copyToClipboard(text){
+    try{
+      await navigator.clipboard.writeText(text);
+      return true;
+    }catch(_e){
+      // fallback
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      try{ document.execCommand('copy'); }catch(e){}
+      ta.remove();
+      return true;
+    }
+  }
+
+  function buildSingleImagePrompt(batchId, sceneItem){
+    const style = (styleTail && styleTail.value) ? styleTail.value.trim() : "";
+    const core = sanitizePrompt((sceneItem.photo_prompt||"").trim() || (sceneItem.english_line||"").trim() || "");
+    const parts = [];
+    // 讓你貼到 GPT 時好辨識
+    parts.push(`[${batchId}-${pad3(sceneItem.id)}]`);
+    if(core) parts.push(core);
+    if(style) parts.push(style);
+    parts.push(SAFE_SUFFIX);
+    return parts.filter(Boolean).join(", ");
+  }
+
   function normalizeLine(s){
-    return (s||"").replace(/\uFEFF/g,'').replace(/\r/g,'').trimEnd();
+    // ✅ SRT 鎖定：永遠把 Windows CRLF 正規化成 LF，避免每次改別的功能就又讀不到
+    return (s||"")
+      .replace(/\uFEFF/g,'')          // BOM
+      .replace(/\r\n/g,'\n')        // CRLF -> LF
+      .replace(/\r/g,'\n')           // CR -> LF
+      .trimEnd();
   }
   
   function parseSrt(raw){
-    raw = (raw || "").replace(/\uFEFF/g,'').replace(/\r/g,'').trim();
+    // ✅ SRT 鎖定：統一換行，避免 CRLF 造成整份變一段（最常見讀不到原因）
+    raw = (raw || "")
+      .replace(/\uFEFF/g,'')      // BOM
+      .replace(/\r\n/g,'\n')    // CRLF -> LF
+      .replace(/\r/g,'\n')       // CR -> LF
+      .trim();
+
     if(!raw) return [];
-    const blocks = raw.split(/\n\s*\n/g);
+    // 以「空行」分段：支援 \n\n、\n  \n 等
+    const blocks = raw.split(/\n\s*\n+/g);
     const cues = [];
     let autoId = 1;
 
@@ -479,17 +553,37 @@
     return `${p}，${tail2}`;
   }
 
-  function buildSceneForBatch(cues){
+  function buildSceneForBatch(cues, batch){
     const tpl = templateSel.value;
     const tail = styleTail.value;
-    return cues.map(c => ({
-      id: c.id,
-      start: c.start,
-      end: c.end,
-      photo_prompt: (tpl === 'custom') ? "" : (tpl === 'lion_mouse' ? promptLionMouse(c.text, tail) : promptGeneric(c.text, tail)),
-      english_line: c.text,
-      camera: buildCameraByText(c.text)
-    }));
+    const n = Math.max(1, Math.min(2, parseInt(mergeSel.value || "1", 10) || 1));
+
+    // 以「1句/2句」合併成一個 scene（方便貼到 GPT 生單張圖）
+    const scenes = [];
+    let sid = 1;
+    for(let i=0;i<cues.length;i+=n){
+      const group = cues.slice(i, i+n);
+      const english = group.map(x=>x.text).join(" ");
+      const first = group[0];
+      const last = group[group.length-1];
+
+      const photo = (tpl === 'custom')
+        ? ""
+        : (tpl === 'lion_mouse' ? promptLionMouse(english, tail) : promptGeneric(english, tail));
+
+      scenes.push({
+        id: sid++,
+        start: first.start,
+        end: last.end,
+        cue_ids: group.map(x=>x.id),
+        photo_prompt: photo,
+        english_line: english,
+        camera: buildCameraByText(english),
+        batch_id: batch?.batchId || batch?.id || "",
+        srt_name: batch?.fileName || ""
+      });
+    }
+    return scenes;
   }
 
   function klingArray(scene){
@@ -502,7 +596,26 @@
   }
 
   function escapeHtml(s){
-    return (s||"").replace(/[&<>"']/g, (c)=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[c]));
+    return (s||"").replace(/[&<>"']/g, (c)=>({
+      "&":"&amp;",
+      "<":"&lt;",
+      ">":"&gt;",
+      '"':"&quot;",
+      "'":"&#039;"
+    }[c] || c));
+  }
+
+  function sanitizePrompt(p){
+    p = (p||"");
+    // hard remove/neutralize common NSFW triggers (english + zh)
+    const repl = [
+      [/\b(nude|nudity|naked|topless|lingerie|erotic|sexy|seduce|porn|fetish)\b/gi, "wholesome"],
+      [/(裸|裸體|裸露|內衣|性感|誘惑|情色|色情|AV片|性暗示)/g, "健康正向"]
+    ];
+    for(const [rg, to] of repl){ p = p.replace(rg, to); }
+    return p.trim();
+  }
+[c]));
   }
 
   function refreshLeftList(){
@@ -529,7 +642,7 @@
       div.className = "item" + (idx===activeIndex ? " active":"");
       div.innerHTML = `
         <div>
-          <div class="name">${pad3(idx+1)}｜${escapeHtml(b.name)}</div>
+          <div class="name">${pad3(idx+1)}｜${escapeHtml(b.name)} <span class="pill mono" style="margin-left:6px;padding:2px 8px;border-radius:999px;">ID:${escapeHtml(b.id||"")}</span></div>
           <div class="meta">${b.cues.length} 段 · ${b.scene?.length? "scene.json ✅":"scene.json ❌"}</div>
         </div>
         <div class="chip mono">${(b.imagesGenerated?.length||0) ? ((b.imagesGenerated.length)+" 張生圖") : ((b.images?.length ? (b.images.length+" 張圖") : "0 張圖"))}</div>
@@ -544,7 +657,7 @@
     refreshLeftList();
 
     const b = batches[idx];
-    activeBadge.textContent = `${pad3(idx+1)}｜${b.name}`;
+    activeBadge.textContent = `${pad3(idx+1)}｜${b.name}｜ID:${b.id||""}`;
     cueChip.textContent = `字幕段數：${b.cues.length}`;
     imgChip.textContent = `圖片：${(b.imagesGenerated?.length||0) ? (b.imagesGenerated.length+' 張生圖') : ((b.images?.length||0)+' 張')}`;
     klingChip.textContent = `Kling JSON 已就緒：${(b.scene && b.scene.length) ? "是":"否"}`;
@@ -607,6 +720,21 @@
       });
       tdPrompt.appendChild(promptInput);
 
+      const copyBtn = document.createElement('button');
+      copyBtn.className = "btn secondary";
+      copyBtn.style.marginTop = "6px";
+      copyBtn.style.padding = "6px 10px";
+      copyBtn.textContent = "複製單張提示";
+      copyBtn.addEventListener('click', async (e)=>{
+        e.preventDefault();
+        e.stopPropagation();
+        const b = batches[activeIndex];
+        const p = buildSingleImagePrompt(b.id || "BW", item);
+        await copyToClipboard(p);
+        rightStatus.innerHTML = `<b>狀態：</b>已複製單張生圖提示（${escapeHtml(b.id||"")}-${pad3(item.id)}）`;
+      });
+      tdPrompt.appendChild(copyBtn);
+
       const tdCam = document.createElement('td');
       const camInput = document.createElement('input');
       camInput.type = "text";
@@ -652,7 +780,10 @@
     for(const f of list){
       const raw = await f.text();
       const cues = parseSrt(raw);
-      batches.push({ name: f.name, rawSrt: raw, cues, scene: [], images: [], imagesGenerated: [] });
+      const batchId = makeBatchId(f.name, raw);
+      const id = batchId;
+      const base = (f.name || "batch").replace(/\.srt$/i, "");
+      batches.push({ id, batchId, fileName: f.name, name: f.name, base, rawSrt: raw, cues, scene: [], images: [], imagesGenerated: [] });
     }
     if(activeIndex === -1 && batches.length) activeIndex = 0;
     refreshLeftList();
@@ -672,7 +803,7 @@
 
   btnBuildAll.addEventListener('click', ()=>{
     if(!batches.length) return;
-    for(const b of batches){ b.scene = buildSceneForBatch(b.cues || []); }
+    for(const b of batches){ b.scene = buildSceneForBatch(b.cues || [], b); }
     refreshLeftList();
     if(activeIndex>=0) setActive(activeIndex);
   });
@@ -706,7 +837,8 @@
   btnDownloadActiveJson.addEventListener('click', ()=>{
     if(activeIndex<0) return;
     const b = batches[activeIndex];
-    const filename = b.name.replace(/\.srt$/i,'') + ".scene.json";
+    const base = (b.base || b.name || "batch").replace(/\.srt$/i,'');
+    const filename = `${b.id||'BW'}_${base}.scene.json`;
     downloadText(filename, JSON.stringify(klingArray(b.scene||[]), null, 2), "application/json");
   });
 
@@ -908,7 +1040,8 @@
     if(noteText) zip.file("README.txt", noteText);
 
     batches.forEach((b, idx)=>{
-      const folderName = `${pad3(idx+1)}_${sanitizeFolderName(b.name.replace(/\.srt$/i,''))}`;
+      const base = (b.base || b.name || 'batch').replace(/\.srt$/i,'');
+      const folderName = `${pad3(idx+1)}_${sanitizeFolderName((b.id||'BW')+'_'+base)}`;
       const folder = zip.folder(folderName);
       folder.file(b.name, b.rawSrt);
       folder.file("scene.json", JSON.stringify(klingArray(b.scene||[]), null, 2));
@@ -925,7 +1058,8 @@
 
     for (let idx=0; idx<batches.length; idx++){
       const b = batches[idx];
-      const folderName = `${pad3(idx+1)}_${sanitizeFolderName(b.name.replace(/\.srt$/i,''))}`;
+      const base = (b.base || b.name || 'batch').replace(/\.srt$/i,'');
+      const folderName = `${pad3(idx+1)}_${sanitizeFolderName((b.id||'BW')+'_'+base)}`;
       const folder = zip.folder(folderName);
       folder.file(b.name, b.rawSrt);
       folder.file("scene.json", JSON.stringify(klingArray(b.scene||[]), null, 2));
@@ -972,7 +1106,7 @@
       if(activeIndex<0) return;
       const b = batches[activeIndex];
       if(templateSel.value === "custom"){ syncActiveJson(); return; }
-      const rebuilt = buildSceneForBatch(b.cues || []);
+      const rebuilt = buildSceneForBatch(b.cues || [], b);
       const oldById = new Map((b.scene||[]).map(x=>[x.id, x]));
       rebuilt.forEach(x=>{
         const old = oldById.get(x.id);
