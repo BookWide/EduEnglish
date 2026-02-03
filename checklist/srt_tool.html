@@ -125,6 +125,28 @@
           <label>批次 N</label>
           <input id="batchN" type="number" min="1" step="1" value="10"/>
         </div>
+
+        <div class="field small">
+          <label>圖片尺寸</label>
+          <select id="imgSize">
+            <option value="1024">1024</option>
+            <option value="768" selected>768（建議）</option>
+            <option value="512">512</option>
+          </select>
+        </div>
+        <div class="field small">
+          <label>格式</label>
+          <select id="imgFormat">
+            <option value="jpg" selected>JPG（建議）</option>
+            <option value="webp">WEBP（更小）</option>
+            <option value="png">PNG（最大）</option>
+          </select>
+        </div>
+        <div class="field small" id="imgQualityWrap">
+          <label>壓縮品質 <span id="imgQualityVal">82</span>%</label>
+          <input id="imgQuality" type="range" min="50" max="95" step="1" value="82"/>
+        </div>
+
         <button id="btnMp3Batch" class="btn secondary" disabled>批次生 MP3（前 N 列）</button>
       
         <button id="btnImgBatch" class="btn secondary" disabled>批次生圖（前 N 列）</button>
@@ -203,6 +225,68 @@
   const IMG_ONE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/img-one";
   const el = (id) => document.getElementById(id);
 
+  // ===== Image output settings (single + batch must match) =====
+  function getImgSettings(){
+    const size = parseInt((el('imgSize')?.value || '768'), 10);
+    const format = (el('imgFormat')?.value || 'jpg').toLowerCase();
+    const q = parseInt((el('imgQuality')?.value || '82'), 10);
+    const quality = Math.max(0.5, Math.min(0.95, q/100));
+    return { size, format, quality, q };
+  }
+  function syncImgQualityUI(){
+    const fmt = (el('imgFormat')?.value || 'jpg').toLowerCase();
+    const wrap = el('imgQualityWrap');
+    if(!wrap) return;
+    wrap.style.display = (fmt === 'png') ? 'none' : 'block';
+    const s = getImgSettings();
+    const v = el('imgQualityVal');
+    if(v) v.textContent = String(s.q);
+  }
+  async function transcodeImageBlob(srcBlob, opts){
+    // Convert to unify size/format and reduce file size
+    const want = (opts.format || 'jpg').toLowerCase();
+    const targetSize = opts.size || 768;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = targetSize;
+    canvas.height = targetSize;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0,0,targetSize,targetSize);
+
+    // Decode
+    let imgW=0, imgH=0, draw = null;
+    try{
+      const bmp = await createImageBitmap(srcBlob);
+      imgW = bmp.width; imgH = bmp.height;
+      draw = (dx,dy,dw,dh)=>ctx.drawImage(bmp, dx,dy,dw,dh);
+    }catch(e){
+      const url = URL.createObjectURL(srcBlob);
+      try{
+        const img = new Image();
+        img.decoding = 'async';
+        await new Promise((res, rej)=>{ img.onload=res; img.onerror=rej; img.src=url; });
+        imgW = img.naturalWidth || img.width;
+        imgH = img.naturalHeight || img.height;
+        draw = (dx,dy,dw,dh)=>ctx.drawImage(img, dx,dy,dw,dh);
+      }finally{
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    // cover fit center
+    const s = Math.max(targetSize/imgW, targetSize/imgH);
+    const w = imgW*s, h = imgH*s;
+    const x = (targetSize - w)/2;
+    const y = (targetSize - h)/2;
+    draw(x,y,w,h);
+
+    const mime = (want==='png') ? 'image/png' : (want==='webp' ? 'image/webp' : 'image/jpeg');
+    const q = (want==='png') ? 1.0 : (opts.quality || 0.82);
+    const outBlob = await new Promise(res=>canvas.toBlob(res, mime, q));
+    return { blob: outBlob || srcBlob, ext: (want==='png'?'png':(want==='webp'?'webp':'jpg')) };
+  }
+
+
   const srtFile = el("srtFile");
   const shortName = el("shortName");
   const sentPerSlide = el("sentPerSlide");
@@ -218,6 +302,13 @@
   const btnMp3Batch = el("btnMp3Batch");
   const btnImgBatch = el("btnImgBatch");
   const batchN = el("batchN");
+  // image output controls (single + batch must match)
+  if(el('imgFormat')) el('imgFormat').addEventListener('change', syncImgQualityUI);
+  if(el('imgQuality')) el('imgQuality').addEventListener('input', syncImgQualityUI);
+  if(el('imgSize')) el('imgSize').addEventListener('change', syncImgQualityUI);
+  syncImgQualityUI();
+
+
 
   const pillFile = el("pillFile");
   const pillRows = el("pillRows");
@@ -605,9 +696,11 @@
 ${t}`);
       return;
     }
-    const blob = await resp.blob();
-    downloadBlob(blob, `${row.id}.png`);
-  }
+    const raw = await resp.blob();
+    const opt = getImgSettings();
+    const out = await transcodeImageBlob(raw, opt);
+    downloadBlob(out.blob, `${row.id}.${out.ext}`);
+}
 
   btnImgOne.addEventListener("click", async () => {
     if (!selectedRow) { alert("請先點選一列"); return; }
