@@ -968,12 +968,7 @@ function getWeekIndex() {
       renderGrid();
     });
 
-    // hero 按鈕
-   const btnTryHero = document.getElementById("btn-try-mid-autumn");
-if (btnTryHero) {
-  btnTryHero.addEventListener("click", () => {
-    window.location.href = "/services/video.html";
-  });
+    
 }
 
     document.getElementById("btn-browse-all").addEventListener("click", () => {
@@ -1550,42 +1545,69 @@ if(data.current_device_id !== my){
 
 
 <script>
+/* ===== CTA（中間藍色按鍵）導向規則 =====
+   1) 已登入 + 已訂閱  -> /account/learning-dashboard.html
+   2) 其他（未登入 / 未訂閱 / 查詢失敗）-> /services/video.html
+   ※ 只改按鍵行為，不動其它結構
+*/
 (function(){
-  const btn = document.getElementById('btn-try-mid-autumn');
-  if(!btn) return;
+  function toVideo(){ window.location.href = '/services/video.html'; }
+  function toDashboard(){ window.location.href = '/account/learning-dashboard.html'; }
 
-  async function hasActiveSubscription(user){
+  async function isSubscribed(supa, user){
     try{
-      const { data: orders } = await window.supa
-        .from('orders')
-        .select('status, expire_at, buyer_id, user_id')
-        .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
-        .order('paid_at', { ascending:false })
-        .limit(5);
+      // 以 profiles.expires_at 為準（你 Admin 清單也是顯示這個）
+      const { data, error } = await supa
+        .from('profiles')
+        .select('expires_at')
+        .eq('id', user.id)
+        .maybeSingle();
+      if (error || !data || !data.expires_at) return false;
 
-      if(!Array.isArray(orders)) return false;
-      const now = Date.now();
-      return orders.some(o => String(o.status).toLowerCase()==='paid' &&
-        o.expire_at && (new Date(o.expire_at)).getTime() > now);
+      const exp = new Date(data.expires_at);
+      if (isNaN(exp.getTime())) return false;
+
+      // 只要 expires_at > 現在 就視為有效
+      return exp.getTime() > Date.now();
     }catch(e){
       return false;
     }
   }
 
-  btn.addEventListener('click', async ()=>{
-    try{
-      const { data } = await window.supa.auth.getSession();
-      const user = data.session?.user;
-      if(user){
-        const ok = await hasActiveSubscription(user);
-        if(ok){
-          location.href = '/account/learning-dashboard.html';
-          return;
-        }
+  function wire(){
+    var btn = document.getElementById('btn-try-mid-autumn');
+    if(!btn) return;
+
+    // 避免重複綁定
+    if (btn.dataset.guardWired === '1') return;
+    btn.dataset.guardWired = '1';
+
+    btn.addEventListener('click', async function(ev){
+      ev.preventDefault();
+
+      // 沒 supabase（或尚未初始化）就走服務頁
+      var supa = window.supa || window.supabaseClient;
+      if(!supa || !supa.auth){ toVideo(); return; }
+
+      try{
+        const { data: ures } = await supa.auth.getUser();
+        const user = ures && ures.user;
+        if(!user){ toVideo(); return; }
+
+        const ok = await isSubscribed(supa, user);
+        if(ok) toDashboard();
+        else toVideo();
+      }catch(err){
+        toVideo();
       }
-    }catch(e){}
-    location.href = '/services/video.html';
-  });
+    }, { passive:false });
+  }
+
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', wire);
+  }else{
+    wire();
+  }
 })();
 </script>
 
