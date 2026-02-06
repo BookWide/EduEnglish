@@ -210,6 +210,20 @@
     bulkOffBtn: document.getElementById('bulkOffBtn'),
   };
 
+  function setBusy(busy, msg) {
+    // Disable controls to prevent race conditions during updates
+    const disabled = !!busy;
+    [els.q, els.catSel, els.pubSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn].forEach(el=>{
+      if (!el) return;
+      el.disabled = disabled;
+    });
+    // Disable row toggles too (if present)
+    document.querySelectorAll('#tbody input[type="checkbox"][data-id]').forEach(el=>{
+      el.disabled = disabled;
+    });
+    if (busy && msg) toast("同步中…", msg);
+  }
+
   function fmtDate(iso) {
     if (!iso) return "—";
     const d = new Date(iso);
@@ -285,24 +299,21 @@
         const val = !!e.target.checked;
         e.target.disabled = true;
         try {
+        setBusy(true, "更新影片狀態…");
           const payload = { is_published: val, updated_at: new Date().toISOString() };
           const { error } = await supa.from('videos').update(payload).eq('id', id);
           if (error) throw error;
 
-          // update local
-          const row = state.rows.find(x=>Number(x.id)===id);
-          if (row) {
-            row.is_published = val;
-            row.updated_at = payload.updated_at;
-          }
           toast("已更新", `#${id} → ${val ? "上架" : "下架"}`);
-          applyFilters();
+          await loadVideos(true);
+
         } catch (err) {
           console.error(err);
           alert("更新失敗：\n" + (err?.message || err));
           // revert UI
           e.target.checked = !val;
         } finally {
+          setBusy(false);
           e.target.disabled = false;
         }
       };
@@ -318,7 +329,14 @@
       .replaceAll("'", "&#39;");
   }
 
-  async function loadVideos() {
+  async function loadVideos(preserve = true) {
+    // Preserve current UI selections
+    const prev = preserve ? {
+      q: els.q.value,
+      cat: els.catSel.value,
+      pub: els.pubSel.value,
+    } : { q:"", cat:"", pub:"" };
+
     els.tbody.innerHTML = `<tr><td colspan="6" style="padding:16px; color:#64748b;">載入中…</td></tr>`;
     state.rows = [];
     state.filtered = [];
@@ -332,9 +350,20 @@
     if (error) throw error;
 
     state.rows = data || [];
+
     // build categories
     const cats = Array.from(new Set(state.rows.map(r => r.category).filter(Boolean))).sort();
     els.catSel.innerHTML = `<option value="">全部分類</option>` + cats.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+
+    // Restore selections (if still valid)
+    if (preserve) {
+      els.q.value = prev.q || "";
+      // Only restore category if it still exists
+      if (prev.cat && cats.includes(prev.cat)) els.catSel.value = prev.cat;
+      else els.catSel.value = "";
+      els.pubSel.value = (prev.pub === "1" || prev.pub === "0") ? prev.pub : "";
+    }
+
     applyFilters();
   }
 
@@ -343,28 +372,30 @@
     if (!rows.length) return toast("沒有資料", "目前篩選後清單是空的。");
     if (!confirm(`確定要把「目前清單」${val ? "全部上架" : "全部下架"}？\n共 ${rows.length} 筆`)) return;
 
-    // Supabase update 需要分批避免 URL 太長
-    const ids = rows.map(r=>Number(r.id)).filter(n=>Number.isFinite(n));
-    const chunk = 100;
-    let done = 0;
-    for (let i=0; i<ids.length; i+=chunk) {
-      const part = ids.slice(i, i+chunk);
-      const payload = { is_published: val, updated_at: new Date().toISOString() };
-      const { error } = await supa.from('videos').update(payload).in('id', part);
-      if (error) throw error;
-      done += part.length;
-      toast("批次更新中…", `${done} / ${ids.length}`);
-    }
-    // update local
-    const nowIso = new Date().toISOString();
-    state.rows.forEach(r=> {
-      if (ids.includes(Number(r.id))) {
-        r.is_published = val;
-        r.updated_at = nowIso;
+    setBusy(true, `批次更新：共 ${rows.length} 筆`);
+
+    try {
+      // Supabase update 需要分批避免 URL 太長
+      const ids = rows.map(r=>Number(r.id)).filter(n=>Number.isFinite(n));
+      const chunk = 100;
+      let done = 0;
+
+      for (let i=0; i<ids.length; i+=chunk) {
+        const part = ids.slice(i, i+chunk);
+        const payload = { is_published: val, updated_at: new Date().toISOString() };
+        const { error } = await supa.from('videos').update(payload).in('id', part);
+        if (error) throw error;
+
+        done += part.length;
+        toast("批次更新中…", `${done} / ${ids.length}`);
       }
-    });
-    toast("批次完成", `${val ? "全上架" : "全下架"}：${ids.length} 筆`);
-    applyFilters();
+
+      toast("批次完成", `${val ? "全上架" : "全下架"}：${rows.length} 筆`);
+      // Reload from DB as the single source of truth
+      await loadVideos(true);
+    } finally {
+      setBusy(false);
+    }
   }
 
   (async function init() {
