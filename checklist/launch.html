@@ -67,7 +67,43 @@
       tbody tr{border-bottom:1px solid var(--line);}
       tbody td[data-k]::before{content:attr(data-k); display:block; font-size:11px; color:var(--muted); margin-bottom:2px;}
     }
-  </style>
+  
+    /* modal */
+    .modal-backdrop{
+      position:fixed; inset:0; background:rgba(2,6,23,.55);
+      backdrop-filter: blur(2px);
+      z-index: 80;
+    }
+    .modal{ position:fixed; inset:0; display:flex; align-items:center; justify-content:center; z-index:90; padding:16px; }
+    .modal-card{
+      width:min(760px, 100%);
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius: var(--r);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    .modal-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:12px; padding:16px 18px; border-bottom:1px solid var(--line); }
+    .modal-title{ font-weight:900; font-size:18px; color:var(--ink); }
+    .modal-sub{ margin-top:4px; font-size:12px; color:var(--muted); line-height:1.5; }
+    .icon-btn{
+      border:1px solid var(--line); background:#fff; color:var(--ink);
+      border-radius: 12px; padding:8px 10px; cursor:pointer;
+    }
+    .modal-body{ padding:16px 18px; }
+    .grid2{ display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    @media (max-width: 720px){ .grid2{ grid-template-columns: 1fr; } }
+    .field{ display:flex; flex-direction:column; gap:6px; }
+    .field > span{ font-size:12px; color:var(--muted); font-weight:700; }
+    .field input{
+      width:100%; padding:10px 12px; border:1px solid var(--line);
+      border-radius: 12px; outline:none;
+    }
+    .field input:focus{ border-color: rgba(37,99,235,.6); box-shadow: 0 0 0 4px rgba(37,99,235,.12); }
+    .hint{ font-size:12px; color:var(--muted); }
+    .modal-actions{ display:flex; gap:10px; justify-content:flex-end; padding-top:12px; }
+
+</style>
 </head>
 <body>
   <div class="topbar">
@@ -106,6 +142,7 @@
           <button class="btn" id="reloadBtn">重新整理</button>
           <button class="btn" id="bulkOnBtn" title="只對目前篩選後的清單生效">目前清單全上架</button>
           <button class="btn" id="bulkOffBtn" title="只對目前篩選後的清單生效" style="background:#ef4444;">目前清單全下架</button>
+          <button class="btn" id="addBtn" style="background:#10b981;">新增影片</button>
         </div>
       </div>
 
@@ -188,7 +225,7 @@
     });
   }
 
-  document.getElementById('backBtn').onclick = ()=> location.href = "../admin.html";
+  document.getElementById('backBtn').onclick = ()=> location.href = "admin.html";
 </script>
 
 <script>
@@ -208,12 +245,28 @@
     reloadBtn: document.getElementById('reloadBtn'),
     bulkOnBtn: document.getElementById('bulkOnBtn'),
     bulkOffBtn: document.getElementById('bulkOffBtn'),
+
+    addBtn: document.getElementById('addBtn'),
+    addModal: document.getElementById('addModal'),
+    addBackdrop: document.getElementById('addBackdrop'),
+    addForm: document.getElementById('addForm'),
+    addCloseBtn: document.getElementById('addCloseBtn'),
+    addCancelBtn: document.getElementById('addCancelBtn'),
+    addCategory: document.getElementById('addCategory'),
+    addSlug: document.getElementById('addSlug'),
+    addTitleInput: document.getElementById('addTitleInput'),
+    addDifficulty: document.getElementById('addDifficulty'),
+    addDuration: document.getElementById('addDuration'),
+    addMp4: document.getElementById('addMp4'),
+    addCover: document.getElementById('addCover'),
+    addPublished: document.getElementById('addPublished'),
+
   };
 
   function setBusy(busy, msg) {
     // Disable controls to prevent race conditions during updates
     const disabled = !!busy;
-    [els.q, els.catSel, els.pubSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn].forEach(el=>{
+    [els.q, els.catSel, els.pubSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn, els.addBtn].forEach(el=>{
       if (!el) return;
       el.disabled = disabled;
     });
@@ -224,7 +277,75 @@
     if (busy && msg) toast("同步中…", msg);
   }
 
-  function fmtDate(iso) {
+  
+  function openAddModal() {
+    if (!els.addModal) return;
+    // reset
+    try { els.addForm.reset(); } catch(e) {}
+    if (els.addPublished) els.addPublished.checked = true;
+
+    const lastCat = localStorage.getItem('bw_assets_last_cat');
+    if (lastCat && els.addCategory) els.addCategory.value = lastCat;
+
+    els.addBackdrop.hidden = false;
+    els.addModal.hidden = false;
+    setTimeout(()=>{ els.addSlug && els.addSlug.focus(); }, 50);
+  }
+
+  function closeAddModal() {
+    if (!els.addModal) return;
+    els.addBackdrop.hidden = true;
+    els.addModal.hidden = true;
+  }
+
+  function normalizeSlug(s) {
+    return (s||"")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '-')
+      .replace(/[^a-z0-9_-]/g, '')
+      .replace(/-+/g, '-')
+      .replace(/^[-_]+|[-_]+$/g, '');
+  }
+
+  async function insertAsset() {
+    const category = (els.addCategory?.value || '').trim().toLowerCase();
+    const slug = normalizeSlug(els.addSlug?.value || '');
+    const title = (els.addTitleInput?.value || '').trim();
+
+    const diff = (els.addDifficulty?.value || '').trim();
+    const dur  = (els.addDuration?.value || '').trim();
+    const mp4  = (els.addMp4?.value || '').trim();
+    const cover= (els.addCover?.value || '').trim();
+    const published = !!els.addPublished?.checked;
+
+    if (!category) throw new Error("category 必填");
+    if (!slug) throw new Error("slug 必填（只允許小寫英數與 - _）");
+    if (!title) throw new Error("title 必填");
+
+    localStorage.setItem('bw_assets_last_cat', category);
+
+    const payload = { category, slug, title, is_published: published };
+    if (diff !== '') payload.difficulty_level = Number(diff);
+    if (dur  !== '') payload.duration_sec = Number(dur);
+    if (mp4  !== '') payload.mp4_url = mp4;
+    if (cover!== '') payload.cover_url = cover;
+
+    setBusy(true, "新增影片資料…");
+    const { error } = await supa.from('assets').insert([payload]);
+    setBusy(false);
+
+    if (error) {
+      const isDup = (error.code === "23505") || (String(error.message||"").toLowerCase().includes("duplicate"));
+      throw new Error(isDup ? `slug 已存在：${slug}` : (error.message || "新增失敗"));
+    }
+
+    toast("新增成功", `已新增：${title}（${slug}）`);
+    closeAddModal();
+    await loadVideos();
+  }
+
+function fmtDate(iso) {
     if (!iso) return "—";
     const d = new Date(iso);
     if (isNaN(d.getTime())) return "—";
@@ -408,7 +529,19 @@
       els.pubSel.addEventListener('change', ()=>applyFilters());
       els.reloadBtn.onclick = ()=>loadVideos().catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOnBtn.onclick = ()=>bulkSet(true).catch(err=>{console.error(err); alert(err?.message||err);});
-      els.bulkOffBtn.onclick = ()=>bulkSet(false).catch(err=>{console.error(err); alert(err?.message||err);});
+      els.bulkOffBtn.onclick = ()=>bulkSet(false).catch(err=>{console.error(err);
+      els.addBtn && (els.addBtn.onclick = ()=>openAddModal());
+      els.addCloseBtn && (els.addCloseBtn.onclick = ()=>closeAddModal());
+      els.addCancelBtn && (els.addCancelBtn.onclick = ()=>closeAddModal());
+      els.addBackdrop && (els.addBackdrop.onclick = ()=>closeAddModal());
+      els.addForm && (els.addForm.onsubmit = (ev)=>{
+        ev.preventDefault();
+        insertAsset().catch(err=>{ console.error(err); alert(err?.message||err); });
+      });
+      document.addEventListener('keydown', (e)=>{
+        if (e.key === 'Escape' && els.addModal && !els.addModal.hidden) closeAddModal();
+      });
+ alert(err?.message||err);});
     } catch (e) {
       console.error(e);
       alert(e?.message || e);
@@ -416,5 +549,77 @@
     }
   })();
 </script>
+
+  <!-- Add Asset Modal -->
+  <div class="modal-backdrop" id="addBackdrop" hidden></div>
+  <div class="modal" id="addModal" hidden role="dialog" aria-modal="true" aria-labelledby="addTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <div id="addTitle" class="modal-title">新增影片（寫入 public.assets）</div>
+          <div class="modal-sub">新增後可在本頁立即看到，並可用「上/下架」開關控制是否出現在首頁與播放器。</div>
+        </div>
+        <button class="icon-btn" id="addCloseBtn" title="關閉">✕</button>
+      </div>
+
+      <form id="addForm" class="modal-body">
+        <div class="grid2">
+          <label class="field">
+            <span>分類 category</span>
+            <input id="addCategory" list="catList" placeholder="movie / story / music / news / grammar" required>
+            <datalist id="catList">
+              <option value="movie"></option>
+              <option value="story"></option>
+              <option value="music"></option>
+              <option value="news"></option>
+              <option value="grammar"></option>
+            </datalist>
+          </label>
+
+          <label class="field">
+            <span>slug（唯一）</span>
+            <input id="addSlug" placeholder="例如: goingbackhome" required>
+            <small class="hint">只用小寫英數與 - _，不要空白。建議用影片檔名風格。</small>
+          </label>
+
+          <label class="field" style="grid-column:1 / -1;">
+            <span>標題 title</span>
+            <input id="addTitleInput" placeholder="例如: Going Back Home" required>
+          </label>
+
+          <label class="field">
+            <span>難度 difficulty_level</span>
+            <input id="addDifficulty" type="number" min="1" max="9" step="1" placeholder="1~9（可空白）">
+          </label>
+
+          <label class="field">
+            <span>秒數 duration_sec</span>
+            <input id="addDuration" type="number" min="0" step="1" placeholder="例如: 195（可空白）">
+          </label>
+
+          <label class="field" style="grid-column:1 / -1;">
+            <span>mp4_url（可空白）</span>
+            <input id="addMp4" placeholder="https://...mp4">
+          </label>
+
+          <label class="field" style="grid-column:1 / -1;">
+            <span>cover_url（可空白）</span>
+            <input id="addCover" placeholder="https://...jpg/png/webp">
+          </label>
+
+          <label class="field" style="grid-column:1 / -1; display:flex; align-items:center; gap:10px;">
+            <input id="addPublished" type="checkbox" checked style="width:auto; transform:scale(1.1);">
+            <span style="margin:0;">立即上架（is_published = true）</span>
+          </label>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn" id="addCancelBtn">取消</button>
+          <button type="submit" class="btn" style="background:var(--brand);">新增</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
 </body>
 </html>
