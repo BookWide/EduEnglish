@@ -594,6 +594,8 @@ const paramBase=params.get('base');
 const BASE = (paramBase!=null ? paramBase : ROOT_BASE);
 const cat =(params.get('cat')||'story').toLowerCase();
 let slug=params.get('slug')||'houyi';
+
+    let CURRENT_USER_IS_ADMIN = false;
 if(slug==='huyi') slug='houyi';
 const vnow=Date.now();
 
@@ -670,6 +672,47 @@ function setOffset(v){
   localStorage.setItem(`offset:${slug}`,String(offset));
 }
 window.player={setOffset,clearRepeat:()=>{loopSentence=false;btnReplay?.classList.remove('blue');}};
+
+
+// ✅ 資料上/下架守門：assets.is_published = false → 不給看（就算有舊連結）
+async function ensureAssetPublishedOrRedirect(){
+  try{
+    const u = await bwPlayerGetUser();
+    const email = (u && u.email) ? String(u.email).toLowerCase() : '';
+    // 你指定的 admin（可看全部）
+    const isAdmin = (email === 'pmktools@gmail.com');
+    CURRENT_USER_IS_ADMIN = isAdmin;
+
+    // 只針對會出現在資源庫的分類做守門
+    const gatedCats = ['movie','music','story','news','pro','jp'];
+    if(!gatedCats.includes(cat)) return true;
+
+    // 查 assets
+    const { data, error } = await playerSupa
+      .from('assets')
+      .select('is_published')
+      .eq('category', cat)
+      .eq('slug', slug)
+      .maybeSingle();
+
+    if(error){
+      console.warn('[player] assets lookup error', error);
+      return true; // 查不到就先放行（避免誤擋）
+    }
+
+    if(data && data.is_published === false && !isAdmin){
+      alert('此影片已下架（不再提供播放）。');
+      // 回到首頁/控制台
+      location.href = (ROOT_BASE || '') + '/index.html';
+      return false;
+    }
+
+    return true;
+  }catch(e){
+    console.warn('[player] ensureAssetPublishedOrRedirect error', e);
+    return true;
+  }
+}
 
 async function loadVideo(){
   const SUPA_PUBLIC_BASE = 'https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public';
@@ -1477,6 +1520,26 @@ async function speakText(text, lang){
 
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
+  async function ensureVideoPublished(category, slug, isAdmin) {
+    try {
+      const { data, error } = await playerSupa
+        .from('videos')
+        .select('is_published')
+        .eq('category', category)
+        .eq('slug', slug)
+        .maybeSingle();
+      if (error) throw error;
+
+      if (data && data.is_published === false && !isAdmin) return false;
+      if (!data && !isAdmin) return false;
+      return true;
+    } catch (e) {
+      console.warn('[BW-player] ensureVideoPublished failed (allowing):', e);
+      return true; // fail-open
+    }
+  }
+
+
 (async function init(){
   const params = new URLSearchParams(location.search);
   const previewParam = params.get('preview') === '1';
@@ -1532,7 +1595,7 @@ if (!isPreview && user) {
     // 3-1) 讀 profiles
     const { data: p, error: perr } = await playerSupa
       .from('profiles')
-      .select('expires_at,cefr_level,cefr_score')
+      .select('expires_at,cefr_level,cefr_score,is_admin')
       .eq('id', user.id)
       .maybeSingle();
 
@@ -1540,7 +1603,9 @@ if (!isPreview && user) {
       console.warn('[BW-player] profiles read error =', perr);
     }
 
-    let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
+    
+    CURRENT_USER_IS_ADMIN = !!(p && p.is_admin);
+let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
 
     // 3-2) 若 profiles 缺 expires_at：用 orders 補救（避免「明明 paid 但 profiles 沒寫到」）
     async function findActiveOrderExpire(){
@@ -1607,7 +1672,16 @@ if (!isPreview && user) {
 
     console.log('[BW-player] allow by expires_at =', exp.toISOString());
 
-    // 3-4) 訂閱通過後，若尚未完成 Level Survey → 先做一次（之後不再打擾）
+    
+    // Publish switch: block unpublished videos for non-admin users
+    const okPublished = await ensureVideoPublished(cat, slug, CURRENT_USER_IS_ADMIN);
+    if (!okPublished) {
+      alert('此影片目前已下架 / 未上架');
+      window.location.href = (ROOT_BASE || '') + '/services/video.html';
+      return;
+    }
+
+// 3-4) 訂閱通過後，若尚未完成 Level Survey → 先做一次（之後不再打擾）
     const levelDone = localStorage.getItem('BW_LEVEL_DONE') === '1'
       || localStorage.getItem('BW_CEFR_BEST')
       || (p && (p.cefr_level || p.cefr_score));
@@ -1640,6 +1714,8 @@ if (!isPreview && user) {
     video.playbackRate = r;
     speedVal.textContent = `${r.toFixed(2)}x`;
 
+    const __ok = await ensureAssetPublishedOrRedirect();
+    if(!__ok) return;
     await loadVideo();
     await loadCues();
     await loadQuiz();
