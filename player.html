@@ -673,53 +673,17 @@ function setOffset(v){
 }
 window.player={setOffset,clearRepeat:()=>{loopSentence=false;btnReplay?.classList.remove('blue');}};
 
-
-// ✅ 資料上/下架守門：assets.is_published = false → 不給看（就算有舊連結）
-async function ensureAssetPublishedOrRedirect(){
-  try{
-    const u = await bwPlayerGetUser();
-    const email = (u && u.email) ? String(u.email).toLowerCase() : '';
-    // 你指定的 admin（可看全部）
-    const isAdmin = (email === 'pmktools@gmail.com');
-    CURRENT_USER_IS_ADMIN = isAdmin;
-
-    // 只針對會出現在資源庫的分類做守門
-    const gatedCats = ['movie','music','story','news','pro','jp'];
-    if(!gatedCats.includes(cat)) return true;
-
-    // 查 assets
-    const { data, error } = await playerSupa
-      .from('assets')
-      .select('is_published')
-      .eq('category', cat)
-      .eq('slug', slug)
-      .maybeSingle();
-
-    if(error){
-      console.warn('[player] assets lookup error', error);
-      return true; // 查不到就先放行（避免誤擋）
-    }
-
-    if(data && data.is_published === false && !isAdmin){
-      alert('此影片已下架（不再提供播放）。');
-      // 回到首頁/控制台
-      location.href = (ROOT_BASE || '') + '/index.html';
-      return false;
-    }
-
-    return true;
-  }catch(e){
-    console.warn('[player] ensureAssetPublishedOrRedirect error', e);
-    return true;
-  }
-}
-
 async function loadVideo(){
   const SUPA_PUBLIC_BASE = 'https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public';
   const SUPA_VIDEOS_BASE = SUPA_PUBLIC_BASE + '/videos';
 
   const sources = [];
   const seen = new Set();
+
+  // ✅ DB 內若有指定 mp4_url / cover_url（assets）就優先用
+  try {
+    if (window.__ASSET_ROW__ && window.__ASSET_ROW__.mp4_url) add(window.__ASSET_ROW__.mp4_url);
+  } catch(_e) {}
 
   function add(url){
     if (!url || seen.has(url)) return;
@@ -1523,12 +1487,14 @@ async function speakText(text, lang){
   async function ensureVideoPublished(category, slug, isAdmin) {
     try {
       const { data, error } = await playerSupa
-        .from('videos')
-        .select('is_published')
+        .from('assets')
+        .select('is_published, mp4_url, cover_url, duration_sec, difficulty_level, title')
         .eq('category', category)
         .eq('slug', slug)
         .maybeSingle();
       if (error) throw error;
+
+      window.__ASSET_ROW__ = data || null;
 
       if (data && data.is_published === false && !isAdmin) return false;
       if (!data && !isAdmin) return false;
@@ -1714,8 +1680,6 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     video.playbackRate = r;
     speedVal.textContent = `${r.toFixed(2)}x`;
 
-    const __ok = await ensureAssetPublishedOrRedirect();
-    if(!__ok) return;
     await loadVideo();
     await loadCues();
     await loadQuiz();
