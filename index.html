@@ -989,20 +989,7 @@ function getWeekIndex() {
 
     // ===== 從 index-all.json 載入所有影片 =====
   // Only show published videos for normal users (admin sees all).
-  async function applyPublishFilter() {
-    try {
-      if (CURRENT_USER_IS_ADMIN) return;
-      if (!supa) return;
-      const { data, error } = await supa
-        .from('assets')
-        .select('category,slug,is_published')
-        .eq('is_published', true);
-      if (error) throw error;
-      const allowed = new Set((data || []).map(r => `${r.category}::${r.slug}`));
-      VIDEO_ITEMS = (VIDEO_ITEMS || []).filter(v => allowed.has(`${v.category}::${v.slug}`));
-    } catch (e) {
-      console.warn('[index] applyPublishFilter failed (showing all):', e);
-    }
+  async function applyPublishFilter(){ /* deprecated (A 方案改由 assets.is_published 直接控制) */ }
   }
 
 
@@ -1013,22 +1000,20 @@ function getWeekIndex() {
          </div>`;
 
       try {
-        const client = (window.supa || supa || null);
-
-        if (client) {
-          // ✅ 新世界：直接讀 public.assets（A 方案唯一資料源）
-          let q = client
+        // ✅ A 方案：以 public.assets 當唯一影片庫（不再依賴 /data/index-all.json）
+        if (window.supa) {
+          let q = window.supa
             .from('assets')
-            .select('category,slug,title,difficulty_level,duration_sec,is_published');
+            .select('category,slug,title,difficulty_level,duration_sec,is_published')
+            .order('category', { ascending: true })
+            .order('slug', { ascending: true });
 
-          // 非管理員：只看已上架
           if (!CURRENT_USER_IS_ADMIN) q = q.eq('is_published', true);
 
           const { data, error } = await q;
           if (error) throw error;
 
-          const list = Array.isArray(data) ? data : [];
-          VIDEO_ITEMS = list.map(item => ({
+          VIDEO_ITEMS = (data || []).map(item => ({
             category: item.category,
             slug: item.slug,
             title: item.title || item.slug,
@@ -1036,10 +1021,9 @@ function getWeekIndex() {
             duration_sec: item.duration_sec ?? 0
           }));
         } else {
-          // ⚠️ Supabase Client 還沒就緒（或被阻擋）→ fallback 讀 index-all.json（避免全空）
+          // fallback：若 supa 未就緒，才使用舊的靜態清單
           const res = await fetch(INDEX_JSON_URL, { cache: "no-store" });
           if (!res.ok) throw new Error("HTTP " + res.status);
-
           const list = await res.json();
           if (!Array.isArray(list)) throw new Error("index-all.json 不是陣列");
 
@@ -1050,19 +1034,16 @@ function getWeekIndex() {
             difficulty_level: item.difficulty_level ?? item.level ?? 0,
             duration_sec: item.duration_sec ?? item.duration ?? 0
           }));
-
-          await applyPublishFilter();
         }
-
-        // 先嘗試載入 weekly-index.json（若不存在就忽略，退回預設輪播）
+// 先嘗試載入 weekly-index.json（若不存在就忽略，退回預設輪播）
         await loadWeeklyIndex();
 
         renderGrid();
-      } catch (e) {
-        console.error("loadAllVideoItems failed:", e);
+      } catch (err) {
+        console.error(err);
         gridEl.innerHTML =
-          `<div style="grid-column: 1 / -1; padding: 20px; text-align: center; color: #ef4444;">
-             載入教材清單失敗：${(e && e.message) ? e.message : e}
+          `<div style="grid-column: 1 / -1; padding: 20px; text-align: center; color: #6b7280;">
+             無法載入教材清單，請稍後再試。
            </div>`;
       }
     }
@@ -1146,9 +1127,10 @@ if (btnTryHero) {
 const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     const SUPABASE_ANON_KEY =
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+    const createClient = (window.supabase && window.supabase.createClient) ? window.supabase.createClient : (window.createClient);
 
-    const supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    window.supa = supa;
+    window.supa = window.supa || (window.supabase?.createClient ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : createClient(SUPABASE_URL, SUPABASE_ANON_KEY));
+    var supa = window.supa;
 
     /* ========= BookWide 單裝置接管（index 主控） =========
        - 新裝置登入：接管（寫入 profiles.current_device_id）
