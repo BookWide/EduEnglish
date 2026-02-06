@@ -67,6 +67,11 @@
       tbody tr{border-bottom:1px solid var(--line);}
       tbody td[data-k]::before{content:attr(data-k); display:block; font-size:11px; color:var(--muted); margin-bottom:2px;}
     }
+  
+    .textarea{width:100%; min-height:120px; border-radius:14px; border:1px solid var(--line); padding:10px 12px; font-size:13px; outline:none; background:#fff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;}
+    .grid2{display:grid; grid-template-columns: 1fr 1fr; gap:10px;}
+    @media (max-width:720px){ .grid2{grid-template-columns:1fr;} }
+
   </style>
 </head>
 <body>
@@ -83,6 +88,49 @@
   </div>
 
   <div class="wrap">
+
+    <div class="card" style="margin-bottom:14px;">
+      <div class="header" style="align-items:flex-start;">
+        <div>
+          <h2 class="h1" style="font-size:18px;">新增影片：匯入 index-*.json → 寫入 assets</h2>
+          <div class="sub">
+            支援像 <span class="mono">index-mid-autumn.json</span> 這種格式（單筆物件或陣列）。<br>
+            按「寫入 assets」後，會以 <b>slug</b> 為主鍵 <b>upsert</b>（已存在就更新，不存在就新增）。
+          </div>
+        </div>
+        <div class="tools" style="justify-content:flex-end; margin-left:auto;">
+          <button class="btn" id="importWriteBtn">寫入 assets</button>
+        </div>
+      </div>
+
+      <div style="padding:0 16px 16px;">
+        <div class="grid2">
+          <div class="card" style="box-shadow:none; border:1px dashed var(--line); padding:12px; border-radius:14px;">
+            <div style="font-weight:900; margin-bottom:8px;">A) 上傳 JSON 檔</div>
+            <input type="file" id="importFile" accept=".json,application/json" class="input" style="width:100%; min-width:auto;">
+            <div class="small" style="margin-top:8px;">例：<span class="mono">index-mid-autumn.json</span></div>
+          </div>
+
+          <div class="card" style="box-shadow:none; border:1px dashed var(--line); padding:12px; border-radius:14px;">
+            <div style="font-weight:900; margin-bottom:8px;">B) 從 URL 讀取 JSON</div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap;">
+              <input id="importUrl" class="input" placeholder="https://.../index-xxx.json" style="flex:1; min-width:220px;">
+              <button class="btn" id="importFetchBtn" type="button">讀取</button>
+            </div>
+            <div class="small" style="margin-top:8px;">提示：同源/CORS 限制時，請用檔案上傳方式。</div>
+          </div>
+        </div>
+
+        <div style="margin-top:12px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+            <div style="font-weight:900;">JSON 預覽</div>
+            <div class="small" id="importHint">尚未載入。</div>
+          </div>
+          <textarea id="importPreview" class="textarea" placeholder='貼上 JSON（可選）：{"title":"...","category":"...","slug":"...","video":"...","cover":"...","is_public":true}'></textarea>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="header">
         <div>
@@ -209,6 +257,140 @@
     bulkOnBtn: document.getElementById('bulkOnBtn'),
     bulkOffBtn: document.getElementById('bulkOffBtn'),
   };
+
+  // ===== Import index-*.json -> assets upsert =====
+  const importEls = {
+    file: document.getElementById('importFile'),
+    url: document.getElementById('importUrl'),
+    fetchBtn: document.getElementById('importFetchBtn'),
+    preview: document.getElementById('importPreview'),
+    hint: document.getElementById('importHint'),
+    writeBtn: document.getElementById('importWriteBtn'),
+  };
+
+  function safeJsonParse(txt){
+    try { return { ok:true, data: JSON.parse(txt) }; }
+    catch(e){ return { ok:false, error: e }; }
+  }
+
+  function normalizeImportItem(raw){
+    if (!raw || typeof raw !== 'object') return null;
+
+    // 支援你現在的 index-mid-autumn.json 欄位命名
+    const title = raw.title ?? raw.name ?? raw.video_title ?? raw.videoTitle ?? null;
+    const category = raw.category ?? raw.cat ?? null;
+    const slug = raw.slug ?? raw.id ?? raw.key ?? null;
+    const mp4_url = raw.video ?? raw.mp4_url ?? raw.mp4Url ?? raw.url ?? null;
+    const cover_url = raw.cover ?? raw.cover_url ?? raw.coverUrl ?? null;
+
+    // 上架旗標：優先看 is_public/is_published，沒有就預設 true（因為你的 index-*.json 通常是要上架）
+    const is_published = (() => {
+      if (raw.is_published !== undefined) return !!raw.is_published;
+      if (raw.is_public !== undefined) return !!raw.is_public;
+      if (raw.published !== undefined) return !!raw.published;
+      return true;
+    })();
+
+    // 可選欄位（如果 assets 表有這些欄位就會寫入，沒有也不會影響 upsert）
+    const difficulty_level = raw.difficulty_level ?? raw.difficulty ?? raw.level ?? null;
+    const duration_sec = raw.duration_sec ?? raw.duration ?? null;
+
+    if (!slug || !category || !title || !mp4_url) return { _invalid:true, reason:'缺少必要欄位（slug/category/title/video）', raw };
+
+    return {
+      slug: String(slug),
+      category: String(category),
+      title: String(title),
+      mp4_url: String(mp4_url),
+      cover_url: cover_url ? String(cover_url) : null,
+      is_published,
+      difficulty_level,
+      duration_sec: (duration_sec === null || duration_sec === undefined || duration_sec === "") ? null : Number(duration_sec),
+    };
+  }
+
+  function setImportHint(msg){
+    if (importEls.hint) importEls.hint.textContent = msg || '';
+  }
+
+  function showImportPreview(obj){
+    const txt = JSON.stringify(obj, null, 2);
+    importEls.preview.value = txt;
+    const n = Array.isArray(obj) ? obj.length : 1;
+    setImportHint(`已載入：${n} 筆（請確認後按「寫入 assets」）`);
+  }
+
+  async function readFileAsText(file){
+    return new Promise((resolve, reject)=>{
+      const fr = new FileReader();
+      fr.onload = ()=>resolve(String(fr.result||""));
+      fr.onerror = ()=>reject(fr.error || new Error("讀檔失敗"));
+      fr.readAsText(file, 'utf-8');
+    });
+  }
+
+  async function loadImportFromText(txt){
+    const parsed = safeJsonParse(txt);
+    if (!parsed.ok) {
+      setImportHint("JSON 解析失敗：請檢查格式");
+      toast("JSON 解析失敗", parsed.error?.message || String(parsed.error));
+      return;
+    }
+    showImportPreview(parsed.data);
+  }
+
+  async function doWriteAssets(){
+    const txt = (importEls.preview.value || "").trim();
+    if (!txt) return toast("沒有資料", "請先載入/貼上 JSON。");
+
+    const parsed = safeJsonParse(txt);
+    if (!parsed.ok) return toast("JSON 解析失敗", parsed.error?.message || String(parsed.error));
+
+    const arr = Array.isArray(parsed.data) ? parsed.data : [parsed.data];
+    const normalized = arr.map(normalizeImportItem);
+
+    const bad = normalized.filter(x => !x || x._invalid);
+    if (bad.length) {
+      console.warn("Import invalid items:", bad);
+      return alert(
+        "匯入失敗：有資料缺欄位。\n\n" +
+        bad.slice(0,5).map((b,i)=>`${i+1}. ${b?.reason || '格式不正確'}`).join("\n") +
+        (bad.length>5 ? `\n... 另有 ${bad.length-5} 筆` : "") +
+        "\n\n必要欄位：slug, category, title, video(或 mp4_url)"
+      );
+    }
+
+    // 寫入 assets（以 slug 為主鍵 upsert）
+    setBusy(true, `寫入 assets：共 ${normalized.length} 筆`);
+    try{
+      // 分批避免太大
+      const chunk = 50;
+      let done = 0;
+      for (let i=0; i<normalized.length; i+=chunk) {
+        const part = normalized.slice(i, i+chunk);
+
+        // 注意：onConflict 需要 supabase 支援且 RLS policy 允許
+        const { error } = await supa
+          .from('assets')
+          .upsert(part, { onConflict: 'slug' });
+
+        if (error) throw error;
+
+        done += part.length;
+        toast("寫入中…", `${done} / ${normalized.length}`);
+      }
+
+      toast("新增/更新完成", `assets 已寫入 ${normalized.length} 筆`);
+      setImportHint(`✅ 已寫入 ${normalized.length} 筆到 assets（你可以在下方清單看到）`);
+      await loadVideos(true);
+    } catch(err){
+      console.error(err);
+      alert("寫入 assets 失敗：\n" + (err?.message || err) + "\n\n提示：如果顯示 RLS/permission，代表 assets 的 policy 還沒放行 upsert。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
 
   function setBusy(busy, msg) {
     // Disable controls to prevent race conditions during updates
@@ -402,6 +584,44 @@
     try {
       await requireAdmin();
       await loadVideos();
+
+      // Import bindings
+      if (importEls.file) importEls.file.addEventListener('change', async (e)=>{
+        const f = e.target.files && e.target.files[0];
+        if (!f) return;
+        const txt = await readFileAsText(f);
+        await loadImportFromText(txt);
+      });
+
+      if (importEls.fetchBtn) importEls.fetchBtn.onclick = async ()=>{
+        const url = (importEls.url?.value || '').trim();
+        if (!url) return toast('請輸入 URL', '請貼上可讀取的 JSON 連結。');
+        try{
+          setBusy(true, '讀取 JSON…');
+          const res = await fetch(url, { cache: 'no-store' });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const txt = await res.text();
+          await loadImportFromText(txt);
+          toast('已讀取', url);
+        } catch(err){
+          console.error(err);
+          alert('讀取失敗：
+' + (err?.message || err) + '
+
+提示：如果是 CORS/跨網域限制，請改用「上傳 JSON 檔」。');
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      if (importEls.writeBtn) importEls.writeBtn.onclick = ()=>doWriteAssets();
+
+      // 允許直接貼上後按寫入
+      if (importEls.preview) importEls.preview.addEventListener('input', ()=>{
+        const t = (importEls.preview.value || '').trim();
+        if (!t) setImportHint('尚未載入。');
+        else setImportHint('已貼上 JSON（請確認後按「寫入 assets」）');
+      });
 
       els.q.addEventListener('input', ()=>applyFilters());
       els.catSel.addEventListener('change', ()=>applyFilters());
