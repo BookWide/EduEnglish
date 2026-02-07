@@ -962,7 +962,7 @@ function getWeekIndex() {
 
       for (const v of limited) {
         // ✅ 使用你指定的封面命名：assets/{category}/{slug}.cover.jpg
-        const cover = `${STORAGE_BASE}/assets/${v.category}/${v.slug}.jpg`;
+        const cover = (v.cover_url || `${STORAGE_BASE}/assets/${v.category}/${v.slug}.jpg`);
         const href = `player.html?cat=${encodeURIComponent(v.category)}&slug=${encodeURIComponent(v.slug)}`;
 
         const card = document.createElement("a");
@@ -1006,44 +1006,78 @@ function getWeekIndex() {
   }
 
 
-    async function loadAllVideoItems() {
-      gridEl.innerHTML =
-        `<div style="grid-column: 1 / -1; padding: 20px; text-align: center; color: #6b7280;">
-           正在載入教材清單…
-         </div>`;
+    
+async function loadAllVideoItems() {
+  gridEl.innerHTML =
+    `<div style="grid-column: 1 / -1; padding: 20px; text-align: center; color: #6b7280;">
+       正在載入教材清單…
+     </div>`;
 
-      try {
-        const res = await fetch(INDEX_JSON_URL, { cache: "no-store" });
-        if (!res.ok) throw new Error("HTTP " + res.status);
+  // 方案 B：直接從 public.assets 讀清單（最新上架立刻生效）
+  try {
+    if (supa) {
+      let q = supa
+        .from('assets')
+        .select('category,slug,title,difficulty_level,duration_sec,cover_url,mp4_url,is_published')
+        .order('category', { ascending: true })
+        .order('slug', { ascending: true });
 
-        const list = await res.json();
-        if (!Array.isArray(list)) throw new Error("index-all.json 不是陣列");
+      // 一般用戶：只顯示已上架
+      if (!CURRENT_USER_IS_ADMIN) q = q.eq('is_published', true);
 
-        VIDEO_ITEMS = list.map(item => ({
-          category: item.category,
-          slug: item.slug,
-          title: item.title || item.slug,
-          difficulty_level: item.difficulty_level ?? item.level ?? 0,
-          duration_sec: item.duration_sec ?? item.duration ?? 0
-        }));
+      const { data, error } = await q;
+      if (error) throw error;
 
-        await applyPublishFilter();
+      VIDEO_ITEMS = (data || []).map(r => ({
+        category: r.category,
+        slug: r.slug,
+        title: r.title || r.slug,
+        difficulty_level: r.difficulty_level ?? 0,
+        duration_sec: r.duration_sec ?? 0,
+        cover_url: r.cover_url || null,
+        mp4_url: r.mp4_url || null,
+      }));
 
+      // 先嘗試載入 weekly-index.json（若不存在就忽略，退回預設輪播）
+      await loadWeeklyIndex();
 
-        // 先嘗試載入 weekly-index.json（若不存在就忽略，退回預設輪播）
-        await loadWeeklyIndex();
-
-        renderGrid();
-      } catch (err) {
-        console.error(err);
-        gridEl.innerHTML =
-          `<div style="grid-column: 1 / -1; padding: 20px; text-align: center; color: #6b7280;">
-             無法載入教材清單，請稍後再試。
-           </div>`;
-      }
+      renderGrid();
+      return;
     }
+  } catch (err) {
+    console.warn('[index] load from assets failed, fallback to index-all.json:', err);
+  }
 
-    // ===== 篩選事件 =====
+  // fallback：仍可用舊的 index-all.json（避免 supabase 停用時整站掛掉）
+  try {
+    const res = await fetch(INDEX_JSON_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+
+    const list = await res.json();
+    if (!Array.isArray(list)) throw new Error("index-all.json 不是陣列");
+
+    VIDEO_ITEMS = list.map(item => ({
+      category: item.category,
+      slug: item.slug,
+      title: item.title || item.slug,
+      difficulty_level: item.difficulty_level ?? item.level ?? 0,
+      duration_sec: item.duration_sec ?? item.duration ?? 0,
+      cover_url: item.cover_url ?? item.cover ?? null,
+      mp4_url: item.mp4_url ?? item.video ?? null,
+    }));
+
+    await applyPublishFilter();
+    await loadWeeklyIndex();
+    renderGrid();
+  } catch (err) {
+    console.error(err);
+    gridEl.innerHTML =
+      `<div style="grid-column: 1 / -1; padding: 20px; text-align: center; color: #6b7280;">
+         無法載入教材清單，請稍後再試。
+       </div>`;
+  }
+}
+// ===== 篩選事件 =====
     document.getElementById("categoryTabs").addEventListener("click", (e) => {
       const btn = e.target.closest("[data-cat]");
       if (!btn) return;
