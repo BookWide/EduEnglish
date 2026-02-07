@@ -735,37 +735,50 @@
         userMsg = `以下是影片的英文字幕（時間 + 內容），請依說明產生 cues JSON 陣列：
 ${srtSample}`;
       } else if (kind === 'quiz'){
-        systemMsg += `你是一個「英文學習測驗（Quiz）JSON」產生器。
-請輸出 **單一 JSON 陣列**（不要多包一層物件，不要 Markdown，不要多餘文字），元素為題目物件，格式必須完全符合下列 schema（與 hideandseek 同款）：
+      // 2.2 測驗 quiz JSON：固定 4 類 × 每類 10 題 = 40 題（統一 hideandseek 風格）
+      const sys = `你是英語學習測驗題目設計師。請嚴格依照輸出格式，輸出「合法 JSON 陣列」且只輸出 JSON。`;
+      const user = `請根據以下逐行字幕（英語句子），產生 quiz 題目。
 
-[
-  {
-    "section": "單字" | "文法" | "閱讀" | "綜合",
-    "type": "single",
-    "question": "英文題目（單句清楚）",
-    "options": ["Option A(英文)", "Option B(英文)", "Option C(英文)", "Option D(英文)"],
-    "answer": "A" | "B" | "C" | "D",
-    "answer_en": "正確選項的英文（等於 options[answer]）",
-    "answer_zh": "正確答案的中文翻譯（繁體）",
-    "answer_ja": "正確答案的日文翻譯（日本語）",
-    "explanation_zh": "中文解釋（繁體，1 句）"
-  }
-]
+【題數規格（固定）】
+- 共 40 題
+- 分成 4 類：單字 / 文法 / 閱讀 / 綜合
+- 每一類 10 題（不可多不可少）
+- 全部題型統一：single（四選一）
+- 每題 options 固定 4 個英文選項（不要加 A./B. 字樣）
 
-硬性規則（必須做到）：
-1) 總共 **40 題**，並且四個 section 各 **10 題**：單字10、文法10、閱讀10、綜合10（順序不限，但數量必須正確）。
-2) 所有題目 `type` 一律是 "single"。
-3) `options` 只放「英文」四個選項，不要包含 A./B. 前綴，不要夾中文/日文。
-4) `answer` 只能是 "A"/"B"/"C"/"D"；`answer_en` 必須等於對應的 options 內容。
-5) 不要產生任何其他欄位。不要省略欄位。不要空字串。
-6) 避免重複題目/重複選項；難度符合影片內容，不要出現與內容無關的題目。`;
-        if (isProNoSrt){
-          userMsg = `請產生 40 題（單字10/文法10/閱讀10/綜合10）的測驗 JSON（格式如規範）。題目以「影片標題與分類」推測內容設計：標題：${title}；分類：${category}。`;
-        } else {
-          userMsg = `請根據下列 SRT 內容，產生 40 題（單字10/文法10/閱讀10/綜合10）的測驗 JSON（格式如規範）。標題：${title}；分類：${category}。SRT：
-${srtText}`;
-        }
-      } else if (kind === 'vocab'){
+【輸出 JSON 陣列格式（每一題物件）】
+{
+  "section": "單字|文法|閱讀|綜合",
+  "type": "single",
+  "question": "英文題目",
+  "options": ["選項1","選項2","選項3","選項4"],
+  "answer": "A|B|C|D",
+  "answer_en": "正確英文選項文字",
+  "answer_zh": "正確答案中文",
+  "answer_ja": "正確答案日文",
+  "explanation_zh": "中文簡短解釋（1 句即可）"
+}
+
+【題目生成規則】
+- 題目必須能從字幕內容推得答案（不要憑空出題）
+- 單字：挑字幕出現過的關鍵字/片語
+- 文法：挑字幕中的句型/時態/介系詞/代名詞等
+- 閱讀：理解字幕情節（who/what/where/why/how）
+- 綜合：把字幕資訊換句話問（同義改寫/推論 1 步）
+
+【字幕內容】\n` + srtLines.join('\n');
+
+      payload = {
+        model,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: user }
+        ],
+        temperature: 0.4
+      };
+    }
+
+    if (kind === 'vocab'){
         if (isProNoSrt){
           systemMsg += `
 任務：根據「文法主題」產出與該主題相關的關鍵字彙 JSON 陣列。
@@ -850,15 +863,40 @@ ${srtSample}`;
 ${srtSample}`;
         }
       } else if (kind === 'index'){
-        const title = slug.replace(/-/g,' ');
+        // 產出「舊款 index-mid-autumn」上架格式（給 launch / assets / index 使用）
+        const videoUrl = `https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/videos/${cat}/${slug}.mp4`;
+        const coverUrl = `https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets/${cat}/${slug}/cover.jpg`;
+
         systemMsg += `
-任務：為單支影片產生 index JSON 物件，包含：
-category, slug, title, difficulty_level (1~3), duration_sec。
-僅輸出單一 JSON 物件。`;
-        userMsg = `請幫我為以下影片產生 index JSON：
+你是一個只會輸出 JSON 的系統。你的回覆會直接丟給 JavaScript 的 JSON.parse。
+
+任務：為單支影片產生「BookWide 上架用 index JSON」（舊款 index-mid-autumn 格式）。
+
+【輸出必須是單一 JSON 物件，欄位必須完整且僅包含以下欄位】
+{
+  "title": "繁體中文標題（若不確定可用英文）",
+  "category": "story | movie | music | news | pro",
+  "slug": "英文 slug（用輸入的 slug 原樣）",
+  "video": "完整 mp4 URL",
+  "cover": "完整封面圖 URL",
+  "cues": { "zh": "./cues-<slug>.json" },
+  "vocab": "./vocab-<slug>.json",
+  "quiz": "./quiz-<slug>.json",
+  "ai": "./ai-<slug>.json",
+  "is_public": true
+}
+
+嚴格要求：
+- 只能輸出 JSON（不要說明文字、不要程式碼區塊）。
+- cues 一律是物件，且只有 zh："./cues-<slug>.json"。
+- vocab/quiz/ai 一律是字串路徑（以 ./ 開頭）。
+- is_public 一律 true。`;
+
+        userMsg = `請依照規格輸出 JSON。
 category: ${cat}
 slug: ${slug}
-title: ${title || slug}`;
+video: ${videoUrl}
+cover: ${coverUrl}`;
       }
 
       return {
@@ -953,6 +991,12 @@ title: ${title || slug}`;
         try{ obj = JSON.parse(text); }
         catch(e){ throw new Error('GPT 回傳內容不是合法 JSON，請重試。'); }
 
+        // quiz：統一成 hideandseek 風格 + 固定 40 題（4 類各 10 題）
+        if (kind === 'quiz'){
+          obj = normalizeQuiz(obj);
+        }
+
+
         // 在 cues 的第一筆物件塞 source_url（保持陣列格式）
         if (kind === 'cues'){
           const srcInput = document.getElementById('videoSourceInput');
@@ -979,6 +1023,103 @@ title: ${title || slug}`;
     }
 
     function cap(s){return s.charAt(0).toUpperCase()+s.slice(1);}
+
+    // --- quiz 正規化：統一 4 類 × 10 題，共 40 題（hideandseek 風格） ---
+    function normalizeQuiz(input){
+      // 允許 input 是陣列或包一層物件
+      let arr = [];
+      if (Array.isArray(input)) arr = input;
+      else if (input && Array.isArray(input.quiz)) arr = input.quiz;
+      else if (input && Array.isArray(input.questions)) arr = input.questions;
+      else if (input && Array.isArray(input.items)) arr = input.items;
+      else arr = [];
+
+      const targets = ['單字','文法','閱讀','綜合'];
+      const buckets = { '單字':[], '文法':[], '閱讀':[], '綜合':[] };
+      const rest = [];
+
+      function mapSection(s){
+        const t = String(s||'').toLowerCase();
+        if (t.includes('vocab') || t.includes('word') || t.includes('單字')) return '單字';
+        if (t.includes('grammar') || t.includes('文法')) return '文法';
+        if (t.includes('read') || t.includes('閱讀')) return '閱讀';
+        if (t.includes('綜合')) return '綜合';
+        // 其他一律視為綜合
+        return '綜合';
+      }
+      function toAnswerLetter(ans){
+        if (ans == null) return 'A';
+        if (typeof ans === 'number'){
+          return ['A','B','C','D'][Math.max(0, Math.min(3, ans))];
+        }
+        const a = String(ans).trim().toUpperCase();
+        if (['A','B','C','D'].includes(a)) return a;
+        // 可能是 "1"/"2"/"3"/"4"
+        if (['1','2','3','4'].includes(a)) return ['A','B','C','D'][parseInt(a,10)-1];
+        return 'A';
+      }
+
+      for (const q0 of arr){
+        if (!q0 || typeof q0 !== 'object') continue;
+        const q = { ...q0 };
+        q.section = mapSection(q.section);
+        q.type = 'single';
+
+        // options
+        if (!Array.isArray(q.options)) q.options = [];
+        q.options = q.options.map(x => String(x||'').replace(/^\s*[A-D]\.?\s*/i,'').trim()).filter(Boolean);
+        while (q.options.length < 4) q.options.push('');
+        q.options = q.options.slice(0,4);
+
+        // answer letter
+        q.answer = toAnswerLetter(q.answer);
+
+        // answer_en / zh / ja
+        const idx = {A:0,B:1,C:2,D:3}[q.answer] ?? 0;
+        if (!q.answer_en) q.answer_en = q.options[idx] || '';
+        if (!q.answer_zh) q.answer_zh = '';
+        if (!q.answer_ja) q.answer_ja = '';
+        if (!q.explanation_zh) q.explanation_zh = '';
+
+        // question
+        if (q.question == null) q.question = '';
+        q.question = String(q.question);
+
+        // 分桶
+        if (buckets[q.section] && buckets[q.section].length < 30){
+          buckets[q.section].push(q);
+        } else {
+          rest.push(q);
+        }
+      }
+
+      // 補齊每桶 10 題
+      for (const sec of targets){
+        while (buckets[sec].length < 10 && rest.length){
+          const q = rest.shift();
+          q.section = sec; // 重新標準化
+          buckets[sec].push(q);
+        }
+      }
+
+      // 若還不足（GPT 不足題），用 rest 或複用題目補到 10（避免崩）
+      for (const sec of targets){
+        while (buckets[sec].length < 10){
+          const fallback = (buckets[sec][0] ? { ...buckets[sec][0] } : {
+            section: sec, type: 'single', question: '', options: ['','','',''], answer:'A', answer_en:'', answer_zh:'', answer_ja:'', explanation_zh:''
+          });
+          buckets[sec].push(fallback);
+        }
+      }
+
+      // 組合 40 題：按 類別順序
+      const out = [];
+      for (const sec of targets){
+        out.push(...buckets[sec].slice(0,10));
+      }
+      return out;
+    }
+
 
     function triggerDownload(text, filename){
       const blob = new Blob([text],{type:'application/json'});
