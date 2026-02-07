@@ -236,7 +236,7 @@
     });
   }
 
-  document.getElementById('backBtn').onclick = ()=> location.href = "../admin.html";
+  document.getElementById('backBtn').onclick = ()=> location.href = "admin.html";
 </script>
 
 <script>
@@ -273,17 +273,68 @@
     catch(e){ return { ok:false, error: e }; }
   }
 
+  // ===== Slug 規則：全部強制轉成 kebab-case（小寫 + 連字號）=====
+  function normalizeSlug(s){
+    return String(s || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[_\s]+/g, "-")        // 空白/底線 -> -
+      .replace(/[^a-z0-9-]/g, "")      // 移除其他符號
+      .replace(/-+/g, "-")             // 多個 - 合併
+      .replace(/^-|-$/g, "");          // 去頭尾 -
+  }
+
+  // 把匯入的 index-*.json 在「預覽」時也修成正確命名規則（避免你看到空白/大寫檔名）
+  function normalizeIndexItemForPreview(raw){
+    if (!raw || typeof raw !== 'object') return raw;
+
+    const category = raw.category ?? raw.cat ?? null;
+    const title = raw.title ?? raw.name ?? raw.video_title ?? raw.videoTitle ?? null;
+
+    // slug 來源：優先 slug，其次用 title/name 推導
+    const rawSlug = raw.slug ?? raw.id ?? raw.key ?? title ?? raw.name ?? null;
+    const slug = normalizeSlug(rawSlug);
+
+    if (!category || !slug) return raw;
+
+    // cover 副檔名：若原本有 .png 就保留 .png，否則一律用 .jpg
+    const coverExt = (() => {
+      const c = String(raw.cover || raw.cover_url || raw.coverUrl || "");
+      const m = c.match(/\.(png|jpe?g)(?:\?|#|$)/i);
+      if (m) return m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+      return "jpg";
+    })();
+
+    const base = "https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets";
+    return {
+      ...raw,
+      title: title ?? raw.title ?? slug,
+      category: String(category),
+      slug,
+      video: `${base}/${category}/${slug}.mp4`,
+      cover: `${base}/${category}/${slug}.${coverExt}`,
+      cues: (raw.cues && typeof raw.cues === 'object')
+        ? { ...raw.cues, zh: `./cues-${slug}.json` }
+        : { zh: `./cues-${slug}.json` },
+      vocab: `./vocab-${slug}.json`,
+      quiz: `./quiz-${slug}.json`,
+      ai: `./ai-${slug}.json`,
+      is_public: (raw.is_public !== undefined) ? !!raw.is_public : true
+    };
+  }
+
   function normalizeImportItem(raw){
     if (!raw || typeof raw !== 'object') return null;
 
-    // 支援你現在的 index-mid-autumn.json 欄位命名
+    // 支援像 index-mid-autumn.json 欄位命名
     const title = raw.title ?? raw.name ?? raw.video_title ?? raw.videoTitle ?? null;
     const category = raw.category ?? raw.cat ?? null;
-    const slug = raw.slug ?? raw.id ?? raw.key ?? null;
-    const mp4_url = raw.video ?? raw.mp4_url ?? raw.mp4Url ?? raw.url ?? null;
-    const cover_url = raw.cover ?? raw.cover_url ?? raw.coverUrl ?? null;
 
-    // 上架旗標：優先看 is_public/is_published，沒有就預設 true（因為你的 index-*.json 通常是要上架）
+    // slug 一律正規化（避免空白/大寫/底線）
+    const rawSlug = raw.slug ?? raw.id ?? raw.key ?? title ?? raw.name ?? null;
+    const slug = normalizeSlug(rawSlug);
+
+    // 上架旗標：優先看 is_published/is_public/published，沒有就預設 true
     const is_published = (() => {
       if (raw.is_published !== undefined) return !!raw.is_published;
       if (raw.is_public !== undefined) return !!raw.is_public;
@@ -291,18 +342,29 @@
       return true;
     })();
 
-    // 可選欄位（如果 assets 表有這些欄位就會寫入，沒有也不會影響 upsert）
+    // 可選欄位
     const difficulty_level = raw.difficulty_level ?? raw.difficulty ?? raw.level ?? null;
     const duration_sec = raw.duration_sec ?? raw.duration ?? null;
 
-    if (!slug || !category || !title || !mp4_url) return { _invalid:true, reason:'缺少必要欄位（slug/category/title/video）', raw };
+    if (!slug || !category || !title) return { _invalid:true, reason:'缺少必要欄位（slug/category/title）', raw };
+
+    // ===== 重要：不再相信 raw.video/raw.cover（避免空白/錯誤檔名），一律用 slug 組標準路徑 =====
+    const base = "https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/assets";
+
+    // cover 副檔名：若原本有 .png 就保留 .png，否則一律用 .jpg
+    const coverExt = (() => {
+      const c = String(raw.cover || raw.cover_url || raw.coverUrl || "");
+      const m = c.match(/\.(png|jpe?g)(?:\?|#|$)/i);
+      if (m) return m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+      return "jpg";
+    })();
 
     return {
       slug: String(slug),
       category: String(category),
       title: String(title),
-      mp4_url: String(mp4_url),
-      cover_url: cover_url ? String(cover_url) : null,
+      mp4_url: `${base}/${category}/${slug}.mp4`,
+      cover_url: `${base}/${category}/${slug}.${coverExt}`,
       is_published,
       difficulty_level,
       duration_sec: (duration_sec === null || duration_sec === undefined || duration_sec === "") ? null : Number(duration_sec),
@@ -336,7 +398,7 @@
       toast("JSON 解析失敗", parsed.error?.message || String(parsed.error));
       return;
     }
-    showImportPreview(parsed.data);
+    showImportPreview(Array.isArray(parsed.data) ? parsed.data.map(normalizeIndexItemForPreview) : normalizeIndexItemForPreview(parsed.data));
   }
 
   async function doWriteAssets(){
