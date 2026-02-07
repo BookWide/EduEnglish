@@ -397,7 +397,7 @@
           <h3>2.2 測驗 quiz JSON</h3>
           <div class="tagline">
             輸出檔名：<code id="nameQuiz">quiz-.json</code><br>
-            Level 1：每題 5 題 × 4 類 = 20 題。vocab / AI 會需要等 quiz 完成後再產生。
+            每類 10 題 × 4 類 = 40 題（不分 level）。vocab / AI 會需要等 quiz 完成後再產生。
           </div>
           <div class="btn-row">
             <button class="btn btn-primary" type="button" onclick="handleGenerate('quiz')">
@@ -734,49 +734,47 @@
 僅輸出 JSON 陣列。`;
         userMsg = `以下是影片的英文字幕（時間 + 內容），請依說明產生 cues JSON 陣列：
 ${srtSample}`;
-      } else if (kind === 'quiz'){
-      // 2.2 測驗 quiz JSON：固定 4 類 × 每類 10 題 = 40 題（統一 hideandseek 風格）
-      const sys = `你是英語學習測驗題目設計師。請嚴格依照輸出格式，輸出「合法 JSON 陣列」且只輸出 JSON。`;
-      const user = `請根據以下逐行字幕（英語句子），產生 quiz 題目。
+   } else if (kind === 'quiz'){
+      // 2.2 測驗 quiz JSON：沿用 quiz-hideandseek.json 的「原生吃法」(外層陣列，每題一個物件)
+      const srtLines = srtSegments.map(s => String(s.text || '').trim()).filter(Boolean);
+
+      systemMsg = `你是英語學習測驗題目設計師。請嚴格依照輸出格式，輸出「合法 JSON 陣列」且只輸出 JSON。`;
+
+      userMsg = `請根據以下字幕內容，產生 quiz 題目（格式完全比照 quiz-hideandseek.json，不分 level）。
 
 【題數規格（固定）】
 - 共 40 題
-- 分成 4 類：單字 / 文法 / 閱讀 / 綜合
-- 每一類 10 題（不可多不可少）
-- 全部題型統一：single（四選一）
-- 每題 options 固定 4 個英文選項（不要加 A./B. 字樣）
+- section 必須只用下列四類（不可新增其他分類）：
+  1) 理解內容
+  2) 細節理解
+  3) 字彙與片語
+  4) 延伸口說
+- 每類 10 題（不可多不可少）
+- type 固定：single（四選一）
+- options 固定 4 個英文選項（不要加 A./B. 字樣）
 
-【輸出 JSON 陣列格式（每一題物件）】
+【每題格式（外層直接是 JSON 陣列）】
 {
-  "section": "單字|文法|閱讀|綜合",
+  "section": "理解內容|細節理解|字彙與片語|延伸口說",
   "type": "single",
   "question": "英文題目",
   "options": ["選項1","選項2","選項3","選項4"],
   "answer": "A|B|C|D",
-  "answer_en": "正確英文選項文字",
-  "answer_zh": "正確答案中文",
-  "answer_ja": "正確答案日文",
-  "explanation_zh": "中文簡短解釋（1 句即可）"
+  "answer_en": "正確英文選項文字（可朗讀短語）",
+  "answer_zh": "正確答案中文（可朗讀短語）",
+  "answer_ja": "正確答案日文（可朗讀短語）",
+  "explanation_zh": "中文一句話解釋"
 }
 
-【題目生成規則】
-- 題目必須能從字幕內容推得答案（不要憑空出題）
-- 單字：挑字幕出現過的關鍵字/片語
-- 文法：挑字幕中的句型/時態/介系詞/代名詞等
-- 閱讀：理解字幕情節（who/what/where/why/how）
-- 綜合：把字幕資訊換句話問（同義改寫/推論 1 步）
+【朗讀規範（重要）】
+- answer_en：只放「正確選項本身的英文文字」，不要寫成解釋句
+- answer_zh / answer_ja：只放短語翻譯，避免長句解釋
+- 三欄都避免括號/斜線/冒號等符號
 
-【字幕內容】\n` + srtLines.join('\n');
-
-      payload = {
-        model,
-        messages: [
-          { role: 'system', content: sys },
-          { role: 'user', content: user }
-        ],
-        temperature: 0.4
-      };
-    }
+【字幕內容】
+${srtLines.join('\n')}
+`;
+      } else if (kind === 'vocab'){}
 
     if (kind === 'vocab'){
         if (isProNoSrt){
@@ -1024,7 +1022,19 @@ cover: ${coverUrl}`;
 
     function cap(s){return s.charAt(0).toUpperCase()+s.slice(1);}
 
-    // --- quiz 正規化：統一 4 類 × 10 題，共 40 題（hideandseek 風格） ---
+    
+
+    // 朗讀安全：把答案欄位清成「短、乾淨、可朗讀」
+    function speakClean(s, maxLen){
+      s = String(s ?? '').trim();
+      s = s.replace(/[“”"「」『』（）()\[\]{}<>]/g, '');
+      s = s.replace(/[\/\\|]/g, ' ');
+      s = s.replace(/[:;]+/g, ' ');
+      s = s.replace(/\s+/g, ' ').trim();
+      if (maxLen && s.length > maxLen) s = s.slice(0, maxLen).trim();
+      return s;
+    }
+// --- quiz 正規化：統一 4 類 × 10 題，共 40 題（hideandseek 風格） ---
     function normalizeQuiz(input){
       // 允許 input 是陣列或包一層物件
       let arr = [];
@@ -1034,18 +1044,18 @@ cover: ${coverUrl}`;
       else if (input && Array.isArray(input.items)) arr = input.items;
       else arr = [];
 
-      const targets = ['單字','文法','閱讀','綜合'];
-      const buckets = { '單字':[], '文法':[], '閱讀':[], '綜合':[] };
+      const targets = ['理解內容','細節理解','字彙與片語','延伸口說'];
+      const buckets = { '理解內容':[], '細節理解':[], '字彙與片語':[], '延伸口說':[] };
       const rest = [];
 
       function mapSection(s){
-        const t = String(s||'').toLowerCase();
-        if (t.includes('vocab') || t.includes('word') || t.includes('單字')) return '單字';
-        if (t.includes('grammar') || t.includes('文法')) return '文法';
-        if (t.includes('read') || t.includes('閱讀')) return '閱讀';
-        if (t.includes('綜合')) return '綜合';
-        // 其他一律視為綜合
-        return '綜合';
+        const raw = String(s||'').trim();
+        const t = raw.toLowerCase();
+        if (t.includes('理解內容') || t.includes('main') || t.includes('comprehension')) return '理解內容';
+        if (t.includes('細節理解') || t.includes('detail')) return '細節理解';
+        if (t.includes('字彙') || t.includes('片語') || t.includes('vocab') || t.includes('phrase')) return '字彙與片語';
+        if (t.includes('延伸') || t.includes('口說') || t.includes('speaking') || t.includes('conversation')) return '延伸口說';
+        return raw || '理解內容'; // 原樣吃，空才補
       }
       function toAnswerLetter(ans){
         if (ans == null) return 'A';
@@ -1076,10 +1086,16 @@ cover: ${coverUrl}`;
 
         // answer_en / zh / ja
         const idx = {A:0,B:1,C:2,D:3}[q.answer] ?? 0;
-        if (!q.answer_en) q.answer_en = q.options[idx] || '';
+        q.answer_en = q.options[idx] || q.answer_en || '';
         if (!q.answer_zh) q.answer_zh = '';
         if (!q.answer_ja) q.answer_ja = '';
         if (!q.explanation_zh) q.explanation_zh = '';
+
+        // 朗讀欄位清理（短、乾淨）
+        q.answer_en = speakClean(q.answer_en, 60);
+        q.answer_zh = speakClean(q.answer_zh, 20);
+        q.answer_ja = speakClean(q.answer_ja, 30);
+
 
         // question
         if (q.question == null) q.question = '';
