@@ -872,84 +872,158 @@ function startQuiz(force){
 })();
 </script>
 
-<script id="bw-level-survey-lock">
+<script id="bw-level-cooldown-lock">
 (function(){
   const DAY = 24*60*60*1000;
-  const COOLDOWN = 30*DAY;
+  const COOLDOWN_DAYS = 30;
+  const COOLDOWN_MS = COOLDOWN_DAYS * DAY;
 
-  function planQuota(){
-    const m = Number(localStorage.getItem("BW_SUB_MONTHS")||0);
-    if(m===12) return 12;
-    if(m===6) return 6;
-    if(m===1) return 0;
-    return 0;
+  function n(v){ const x = Number(v); return Number.isFinite(x)?x:0; }
+
+  function planMonths(){
+    // Your site should set this on subscription: 1 / 6 / 12
+    return n(localStorage.getItem("BW_SUB_MONTHS"));
+  }
+  function planRetakeQuota(months){
+    if(months===6) return 6;
+    if(months===12) return 12;
+    return 0; // 1 month
   }
 
-  function baselineDone(){
-    return (localStorage.getItem("BW_LEVEL_DONE")||localStorage.getItem("BW_LEVEL_BASELINE_DONE")||"") === "1";
+  function fmtDate(ts){
+    try{
+      const d = new Date(ts);
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,"0");
+      const dd = String(d.getDate()).padStart(2,"0");
+      return `${y}/${m}/${dd}`;
+    }catch(e){ return ""; }
   }
 
-  function canRetake(){
-    const quota = planQuota();
-    const used = Number(localStorage.getItem("BW_LEVEL_RETAKE_USED")||"0");
-    const last = Number(localStorage.getItem("BW_LEVEL_RETAKE_TS")||"0");
-    if(!baselineDone()){
-      return { ok:true, mode:"baseline", quota, used };
+  function getState(){
+    const months = planMonths();
+    const quota = planRetakeQuota(months);
+    const baselineDone = localStorage.getItem("BW_LEVEL_BASELINE_DONE")==="1";
+    const used = n(localStorage.getItem("BW_LEVEL_RETAKE_USED"));
+    const last = n(localStorage.getItem("BW_LEVEL_RETAKE_TS"));
+    const now = Date.now();
+
+    if(!baselineDone){
+      return { allow:true, mode:"baseline", months, quota, used, last, nextOkTs:0, reason:"" };
     }
-    if(used >= quota) return { ok:false, reason:"quota", quota, used };
-    if(last && Date.now() < last + COOLDOWN){
-      return { ok:false, reason:"cooldown", waitMs:(last+COOLDOWN-Date.now()), quota, used };
+
+    if(used >= quota){
+      return { allow:false, mode:"blocked", months, quota, used, last, nextOkTs:0, reason:"quota" };
     }
-    return { ok:true, mode:"retake", quota, used };
+
+    const nextOkTs = last ? (last + COOLDOWN_MS) : 0;
+    if(last && now < nextOkTs){
+      return { allow:false, mode:"blocked", months, quota, used, last, nextOkTs, reason:"cooldown" };
+    }
+
+    return { allow:true, mode:"retake", months, quota, used, last, nextOkTs:0, reason:"" };
   }
 
-  // Expose for debugging
-  window.BW_CAN_RETAKE_LEVEL = canRetake;
+  // Make state available for debugging
+  window.BW_LEVEL_STATE = getState;
 
-  // Intercept the moment BEFORE the page writes TALK_START_WEEK / BW_LEVEL_WEEK_CAP.
-  // We do it by monkey-patching localStorage.setItem in a scoped way.
-  const _setItem = localStorage.setItem.bind(localStorage);
-  localStorage.setItem = function(k,v){
-    if(k === "TALK_START_WEEK" || k === "BW_LEVEL_WEEK_CAP"){
-      const st = canRetake();
-      if(!st.ok){
-        // Block overwriting start/cap
-        console.warn("[BW] blocked level overwrite", st);
-        return;
-      }
-      // allow baseline always; allow retake only if ok
-      if(st.mode === "retake" && k === "TALK_START_WEEK"){
-        _setItem("BW_LEVEL_RETAKE_USED", String(st.used + 1));
-        _setItem("BW_LEVEL_RETAKE_TS", String(Date.now()));
-      }
-      // mark baseline once
-      if(st.mode === "baseline"){
-        _setItem("BW_LEVEL_BASELINE_DONE","1");
-        _setItem("BW_LEVEL_DONE","1");
-      }
+  // Hard guard: prevent writing startWeek / anchor keys when blocked
+  const guardedKeys = new Set([
+    "BW_TALK_START_WEEK",
+    "BW_START_WEEK",
+    "TALK_START_WEEK",
+    "BW_LEVEL_UNLOCKED_WEEK",
+    "BW_LEVEL_WEEK_CAP",
+    "BW_SUB_START_TS"
+  ]);
+
+  const _setItem = Storage.prototype.setItem;
+  Storage.prototype.setItem = function(k, v){
+    const st = getState();
+    if(st && st.allow===false && guardedKeys.has(String(k))){
+      // silently ignore
+      return;
     }
-    return _setItem(k,v);
+    return _setItem.call(this, k, v);
   };
 
-  // Optional: add UI hint on start screen if we can find a place
+  function disableUI(message){
+    // Try to disable likely start/submit buttons
+    const candidates = [
+      document.querySelector("#startBtn"),
+      document.querySelector("[data-start]"),
+      document.querySelector("[data-submit-level]"),
+      document.querySelector("button[type=submit]"),
+      ...Array.from(document.querySelectorAll("button")).filter(b=>{
+        const t = (b.textContent||"").trim();
+        return /開始測驗|開始測試|Start/i.test(t);
+      })
+    ].filter(Boolean);
+
+    candidates.forEach(btn=>{
+      btn.disabled = true;
+      btn.setAttribute("aria-disabled","true");
+      btn.style.opacity = "0.45";
+      btn.style.pointerEvents = "none";
+      btn.title = message;
+    });
+
+    // show banner message
+    let box = document.getElementById("bwRetakeLockBanner");
+    if(!box){
+      box = document.createElement("div");
+      box.id = "bwRetakeLockBanner";
+      box.style.cssText = [
+        "position:fixed",
+        "left:16px",
+        "right:16px",
+        "bottom:16px",
+        "z-index:99999",
+        "background:rgba(0,0,0,0.72)",
+        "color:#fff",
+        "padding:12px 14px",
+        "border-radius:12px",
+        "font-size:14px",
+        "line-height:1.4",
+        "backdrop-filter: blur(8px)",
+        "box-shadow:0 8px 24px rgba(0,0,0,0.35)"
+      ].join(";");
+      box.innerHTML = `<div style="font-weight:700;margin-bottom:4px;">Level 測驗已鎖定</div><div id="bwRetakeLockText"></div>`;
+      document.body.appendChild(box);
+    }
+    const text = box.querySelector("#bwRetakeLockText");
+    if(text) text.textContent = message;
+  }
+
+  function onResultCommitted(){
+    // Call this after an actual successful submission (baseline or retake)
+    const st = getState();
+    const now = Date.now();
+    if(st.mode==="baseline"){
+      localStorage.setItem("BW_LEVEL_BASELINE_DONE","1");
+      // baseline does NOT consume retake quota
+      localStorage.setItem("BW_LEVEL_RETAKE_TS", String(now));
+      // do not increment used here
+    }else if(st.mode==="retake"){
+      localStorage.setItem("BW_LEVEL_RETAKE_TS", String(now));
+      localStorage.setItem("BW_LEVEL_RETAKE_USED", String(n(localStorage.getItem("BW_LEVEL_RETAKE_USED")) + 1));
+    }
+  }
+
+  // Expose helper so existing code can call it if you add one line.
+  window.BW_LEVEL_ON_COMMIT = onResultCommitted;
+
   document.addEventListener("DOMContentLoaded", ()=>{
-    try{
-      const box = document.querySelector("[data-level-info]") || document.querySelector(".card") || document.querySelector("main") || document.body;
-      const st = canRetake();
-      const el = document.createElement("div");
-      el.style.cssText = "margin-top:10px;color:#cbd5e1;font-weight:700;font-size:14px;opacity:.9";
-      if(!baselineDone()){
-        el.textContent = "首次測驗：會設定 Talk 起點。";
-      }else if(!st.ok && st.reason==="quota"){
-        el.textContent = "已用完本訂閱可重測次數。";
-      }else if(!st.ok && st.reason==="cooldown"){
-        const days = Math.ceil(st.waitMs/(24*60*60*1000));
-        el.textContent = "重測冷卻中：約 "+days+" 天後可再測。";
+    const st = getState();
+    if(!st.allow){
+      if(st.reason==="quota"){
+        disableUI("你已用完本訂閱可重測次數。");
+      }else if(st.reason==="cooldown"){
+        disableUI(`30 天內不可重測。下次可重測：${fmtDate(st.nextOkTs)}`);
       }else{
-        el.textContent = "可重測（每 30 天一次）。剩餘 "+(st.quota-st.used)+" 次。";
+        disableUI("目前不可重測。");
       }
-      box.appendChild(el);
-    }catch(e){}
+    }
   });
 
 })();
