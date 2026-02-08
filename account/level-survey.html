@@ -871,5 +871,89 @@ function startQuiz(force){
   }
 })();
 </script>
+
+<script id="bw-level-survey-lock">
+(function(){
+  const DAY = 24*60*60*1000;
+  const COOLDOWN = 30*DAY;
+
+  function planQuota(){
+    const m = Number(localStorage.getItem("BW_SUB_MONTHS")||0);
+    if(m===12) return 12;
+    if(m===6) return 6;
+    if(m===1) return 0;
+    return 0;
+  }
+
+  function baselineDone(){
+    return (localStorage.getItem("BW_LEVEL_DONE")||localStorage.getItem("BW_LEVEL_BASELINE_DONE")||"") === "1";
+  }
+
+  function canRetake(){
+    const quota = planQuota();
+    const used = Number(localStorage.getItem("BW_LEVEL_RETAKE_USED")||"0");
+    const last = Number(localStorage.getItem("BW_LEVEL_RETAKE_TS")||"0");
+    if(!baselineDone()){
+      return { ok:true, mode:"baseline", quota, used };
+    }
+    if(used >= quota) return { ok:false, reason:"quota", quota, used };
+    if(last && Date.now() < last + COOLDOWN){
+      return { ok:false, reason:"cooldown", waitMs:(last+COOLDOWN-Date.now()), quota, used };
+    }
+    return { ok:true, mode:"retake", quota, used };
+  }
+
+  // Expose for debugging
+  window.BW_CAN_RETAKE_LEVEL = canRetake;
+
+  // Intercept the moment BEFORE the page writes TALK_START_WEEK / BW_LEVEL_WEEK_CAP.
+  // We do it by monkey-patching localStorage.setItem in a scoped way.
+  const _setItem = localStorage.setItem.bind(localStorage);
+  localStorage.setItem = function(k,v){
+    if(k === "TALK_START_WEEK" || k === "BW_LEVEL_WEEK_CAP"){
+      const st = canRetake();
+      if(!st.ok){
+        // Block overwriting start/cap
+        console.warn("[BW] blocked level overwrite", st);
+        return;
+      }
+      // allow baseline always; allow retake only if ok
+      if(st.mode === "retake" && k === "TALK_START_WEEK"){
+        _setItem("BW_LEVEL_RETAKE_USED", String(st.used + 1));
+        _setItem("BW_LEVEL_RETAKE_TS", String(Date.now()));
+      }
+      // mark baseline once
+      if(st.mode === "baseline"){
+        _setItem("BW_LEVEL_BASELINE_DONE","1");
+        _setItem("BW_LEVEL_DONE","1");
+      }
+    }
+    return _setItem(k,v);
+  };
+
+  // Optional: add UI hint on start screen if we can find a place
+  document.addEventListener("DOMContentLoaded", ()=>{
+    try{
+      const box = document.querySelector("[data-level-info]") || document.querySelector(".card") || document.querySelector("main") || document.body;
+      const st = canRetake();
+      const el = document.createElement("div");
+      el.style.cssText = "margin-top:10px;color:#cbd5e1;font-weight:700;font-size:14px;opacity:.9";
+      if(!baselineDone()){
+        el.textContent = "首次測驗：會設定 Talk 起點。";
+      }else if(!st.ok && st.reason==="quota"){
+        el.textContent = "已用完本訂閱可重測次數。";
+      }else if(!st.ok && st.reason==="cooldown"){
+        const days = Math.ceil(st.waitMs/(24*60*60*1000));
+        el.textContent = "重測冷卻中：約 "+days+" 天後可再測。";
+      }else{
+        el.textContent = "可重測（每 30 天一次）。剩餘 "+(st.quota-st.used)+" 次。";
+      }
+      box.appendChild(el);
+    }catch(e){}
+  });
+
+})();
+</script>
+
 </body>
 </html>
