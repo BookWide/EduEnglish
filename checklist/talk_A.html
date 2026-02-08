@@ -711,6 +711,7 @@ body{line-height:1.1}
         </div>
       </div>
       <div class="fillEn" id="fillEn">Can I get a ____ , please?</div>
+      <div class="fillHint" id="fillTrans" style="margin-top:8px; color:var(--muted);"></div>
       <div class="fillHint" id="fillHint">先用「填空」完成一句，再改成你自己的說法。</div>
       <div class="fillRow">
         <input class="inp" id="fillInput" placeholder="填入空格…"/>
@@ -942,7 +943,8 @@ const DAY = 24*60*60*1000;
   const btnHideFill = $("btnHideFill");
   const fillEn = $("fillEn");
   const fillHint = $("fillHint");
-  const fillInput = $("fillInput");
+    const fillTrans = $("fillTrans");
+const fillInput = $("fillInput");
   const btnSendFill = $("btnSendFill");
   const btnFillReset = $("btnFillReset");
   const btnBack = $("btnBack");
@@ -1068,6 +1070,7 @@ function normalizeTurns(raw){
       const text = (t.text ?? t.english ?? t.en ?? "").toString();
       const en = (t.en ?? t.english ?? t.text ?? '').toString().trim();
       const zh = (t.zh ?? t.tw ?? t.cn ?? t.chinese ?? '').toString().trim();
+      const ja = (t.ja ?? t.jp ?? t.japanese ?? '').toString().trim();
 
       // role normalization for dialogue mode
       let roleRaw = ((t.role ?? t.speaker ?? '').toString().trim()) || "";
@@ -1087,7 +1090,7 @@ function normalizeTurns(raw){
       const fill = (t.fill ?? t.blank ?? '').toString();
       const answer = (t.answer ?? '').toString().trim();
 
-      return { en, zh, role, level, hint, fill, answer };
+      return { en, zh, ja, role, level, hint, fill, answer };
     }).filter(x=>x && x.en);
   }
 
@@ -1118,28 +1121,45 @@ function speakJA(text){
     window.speechSynthesis.speak(u);
   }catch(e){}
 }
-function renderZhJa(containerEl, zhText){
+function renderZhJa(containerEl, zhText, jaText){
   if(!containerEl) return;
   containerEl.innerHTML = '';
-  if(!zhText){ containerEl.style.display='none'; return; }
-  containerEl.style.display='';
-  const wrap = document.createElement('div');
-  wrap.className = 'zh-line';
-  const span = document.createElement('span');
-  span.textContent = zhText;
-  wrap.appendChild(span);
 
-  const ja = extractJapanese(zhText);
+  const zh = (zhText || '').toString().trim();
+  const ja = (jaText || '').toString().trim() || extractJapanese(zh);
+
+  if(!zh && !ja){ containerEl.style.display='none'; return; }
+  containerEl.style.display='';
+
+  // ZH line
+  if(zh){
+    const zhWrap = document.createElement('div');
+    zhWrap.className = 'zh-line';
+    const zhSpan = document.createElement('span');
+    zhSpan.textContent = zh;
+    zhWrap.appendChild(zhSpan);
+    containerEl.appendChild(zhWrap);
+  }
+
+  // JA line (separate field preferred; fallback to extracting from old mixed zh)
   if(ja){
+    const jaWrap = document.createElement('div');
+    jaWrap.className = 'zh-line';
+    const jaSpan = document.createElement('span');
+    jaSpan.textContent = ja;
+    jaSpan.style.fontFamily = 'system-ui, -apple-system, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif';
+    jaWrap.appendChild(jaSpan);
+
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'jaSpeakBtn';
     btn.title = '朗讀日文';
     btn.textContent = '🔊';
     btn.addEventListener('click', (ev)=>{ ev.stopPropagation(); speakJA(ja); });
-    wrap.appendChild(btn);
+    jaWrap.appendChild(btn);
+
+    containerEl.appendChild(jaWrap);
   }
-  containerEl.appendChild(wrap);
 }
 
 function updateUI(){
@@ -1154,7 +1174,7 @@ function updateUI(){
 
       lineEn.textContent = ai.en || "—";
       const li = document.getElementById("lineEnInline"); if(li) li.textContent = ai.en || "—";
-      renderZhJa(lineZh, ai.zh); const lz = document.getElementById("lineZhInline"); renderZhJa(lz, ai.zh);
+      renderZhJa(lineZh, ai.zh, ai.ja); const lz = document.getElementById("lineZhInline"); renderZhJa(lz, ai.zh, ai.ja);
       levBadge.textContent = ai.level || "A1";
 
       // Input card becomes "your reply" (do NOT reveal the expected answer by default)
@@ -1170,16 +1190,22 @@ function updateUI(){
       const cl = makeCloze(expected);
       // default show cloze; user can press「提示」to reveal full expected answer temporarily
       fillEn.textContent = expected ? (cl.cloze || "請輸入你的回覆…") : "請輸入你的回覆…";
-      renderFillOptions(cl);
+      
+      // Show expected translation (from JSON) if provided
+      if(fillTrans){
+        const uzh = (user && user.zh) ? user.zh : "";
+        const uja = (user && user.ja) ? user.ja : "";
+        renderZhJa(fillTrans, uzh, uja);
+      }renderFillOptions(cl);
       fillHint.textContent = "對話模式：AI 先說一句，等你回覆（語音或輸入）才會進下一句。按「提示」可顯示完整建議句。" + (expectedSrc==="generated" ? "  ⚠ 缺 USER 建議句：已用規則生成，請補 JSON。" : "");
       // do not auto-clear while typing
       // top labels
       weekLabel.textContent = "W" + String(activeWeek);
       scenePickLabel.textContent = activeSceneTitle ? activeSceneTitle : "選擇情境";
       sceneTitle.textContent = activeSceneTitle ? activeSceneTitle : "載入中…";
-      const progMax = Math.max(1, turns.length);
-const progNow = Math.min(progMax, aiIdx + 1);
-sceneSub.textContent = `本週：${progMax} 句（Core / Variation / Challenge） · 進度 ${progNow}/${progMax}`;
+      const progMax = Math.max(1, Math.ceil(turns.length/2));
+      const progNow = Math.min(progMax, Math.floor(aiIdx/2)+1);
+      sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${progNow}/${progMax}`;
       return;
     }
 
@@ -1187,7 +1213,7 @@ sceneSub.textContent = `本週：${progMax} 句（Core / Variation / Challenge�
     const t = currentTurn();
     lineEn.textContent = t.en || "—";
     const li2 = document.getElementById("lineEnInline"); if(li2) li2.textContent = t.en || "—";
-    renderZhJa(lineZh, t.zh); const lz2 = document.getElementById("lineZhInline"); renderZhJa(lz2, t.zh);
+    renderZhJa(lineZh, t.zh, t.ja); const lz2 = document.getElementById("lineZhInline"); renderZhJa(lz2, t.zh, t.ja);
     levBadge.textContent = t.level || "A1";
 
     const fillText = t.fill && t.fill.trim() ? t.fill : guessFillFromSentence(t.en);
@@ -1201,7 +1227,7 @@ sceneSub.textContent = `本週：${progMax} 句（Core / Variation / Challenge�
     weekLabel.textContent = "W" + String(activeWeek);
     scenePickLabel.textContent = activeSceneTitle ? activeSceneTitle : "選擇情境";
     sceneTitle.textContent = activeSceneTitle ? activeSceneTitle : "載入中…";
-    sceneSub.textContent = `本週：${Math.max(1,turns.length)} 句（Core / Variation / Challenge） · 進度 ${turnIdx+1}/${Math.max(1,turns.length)}`;
+    sceneSub.textContent = `本週：${ITEMS_PER_WEEK} 個練習（Core / Variation / Challenge） · 進度 ${turnIdx+1}/${Math.max(1,turns.length)}`;
   }
 
 
