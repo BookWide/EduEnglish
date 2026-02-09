@@ -254,9 +254,6 @@ a{color:inherit}
 .group .gHead .lock{font-size:12px; color:var(--muted); font-weight:900}
 .item{padding:12px; border-top:1px solid var(--line); display:flex; gap:10px; align-items:center; justify-content:space-between}
 .item .name{font-weight:900}
-.item .name{display:none !important;}
-.item .sub{font-size:12px !important; margin:0 !important; color:var(--muted) !important; font-weight:800 !important;}
-
 .item .sub{margin:0; font-size:12px}
 .item button{white-space:nowrap}
 @media (max-width:520px){
@@ -666,7 +663,7 @@ body{line-height:1.1}
             <option value="Sophia.mp4">Sophia</option>
           </select>
         </label>
-      <button class="smallBtn" id="btnReplay" title="朗讀日文">🔊</button>
+      <button class="smallBtn" id="btnReplay">重播</button>
       <span class="fileTag" id="fileTag"></span>
     </div>
   </div>
@@ -1040,8 +1037,33 @@ const fillInput = $("fillInput");
     const diff = Date.now() - ts;
     const weekMs = WEEK_DAYS * DAY;
     const passed = diff / weekMs; // 0.0, 1.0, 2.0...
-    const w = Math.floor(passed + ADVANCE_WEEKS) + 1;
-    return Math.max(1, Math.min(MAX_WEEKS, w));
+    const base = Math.max(1, Math.min(MAX_WEEKS, Math.floor(passed + ADVANCE_WEEKS) + 1));
+
+    // --- Level cap (front) ---
+    // Priority:
+    // 1) BW_LEVEL_UNLOCKED_WEEK = number (e.g. 8)
+    // 2) BW_LEVEL_WEEK_MAP = JSON mapping (e.g. {"A":1,"B":6,"C":12})
+    // 3) BW_LEVEL_RESULT = "A"|"B"|"C" (default A=1,B=6,C=12)
+    let cap = null;
+    try{
+      const n = Number(localStorage.getItem("BW_LEVEL_UNLOCKED_WEEK"));
+      if(Number.isFinite(n) && n > 0) cap = Math.floor(n);
+
+      if(cap == null){
+        let map = null;
+        try{
+          const raw = localStorage.getItem("BW_LEVEL_WEEK_MAP");
+          if(raw) map = JSON.parse(raw);
+        }catch(_){}
+
+        const r = (localStorage.getItem("BW_LEVEL_RESULT")||"").trim().toUpperCase();
+        const def = {A:1, B:6, C:12};
+        const wk = (map && map[r] != null) ? Number(map[r]) : def[r];
+        if(Number.isFinite(wk) && wk > 0) cap = Math.floor(wk);
+      }
+    }catch(_){}
+
+    return (cap!=null) ? Math.min(base, cap) : base;
   }
 
   // ---- turns normalize (defensive) ----
@@ -1114,19 +1136,9 @@ function normalizeTurns(raw){
 // ===== ZH line + tiny JA speak button (minimal) =====
 function extractJapanese(text){
   if(!text) return "";
-  const s = String(text);
-
-  // Common legacy format: "中文　日本語" (full-width space) or newline separated
-  const parts = s.split(/\u3000|\n/).map(x=>x.trim()).filter(Boolean);
-  // Prefer the segment that contains Hiragana/Katakana
-  const kanaRe = /[\u3040-\u30ff]/;
-  for(const seg of parts){
-    if(kanaRe.test(seg)) return seg;
-  }
-
-  // Fallback: grab the first run that contains kana, allow following Kanji/punct
-  const m2 = s.match(/[\u3040-\u30ff][\u3040-\u30ff\u3400-\u9fff\u3000-\u303f\u0020-\u007e]*/);
-  return m2 ? m2[0].trim() : "";
+  // Hiragana/Katakana + common Kanji ranges
+  const m = text.match(/[\u3040-\u30ff\u3400-\u9fff][\u3040-\u30ff\u3400-\u9fff\u3000-\u303f\u0020-\u007e]*/);
+  return m ? m[0].trim() : "";
 }
 function speakJA(text){
   try{
@@ -1719,7 +1731,8 @@ async function init(){
   const urlT = getTeacherFromURL();
   setTeacher(urlT || savedT || (selTeacher ? selTeacher.value : "teacher.mp4"));
     getOverrides();
-    unlockedWeek = 108; // talk_A 測試：全解鎖到 W108
+    // Front: unlockedWeek 由「訂閱/時間」計算，再套用 level cap（若有）
+    unlockedWeek = computeUnlockedWeek();
     const savedWeek = parseInt(localStorage.getItem(LS_WEEK)||"0",10) || 0;
     // admin=1 測試：避免把 activeWeek 設成 W999（index 沒有會讓清單空白），預設從 W1 開始
     activeWeek = Math.min(Math.max(savedWeek || (isAdmin ? 1 : unlockedWeek), 1), unlockedWeek);
@@ -1865,11 +1878,11 @@ if(!firstId){
 
   btnReplay.addEventListener("click", ()=>{
     const t = currentTurn();
-    const ja = (t && (t.ja || extractJapanese(t.zh))) ? (t.ja || extractJapanese(t.zh)) : "";
-    if(ja) speakJA(ja);
+    if(t.en) speak(t.en);
+    else if(lastTts) speak(lastTts);
   });
 
-btnSkip.addEventListener("click", ()=>nextTurn());
+  btnSkip.addEventListener("click", ()=>nextTurn());
 
   btnHint.addEventListener("click", ()=>{
     if(talkMode === "dialogue"){
@@ -2159,39 +2172,6 @@ function bwSaveTalkDailyScore(){
     const baseWeek = old.apply(this, arguments);
     const ov = getOverrideWeek();
     return (ov!=null) ? Math.min(baseWeek, ov) : baseWeek;
-  };
-})();
-</script>
-
-
-<script id="bw-talk-unlock-core">
-(function(){
-  const DAY = 24*60*60*1000;
-  function weeksBetween(a,b){ return Math.floor((b-a)/(7*DAY)); }
-
-  function getSubWeeks(){
-    const m = Number(localStorage.getItem("BW_SUB_MONTHS")||0);
-    if(m===1) return 4;
-    if(m===6) return 27;
-    if(m===12) return 54;
-    return 1;
-  }
-
-  function getStartWeek(){
-    return Number(localStorage.getItem("BW_TALK_START_WEEK")||1);
-  }
-
-  function getAnchor(){
-    return Number(localStorage.getItem("BW_SUB_START_TS")||0);
-  }
-
-  window.computeUnlockedWeek = function(){
-    const start = getStartWeek();
-    const anchor = getAnchor();
-    const subWeeks = getSubWeeks();
-    if(!anchor) return start;
-    const passed = weeksBetween(anchor, Date.now());
-    return Math.min(start + passed, start + subWeeks - 1);
   };
 })();
 </script>
