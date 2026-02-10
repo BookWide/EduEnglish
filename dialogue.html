@@ -90,6 +90,7 @@ body{
   display:flex;align-items:center;justify-content:center;color:#fff;font-size:26px;
   box-shadow:0 10px 20px rgba(37,99,235,.25);
 }
+.bigMic.rec{background:#dc2626;box-shadow:0 10px 20px rgba(220,38,38,.25)}
 .modeBtn{
   border:1px solid var(--line);background:#fff;border-radius:999px;
   padding:10px 14px;font-size:13px;cursor:pointer;color:var(--ink);
@@ -171,9 +172,12 @@ body{
 
   <div class="shell" id="app">
     <div class="npcCard">
-      <div class="avatar" id="avatarBox"><span id="avatarFallback">T</span></div>
+      <div class="avatar" id="avatarBox">
+  <video id="teacherVideo" playsinline muted loop preload="metadata" style="width:100%;height:100%;object-fit:cover;border-radius:18px;display:none"></video>
+  <span id="avatarFallback">T</span>
+</div>
       <div class="npcBody">
-        <div class="npcEn" id="npcLine">請先載入 ?src=xxx.dialogue.json</div>
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;">  <div class="npcEn" id="npcLine">請先載入 ?src=xxx.dialogue.json</div>  <button id="ttsBtn" title="朗讀" style="flex:0 0 auto;border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 10px;cursor:pointer">🔊</button></div>
         <div class="npcSub" id="npcSub">（可切換 EN / 中 / 日；缺語言顯示「—」）</div>
         <div class="metaRow">
           <div id="metaLeft">—</div>
@@ -183,7 +187,7 @@ body{
     </div>
 
     <div class="modeRow" id="modeRow">
-      <div class="bigMic" title="（這裡先當作 UI 標示，不做語音）">🎤</div>
+      <button class="bigMic" id="micBtn" title="語音輸入（Browser Speech）" style="border:0;cursor:pointer">🎤</button>
       <button class="modeBtn active" data-mode="input">輸入</button>
       <button class="modeBtn" data-mode="hint">提示</button>
       <button class="modeBtn" data-mode="collect">收藏</button>
@@ -242,6 +246,9 @@ body{
 
   const avatarBox = $('#avatarBox');
   const avatarFallback = $('#avatarFallback');
+  const teacherVideo = $('#teacherVideo');
+  const ttsBtn = $('#ttsBtn');
+  const micBtn = $('#micBtn');
 
   const userBox = $('#userBox');
   const hideBtn = $('#hideBtn');
@@ -265,6 +272,10 @@ body{
   let lang = 'en';
   let mode = 'input';
   let locked = false;
+  const DEFAULT_TEACHER_MP4 = 'https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/talk/teacher/Emma.mp4';
+  let teacherMp4 = DEFAULT_TEACHER_MP4;
+  let recognition = null;
+  let isRec = false;
 
   function getText(obj, baseKey){
     const key = baseKey + '_' + lang;
@@ -273,6 +284,17 @@ body{
   }
 
   function setAvatar(avatar){
+    // 優先顯示老師影片（Emma.mp4），不影響既有 avatar 欄位
+    const useVideo = !!teacherMp4;
+    if (useVideo){
+      teacherVideo.style.display = 'block';
+      avatarFallback.style.display = 'none';
+      teacherVideo.src = teacherMp4;
+      teacherVideo.play().catch(()=>{});
+      return;
+    }
+
+    // fallback：原本的圖片或字母
     avatarBox.innerHTML = '';
     if (avatar && typeof avatar === 'string' && avatar.trim()){
       const img = document.createElement('img');
@@ -300,6 +322,21 @@ body{
 
   function normalize(s){
     return String(s || '').trim().toLowerCase();
+  }
+
+  function speakCurrent(){
+    if(!DATA) return;
+    const t = DATA.turns[idx];
+    const npc = t.npc || {};
+    const text = getText(npc, 'line');
+    if(!text || text === '—') return;
+    if(!('speechSynthesis' in window)) return;
+    try{ window.speechSynthesis.cancel(); }catch(e){}
+    const ut = new SpeechSynthesisUtterance(text);
+    // lang mapping
+    ut.lang = (lang === 'zh') ? 'zh-TW' : (lang === 'ja') ? 'ja-JP' : 'en-US';
+    ut.rate = 1.0;
+    window.speechSynthesis.speak(ut);
   }
 
   function clearFeedback(){
@@ -434,6 +471,9 @@ body{
         langBtns.forEach(x=>x.classList.remove('active'));
         b.classList.add('active');
         lang = b.dataset.lang;
+        if (recognition){
+          try{ recognition.lang = (lang === 'zh') ? 'zh-TW' : (lang === 'ja') ? 'ja-JP' : 'en-US'; }catch(e){}
+        }
         if (DATA) render();
       };
     });
@@ -441,6 +481,43 @@ body{
     modeBtns.forEach(b=>{
       b.onclick = () => setMode(b.dataset.mode);
     });
+
+    // Speech Recognition (語音輸入 → 填入答案框)
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SR){
+      recognition = new SR();
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+      recognition.continuous = false;
+      const setRecLang = ()=>{
+        recognition.lang = (lang === 'zh') ? 'zh-TW' : (lang === 'ja') ? 'ja-JP' : 'en-US';
+      };
+      setRecLang();
+      recognition.onresult = (e)=>{
+        const txt = e.results?.[0]?.[0]?.transcript || '';
+        if(txt) answerInput.value = txt.trim();
+      };
+      recognition.onend = ()=>{
+        isRec = false;
+        micBtn.classList.remove('rec');
+      };
+      micBtn.onclick = ()=>{
+        if(!recognition) return;
+        if(isRec){ try{ recognition.stop(); }catch(e){} return; }
+        setRecLang();
+        isRec = true;
+        micBtn.classList.add('rec');
+        try{ recognition.start(); }catch(e){ isRec=false; micBtn.classList.remove('rec'); }
+      };
+    } else {
+      micBtn.title = '此瀏覽器不支援語音輸入（SpeechRecognition）';
+      micBtn.onclick = ()=>{
+        feedback.textContent = '此瀏覽器不支援語音輸入（SpeechRecognition）。';
+        feedback.className = 'feedback bad';
+      };
+    }
+
+    ttsBtn.onclick = () => speakCurrent();
 
     hideBtn.onclick = () => {
       const hidden = userContent.classList.toggle('hidden');
@@ -467,6 +544,8 @@ body{
     // Auto from query
     const qs = new URLSearchParams(location.search);
     let src = (qs.get('src') || '').trim();
+    const teacherParam = (qs.get('teacher') || '').trim();
+    if(teacherParam) teacherMp4 = teacherParam;
 
     // 支援：?cat=news&slug=english-idioms-2  →  data/news/english-idioms-2/english-idioms-2.dialogue.json
     if(!src){
