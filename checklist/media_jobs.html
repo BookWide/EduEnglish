@@ -218,33 +218,9 @@
       font-size:12px;
       color:rgba(255,255,255,.85);
     }
-  
-    .toast{
-      position:fixed;
-      right:16px;
-      top:16px;
-      z-index:9999;
-      max-width:min(520px, calc(100vw - 32px));
-      padding:10px 12px;
-      border-radius:12px;
-      border:1px solid rgba(255,255,255,.16);
-      background:rgba(0,0,0,.72);
-      color:rgba(255,255,255,.95);
-      font-size:13px;
-      line-height:1.4;
-      box-shadow:0 10px 30px rgba(0,0,0,.35);
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-      user-select:none;
-    }
-    .toast.bad{ border-color: rgba(255,80,80,.45); }
-    .toast.ok{ border-color: rgba(0,255,180,.35); }
-
   </style>
 </head>
 <body>
-
-<div id="toast" class="toast" style="display:none"></div>
 <header>
   <h1>Media Jobs 控制台 (Supabase + Worker)</h1>
   <div class="sub">
@@ -273,6 +249,11 @@
       <div>
         <label>Worker ID（顯示用）</label>
         <input id="workerId" value="LIN-SUKHUAN" />
+      </div>
+
+      <div>
+        <label>ADMIN_KEY（Insert Beats 用，走 RPC / 繞過 RLS）</label>
+        <input id="adminKey" placeholder="貼上 MEDIA_JOBS_ADMIN_KEY" />
       </div>
     </div>
 
@@ -437,44 +418,6 @@
   // ---------- helpers ----------
   const $ = (id) => document.getElementById(id);
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-  function isAbortError(e){
-    return e?.name === "AbortError" || /aborterror/i.test(String(e?.message || e));
-  }
-
-  let _toastTimer = null;
-  function toast(msg, kind="info"){
-    const el = $("toast");
-    if(!el) return;
-    el.className = "toast " + kind;
-    el.textContent = msg;
-    el.style.display = "block";
-    clearTimeout(_toastTimer);
-    _toastTimer = setTimeout(()=>{ el.style.display="none"; }, 2600);
-  }
-
-  function uiError(e, prefix=""){
-    if(isAbortError(e)) return; // ✅ AbortError 靜默
-    const msg = (prefix? (prefix + "：") : "") + (e?.message || e);
-    console.error(prefix || "Error", e);
-    toast("❌ " + msg, "bad");
-  }
-
-  async function retryOnce(fn){
-    try { return await fn(); }
-    catch(e){
-      if(isAbortError(e)){
-        await sleep(350);
-        try { return await fn(); }
-        catch(e2){ return { __abort:true, err:e2 }; }
-      }
-      throw e;
-    }
-  }
-
-  // refresh lock (avoid overlapping refresh when auto ON)
-  let _refreshing = false;
-
   const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
   function setConn(connected, msg){
@@ -552,7 +495,8 @@
       url: $("sbUrl").value.trim(),
       anon: $("sbAnon").value.trim(),
       bucket: $("sbBucket").value.trim() || "talk",
-      workerId: $("workerId").value.trim() || ""
+      workerId: $("workerId").value.trim() || "",
+      adminKey: $("adminKey").value.trim() || ""
     };
     localStorage.setItem("media_jobs_settings", JSON.stringify(o));
   }
@@ -563,6 +507,7 @@
       if(o.anon) $("sbAnon").value = o.anon;
       if(o.bucket) $("sbBucket").value = o.bucket;
       if(o.workerId) $("workerId").value = o.workerId;
+      if(o.adminKey) $("adminKey").value = o.adminKey;
     }catch{}
   }
 
@@ -618,24 +563,20 @@
     if(!uuidRe.test(jobId)) throw new Error("Job ID 必須是 uuid（例如 fa5a...）");
     if(!beats.length) throw new Error("沒有可插入的 beats（先 Preview Parse 看看）");
 
-    // build rows
-    const rows = beats.map(b => ({
-      job_id: jobId,
-      beat_index: b.beat_index,
-      start_ms: b.start_ms,
-      end_ms: b.end_ms,
-      line_text: b.line_text
-    }));
+    const adminKey = ($("adminKey").value || "").trim();
+    if(!adminKey) throw new Error("缺少 ADMIN_KEY（請在上方連線設定填入 MEDIA_JOBS_ADMIN_KEY）");
 
-    // chunk insert to avoid payload limit
-    const CHUNK = 200;
-    for(let i=0;i<rows.length;i+=CHUNK){
-      const chunk = rows.slice(i, i+CHUNK);
-      const { error } = await supabase.from("media_job_beats").insert(chunk);
-      if(error) throw error;
-      await sleep(120);
-    }
+    // 走 RPC（security definer）避免 ANON 直接 insert 被 RLS 擋
+    const { data, error } = await supabase.rpc("insert_media_job_beats", {
+      _job_id: jobId,
+      _beats: beats,
+      _admin_key: adminKey
+    });
+    if(error) throw error;
+
+    return data; // inserted count
   }
+
 
   function pickOutputs(row){
     const outs = [];
@@ -655,87 +596,68 @@
 
   async function refreshJobs(){
     requireConn();
-    if(_refreshing) return;
-    _refreshing = true;
-    try{
-      const status = $("filterStatus").value.trim();
-      const q = $("searchText").value.trim().toLowerCase();
+    const status = $("filterStatus").value.trim();
+    const q = $("searchText").value.trim().toLowerCase();
 
-      let query = supabase.from("media_jobs")
-        .select("*")
-        .order("created_at", { ascending:false })
-        .limit(50);
+    let query = supabase.from("media_jobs")
+      .select("*")
+      .order("created_at", { ascending:false })
+      .limit(50);
 
-      if(status) query = query.eq("status", status);
+    if(status) query = query.eq("status", status);
 
-      const r = await retryOnce(async()=> await query);
-      if(r && r.__abort) return;
-      const { data, error } = r;
-      if(error) throw error;
+    const { data, error } = await query;
+    if(error) throw error;
 
-      const rows = (data || []).filter(row=>{
-        if(!q) return true;
-        const hay = [
-          row.id, row.slug, row.category, row.title,
-          row.status, row.stage,
-          row.error_code, row.error_message
-        ].map(v => (v ?? "").toString().toLowerCase()).join(" | ");
-        return hay.includes(q);
-      });
+    const rows = (data || []).filter(r => {
+      if(!q) return true;
+      const hay = `${r.id} ${r.slug||""} ${r.title||""}`.toLowerCase();
+      return hay.includes(q);
+    });
 
-      const body = $("jobsBody");
-      if(!rows.length){
-        body.innerHTML = `<tr><td colspan="5" class="small" style="background:transparent;border:0;padding:14px 10px">查無資料。</td></tr>`;
-        return;
-      }
-
-      body.innerHTML = rows.map(r=>{
-        const dot = statusDot(r.status);
-        const prog = Math.max(0, Math.min(100, Number(r.progress ?? 0)));
-        const outs = pickOutputs(r).map(o=>`<a class="link" href="${esc(o.url)}" target="_blank">${esc(o.k)}</a>`).join(" · ");
-
-        return `
-          <tr>
-            <td>
-              <div class="row">
-                <span class="dot ${dot}"></span>
-                <div class="mono">${esc(r.id)}</div>
-              </div>
-              <div class="small muted">${esc(r.slug||"")} · ${esc(r.category||"")}</div>
-              <div class="small">${esc(r.title||"")}</div>
-            </td>
-            <td>
-              <div><b>${esc(r.status||"")}</b></div>
-              <div class="small muted">${esc(r.stage||"")}</div>
-              <div class="small">${outs ? ("輸出："+outs) : ""}</div>
-            </td>
-            <td class="small">
-              <div>${prog}%</div>
-              <div class="bar"><span style="width:${prog}%"></span></div>
-              <div class="small muted">${esc(r.worker_id||"")}</div>
-            </td>
-            <td class="small">
-              <div class="muted">${esc(r.created_at||"")}</div>
-              <div class="muted">${esc(r.updated_at||"")}</div>
-            </td>
-            <td class="small">
-              ${r.error_code ? `<div class="bad"><b>${esc(r.error_code)}</b></div>` : ""}
-              ${r.error_message ? `<div class="bad">${esc(r.error_message)}</div>` : ""}
-              <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
-                <button class="mini" data-act="copy" data-id="${esc(r.id)}">Copy ID</button>
-                <button class="mini" data-act="pause" data-id="${esc(r.id)}">Pause</button>
-                <button class="mini" data-act="resume" data-id="${esc(r.id)}">Resume</button>
-                <button class="mini danger" data-act="fail" data-id="${esc(r.id)}">Fail</button>
-              </div>
-            </td>
-          </tr>
-        `;
-      }).join("");
-    }catch(e){
-      uiError(e, "Refresh 失敗");
-    }finally{
-      _refreshing = false;
+    const body = $("jobsBody");
+    if(!rows.length){
+      body.innerHTML = `<tr><td colspan="5" class="small" style="background:transparent;border:0;padding:14px 10px">查無資料。</td></tr>`;
+      return;
     }
+
+    body.innerHTML = rows.map(r => {
+      const dot = statusDot(r.status);
+      const prog = Math.max(0, Math.min(100, Number(r.progress ?? 0)));
+      const stage = r.stage ? `<div class="small">stage: <span class="mono">${esc(r.stage)}</span></div>` : "";
+      const err = r.error_message ? `<div class="small" style="color:rgba(255,107,107,.92)">⚠ ${esc(r.error_message)}</div>` : "";
+      const outs = pickOutputs(r);
+      const outHtml = outs.length
+        ? outs.map(o => `<div class="small"><a href="${esc(o.url)}" target="_blank" rel="noreferrer">${esc(o.k)}</a></div>`).join("")
+        : `<div class="small">（尚無輸出）</div>`;
+
+      const btns = `
+        <div class="rightActions">
+          <button class="btn" data-act="copy" data-id="${esc(r.id)}">Copy ID</button>
+          <button class="btn warn" data-act="pause" data-id="${esc(r.id)}">Pause</button>
+          <button class="btn ok" data-act="resume" data-id="${esc(r.id)}">Resume</button>
+          <button class="btn bad" data-act="fail" data-id="${esc(r.id)}">Fail</button>
+        </div>
+      `;
+
+      return `
+        <tr>
+          <td>
+            <div class="tag"><span class="dot ${dot}"></span><span class="mono">${esc(r.id)}</span></div>
+            <div class="small">${esc(r.slug || "")} • ${esc(r.title || "")}</div>
+            ${stage}
+          </td>
+          <td><span class="tag">${esc(r.status || "")}</span></td>
+          <td>
+            <div class="progress"><div class="bar" style="width:${prog}%"></div></div>
+            <div class="small">${prog}%</div>
+            ${err}
+          </td>
+          <td>${outHtml}</td>
+          <td>${btns}</td>
+        </tr>
+      `;
+    }).join("");
   }
 
   // ---------- UI wire ----------
@@ -752,17 +674,17 @@
       await refreshJobs();
     }catch(e){
       console.error(e);
-      uiError(e,"Connect 失敗");
+      alert("❌ Connect 失敗：\n" + (e?.message || e));
       setConn(false, "Not connected");
       supabase = null;
     }
   };
 
   $("btnCreatePending").onclick = async ()=> {
-    try{ await createJob({queue:false}); }catch(e){ console.error(e); uiError(e); }
+    try{ await createJob({queue:false}); }catch(e){ console.error(e); alert("❌ " + (e?.message||e)); }
   };
   $("btnCreateQueue").onclick = async ()=> {
-    try{ await createJob({queue:true}); }catch(e){ console.error(e); uiError(e); }
+    try{ await createJob({queue:true}); }catch(e){ console.error(e); alert("❌ " + (e?.message||e)); }
   };
 
   $("btnPause").onclick = async ()=> {
@@ -770,21 +692,21 @@
       const id = $("ctlJobId").value.trim();
       await updateJobStatus(id, "pending", { stage: "paused(pending)" });
       alert("✅ 已 Pause（status=pending）");
-    }catch(e){ console.error(e); uiError(e); }
+    }catch(e){ console.error(e); alert("❌ " + (e?.message||e)); }
   };
   $("btnResume").onclick = async ()=> {
     try{
       const id = $("ctlJobId").value.trim();
       await updateJobStatus(id, "queued", { stage: "resumed(queued)" });
       alert("✅ 已 Resume（status=queued）");
-    }catch(e){ console.error(e); uiError(e); }
+    }catch(e){ console.error(e); alert("❌ " + (e?.message||e)); }
   };
   $("btnMarkFailed").onclick = async ()=> {
     try{
       const id = $("ctlJobId").value.trim();
       await updateJobStatus(id, "failed", { stage: "manual_failed", error_message: "manually marked failed" });
       alert("✅ 已標記 failed");
-    }catch(e){ console.error(e); uiError(e); }
+    }catch(e){ console.error(e); alert("❌ " + (e?.message||e)); }
   };
 
   $("btnReadSrt").onclick = async ()=> {
@@ -794,7 +716,7 @@
       const text = await f.text();
       $("srtText").value = text;
       setSrtState(true, `已讀取檔案：${f.name}（${Math.round(f.size/1024)} KB）`);
-    }catch(e){ console.error(e); setSrtState(false, "尚未載入"); uiError(e); }
+    }catch(e){ console.error(e); setSrtState(false, "尚未載入"); alert("❌ " + (e?.message||e)); }
   };
   $("btnClearSrt").onclick = ()=> { $("srtText").value=""; $("parseOut").value=""; setSrtState(false, "尚未載入"); };
 
@@ -806,7 +728,7 @@
       ).join("\n");
       $("parseOut").value = `beats = ${beats.length}\n\n` + preview + (beats.length>30 ? `\n\n...（只顯示前 30 筆）` : "");
       setSrtState(true, `已解析 beats：${beats.length} 筆`);
-    }catch(e){ console.error(e); uiError(e); }
+    }catch(e){ console.error(e); alert("❌ " + (e?.message||e)); }
   };
 
   $("btnInsertBeats").onclick = async ()=> {
@@ -815,10 +737,10 @@
       const jobId = $("beatsJobId").value.trim();
       const beats = parseSrtToBeats($("srtText").value);
       if(!beats.length) throw new Error("解析不到 beats：請確認 SRT 時間格式 (00:00:01,000 --> 00:00:03,000)");
-      await insertBeats(jobId, beats);
-      alert(`✅ Insert Beats 成功：${beats.length} 筆\n\n下一步：Queue This Job`);
+      const n = await insertBeats(jobId, beats);
+      alert(`✅ Insert Beats 成功：${n ?? beats.length} 筆\n\n下一步：Queue This Job`);
       await refreshJobs();
-    }catch(e){ console.error(e); uiError(e); }
+    }catch(e){ console.error(e); alert("❌ " + (e?.message||e)); }
   };
 
   $("btnQueueThisJob").onclick = async ()=> {
@@ -826,11 +748,11 @@
       const jobId = $("beatsJobId").value.trim();
       await queueThisJob(jobId);
       alert("✅ 已 Queue");
-    }catch(e){ console.error(e); uiError(e); }
+    }catch(e){ console.error(e); alert("❌ " + (e?.message||e)); }
   };
 
   $("btnRefresh").onclick = async ()=> {
-    try{ await refreshJobs(); }catch(e){ console.error(e); uiError(e); }
+    try{ await refreshJobs(); }catch(e){ console.error(e); alert("❌ " + (e?.message||e)); }
   };
   $("btnToggleAuto").onclick = async ()=> {
     if(autoTimer){
@@ -873,7 +795,7 @@
       }
     }catch(e){
       console.error(e);
-      uiError(e);
+      alert("❌ " + (e?.message||e));
     }
   });
 
