@@ -57,11 +57,7 @@
     color:var(--text);font-size:13px;opacity:0;pointer-events:none;transition:opacity .18s ease;
   }
   .toast.show{opacity:1}
-
-.bw-ref-actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
-.bw-ref-status{opacity:.85;font-size:12px}
-
-\1
+</style>
 </head>
 <body>
 <header>
@@ -120,7 +116,7 @@
 </div>
 
     <input id="refImages" type="file" accept="image/*" multiple class="bw-input" style="width:100%; padding:8px;" />
-    <div id="refImagesHint" style="font-size:11px; opacity:.75; margin-top:6px;">未選擇參考圖</div>
+    <div id="refImagesHint" style="font-size:11px; opacity:.75; margin-top:6px;">（Story Mode：不送參考圖進模型，只鎖風格）未選擇參考圖</div>
   </div>
 </div>
 
@@ -460,10 +456,10 @@ function bwGetRefLine() {
   if (!inp || !inp.files) return "";
   const files = Array.from(inp.files || []);
   if (hint) {
-    hint.textContent = files.length ? (`已選擇 ${files.length} 張參考圖：` + files.map(f => f.name).join("、")) : "未選擇參考圖";
+    hint.textContent = files.length ? (`已選擇 ${files.length} 張參考圖：` + files.map(f => f.name).join("、")) : "（Story Mode：不送參考圖進模型，只鎖風格）未選擇參考圖";
   }
   if (!files.length) return "";
-  return "Match the provided reference images: same era, clothing, faces, color grade, and cinematography (attach the reference images when generating).";
+  return "Story mode: keep a consistent storybook look (warm tone, soft light). Reference images are NOT attached in this mode (no character lock).";
 }
 // === /BW v1 ===
 
@@ -475,13 +471,13 @@ function bwGetBeatRefLine(rowIndex, totalRows) {
   if (!inp || !inp.files || !inp.files.length) return "";
   const files = Array.from(inp.files);
   if (mode === "global") {
-    return "Match all reference images consistently across all scenes.";
+    return "Story mode: keep a consistent storybook look (warm tone, soft light).";
   }
   const n = files.length;
-  if (n === 1) return "Match the single reference image across the full story.";
+  if (n === 1) return "Story mode: keep a consistent storybook look (warm tone, soft light).";
   const segment = Math.floor((rowIndex / totalRows) * n);
   const refIndex = Math.min(segment, n - 1);
-  return `Match reference image ${refIndex+1} for this story beat (keep era, faces, clothing, color grade consistent).`;
+  return "Story mode: keep a consistent storybook look (warm tone, soft light).";
 }
 // === /BW v2 ===
 function makePhotoPrompt(english, titleHint, idx, index = 0, totalRows = 1){
@@ -775,16 +771,8 @@ async function fileToDataURL(file){
 }
 
 function pickRefFileForIndex(rowIndex, totalRows){
-  const inp = document.getElementById("refImages");
-  const mode = document.getElementById("refModeSelect")?.value || "global";
-  if (!inp || !inp.files || !inp.files.length) return [];
-  const files = Array.from(inp.files);
-  if (mode === "global") return files.slice(0, 3);
-  const n = files.length;
-  if (n <= 1) return files.slice(0, 1);
-  const segment = Math.floor((rowIndex / Math.max(totalRows,1)) * n);
-  const refIndex = Math.min(segment, n - 1);
-  return [files[refIndex]];
+  // STORY MODE: do not attach reference images (avoid locking a single character/pose).
+  return [];
 }
 
 async function getRefImagesData(rowIndex, totalRows){
@@ -815,10 +803,7 @@ async function imgOne(row, rowIndex = 0, totalRows = 1){
       },
       body: JSON.stringify({
         prompt: row.photo_prompt,
-        size: imgSize,
-        // NEW: reference images (data URLs). Backend must support this field.
-        ref_images: await getRefImagesData(rowIndex, totalRows),
-        ref_mode: (document.getElementById("refModeSelect")?.value || "global")
+        size: imgSize
       })
     });
 
@@ -920,101 +905,6 @@ ${t}`);
   // initial
   refreshButtons();
 })();
-
-// ===== BookWide: per-video reference control (LOCK/CLEAR) =====
-let BW_LOADED_SRT_NAME = "";
-let BW_CURRENT_PROJECT_ID = "";
-let BW_REF = { locked:false, dataUrls:[], fileNames:[] };
-
-function bwProjectId(){
-  const shortEl = document.getElementById("shortName");
-  const shortName = (shortEl?.value || "").trim();
-  return shortName || (BW_LOADED_SRT_NAME || "untitled");
-}
-
-function bwSetRefStatus(){
-  const el = document.getElementById("refStatus");
-  if(!el) return;
-  if(BW_REF.locked && BW_REF.dataUrls.length){
-    el.textContent = `本片：已鎖定風格（${BW_REF.fileNames.join(", ")}）`;
-  } else {
-    el.textContent = "本片：未鎖定風格（不送參考圖）";
-  }
-}
-
-async function bwFileToResizedDataUrl(file, maxSide=768, quality=0.92){
-  const bmp = await createImageBitmap(file);
-  const w=bmp.width, h=bmp.height;
-  const scale = Math.min(1, maxSide/Math.max(w,h));
-  const cw=Math.round(w*scale), ch=Math.round(h*scale);
-  const canvas=document.createElement("canvas");
-  canvas.width=cw; canvas.height=ch;
-  const ctx=canvas.getContext("2d");
-  ctx.drawImage(bmp,0,0,cw,ch);
-  return canvas.toDataURL("image/jpeg", quality);
-}
-
-async function bwLockCurrentVideoRef(){
-  const inp = document.getElementById("refImages");
-  if(!inp || !inp.files || !inp.files.length){
-    alert("請先在「參考圖」選擇 1–2 張圖片，再鎖定本片。");
-    return;
-  }
-  const files = Array.from(inp.files).slice(0,2);
-  const dataUrls=[];
-  for(const f of files){
-    dataUrls.push(await bwFileToResizedDataUrl(f));
-  }
-  BW_REF.locked=true;
-  BW_REF.dataUrls=dataUrls;
-  BW_REF.fileNames=files.map(f=>f.name);
-  bwSetRefStatus();
-}
-
-function bwClearCurrentVideoRef(){
-  BW_REF.locked=false;
-  BW_REF.dataUrls=[];
-  BW_REF.fileNames=[];
-  const inp=document.getElementById("refImages");
-  if(inp) inp.value="";
-  bwSetRefStatus();
-}
-
-function bwMaybeResetOnProjectChange(){
-  const nextId = bwProjectId();
-  if(!BW_CURRENT_PROJECT_ID){
-    BW_CURRENT_PROJECT_ID = nextId;
-    return;
-  }
-  if(nextId !== BW_CURRENT_PROJECT_ID){
-    if(BW_REF.locked && BW_REF.dataUrls.length){
-      const keep = confirm("偵測到新影片（或短檔名變更）。
-要沿用上一支的風格參考嗎？
-
-【確定】沿用 / 【取消】清空");
-      if(!keep) bwClearCurrentVideoRef();
-    } else {
-      bwClearCurrentVideoRef();
-    }
-    BW_CURRENT_PROJECT_ID = nextId;
-  }
-}
-
-function bwHookRefControls(){
-  const lockBtn=document.getElementById("btnLockRef");
-  const clearBtn=document.getElementById("btnClearRef");
-  if(lockBtn) lockBtn.addEventListener("click", ()=>bwLockCurrentVideoRef().catch(e=>{console.error(e); alert("鎖定失敗，請看 Console");}));
-  if(clearBtn) clearBtn.addEventListener("click", ()=>bwClearCurrentVideoRef());
-  const shortEl=document.getElementById("shortName");
-  if(shortEl) shortEl.addEventListener("change", ()=>{ bwMaybeResetOnProjectChange(); bwSetRefStatus(); });
-  bwSetRefStatus();
-}
-
-window.addEventListener("DOMContentLoaded", ()=>{
-  BW_CURRENT_PROJECT_ID = bwProjectId();
-  bwHookRefControls();
-});
-// ===== end per-video reference control =====
-
-\1
+</script>
+</body>
 </html>
