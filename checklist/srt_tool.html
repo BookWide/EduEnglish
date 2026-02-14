@@ -289,6 +289,7 @@
   let rows = [];
   /** @type {any|null} */
   let selectedRow = null;
+  let selectedRowIndex = 0;
 
   function showToast(msg){
     toast.textContent = msg;
@@ -483,20 +484,21 @@ function makePhotoPrompt(english, titleHint, idx, index = 0, totalRows = 1){
 
   // --- Stable commercial prompt: lock style, lighting, framing across the whole story ---
   const GLOBAL_STYLE = [
-    "cinematic still photo",
-    "storybook realism",
-    "soft natural lighting",
-    "warm golden tone",
-    "consistent character design",
-    "same main characters across all scenes",
-    "same environment continuity",
-    "medium shot",
-    "stable framing",
-    "natural color grading",
-    "no dramatic lighting change",
-    "no color shift",
-    "NO text, NO subtitles, NO captions, NO words, NO letters, NO watermark"
-  ].join(", ");
+  "cinematic still photo",
+  "storybook realism",
+  "soft natural lighting",
+  "warm golden tone",
+  "consistent character design",
+  "same lion: large golden mane, calm noble face, amber eyes",
+  "same mouse: tiny brown mouse, round ears, small bright eyes",
+  "same forest environment continuity",
+  "medium shot",
+  "stable framing",
+  "natural color grading",
+  "no dramatic lighting change",
+  "no color shift",
+  "NO text, NO subtitles, NO captions, NO words, NO letters, NO watermark"
+].join(", ");
 
   const eraSel = document.getElementById("eraSelect");
   const eraMode = (eraSel && eraSel.value) ? eraSel.value : "auto";
@@ -757,7 +759,45 @@ function makePhotoPrompt(english, titleHint, idx, index = 0, totalRows = 1){
     downloadBlob(blob, `${row.id}.mp3`);
   }
 
-  async function imgOne(row){
+  
+// --- Reference image support (attach 1-3 images to influence generation) ---
+async function fileToDataURL(file){
+  return await new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onerror = () => reject(fr.error || new Error("FileReader error"));
+    fr.onload = () => resolve(String(fr.result || ""));
+    fr.readAsDataURL(file);
+  });
+}
+
+function pickRefFileForIndex(rowIndex, totalRows){
+  const inp = document.getElementById("refImages");
+  const mode = document.getElementById("refModeSelect")?.value || "global";
+  if (!inp || !inp.files || !inp.files.length) return [];
+  const files = Array.from(inp.files);
+  if (mode === "global") return files.slice(0, 3);
+  const n = files.length;
+  if (n <= 1) return files.slice(0, 1);
+  const segment = Math.floor((rowIndex / Math.max(totalRows,1)) * n);
+  const refIndex = Math.min(segment, n - 1);
+  return [files[refIndex]];
+}
+
+async function getRefImagesData(rowIndex, totalRows){
+  const files = pickRefFileForIndex(rowIndex, totalRows);
+  if (!files.length) return [];
+  const out = [];
+  for (const f of files){
+    try{
+      out.push(await fileToDataURL(f));
+    }catch(e){
+      console.warn("ref image read failed", f?.name, e);
+    }
+  }
+  return out;
+}
+
+async function imgOne(row, rowIndex = 0, totalRows = 1){
     if (!row){
       alert("請先點選一列");
       return;
@@ -771,7 +811,10 @@ function makePhotoPrompt(english, titleHint, idx, index = 0, totalRows = 1){
       },
       body: JSON.stringify({
         prompt: row.photo_prompt,
-        size: imgSize
+        size: imgSize,
+        // NEW: reference images (data URLs). Backend must support this field.
+        ref_images: await getRefImagesData(rowIndex, totalRows),
+        ref_mode: (document.getElementById("refModeSelect")?.value || "global")
       })
     });
 
@@ -791,7 +834,7 @@ ${t}`);
     const old = btnImgOne.textContent;
     btnImgOne.textContent = "生成中…";
     try{
-      await imgOne(selectedRow);
+      await imgOne(selectedRow, selectedRowIndex || 0, rows.length || 1);
     }finally{
       btnImgOne.disabled = false;
       btnImgOne.textContent = old;
@@ -814,7 +857,7 @@ ${t}`);
     try{
       for (let i=0;i<n;i++){
         btnImgBatch.textContent = `批次生成中（${i+1}/${n}）…`;
-        await imgOne(rows[i]);
+        await imgOne(rows[i], i, n);
         await new Promise(r=>setTimeout(r, 350));
       }
       showToast(`批次完成：${n} 張圖片`);
