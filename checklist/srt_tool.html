@@ -643,6 +643,7 @@ function makeCameraPrompt(english, idx){
     // Always clear reference when switching SRT (so it never leaks)
     clearReferenceUI({forceUnlock:true});
     lastLockedRefKey = null;
+    clearRefCache();
 
     // Always clear character anchor when switching SRT (so it never leaks)
     clearCharAnchorUI();
@@ -654,7 +655,7 @@ function makeCameraPrompt(english, idx){
 
   // events
   refImages?.addEventListener("change", () => { updateRefHint(); });
-  btnClearRef?.addEventListener("click", () => { clearReferenceUI({forceUnlock:false}); });
+  btnClearRef?.addEventListener("click", () => { clearReferenceUI({forceUnlock:false}); clearRefCache(); });
 
   function clearCharAnchorUI() {
     if (charAnchor) charAnchor.value = "";
@@ -808,24 +809,105 @@ function makeCameraPrompt(english, idx){
     downloadBlob(blob, `${row.id}.mp3`);
   }
 
-  async function imgOne(row){
-    const resp = await fetch(IMG_ONE_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "apikey": SUPABASE_ANON_KEY,
-        "Authorization": "Bearer " + SUPABASE_ANON_KEY
-      },
-      body: JSON.stringify({ prompt: row.photo_prompt, size: imgSize })
-    });
+  async 
+  // ===== Image generation (serial-safe) =====
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-    if (!resp.ok){
-      const t = await resp.text().catch(()=> "");
-      alert(`生圖失敗：${resp.status}\n${t}`);
-      return;
+  // Cache ref images per current SRT (avoid re-reading files every row)
+  let _refCacheKey = null;
+  let _refCacheUrls = null;
+
+  function clearRefCache(){
+    _refCacheKey = null;
+    _refCacheUrls = null;
+  }
+
+  async function readFilesAsDataUrls(fileList, maxN = 3){
+    const files = Array.from(fileList || []).slice(0, maxN);
+    const urls = [];
+    for (const f of files){
+      const url = await new Promise((resolve, reject) => {
+        const fr = new FileReader();
+        fr.onload = () => resolve(String(fr.result || ""));
+        fr.onerror = () => reject(fr.error || new Error("FileReader error"));
+        fr.readAsDataURL(f);
+      });
+      urls.push(url);
     }
-    const blob = await resp.blob();
-    downloadBlob(blob, `${row.id}.png`);
+    return urls;
+  }
+
+  async function getRefImagesForSend(){
+    // Only send reference images in By Beats mode (and only if user selected)
+    const refInput = document.getElementById("refImages");
+    if (!refInput) return null;
+
+    // Tie cache to current SRT key (so switching SRT never leaks old reference)
+    const key = currentSrtKey || "__none__";
+    if (_refCacheKey === key && Array.isArray(_refCacheUrls)) return _refCacheUrls.length ? _refCacheUrls : null;
+
+    const urls = await readFilesAsDataUrls(refInput.files, 3).catch(() => []);
+    _refCacheKey = key;
+    _refCacheUrls = urls;
+    return urls.length ? urls : null;
+  }
+
+  async function imgOne(row, ref_images){
+    // Returns: { ok:true, blob } OR { ok:false, status, code, message }
+    const payload = { prompt: row.photo_prompt, size: imgSize };
+    if (Array.isArray(ref_images) && ref_images.length) payload.ref_images = ref_images;
+
+    // Retry for transient errors (429/5xx/network)
+    const maxAttempts = 6;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++){
+      let resp;
+      try{
+        resp = await fetch(IMG_ONE_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": "Bearer " + SUPABASE_ANON_KEY
+          },
+          body: JSON.stringify(payload)
+        });
+      }catch(e){
+        // Network error
+        const backoff = Math.min(15000, 700 * Math.pow(2, attempt-1));
+        await sleep(backoff);
+        continue;
+      }
+
+      if (resp.status === 429 || resp.status >= 500){
+        const backoff = Math.min(20000, 700 * Math.pow(2, attempt-1));
+        await sleep(backoff);
+        continue;
+      }
+
+      if (!resp.ok){
+        const raw = await resp.text().catch(() => "");
+        // Try parse OpenAI style error
+        let code = "";
+        let msg = raw || ("HTTP " + resp.status);
+        try{
+          const j = JSON.parse(raw);
+          const err = j?.detail?.error || j?.error || j?.detail || j;
+          code = err?.code || err?.error?.code || "";
+          msg = err?.message || err?.error?.message || msg;
+        }catch(_){}
+
+        return { ok:false, status: resp.status, code, message: msg };
+      }
+
+      const b64 = (await resp.text()).trim(); // edge function returns base64 or dataURL? (current impl returns base64)
+      // If already dataURL, keep; else wrap
+      const dataUrl = b64.startsWith("data:image") ? b64 : ("data:image/png;base64," + b64);
+      const bytes = dataUrlToBytes(dataUrl);
+      const blob = new Blob([bytes], { type: "image/png" });
+      return { ok:true, blob };
+    }
+
+    return { ok:false, status: 0, code: "retry_exhausted", message: "Too many retries / network unstable." };
   }
 
   btnMp3One.addEventListener("click", async () => {
@@ -875,22 +957,64 @@ function makeCameraPrompt(english, idx){
 
   btnImgBatch.addEventListener("click", async () => {
     if (!rows.length) return;
+
     let n = Number(batchN.value || 10);
     if (!Number.isFinite(n) || n < 1) n = 10;
     n = Math.min(n, rows.length);
 
-    if (!confirm(`將依序下載 ${n} 張圖片（瀏覽器可能會詢問允許多檔下載）。要開始嗎？`)) return;
+    if (!confirm(`將「逐張」依序生成並下載 ${n} 張圖片（遇到 429 會自動等待重試；遇到被系統阻擋的提示詞會跳過並繼續）。要開始嗎？`)) return;
 
     btnImgBatch.disabled = true;
     const old = btnImgBatch.textContent;
-    btnImgBatch.textContent = `批次生成中（0/${n}）…`;
+    const blocked = [];
+
     try{
+      // Freeze reference images for THIS SRT run (so it won't change mid-batch)
+      const ref_images = await getRefImagesForSend();
+
       for (let i=0;i<n;i++){
         btnImgBatch.textContent = `批次生成中（${i+1}/${n}）…`;
-        await imgOne(rows[i]);
-        await new Promise(r=>setTimeout(r, 350));
+        const row = rows[i];
+
+        const r = await imgOne(row, ref_images);
+        if (!r?.ok){
+          const msg = (r?.message || "unknown error").toString();
+
+          // Hard stop cases
+          if (msg.includes("billing_hard_limit") || msg.includes("Billing hard limit") || msg.includes("insufficient_quota")){
+            alert("已達到帳務/額度限制（billing hard limit / quota）。請先到 Billing 補值或調整用量上限後再試。");
+            break;
+          }
+
+          // Moderation blocked => skip but record
+          if (r?.code === "moderation_blocked" || r?.code === "image_generation_user_error" || msg.includes("safety") || msg.includes("rejected by the safety system")){
+            blocked.push({ id: row.id, reason: msg });
+            // small cool down to avoid repeated blocks/429
+            await sleep(600);
+            continue;
+          }
+
+          // Other 4xx errors => stop (usually prompt / request format)
+          alert(`生圖失敗（第 ${i+1} 張 / ID=${row.id}）
+HTTP ${r?.status || ""} ${r?.code || ""}
+${msg}`);
+          break;
+        }
+
+        // success: download
+        const filename = `${row.id}.png`;
+        downloadBlob(r.blob, filename);
+
+        // Gentle pacing
+        await sleep(450);
       }
-      showToast(`批次完成：${n} 張圖片`);
+
+      if (blocked.length){
+        console.warn("Blocked rows:", blocked);
+        showToast(`完成（有跳過 ${blocked.length} 張被系統阻擋：請看 Console）`);
+      }else{
+        showToast(`批次完成：${n} 張圖片`);
+      }
     }catch(e){
       console.error(e);
       alert("批次中斷：請看 Console");
