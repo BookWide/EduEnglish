@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>影片量產工具 V5 - Google Imagen 3 專業版</title>
+<style>
+  :root{
+    --bg:#0b1220;--panel:#0f1b33;--panel2:#0c172d;--text:#e8eefc;--muted:#9fb1d1;
+    --line:#1b2b4b;--btn:#1f6feb;--btn2:#12264d;--danger:#ff5d5d;--ok:#22c55e;
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Arial; background:var(--bg); color:var(--text); padding:20px;}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:20px;box-shadow:0 8px 32px rgba(0,0,0,0.3)}
+  h1{margin:0 0 15px 0;font-size:18px;color:var(--ok)}
+  .control-row{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:15px}
+  .field{flex:1;min-width:180px}
+  label{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}
+  input, select, textarea{width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:10px;outline:none;font-size:14px}
+  .btn{border:none;border-radius:10px;padding:10px 18px;font-weight:700;background:var(--btn);color:white;cursor:pointer;transition:0.2s}
+  .btn:hover{filter:brightness(1.2)}
+  .btn-ok{background:var(--ok)}
+  table{width:100%;border-collapse:collapse;margin-top:10px}
+  th,td{border:1px solid var(--line);padding:12px;text-align:left;font-size:13px}
+  th{background:rgba(255,255,255,0.05);color:var(--muted)}
+  textarea{font-family:monospace;background:#000;color:#22c55e}
+  .merge-hint{color:var(--ok);font-size:11px;font-weight:bold}
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>🎬 萬用影片量產工作台 (Imagen 3 & 自由對齊)</h1>
+  <div class="control-row">
+    <div class="field">
+      <label>1. 上傳 SRT (內容結尾加 ">>" 即可合併至下一張圖)</label>
+      <input type="file" id="srtFile" accept=".srt"/>
+    </div>
+    <div style="width:120px">
+      <label>短檔名</label>
+      <input id="shortName" type="text" placeholder="vid"/>
+    </div>
+    <button class="btn btn-ok" onclick="bwProcessSrt()">解析並優化任務</button>
+  </div>
+  <p style="font-size:12px;color:var(--muted);margin:0">※ 本程序已移除 OpenAI 插件，生圖將直接透過您設定的後端調用 Google Imagen 3。</p>
+</div>
+
+<table id="taskTable">
+  <thead>
+    <tr>
+      <th width="90">檔案編號</th>
+      <th width="150">時間軸</th>
+      <th>字幕內容 (自動修正拼音)</th>
+      <th>Imagen 3 提示詞 (寫實風格)</th>
+      <th width="90">操作</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script>
+// 承襲您原始程序的 API 配置
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
+const IMG_API = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/img-one";
+
+let PROCESSED_TASKS = [];
+
+async function bwProcessSrt() {
+  const file = document.getElementById('srtFile').files[0];
+  if(!file) return alert("請先選擇 SRT 檔案");
+  
+  const text = await file.text();
+  const blocks = text.trim().split(/\n\s*\n/);
+  const rows = blocks.map(b => {
+    const lines = b.split('\n');
+    return { time: lines[1], text: lines.slice(2).join(" ").trim() };
+  });
+  
+  bwRender(rows);
+}
+
+function bwRender(items) {
+  const tbody = document.querySelector('#taskTable tbody');
+  tbody.innerHTML = "";
+  const sname = document.getElementById('shortName').value || "v";
+  PROCESSED_TASKS = [];
+  
+  let currentGroup = [];
+  let startTime = "";
+  let counter = 1;
+
+  items.forEach((item, idx) => {
+    const isMerging = item.text.includes(">>");
+    // 自動修正：統一將拼音轉回正確歷史名稱
+    let clean = item.text.replace(">>", "").trim()
+                        .replace(/Shugo Yang|Zhugo Yang/g, "Zhuge Liang")
+                        .replace(/Lubay/g, "Liu Bei");
+    
+    if(!startTime) startTime = item.time.split(" --> ")[0];
+    currentGroup.push(clean);
+
+    if(!isMerging || idx === items.length - 1) {
+      const fullContent = currentGroup.join(" ");
+      const fileID = `${sname}_${String(counter).padStart(3, '0')}`;
+      const endTime = item.time.split(" --> ")[1];
+      
+      // 生成符合 Imagen 3 高品質寫實風格的提示詞
+      const prompt = `Cinematic photo, 8k, realistic historical setting, high detail, professional photography. Scene: ${fullContent}. --ar 16:9`;
+      
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><b>${fileID}</b></td>
+        <td><small>${startTime}<br>至<br>${endTime}</small></td>
+        <td><textarea rows="3">${fullContent}</textarea></td>
+        <td><textarea rows="3">${prompt}</textarea></td>
+        <td><button class="btn" onclick="bwImgOne('${fileID}', '${prompt.replace(/'/g,"\\'")}')">直接生圖</button></td>
+      `;
+      tbody.appendChild(tr);
+      
+      PROCESSED_TASKS.push({ id: fileID, prompt: prompt });
+      currentText = []; startTime = ""; currentGroup = []; counter++;
+    }
+  });
+}
+
+async function bwImgOne(id, prompt) {
+  // 對接您的 Supabase 後端，並強制要求 Imagen 3 模型
+  try {
+    const resp = await fetch(IMG_API, {
+      method: "POST",
+      headers: { 
+        "Content-Type": "application/json", 
+        "apikey": SUPA_KEY, 
+        "Authorization": "Bearer " + SUPA_KEY 
+      },
+      body: JSON.stringify({ 
+        prompt: prompt, 
+        model: "imagen-3", // 完全避開 OpenAI
+        size: "1536x1024",
+        aspect_ratio: "16:9"
+      })
+    });
+
+    if(resp.ok) {
+      const blob = await resp.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `${id}.png`;
+      a.click();
+    } else {
+      alert("生圖失敗，請確認後端 Edge Function 是否支援 Imagen 3");
+    }
+  } catch(e) {
+    console.error(e);
+    alert("連線錯誤");
+  }
+}
+</script>
+</body>
+</html>
