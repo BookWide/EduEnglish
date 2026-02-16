@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
-<meta charset="utf-8"/><title>量產專家 V30 - 自動劇情分組旗艦版</title>
+<meta charset="utf-8"/><title>量產專家 V31 - 智能分類版</title>
 <style>
   :root{ --bg:#050a14; --panel:#0f172a; --text:#f1f5f9; --ok:#10b981; --btn:#3b82f6; --line:#1e293b; --done:#334155; }
   body{ background:var(--bg); color:var(--text); font-family: system-ui; padding:20px; line-height:1.5; }
@@ -11,51 +11,52 @@
   input, select, textarea{ width:100%; background:#000; border:1px solid var(--line); color:#22c55e; border-radius:10px; padding:10px; font-size:14px; outline:none; }
   .btn{ background:var(--btn); color:white; border:none; padding:12px; border-radius:10px; cursor:pointer; font-weight:bold; transition:0.2s; }
   .btn.is-done { background:var(--done); color:#94a3b8; }
-  .btn.is-done::after { content: " (已存)"; }
+  .btn.is-done::after { content: " (已產出)"; }
   table{ width:100%; border-collapse:collapse; margin-top:20px; }
   th, td{ border:1px solid var(--line); padding:10px; text-align:left; vertical-align:top; }
   tr.is-done { opacity: 0.4; background: rgba(0,0,0,0.2); }
-  .batch-badge { background:#f59e0b; color:#000; font-size:10px; padding:2px 6px; border-radius:4px; font-weight:bold; }
+  .batch-tag { background:var(--ok); color:#000; font-size:10px; padding:2px 6px; border-radius:4px; font-weight:bold; }
   #statusInfo { color:var(--ok); font-weight:bold; margin:10px 0; }
 </style>
 </head>
 <body>
 
 <div class="card">
-  <h1>🎬 量產工廠 V30 (自動分組 & 劇情鎖定)</h1>
+  <h1>🎬 量產工廠 V31 (智能分類批次版)</h1>
   <div class="grid">
     <div>
-      <label>1. 影片劇情大類</label>
-      <select id="vStyle" onchange="reProcess()">
-        <option value="Cinematic realistic photography, 8k, natural lighting">寫實電影風格</option>
-        <option value="3D animation, Pixar style, vivid colors">3D 動畫風格</option>
-        <option value="Classic oil painting, storybook illustration">繪本故事風格</option>
+      <label>1. 影片大類 (決定 AI 風格)</label>
+      <select id="vCategory" onchange="autoProcess()">
+        <option value="Cinematic realistic photography, nature documentary style, 8k">1. 自然寫實 (動物類)</option>
+        <option value="Disney/Pixar style 3D animation, bright and vivid">2. 夢幻童話 (3D類)</option>
+        <option value="Moody dark cinematic drama, high contrast, atmospheric">3. 暗黑寓言 (大片類)</option>
+        <option value="Classic watercolor illustration, storybook style">4. 水彩繪本 (優雅類)</option>
+        <option value="Epic fantasy movie scene, wide angle, breathtaking">5. 史詩電影 (冒險類)</option>
       </select>
     </div>
     <div>
-      <label>2. 主角細節描述 (防變人核心)</label>
-      <input id="charSpec" type="text" placeholder="例：A realistic brown mouse (No human)" oninput="reProcess()"/>
+      <label>2. 主角特徵 (鎖定身分)</label>
+      <input id="charSpec" type="text" placeholder="例：A realistic brown mouse" oninput="autoProcess()"/>
     </div>
     <div>
-      <label>3. 劇情合併密度 (功能開關)</label>
-      <select id="autoMergeCount" onchange="reProcess()">
-        <option value="1">1 句一圖 (不合併)</option>
-        <option value="3">3 句一段 (連貫)</option>
-        <option value="5" selected>5 句一段 (省錢量產)</option>
-        <option value="10">10 句一段 (極速)</option>
+      <label>3. 設定合併密度</label>
+      <select id="mergeDensity" onchange="autoProcess()">
+        <option value="3">每 3 句生一張圖</option>
+        <option value="5" selected>每 5 句生一張圖 (推薦)</option>
+        <option value="10">每 10 句生一張圖 (超省錢)</option>
       </select>
     </div>
     <div>
       <label>4. 讀取 Buzz SRT</label>
-      <input type="file" id="srtInput" onchange="reProcess()" />
+      <input type="file" id="srtFile" onchange="autoProcess()" />
     </div>
   </div>
-  <div id="statusInfo">請先上傳 SRT 檔案...</div>
+  <div id="statusInfo">請先載入 SRT 檔案...</div>
 </div>
 
 <table id="mainTable">
   <thead>
-    <tr><th width="100">任務 ID</th><th width="120">時間軸</th><th>合併劇本 (MP3)</th><th>視覺指令 (PNG)</th><th width="120">操作</th></tr>
+    <tr><th width="100">任務 ID</th><th width="120">時間</th><th>劇情內容 (MP3)</th><th>視覺指令 (PNG)</th><th width="120">操作</th></tr>
   </thead>
   <tbody></tbody>
 </table>
@@ -65,54 +66,48 @@ const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsI
 const IMG_API = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/img-one";
 const TTS_API = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/tts-mp3";
 
-let allSentences = [];
+let srtCache = [];
 
-async function reProcess() {
-  const file = document.getElementById('srtInput').files[0];
+async function autoProcess() {
+  const file = document.getElementById('srtFile').files[0];
   if(!file) return;
 
-  // 如果是第一次上傳，讀取內容；否則使用緩存
-  if (allSentences.length === 0 || document.getElementById('srtInput').dataset.changed === "true") {
-    const rawText = await file.text();
-    const regex = /(\d+)\s+(\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3})\s+([\s\S]*?)(?=\n\d+\s+\d{2}:\d{2}:\d{2},\d{3} -->|$)/g;
-    let match;
-    allSentences = [];
-    while ((match = regex.exec(rawText)) !== null) {
-      allSentences.push({ time: match[2], text: match[3].trim().replace(/\r?\n/g, " ") });
-    }
+  const rawText = await file.text();
+  const regex = /(\d+)\s+(\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3})\s+([\s\S]*?)(?=\n\d+\s+\d{2}:\d{2}:\d{2},\d{3} -->|$)/g;
+  let match;
+  srtCache = [];
+  while ((match = regex.exec(rawText)) !== null) {
+    srtCache.push({ time: match[2], text: match[3].trim().replace(/\r?\n/g, " ") });
   }
 
-  const style = document.getElementById('vStyle').value;
+  const category = document.getElementById('vCategory').value;
   const char = document.getElementById('charSpec').value || "the protagonist";
-  const mergeNum = parseInt(document.getElementById('autoMergeCount').value);
+  const density = parseInt(document.getElementById('mergeDensity').value);
   const tbody = document.querySelector('#mainTable tbody');
   tbody.innerHTML = "";
 
-  // 根據選擇的 3/5/10 進行自動循環合併
-  for (let i = 0; i < allSentences.length; i += mergeNum) {
-    const chunk = allSentences.slice(i, i + mergeNum);
-    const fullTxt = chunk.map(c => c.text).join(" ");
-    const startTime = chunk[0].time.split(' --> ')[0];
-    const taskId = `P_${String(Math.floor(i/mergeNum)+1).padStart(3, '0')}`;
-    
-    // 將「大類」、「主角描述」與「劇情」鎖定在一起
-    const prompt = `Style: ${style}. Character: ${char}. Scene: ${fullTxt}. (Strictly maintain subject as ${char}, No humans)`;
+  for (let i = 0; i < srtCache.length; i += density) {
+    const chunk = srtCache.slice(i, i + density);
+    const fullText = chunk.map(c => c.text).join(" ");
+    const startT = chunk[0].time.split(' --> ')[0];
+    const taskId = `BATCH_${String(Math.floor(i/density)+1).padStart(3, '0')}`;
+    const prompt = `Style: ${category}. Character Anchor: ${char}. Scene Action: ${fullText}. (Strictly stay in character as ${char}, NO human transformation)`;
 
     const tr = document.createElement('tr');
     tr.id = `row_${taskId}`;
     tr.innerHTML = `
-      <td><b>${taskId}</b><br><span class="batch-badge">${chunk.length} 句合一</span></td>
-      <td><small>${startTime}</small></td>
-      <td><textarea rows="3" id="t_${taskId}">${fullTxt}</textarea></td>
-      <td><textarea rows="3" id="p_${taskId}">${prompt}</textarea></td>
-      <td><button class="btn" id="b_${taskId}" onclick="genTask('${taskId}')">一鍵產出</button></td>
+      <td><b>${taskId}</b><br><span class="batch-tag">${chunk.length} 句合一</span></td>
+      <td><small>${startT}</small></td>
+      <td><textarea id="t_${taskId}" rows="3">${fullText}</textarea></td>
+      <td><textarea id="p_${taskId}" rows="3">${prompt}</textarea></td>
+      <td><button class="btn" id="b_${taskId}" onclick="gen('${taskId}')">一鍵產出</button></td>
     `;
     tbody.appendChild(tr);
   }
-  document.getElementById('statusInfo').innerText = `📊 分組模式: 每 ${mergeNum} 句一段 | 總計: ${Math.ceil(allSentences.length/mergeNum)} 組任務`;
+  document.getElementById('statusInfo').innerText = `✅ 劇情讀取完畢：共 ${Math.ceil(srtCache.length/density)} 個產出任務`;
 }
 
-async function genTask(id) {
+async function gen(id) {
   const t = document.getElementById('t_'+id).value;
   const p = document.getElementById('p_'+id).value;
   const btn = document.getElementById('b_'+id);
@@ -135,6 +130,7 @@ async function genTask(id) {
 </script>
 </body>
 </html>
+
 
 
 
