@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8"/>
+<title>量產專家 V10 - 影片驅動與進度監控</title>
+<style>
+  :root{ --bg:#0b1220; --panel:#0f1b33; --text:#e8eefc; --line:#1b2b4b; --ok:#22c55e; --btn:#1f6feb; }
+  body{ background:var(--bg); color:var(--text); font-family: system-ui; padding:20px; }
+  .card{ background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; margin-bottom:20px; }
+  .grid{ display:grid; grid-template-columns: 1fr 1fr 1fr; gap:15px; margin-bottom:15px; }
+  input, select, textarea{ background:#000; border:1px solid var(--line); color:#22c55e; border-radius:8px; padding:10px; width:100%; font-size:14px; }
+  
+  /* 進度條組件 */
+  #progressSection { display:none; margin: 20px 0; }
+  .progress-bg { background: rgba(255,255,255,0.1); border-radius:10px; height:12px; overflow:hidden; }
+  .progress-fill { background: var(--ok); width: 0%; height: 100%; transition: width 0.3s; }
+  .status-label { font-size:12px; color:var(--ok); margin-bottom:5px; text-align:center; }
+
+  .btn{ background:var(--btn); color:#fff; border:none; padding:12px; border-radius:10px; cursor:pointer; font-weight:bold; width:100%; }
+  table{ width:100%; border-collapse:collapse; margin-top:20px; }
+  th, td{ border:1px solid var(--line); padding:10px; font-size:13px; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>🎬 量產專家 V10 (影片驅動模式)</h1>
+  <div class="grid">
+    <div>
+      <label style="font-size:12px;color:#9fb1d1;">1. 上傳 SRT (加 >> 合併)</label>
+      <input type="file" id="srtFile" />
+    </div>
+    <div>
+      <label style="font-size:12px;color:#9fb1d1;">2. 影片參考/主角定裝</label>
+      <select id="mainChar">
+        <option value="A realistic brown field mouse">老鼠 (不變人模式)</option>
+        <option value="A cinematic African lion">獅子 (寫實模式)</option>
+        <option value="Custom">自定義劇情主角...</option>
+      </select>
+    </div>
+    <div>
+      <label style="font-size:12px;color:#9fb1d1;">3. 影片批次編號</label>
+      <input id="shortName" type="text" placeholder="如: 001_lion" />
+    </div>
+  </div>
+
+  <div id="progressSection">
+    <div class="status-label" id="statusMsg">準備就緒</div>
+    <div class="progress-bg"><div class="progress-fill" id="progBar"></div></div>
+  </div>
+
+  <button class="btn" style="background:var(--ok)" onclick="startV10()">開始解析並鎖定視覺風格</button>
+</div>
+
+<table id="taskTable">
+  <thead>
+    <tr>
+      <th width="80">編號</th>
+      <th width="150">時間軸</th>
+      <th>字幕 (配音)</th>
+      <th>Imagen 3 指令 (已鎖定角色圖)</th>
+      <th width="80">生圖</th>
+    </tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script>
+const SUPA_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
+const IMG_API = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/img-one";
+
+async function startV10() {
+  const file = document.getElementById('srtFile').files[0];
+  if(!file) return alert("請先選擇 SRT 檔");
+  
+  // 啟動進度條
+  document.getElementById('progressSection').style.display = 'block';
+  const bar = document.getElementById('progBar');
+  const msg = document.getElementById('statusMsg');
+
+  msg.innerText = "正在分析影片參考並讀取劇本...";
+  bar.style.width = "30%";
+
+  const text = await file.text();
+  const char = document.getElementById('mainChar').value;
+  const sname = document.getElementById('shortName').value || "vid";
+  
+  const items = text.trim().split(/\n\s*\n/).map(b => {
+    const lines = b.split('\n');
+    return { time: lines[1], text: lines.slice(2).join(" ").trim() };
+  });
+
+  const tbody = document.querySelector('#taskTable tbody');
+  tbody.innerHTML = "";
+  
+  let group = [];
+  let startT = "";
+  let counter = 1;
+
+  bar.style.width = "60%";
+  msg.innerText = "正在建立視覺連貫性提示詞...";
+
+  items.forEach((item, idx) => {
+    const isMerging = item.text.includes(">>");
+    const clean = item.text.replace(">>", "").trim();
+    if(!startT) startT = item.time.split(" --> ")[0];
+    group.push(clean);
+
+    if(!isMerging || idx === items.length - 1) {
+      const full = group.join(" ");
+      const id = `${sname}_${String(counter).padStart(3, '0')}`;
+      
+      // 核心修正：強制鎖定主角形態，解決老鼠變人的問題
+      const prompt = `[Visual Reference: ${char}]. Cinematic 8k photography. Scene: ${full}. (Important: Maintain character as ${char}, no humans).`;
+
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${id}</td>
+        <td><small>${startT}</small></td>
+        <td><textarea rows="2">${full}</textarea></td>
+        <td><textarea rows="2">${prompt}</textarea></td>
+        <td><button class="btn" onclick="exec('${id}','${prompt.replace(/'/g,"\\'")}')" style="font-size:12px;padding:5px;">生圖</button></td>
+      `;
+      tbody.appendChild(tr);
+      group = []; startT = ""; counter++;
+    }
+  });
+
+  bar.style.width = "100%";
+  msg.innerText = "完成！素材已按劇本邏輯分配。";
+}
+
+async function exec(id, prompt) {
+  const resp = await fetch(IMG_API, {
+    method: "POST",
+    headers: { "Content-Type":"application/json", "apikey":SUPA_KEY, "Authorization":"Bearer "+SUPA_KEY },
+    body: JSON.stringify({ prompt: prompt, model: "imagen-3", size: "1536x1024" })
+  });
+  if(resp.ok) {
+    const blob = await resp.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${id}.png`;
+    a.click();
+  }
+}
+</script>
+</body>
+</html>
