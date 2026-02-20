@@ -98,6 +98,10 @@
       font-size:12px;
       line-height:1.35;
     }
+    textarea[readonly]{
+      opacity:.95;
+      background: rgba(0,0,0,.28);
+    }
     .row2{ display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
     .pill{
       display:inline-flex;
@@ -212,8 +216,22 @@
       white-space:pre-wrap;
     }
     .mini2{ display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
-    .miniLabel{ font-size:12px; color:var(--muted); margin: 0 0 6px; }
+    .miniLabel{ font-size:12px; color:var(--muted); margin: 0 0 6px; display:flex; align-items:center; justify-content:space-between; gap:10px; }
     .miniTA{ min-height:78px; font-family:var(--mono); font-size:12px; }
+
+    .finalWrap{ margin-top:10px; }
+    .finalTA{ min-height:140px; }
+    .copyLine{ display:flex; justify-content:flex-end; gap:10px; margin-top:8px; }
+    .tinyBtn{
+      padding:8px 10px;
+      border-radius:12px;
+      font-size:12px;
+      font-weight:700;
+      border:1px solid rgba(255,255,255,.14);
+      background: rgba(255,255,255,.06);
+      color:rgba(255,255,255,.92);
+      cursor:pointer;
+    }
   </style>
 </head>
 
@@ -326,7 +344,7 @@
       <div class="rightTop">
         <div>
           <div style="font-weight:800; font-size:14px;">分鏡清單</div>
-          <div class="smallmuted">可手動改每段「動畫提示詞 / 運鏡」。匯出 JSON 後直接餵 Kling。</div>
+          <div class="smallmuted">方案 A：新增「最終 Kling Prompt（可直接貼）」欄位，跟 JSON 完全一致。</div>
         </div>
         <div class="meta">
           <span class="pill" id="countPill">分鏡：0</span>
@@ -470,6 +488,30 @@
       return { mode, generateSec: 5, targetSec: 10, stretchFactor: 2.0, label: "Kling 5s → 拉長10s（省成本）" };
     }
 
+    function getGlobalTail(){
+      const style = el("styleSelect").value;
+      const custom = el("customStyle").value.trim();
+      const ss = styleSuffix(style, custom);
+      const suffix = el("globalSuffix").value.trim();
+      return [ss, suffix].filter(Boolean).join(", ");
+    }
+
+    function buildFinalKlingPrompt(shot){
+      const globalTail = getGlobalTail();
+      const motion = (shot.motionPrompt || "").trim();
+      const scene = (shot.text || "").trim();
+      const cam = (shot.cameraPrompt || "").trim();
+      const dur = shot.generate_sec;
+
+      return [
+        motion,
+        scene ? `Scene: ${scene}` : "",
+        cam ? `Camera: ${cam}` : "",
+        globalTail ? `Style/Quality: ${globalTail}` : "",
+        `Duration: ${dur} seconds.`
+      ].filter(Boolean).join("\n\n");
+    }
+
     function updateTopMeta(){
       const cfg = getModeConfig();
       el("countPill").textContent = `分鏡：${state.shots.length}`;
@@ -477,7 +519,7 @@
       el("durPill").textContent = `Kling：${cfg.generateSec}s → 片段：${cfg.targetSec}s`;
     }
 
-    // ✅ 重要：安全渲染（不用 innerHTML 塞 textarea 的內容）
+    // ✅ 方案 A：新增「最終 Kling Prompt」只讀欄位（跟 JSON 一樣）
     function renderCards(){
       const cards = el("cards");
       cards.innerHTML = "";
@@ -524,19 +566,18 @@
         const mini2 = document.createElement("div");
         mini2.className = "mini2";
 
-        // left textarea
+        // left: motion prompt (editable)
         const left = document.createElement("div");
         const ll = document.createElement("div");
         ll.className = "miniLabel";
-        ll.textContent = "動畫提示詞（Kling prompt）";
+        ll.textContent = "動態基底（motion prompt）";
         const taMotion = document.createElement("textarea");
         taMotion.className = "miniTA";
-        taMotion.value = shot.motionPrompt || ""; // ✅ 不會被 HTML 污染
-        taMotion.addEventListener("input", ()=> shot.motionPrompt = taMotion.value);
+        taMotion.value = shot.motionPrompt || "";
         left.appendChild(ll);
         left.appendChild(taMotion);
 
-        // right textarea
+        // right: camera prompt (editable)
         const right = document.createElement("div");
         const rl = document.createElement("div");
         rl.className = "miniLabel";
@@ -544,7 +585,6 @@
         const taCam = document.createElement("textarea");
         taCam.className = "miniTA";
         taCam.value = shot.cameraPrompt || "";
-        taCam.addEventListener("input", ()=> shot.cameraPrompt = taCam.value);
         right.appendChild(rl);
         right.appendChild(taCam);
 
@@ -552,11 +592,61 @@
         mini2.appendChild(right);
         body.appendChild(mini2);
 
+        // final prompt (readonly) + copy button
+        const finalWrap = document.createElement("div");
+        finalWrap.className = "finalWrap";
+
+        const fl = document.createElement("div");
+        fl.className = "miniLabel";
+        fl.innerHTML = `<span>最終 Kling Prompt（可直接貼，與 JSON 一致）</span><span class="smallmuted">${shot.generate_sec}s</span>`;
+
+        const taFinal = document.createElement("textarea");
+        taFinal.className = "miniTA finalTA";
+        taFinal.readOnly = true;
+        taFinal.value = buildFinalKlingPrompt(shot);
+
+        const copyLine = document.createElement("div");
+        copyLine.className = "copyLine";
+
+        const btnCopyFinal = document.createElement("button");
+        btnCopyFinal.className = "tinyBtn";
+        btnCopyFinal.type = "button";
+        btnCopyFinal.textContent = "複製本段 Prompt";
+        btnCopyFinal.addEventListener("click", async ()=>{
+          try{
+            await navigator.clipboard.writeText(taFinal.value);
+            btnCopyFinal.textContent = "已複製 ✓";
+            setTimeout(()=>btnCopyFinal.textContent="複製本段 Prompt", 900);
+          }catch(e){
+            alert("複製失敗：瀏覽器權限限制");
+          }
+        });
+
+        copyLine.appendChild(btnCopyFinal);
+
+        finalWrap.appendChild(fl);
+        finalWrap.appendChild(taFinal);
+        finalWrap.appendChild(copyLine);
+        body.appendChild(finalWrap);
+
         const info = document.createElement("div");
         info.className = "smallmuted";
         info.style.marginTop = "10px";
         info.textContent = `${shot.image.name} ｜ SRT: ${shot.start.toFixed(2)}–${shot.end.toFixed(2)}`;
         body.appendChild(info);
+
+        // live sync: when motion/camera changes, refresh final prompt
+        function refreshFinal(){
+          taFinal.value = buildFinalKlingPrompt(shot);
+        }
+        taMotion.addEventListener("input", ()=>{
+          shot.motionPrompt = taMotion.value;
+          refreshFinal();
+        });
+        taCam.addEventListener("input", ()=>{
+          shot.cameraPrompt = taCam.value;
+          refreshFinal();
+        });
 
         card.appendChild(thumb);
         card.appendChild(body);
@@ -583,11 +673,6 @@
 
       const cat = el("catSelect").value;
       const style = el("styleSelect").value;
-      const custom = el("customStyle").value.trim();
-      const suffix = el("globalSuffix").value.trim();
-
-      const ss = styleSuffix(style, custom);
-      const globalTail = [ss, suffix].filter(Boolean).join(", ");
 
       state.baseName = state.baseName || safeBaseFromImages(state.images);
 
@@ -608,7 +693,6 @@
           generate_sec: cfg.generateSec,
           target_sec: cfg.targetSec,
           stretch_factor: cfg.stretchFactor,
-          global_suffix: globalTail,
           motionPrompt: defaultMotionPrompt(),
           cameraPrompt: defaultCameraPrompt()
         });
@@ -620,18 +704,14 @@
 
     function buildJson(){
       const cfg = getModeConfig();
-      const style = el("styleSelect").value;
-      const custom = el("customStyle").value.trim();
-      const ss = styleSuffix(style, custom);
-      const suffix = el("globalSuffix").value.trim();
-      const globalTail = [ss, suffix].filter(Boolean).join(", ");
       const base = state.baseName || safeBaseFromImages(state.images);
+      const globalTail = getGlobalTail();
 
       return {
         meta: {
           base,
           category: el("catSelect").value,
-          style: style,
+          style: el("styleSelect").value,
           mode: cfg.mode,
           kling_generate_sec: cfg.generateSec,
           target_sec: cfg.targetSec,
@@ -651,13 +731,7 @@
           generate_sec: s.generate_sec,
           target_sec: s.target_sec,
           stretch_factor: s.stretch_factor,
-          kling_prompt: [
-            (s.motionPrompt || "").trim(),
-            `Scene: ${s.text}`,
-            (s.cameraPrompt || "").trim() ? `Camera: ${(s.cameraPrompt || "").trim()}` : "",
-            (globalTail ? `Style/Quality: ${globalTail}` : ""),
-            `Duration: ${s.generate_sec} seconds.`
-          ].filter(Boolean).join("\n\n")
+          kling_prompt: buildFinalKlingPrompt(s) // ✅ 這就是卡片「最終欄位」同一份
         }))
       };
     }
@@ -715,12 +789,18 @@
 
     el("styleSelect").addEventListener("change", ()=>{
       el("customStyleWrap").style.display = (el("styleSelect").value === "E") ? "block" : "none";
+      if(state.shots.length) renderCards(); // 風格變 → 最終Prompt重算
+    });
+    el("customStyle").addEventListener("input", ()=>{
+      if(state.shots.length) renderCards();
+    });
+    el("globalSuffix").addEventListener("input", ()=>{
+      if(state.shots.length) renderCards();
     });
 
     el("modeSelect").addEventListener("change", ()=>{
       updateTopMeta();
       if(state.shots.length){
-        // 更新每張的模式參數
         const cfg = getModeConfig();
         state.shots.forEach(s=>{
           s.mode = cfg.mode;
@@ -766,9 +846,9 @@
       el("downloadJsonBtn").disabled = true;
     });
 
+    // init
     updateTopMeta();
     setStatus("尚未產生");
   </script>
 </body>
-</html>
 </html>
