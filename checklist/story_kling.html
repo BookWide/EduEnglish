@@ -441,6 +441,24 @@
   color: rgba(255,255,255,.78);
 }
 
+
+/* ===== Visible Narration Preview (Cost Check Mode) ===== */
+.narrationPreview{
+  margin-bottom:12px;
+  padding:12px 14px;
+  border-radius:10px;
+  background: rgba(255,255,255,.06);
+  border:1px solid rgba(255,255,255,.12);
+  font-size:14px;
+  line-height:1.5;
+  color:rgba(255,255,255,.92);
+  white-space:pre-wrap;
+}
+.narrationPreview.empty{
+  opacity:.5;
+  font-style:italic;
+}
+
 </style>
 </head>
 
@@ -450,7 +468,7 @@
     <div class="topLeft">
       <h1>故事影片 → Kling 動畫提示 JSON（5/10 秒模式）</h1>
       <p class="sub">
-        流程：匯入切好的圖片 → 匯入 SRT（依 min/max 秒合併 chunk）→ 產出每段「Kling 動畫提示」→ 匯出 JSON。<br/>
+        流程：匯入切好的圖片 → 匯入 SRT（固定以圖片每張 10 秒對齊）→ 產出每段「Kling 動畫提示」→ 匯出 JSON。<br/>
         <b>新功能：</b>自動判斷動態層級（Calm/Medium/Tension）＋ 全域/每段「強度滑桿」可調，最終 Prompt 即時更新並與 JSON 一致。
       </p>
     </div>
@@ -481,7 +499,7 @@
       </div>
 
       <div class="field">
-        <p class="label"><b>2) 匯入 SRT</b><span class="smallmuted">會依 min/max 秒合併 chunk</span></p>
+        <p class="label"><b>2) 匯入 SRT</b><span class="smallmuted">固定以「圖片每張 10 秒」對齊字幕（不再合併 chunk）</span></p>
         <input id="srtInput" type="file" accept=".srt,text/plain" />
         <div class="smallmuted" id="srtInfo" style="margin-top:6px;">尚未選擇 SRT</div>
       </div>
@@ -489,13 +507,15 @@
       <div class="row2">
         <div class="field">
           <p class="label"><b>每段最短秒數（min）</b></p>
-          <input id="minSec" type="number" min="1" step="1" value="10" />
+          <input id="minSec" type="number" min="1" step="1" value="10" readonly />
         </div>
         <div class="field">
           <p class="label"><b>每段最長秒數（max）</b></p>
-          <input id="maxSec" type="number" min="1" step="1" value="10" />
+          <input id="maxSec" type="number" min="1" step="1" value="10" readonly />
         </div>
       </div>
+
+      <div class="note" style="margin-top:0;margin-bottom:12px;"><b>固定10秒對齊模式：</b>每張圖片固定 10 秒（第 i 張 = (i-1)*10 ～ i*10），SRT 依時間自動分配到對應圖片；段數永遠 = 圖片數。</div>
 
       <div class="field">
         <p class="label"><b>動態模式</b><span class="smallmuted">MP3 一律 10 秒不動</span></p>
@@ -592,6 +612,12 @@
         </div>
         <div class="klingHint">建議6段：0005/0006/0018/0019/0023/0025（依目前圖片順序；若段數不足會自動忽略）。</div>
         <div class="klingCount" id="klingCount">Kling 已勾選：0</div>
+        <div class="btnrow" style="margin-top:10px;">
+          <button type="button" id="filterAllBtn">顯示全部</button>
+          <button type="button" id="filterKlingBtn">只顯示 Kling</button>
+          <button type="button" id="filterStillBtn">只顯示 Still</button>
+        </div>
+        <div class="klingHint" id="filterHint">目前顯示：全部</div>
       </div>
 
 </div>
@@ -627,7 +653,8 @@
     cues: [],
     chunks: [],
     shots: [],
-    baseName: ""
+    baseName: "",
+    viewFilter: "all"
   };
 
   const el = (id)=>document.getElementById(id);
@@ -709,6 +736,29 @@
       merged.push(c);
     }
     return merged;
+  }
+
+  // ✅ 固定以「圖片每張固定秒數」對齊字幕（段數 = 圖片數）
+  function buildChunksByImages(cues, imageCount, firstSec, restSec){
+    const chunks = [];
+    let t = 0;
+    for(let i=0;i<imageCount;i++){
+      const dur = (i===0) ? firstSec : restSec;
+      const start = t;
+      const end = t + dur;
+      t = end;
+
+      const texts = [];
+      for(const cue of cues){
+        // overlap rule: cue intersects [start,end)
+        if(cue.start < end && cue.end > start){
+          texts.push(cue.text);
+        }
+      }
+      const txt = texts.join(" ").replace(/\s+/g," ").trim();
+      chunks.push({start, end, text: txt});
+    }
+    return chunks;
   }
 
   function styleSuffix(style, custom){
@@ -891,6 +941,20 @@
     const kc = document.getElementById('klingCount');
     if(kc) kc.textContent = `Kling 已勾選：${n}`;
   }
+  function updateFilterHint(){
+    const fh = document.getElementById('filterHint');
+    if(!fh) return;
+    const vf = state.viewFilter || 'all';
+    const label = vf==='kling' ? '只顯示 Kling' : (vf==='still' ? '只顯示 Still' : '全部');
+    // visible count uses current filter
+    let visible = 0;
+    for(const s of state.shots){
+      if(vf==='kling' && !s.use_kling) continue;
+      if(vf==='still' && s.use_kling) continue;
+      visible++;
+    }
+    fh.textContent = `目前顯示：${label}（${visible} 段）`;
+  }
 
   function updateTopMeta(){
     const cfg = getModeConfig();
@@ -933,8 +997,11 @@
 
     const globalInt = parseFloat(el("globalIntensity").value || "1") || 1;
 
+    const vf = state.viewFilter || "all";
     for(let idx=0; idx<state.shots.length; idx++){
       const shot = state.shots[idx];
+      if(vf === "kling" && !shot.use_kling) continue;
+      if(vf === "still" && shot.use_kling) continue;
 
       // auto motion template if shot not manually edited by user (flag)
       if(!shot.userEditedMotion){
@@ -1029,6 +1096,7 @@
 
       const body = document.createElement("div");
       body.className = "cardBody";
+      body.innerHTML = narrationPreviewHTML;
 
       const cap = document.createElement("p");
       cap.className = "capLine";
@@ -1302,6 +1370,7 @@ finalWrap.appendChild(fl);
 
     updateTopMeta();
     updateKlingCount();
+    updateFilterHint();
     el("copyJsonBtn").disabled = state.shots.length === 0;
     el("downloadJsonBtn").disabled = state.shots.length === 0;
   }
@@ -1314,9 +1383,12 @@ finalWrap.appendChild(fl);
     const maxSec = Math.max(minSec, parseInt(el("maxSec").value || String(minSec), 10));
 
     state.cues = parseSrt(state.srtText);
-    state.chunks = buildChunks(state.cues, minSec, maxSec);
+    // 片頭 2 秒 + 其餘 10 秒：以圖片為主對齊字幕（段數=圖片數）
+    const firstSec = 2;
+    const restSec = 10;
+    state.chunks = buildChunksByImages(state.cues, state.images.length, firstSec, restSec);
 
-    const n = Math.min(state.images.length, state.chunks.length);
+    const n = Math.min(state.images.length, state.chunks.length); // should be equal in fixed-10s mode
     const cfg = getModeConfig();
 
     const cat = el("catSelect").value;
@@ -1329,8 +1401,11 @@ finalWrap.appendChild(fl);
       const img = state.images[i];
       const ch = state.chunks[i];
       const narration = ch.text;
+      // 若某段時間窗內沒有字幕，仍保留該段（避免段數變少）
+      const safeNarr = narration || "";
+      const narrationPreviewHTML = `<div class="narrationPreview ${safeNarr? '' : 'empty'}">${safeNarr || '（此段沒有字幕）'}</div>`;
 
-      const lvl = detectMotionLevel(narration);
+      const lvl = detectMotionLevel(safeNarr);
 
       state.shots.push({
         id: i+1,
@@ -1342,7 +1417,7 @@ finalWrap.appendChild(fl);
         image: img,
         start: ch.start,
         end: ch.end,
-        text: narration,
+        text: safeNarr,
         mode: cfg.mode,
         generate_sec: cfg.generateSec,
         target_sec: cfg.targetSec,
@@ -1497,6 +1572,7 @@ finalWrap.appendChild(fl);
   el("modeSelect").addEventListener("change", ()=>{
     updateTopMeta();
     updateKlingCount();
+    updateFilterHint();
     if(state.shots.length){
       const cfg = getModeConfig();
       state.shots.forEach(s=>{
@@ -1543,6 +1619,7 @@ finalWrap.appendChild(fl);
     state.chunks = [];
     state.shots = [];
     state.baseName = "";
+    state.viewFilter = "all";
 
     el("imgInput").value = "";
     el("srtInput").value = "";
@@ -1552,6 +1629,7 @@ finalWrap.appendChild(fl);
     setStatus("尚未產生");
     updateTopMeta();
     updateKlingCount();
+    updateFilterHint();
     el("copyJsonBtn").disabled = true;
     el("downloadJsonBtn").disabled = true;
   });
@@ -1559,6 +1637,7 @@ finalWrap.appendChild(fl);
   // init
   updateTopMeta();
   updateKlingCount();
+  updateFilterHint();
   setStatus("尚未產生");
 </script>
 </body>
