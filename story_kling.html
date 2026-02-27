@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>BookWide - Story Kling JSON (5/10s)</title>
+  <title>BookWide - Story Kling JSON (OK02 SRT segments)</title>
   <style>
     :root{
       --bg:#070b14;
@@ -502,22 +502,61 @@
         <p class="label"><b>2) 匯入 SRT</b><span class="smallmuted">固定以「圖片每張 10 秒」對齊字幕（不再合併 chunk）</span></p>
         <input id="srtInput" type="file" accept=".srt,text/plain" />
         <div class="smallmuted" id="srtInfo" style="margin-top:6px;">尚未選擇 SRT</div>
+      
+      <div class="field">
+        <p class="label"><b>3) 匯入 overrides.json（可選）</b><span class="smallmuted">（每段 TTS 調音提示/一鍵複製）</span></p>
+        <input id="ovrInput" type="file" accept=".json,application/json" />
+        <div class="smallmuted" id="ovrInfo" style="margin-top:6px;">尚未匯入 overrides.json</div>
       </div>
+</div>
 
       <div class="row2">
         <div class="field">
           <p class="label"><b>每段最短秒數（min）</b></p>
-          <input id="minSec" type="number" min="1" step="1" value="10" readonly />
+          <input id="minSec" type="number" min="1" step="1" value="1" readonly />
         </div>
         <div class="field">
           <p class="label"><b>每段最長秒數（max）</b></p>
-          <input id="maxSec" type="number" min="1" step="1" value="10" readonly />
+          <input id="maxSec" type="number" min="1" step="1" value="15" />
         </div>
       </div>
 
-      <div class="note" style="margin-top:0;margin-bottom:12px;"><b>固定10秒對齊模式：</b>每張圖片固定 10 秒（第 i 張 = (i-1)*10 ～ i*10），SRT 依時間自動分配到對應圖片；段數永遠 = 圖片數。</div>
+      
+<div class="note" style="margin-top:0;margin-bottom:12px;">
+  <b>對齊模式（要跟 OK02 auto_reimage_srt.py 同秒數就選「SRT 自然分段」）：</b><br/>
+  1) <b>SRT 自然分段</b>：依 SRT cue 合併 1~N 句、遇到 gap 太大就切段、每段 ≤ max_sec（✅最準，對齊你命令列印出的 0~7 / 7~13 / 13~21 ...）<br/>
+  2) <b>固定2+10秒</b>：第1段2秒，其餘每張10秒（舊模式，容易切到半句）
+</div>
 
-      <div class="field">
+<div class="row2">
+  <div class="field">
+    <p class="label"><b>模式</b></p>
+    <select id="alignMode">
+      <option value="srt" selected>SRT 自然分段（推薦 / 對齊 OK02）</option>
+      <option value="fixed">固定 2 秒 + 其餘 10 秒（舊）</option>
+    </select>
+  </div>
+  <div class="field">
+    <p class="label"><b>max_gap（秒）</b><span class="smallmuted">OK02 預設 1.5</span></p>
+    <input id="maxGap" type="number" min="0" step="0.1" value="1.5" />
+  </div>
+</div>
+
+<div class="row2">
+  <div class="field">
+    <p class="label"><b>max_sentences（句）</b><span class="smallmuted">OK02 預設 3</span></p>
+    <input id="maxSent" type="number" min="1" step="1" value="3" />
+  </div>
+  <div class="field">
+    <p class="label"><b>≈10 秒判定（±秒）</b><span class="smallmuted">自動勾選 Kling 用</span></p>
+    <input id="near10Tol" type="number" min="0" step="0.1" value="0.6" />
+  </div>
+</div>
+
+<div class="field" style="margin-top:0;margin-bottom:12px;">
+  <button class="btn ghost" id="btnPickNear10">只勾選 ≈10 秒段（其餘 Still）</button>
+</div>
+<div class="field">
         <p class="label"><b>動態模式</b><span class="smallmuted">MP3 一律 10 秒不動</span></p>
         <select id="modeSelect">
           <option value="k5_to_10">Kling 5秒生成 → ffmpeg 拉長到 10秒（省成本）</option>
@@ -751,15 +790,53 @@
       const texts = [];
       for(const cue of cues){
         // overlap rule: cue intersects [start,end)
-        if(cue.start < end && cue.end > start){
+        if(cue.start >= start && cue.start < end){
           texts.push(cue.text);
         }
       }
-      const txt = texts.join(" ").replace(/\s+/g," ").trim();
+      const unique = Array.from(new Set(texts.map(t=>String(t||"").replace(/\s+/g," ").trim()).filter(Boolean)));
+      const txt = unique.join(" ");
       chunks.push({start, end, text: txt});
     }
     return chunks;
   }
+
+
+  // ✅ OK02 auto_reimage_srt.py 同款：SRT 自然分段（max_sec / max_sentences / max_gap）
+  // cues: [{start,end,text}]
+  function buildSegmentsLikeOK02(cues, maxSec, maxSentences, maxGap){
+    const segs = [];
+    let i = 0;
+    const n = cues.length;
+    while(i < n){
+      let s0 = cues[i].start;
+      let e0 = cues[i].end;
+      let texts = [cues[i].text];
+      let count = 1;
+      let j = i + 1;
+
+      while(j < n && count < maxSentences){
+        const gap = cues[j].start - e0;
+        const candEnd = cues[j].end;
+        if(gap > maxGap) break;
+        if((candEnd - s0) <= (maxSec + 1e-6)){
+          e0 = candEnd;
+          texts.push(cues[j].text);
+          count += 1;
+          j += 1;
+        }else{
+          break;
+        }
+      }
+
+      const segText = texts.map(t=>String(t||"").trim()).filter(Boolean).join(" ").trim() || "A short moment in the story.";
+      segs.push({start:s0, end:e0, text:segText});
+      i = j;
+    }
+    return segs;
+  }
+
+  function durOf(x){ return Math.max(0, (x.end||0) - (x.start||0)); }
 
   function styleSuffix(style, custom){
     const map = {
@@ -1126,13 +1203,68 @@
       previewDiv.className = "narrationPreview" + (_txt ? "" : " empty");
       previewDiv.textContent = _txt || "（此段沒有字幕）";
       body.appendChild(previewDiv);
+      // (UI) 去除重複文字：不再顯示 capLine（保留上方 narrationPreview 泡泡）
+      // ===== per-segment voice override hint (overrides.json) =====
+      try{
+        const key = pad4(idx+1);
+        const vmap = (state.overrides && state.overrides.voice) ? state.overrides.voice : {};
+        const vovr = vmap[key];
+        if(vovr){
+          const wrap = document.createElement("div");
+          wrap.className = "ovrWrap";
 
-      const cap = document.createElement("p");
-      cap.className = "capLine";
-      cap.textContent = shot.text;
-      body.appendChild(cap);
+          const header = document.createElement("div");
+          header.className = "ovrHeader";
+          const left = document.createElement("div");
+          left.textContent = `🎙 TTS 調音建議（${key}）`;
+          const right = document.createElement("div");
+          right.textContent = "▼";
+          header.appendChild(left);
+          header.appendChild(right);
+          wrap.appendChild(header);
 
-      // ✅ 每段強度滑桿
+          const ta = document.createElement("textarea");
+          ta.className = "miniTA";
+          ta.readOnly = true;
+          ta.style.marginTop = "10px";
+          ta.style.display = "none";
+          ta.value = JSON.stringify({ [key]: vovr }, null, 2);
+          wrap.appendChild(ta);
+
+          const btnRow = document.createElement("div");
+          btnRow.className = "ovrBtns";
+          btnRow.style.marginTop = "8px";
+          btnRow.style.display = "none";
+
+          const btnCopy = document.createElement("button");
+          btnCopy.className = "ghost";
+          btnCopy.textContent = "複製";
+          btnCopy.onclick = async ()=>{
+            try{
+              await navigator.clipboard.writeText(ta.value);
+              btnCopy.textContent = "已複製";
+              setTimeout(()=>btnCopy.textContent="複製", 900);
+            }catch(e){
+              alert("複製失敗（瀏覽器限制），請手動選取複製");
+            }
+          };
+
+          btnRow.appendChild(btnCopy);
+          wrap.appendChild(btnRow);
+
+          header.onclick = ()=>{
+            const open = (ta.style.display === "none");
+            ta.style.display = open ? "block" : "none";
+            btnRow.style.display = open ? "flex" : "none";
+            right.textContent = open ? "▲" : "▼";
+          };
+
+          body.appendChild(wrap);
+        }
+      }catch(e){
+        // ignore
+      }
+// ✅ 每段強度滑桿
       const sField = document.createElement("div");
       sField.className = "field";
       const sLabel = document.createElement("div");
@@ -1412,10 +1544,24 @@ finalWrap.appendChild(fl);
     const maxSec = Math.max(minSec, parseInt(el("maxSec").value || String(minSec), 10));
 
     state.cues = parseSrt(state.srtText);
-    // 片頭 2 秒 + 其餘 10 秒：以圖片為主對齊字幕（段數=圖片數）
-    const firstSec = 2;
-    const restSec = 10;
-    state.chunks = buildChunksByImages(state.cues, state.images.length, firstSec, restSec);
+
+    const mode = el("alignMode").value;
+    if(mode === "fixed"){
+      // 舊模式：片頭 2 秒 + 其餘 10 秒（以圖片為主）
+      const firstSec = 2;
+      const restSec = 10;
+      state.chunks = buildChunksByImages(state.cues, state.images.length, firstSec, restSec);
+    }else{
+      // ✅ OK02 auto_reimage_srt.py 同款：SRT 自然分段
+      const maxGap = Math.max(0, parseFloat(el("maxGap").value || "1.5"));
+      const maxSent = Math.max(1, parseInt(el("maxSent").value || "3", 10));
+      state.chunks = buildSegmentsLikeOK02(state.cues, maxSec, maxSent, maxGap);
+
+      if(state.images.length !== state.chunks.length){
+        console.warn("Image count != segment count", state.images.length, state.chunks.length);
+        // 仍可繼續：用較小的那個數量組 shots，但會顯示警告
+      }
+    }
 
     const n = Math.min(state.images.length, state.chunks.length); // should be equal in fixed-10s mode
     const cfg = getModeConfig();
@@ -1625,6 +1771,23 @@ finalWrap.appendChild(fl);
   el("copyJsonBtn").addEventListener("click", copyJson);
   el("downloadJsonBtn").addEventListener("click", downloadJson);
 
+  el("btnPickNear10").addEventListener("click", ()=>{
+    if(!state.shots.length){ alert("請先產生分鏡"); return; }
+    const tol = Math.max(0, parseFloat(el("near10Tol").value || "0.6"));
+    let picked = 0;
+    state.shots.forEach(s=>{
+      const d = (s.end - s.start);
+      const ok = Math.abs(d - 10.0) <= tol;
+      s.use_kling = ok;
+      if(ok) picked++;
+    });
+    updateKlingCount();
+    renderCards();
+    alert(`已勾選 ≈10秒 段：${picked} 段（容忍±${tol}s）`);
+  });
+
+
+
   el("applyDefaultBtn").addEventListener("click", ()=>{
     if(!state.shots.length){ alert("請先產生分鏡"); return; }
     state.shots.forEach(s=>{
@@ -1687,6 +1850,41 @@ finalWrap.appendChild(fl);
   updateKlingCount();
   updateFilterHint();
   setStatus("尚未產生");
+
+  // ===== overrides.json loader =====
+  async function readOverridesJson(file){
+    const txt = await file.text();
+    const clean = (txt || "").replace(/^\uFEFF/, "").trim();
+    const obj = JSON.parse(clean);
+    const out = {
+      voice: (obj && obj.voice) ? obj.voice : {},
+      image_hint: (obj && obj.image_hint) ? obj.image_hint : {},
+      image_forbid: Array.isArray(obj && obj.image_forbid) ? obj.image_forbid : []
+    };
+    state.overrides = out;
+    const el = document.getElementById("ovrInfo");
+    if(el){
+      const vCount = Object.keys(out.voice||{}).length;
+      const hCount = Object.keys(out.image_hint||{}).length;
+      el.textContent = `已匯入 overrides.json（voice: ${vCount} 段 / image_hint: ${hCount} 段）`;
+    }
+    rerender();
+  }
+
+  const ovrInput = document.getElementById("ovrInput");
+  if(ovrInput){
+    ovrInput.addEventListener("change", async (e)=>{
+      const f = e.target.files && e.target.files[0];
+      if(!f) return;
+      try{
+        await readOverridesJson(f);
+      }catch(err){
+        console.error(err);
+        alert("overrides.json 解析失敗：\n" + (err && err.message ? err.message : err));
+      }
+    });
+  }
+
 </script>
 </body>
 </html>
