@@ -459,7 +459,21 @@
   font-style:italic;
 }
 
-</style>
+
+    .vGrid{ display:grid; grid-template-columns: 1.3fr 1fr 1fr 1fr; gap:10px; margin-top:8px; }
+    .vCell{ display:flex; flex-direction:column; gap:6px; }
+    .vMini{ font-size:12px; color:rgba(255,255,255,.7); }
+    .miniIn,.miniSel{ width:100%; padding:10px 10px; border-radius:12px; border:1px solid var(--border); background:rgba(255,255,255,.04); color:var(--text); outline:none; }
+    .miniSel{ appearance:auto; }
+    .vBtnRow{ display:flex; align-items:center; gap:10px; margin-top:10px; }
+    .btnSmall{ padding:10px 12px; border-radius:12px; border:1px solid var(--border); background:rgba(255,255,255,.06); color:var(--text); cursor:pointer; }
+    .btnSmall.primary{ background:rgba(64,160,255,.2); border-color:rgba(64,160,255,.35); }
+    .dirtyTag{ font-size:12px; padding:4px 10px; border-radius:999px; border:1px solid var(--border); color:rgba(255,255,255,.65); }
+    .dirtyTag.on{ border-color:rgba(255,196,0,.45); color:rgba(255,196,0,.9); }
+
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 
 <body>
@@ -634,6 +648,7 @@
         <button id="applyDefaultBtn">重置動態基底/運鏡</button>
         <button id="copyJsonBtn" disabled>複製 JSON</button>
         <button class="primary" id="downloadJsonBtn" disabled>下載 JSON</button>
+        <button class="primary" id="exportOk2ZipBtn" disabled>匯出 OK2 套件（ZIP：只更新變動段）</button>
         <button class="danger" id="clearBtn">清空</button>
       
       <div id="klingTools" class="field" style="margin-top:12px;">
@@ -1200,7 +1215,138 @@
       previewDiv.className = "narrationPreview" + (_txt ? "" : " empty");
       previewDiv.textContent = _txt || "（此段沒有字幕）";
       body.appendChild(previewDiv);
+
+      // ✅ 每段語音面板（voice / rate / pitch / volume + 試聽）
+      if(!shot.voiceCfg){
+        shot.voiceCfg = { voice: "en-US-JennyNeural", rate: "+0%", pitch: "+0Hz", volume: "+0%" };
+      }
+      const vField = document.createElement("div");
+      vField.className = "field";
+      const vLabel = document.createElement("div");
+      vLabel.className = "miniLabel";
+      vLabel.innerHTML = `<span>語音（本段）</span><span class="smallmuted">試聽 / 匯出 mp3</span>`;
+      const vGrid = document.createElement("div");
+      vGrid.className = "vGrid";
+
+      const mkIn = (lab, val, ph) => {
+        const w = document.createElement("div");
+        w.className = "vCell";
+        const l = document.createElement("div");
+        l.className = "vMini";
+        l.textContent = lab;
+        const inp = document.createElement("input");
+        inp.className = "miniIn";
+        inp.value = val || "";
+        if(ph) inp.placeholder = ph;
+        w.appendChild(l); w.appendChild(inp);
+        return {w, inp};
+      };
+
+      // voice select + custom
+      const voiceWrap = document.createElement("div");
+      voiceWrap.className = "vCell";
+      const voiceLab = document.createElement("div");
+      voiceLab.className = "vMini";
+      voiceLab.textContent = "voice";
+      const voiceSel = document.createElement("select");
+      voiceSel.className = "miniSel";
+      const voices = [
+        "en-US-JennyNeural",
+        "en-US-GuyNeural",
+        "en-US-AriaNeural",
+        "zh-TW-HsiaoChenNeural",
+        "ja-JP-NanamiNeural"
+      ];
+      for(const v of voices){
+        const opt = document.createElement("option");
+        opt.value = v; opt.textContent = v;
+        voiceSel.appendChild(opt);
+      }
+      const customOpt = document.createElement("option");
+      customOpt.value = "__custom__";
+      customOpt.textContent = "（自訂）";
+      voiceSel.appendChild(customOpt);
+
+      const voiceCustom = document.createElement("input");
+      voiceCustom.className = "miniIn";
+      voiceCustom.placeholder = "輸入自訂 voice 名稱";
+      voiceCustom.style.display = "none";
+
+      if(voices.includes(shot.voiceCfg.voice)){
+        voiceSel.value = shot.voiceCfg.voice;
+      }else{
+        voiceSel.value = "__custom__";
+        voiceCustom.style.display = "block";
+        voiceCustom.value = shot.voiceCfg.voice || "";
+      }
+
+      voiceSel.addEventListener("change", ()=>{
+        if(voiceSel.value === "__custom__"){
+          voiceCustom.style.display = "block";
+          shot.voiceCfg.voice = voiceCustom.value || "";
+        }else{
+          voiceCustom.style.display = "none";
+          shot.voiceCfg.voice = voiceSel.value;
+        }
+        markVoiceDirty(shot);
+      });
+      voiceCustom.addEventListener("input", ()=>{
+        if(voiceSel.value === "__custom__"){
+          shot.voiceCfg.voice = voiceCustom.value || "";
+          markVoiceDirty(shot);
+        }
+      });
+
+      voiceWrap.appendChild(voiceLab);
+      voiceWrap.appendChild(voiceSel);
+      voiceWrap.appendChild(voiceCustom);
+
+      const rate = mkIn("rate", shot.voiceCfg.rate, "+10% / -10%");
+      const pitch = mkIn("pitch", shot.voiceCfg.pitch, "+40Hz / -40Hz");
+      const volume = mkIn("volume", shot.voiceCfg.volume, "+5% / -5%");
+
+      rate.inp.addEventListener("input", ()=>{ shot.voiceCfg.rate = rate.inp.value || "+0%"; markVoiceDirty(shot); });
+      pitch.inp.addEventListener("input", ()=>{ shot.voiceCfg.pitch = pitch.inp.value || "+0Hz"; markVoiceDirty(shot); });
+      volume.inp.addEventListener("input", ()=>{ shot.voiceCfg.volume = volume.inp.value || "+0%"; markVoiceDirty(shot); });
+
+      const vBtnRow = document.createElement("div");
+      vBtnRow.className = "vBtnRow";
+      const btnPrev = document.createElement("button");
+      btnPrev.className = "btnSmall primary";
+      btnPrev.textContent = "▶ 試聽本段";
+      btnPrev.addEventListener("click", async ()=>{
+        btnPrev.disabled = true;
+        btnPrev.textContent = "產生中...";
+        try{
+          await previewTTSForShot(shot);
+        }catch(e){
+          alert(String(e));
+          console.error(e);
+        }finally{
+          btnPrev.disabled = false;
+          btnPrev.textContent = "▶ 試聽本段";
+        }
+      });
+
+      const dirty = document.createElement("span");
+      dirty.className = "dirtyTag" + (shot.voiceDirty ? " on" : "");
+      dirty.textContent = shot.voiceDirty ? "已改" : "未改";
+
+      vBtnRow.appendChild(btnPrev);
+      vBtnRow.appendChild(dirty);
+
+      vGrid.appendChild(voiceWrap);
+      vGrid.appendChild(rate.w);
+      vGrid.appendChild(pitch.w);
+      vGrid.appendChild(volume.w);
+
+      vField.appendChild(vLabel);
+      vField.appendChild(vGrid);
+      vField.appendChild(vBtnRow);
+      body.appendChild(vField);
+
       // (UI) 去除重複文字：不再顯示 capLine（保留上方 narrationPreview 泡泡）
+：不再顯示 capLine（保留上方 narrationPreview 泡泡）
 // ✅ 每段強度滑桿
       const sField = document.createElement("div");
       sField.className = "field";
@@ -1471,6 +1617,7 @@ finalWrap.appendChild(fl);
     updateFilterHint();
     el("copyJsonBtn").disabled = state.shots.length === 0;
     el("downloadJsonBtn").disabled = state.shots.length === 0;
+    el("exportOk2ZipBtn").disabled = state.shots.length === 0;
   }
 
   
@@ -1692,7 +1839,227 @@ finalWrap.appendChild(fl);
     };
   }
 
-  async function copyJson(){
+  
+  // ===== TTS preview + mp3 cache (IndexedDB) =====
+  const AZURE_TTS_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/azure-tts";
+
+  function markVoiceDirty(shot){
+    shot.voiceDirty = true;
+    // if tag exists on screen, simplest is re-render to refresh the tag
+    // (cheap enough; shots count small)
+    renderCards();
+    updateExportButtons();
+  }
+
+  function getShotVoice(shot){
+    const v = shot.voiceCfg || { voice:"en-US-JennyNeural", rate:"+0%", pitch:"+0Hz", volume:"+0%" };
+    return {
+      voice: (v.voice || "en-US-JennyNeural"),
+      rate: (v.rate || "+0%"),
+      pitch: (v.pitch || "+0Hz"),
+      volume: (v.volume || "+0%")
+    };
+  }
+
+  async function previewTTSForShot(shot){
+    const {voice, rate, pitch, volume} = getShotVoice(shot);
+    const text = (shot.text || "").trim();
+    if(!text){
+      alert("此段沒有文字，無法試聽。");
+      return;
+    }
+    const body = {
+      text,
+      lang: "en", // 舊版兼容：你的 function 目前用 en/zh/ja。若你改成 en-US 也可在 function 端兼容。
+      voice,
+      rate,
+      pitch,
+      volume
+    };
+    const res = await fetch(AZURE_TTS_URL, {
+      method: "POST",
+      headers: { "Content-Type":"application/json" },
+      body: JSON.stringify(body)
+    });
+    if(!res.ok){
+      const t = await res.text();
+      throw new Error("TTS failed: " + t);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = new Audio(url);
+    a.play();
+    a.onended = ()=> URL.revokeObjectURL(url);
+  }
+
+  async function sha1Hex(str){
+    const enc = new TextEncoder().encode(str);
+    const buf = await crypto.subtle.digest("SHA-1", enc);
+    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
+  }
+
+  // IndexedDB minimal wrapper
+  function idbOpen(){
+    return new Promise((resolve, reject)=>{
+      const req = indexedDB.open("bw_tts_cache_v1", 1);
+      req.onupgradeneeded = ()=>{
+        const db = req.result;
+        if(!db.objectStoreNames.contains("mp3")){
+          db.createObjectStore("mp3", { keyPath: "id" });
+        }
+      };
+      req.onsuccess = ()=> resolve(req.result);
+      req.onerror = ()=> reject(req.error);
+    });
+  }
+
+  async function idbGet(id){
+    const db = await idbOpen();
+    return new Promise((resolve, reject)=>{
+      const tx = db.transaction("mp3", "readonly");
+      const st = tx.objectStore("mp3");
+      const rq = st.get(id);
+      rq.onsuccess = ()=> resolve(rq.result || null);
+      rq.onerror = ()=> reject(rq.error);
+    });
+  }
+
+  async function idbPut(rec){
+    const db = await idbOpen();
+    return new Promise((resolve, reject)=>{
+      const tx = db.transaction("mp3", "readwrite");
+      const st = tx.objectStore("mp3");
+      const rq = st.put(rec);
+      rq.onsuccess = ()=> resolve(true);
+      rq.onerror = ()=> reject(rq.error);
+    });
+  }
+
+  function buildOk2Manifest(){
+    const base = state.baseName || safeBaseFromImages(state.images) || "story";
+    return {
+      meta: {
+        base,
+        source_mp4: (state.mp4FileName || null),
+        source_srt: (state.srtFileName || null),
+        mode: "srt_natural",
+        created_at: new Date().toISOString()
+      },
+      segments: state.shots.map(s => ({
+        id: s.id,
+        start: s.start,
+        end: s.end,
+        text: (s.text || "").trim(),
+        image_prompt: buildFinalKlingPrompt(s),
+        use_kling: !!s.use_kling
+      }))
+    };
+  }
+
+  function buildOverridesAll(){
+    // 全段輸出（方便追溯），ok2 可不使用 voice，但保留
+    const voice = {};
+    for(const s of state.shots){
+      const v = getShotVoice(s);
+      voice[s.id] = v;
+    }
+    return { voice };
+  }
+
+  async function getOrGenMp3ForSegment(seg){
+    const v = getShotVoice(seg);
+    const text = (seg.text || "").trim();
+    const hash = await sha1Hex([text, v.voice, v.rate, v.pitch, v.volume].join("|"));
+    const cached = await idbGet(seg.id);
+    if(cached && cached.hash === hash && cached.blob){
+      return { blob: cached.blob, hash, reused: true };
+    }
+    // generate via Azure
+    const body = { text, lang:"en", voice:v.voice, rate:v.rate, pitch:v.pitch, volume:v.volume };
+    const res = await fetch(AZURE_TTS_URL, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    if(!res.ok){
+      const t = await res.text();
+      throw new Error(`TTS failed on ${seg.id}: ${t}`);
+    }
+    const blob = await res.blob();
+    await idbPut({ id: seg.id, hash, blob, saved_at: Date.now() });
+    // clear dirty flag (已落地)
+    seg.voiceDirty = false;
+    return { blob, hash, reused: false };
+  }
+
+  async function exportOk2Zip(){
+    if(typeof JSZip === "undefined"){
+      alert("缺少 JSZip（CDN 下載失敗）。請確認網路可用。");
+      return;
+    }
+    const btn = el("exportOk2ZipBtn");
+    btn.disabled = true;
+    const oldTxt = btn.textContent;
+    btn.textContent = "打包中...";
+
+    try{
+      const zip = new JSZip();
+
+      // files: manifest + overrides
+      const manifest = buildOk2Manifest();
+      const overrides = buildOverridesAll();
+      zip.file("manifest.json", JSON.stringify(manifest, null, 2));
+      zip.file("overrides.json", JSON.stringify(overrides, null, 2));
+
+      const folder = zip.folder("remp3_output");
+
+      // generate/reuse mp3 per segment (B: only update changed)
+      let done = 0;
+      const total = state.shots.length;
+
+      for(const seg of state.shots){
+        const text = (seg.text || "").trim();
+        if(!text){
+          // no text → skip mp3 (still create placeholder? here skip)
+          done++;
+          btn.textContent = `打包中... ${done}/${total}（跳過空段 ${seg.id}）`;
+          continue;
+        }
+        btn.textContent = `產生/重用 mp3... ${done+1}/${total}`;
+        const { blob, reused } = await getOrGenMp3ForSegment(seg);
+        folder.file(`${seg.id}.mp3`, blob);
+        done++;
+        btn.textContent = `打包中... ${done}/${total}` + (reused ? "（重用）" : "");
+      }
+
+      // generate zip
+      btn.textContent = "輸出 ZIP...";
+      const out = await zip.generateAsync({ type: "blob" });
+      const base = (state.baseName || safeBaseFromImages(state.images) || "story");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(out);
+      a.download = `${base}_OK2_PACKAGE.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
+
+      // refresh cards to reflect cleared dirty tags
+      renderCards();
+      updateExportButtons();
+    }catch(e){
+      alert(String(e));
+      console.error(e);
+    }finally{
+      btn.disabled = false;
+      btn.textContent = oldTxt;
+    }
+  }
+
+  function updateExportButtons(){
+    const ok = state.shots && state.shots.length > 0;
+    const b = el("exportOk2ZipBtn");
+    if(b) b.disabled = !ok;
+  }
+
+
+async function copyJson(){
     const payload = buildJson();
     await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
     alert("已複製 JSON");
@@ -1816,6 +2183,8 @@ el("srtInput").addEventListener("change", async (e)=>{
   el("buildBtn").addEventListener("click", buildShots);
   el("copyJsonBtn").addEventListener("click", copyJson);
   el("downloadJsonBtn").addEventListener("click", downloadJson);
+  el("exportOk2ZipBtn").addEventListener("click", exportOk2Zip);
+  updateExportButtons();
 
   el("btnPickNear10").addEventListener("click", ()=>{
     if(!state.shots.length){ alert("請先產生分鏡"); return; }
@@ -1869,6 +2238,7 @@ el("srtInput").addEventListener("change", async (e)=>{
     updateFilterHint();
     el("copyJsonBtn").disabled = true;
     el("downloadJsonBtn").disabled = true;
+    el("exportOk2ZipBtn").disabled = true;
   });
 
 
@@ -1901,4 +2271,5 @@ el("srtInput").addEventListener("change", async (e)=>{
 </script>
 </body>
 </html>
+
 
