@@ -513,7 +513,7 @@ select option{ color:#111; background:#fff; }
 </head>
 
 <body>
-<div id="versionBadge">v15 multi-voice-stitch-keep-26</div>
+<div id="versionBadge">v16 export-fixed + multi-voice</div>
 <div id="multiVoiceModal"><div class="panel"></div></div>
 
 <header>
@@ -735,7 +735,7 @@ select option{ color:#111; background:#fff; }
 </div>
 
 <script>
-console.log('MP4_SRT_VERSION:', 'v15 multi-voice-stitch-keep-26');
+console.log('MP4_SRT_VERSION:', 'v16 export-fixed + multi-voice');
 
   const state = {
     video: null, // {name, url, file, duration, width, height}
@@ -1393,14 +1393,6 @@ const badges = [
       dirty.textContent = shot.voiceDirty ? "已改" : "未改";
 
       vBtnRow.appendChild(btnPrev);
-      // ✅ 切段按鈕（與『試聽本段』同一行）
-      const btnSplitNow = document.createElement("button");
-      btnSplitNow.className = "btnSmall";
-      const _sid = (String(shot.id).match(/\d+/) || [String(shot.id)])[0];
-      btnSplitNow.textContent = `切成${_sid}-1/${_sid}-2`;
-      btnSplitNow.title = `把本段依句子切成多段（例：${_sid} → ${_sid}-1, ${_sid}-2）`;
-      btnSplitNow.addEventListener("click", ()=>{ splitShotBySentences(shot); });
-      vBtnRow.appendChild(btnSplitNow);
       vBtnRow.appendChild(dirty);
 
       vGrid.appendChild(voiceWrap);
@@ -2635,9 +2627,122 @@ if (typeof __origRenderShots === 'function') {
     return r;
   };
 }
+
+
+  // ===== OK2 Export (restored) =====
+  async function exportOk2Zip(){
+    if(typeof JSZip === "undefined"){
+      alert("缺少 JSZip（CDN 下載失敗）。請確認網路可用。");
+      return;
+    }
+    const btn = el("exportOk2ZipBtn");
+    btn.disabled = true;
+    const oldTxt = btn.textContent;
+    btn.textContent = "打包中...";
+
+    try{
+      const zip = new JSZip();
+
+      const baseName = (state.baseName || safeBaseFromImages(state.images) || "story");
+      // files: manifest + overrides
+      const manifest = buildOk2Manifest();
+      const overrides = buildOverridesAll();
+      zip.file("manifest.json", JSON.stringify(manifest, null, 2));
+      zip.file("overrides.json", JSON.stringify(overrides, null, 2));
+      // === include frames_srt jpgs (cut from source MP4) ===
+      // path: out_assets/<base>/frames_srt/seg_0001.jpg ...
+      const dataURLToUint8 = (dataURL) => {
+        const m = String(dataURL || "").match(/^data:([^;]+);base64,(.+)$/);
+        if (!m) throw new Error("bad dataURL");
+        const b64 = m[2];
+        const bin = atob(b64);
+        const u8 = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+        return u8;
+      };
+
+      const folderOutAssets = zip.folder("out_assets");
+      const folderBase = folderOutAssets.folder(baseName);
+      const folderFrames = folderBase.folder("frames_srt");
+      if (Array.isArray(state.images) && state.images.length) {
+        for (let i = 0; i < state.images.length; i++) {
+          const it = state.images[i];
+          const name = `seg_${String(i + 1).padStart(4, "0")}.jpg`;
+          try {
+            folderFrames.file(name, dataURLToUint8(it.url), { binary: true });
+          } catch (e) {
+            console.warn("skip frame", i, e);
+          }
+        }
+      }
+      // ✅ 你要的路徑：story/remp3_output/<base>/
+      const folder = zip.folder("remp3_output").folder(baseName);
+
+      // generate/reuse mp3 per segment (B: only update changed)
+      let done = 0;
+      const total = state.shots.length;
+
+      for(const seg of state.shots){
+        const text = (seg.text || "").trim();
+        if(!text){
+          // no text → skip mp3 (still create placeholder? here skip)
+          done++;
+          btn.textContent = `打包中... ${done}/${total}（跳過空段 ${seg.id}）`;
+          continue;
+        }
+        btn.textContent = `產生/重用 mp3... ${done+1}/${total}`;
+        const { blob, reused } = await getOrGenMp3ForSegment(seg);
+        folder.file(`${baseName}_${seg.id}.mp3`, blob);
+        done++;
+        btn.textContent = `打包中... ${done}/${total}` + (reused ? "（重用）" : "");
+      }
+
+      // generate zip
+      btn.textContent = "輸出 ZIP...";
+      const out = await zip.generateAsync({ type: "blob" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(out);
+      a.download = `${baseName}_OK2_PACKAGE.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
+
+      // refresh cards to reflect cleared dirty tags
+      renderCards();
+      updateExportButtons();
+    }catch(e){
+      alert(String(e));
+      console.error(e);
+    }finally{
+      btn.disabled = false;
+      btn.textContent = oldTxt;
+    }
+  }
+
+          function applyVoiceToRole(role, voiceCfg){
+  if(!role) return;
+  for(const s of (state.shots||[])){
+    if((s.role||"narration") === role){
+      s.voiceCfg = { ...voiceCfg };
+      s.voiceDirty = true;
+    }
+  }
+}
+
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
 
 
 
