@@ -494,13 +494,27 @@ select option{ color:#111; background:#fff; }
     .dirtyTag{ font-size:12px; padding:4px 10px; border-radius:999px; border:1px solid var(--border); color:rgba(255,255,255,.65); }
     .dirtyTag.on{ border-color:rgba(255,196,0,.45); color:rgba(255,196,0,.9); }
 
-  </style>
+  
+/* ===== Multi-voice modal ===== */
+#multiVoiceModal{position:fixed;inset:0;z-index:99998;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;}
+#multiVoiceModal .panel{width:min(920px,92vw);max-height:86vh;overflow:auto;background:#0f1726;border:1px solid rgba(255,255,255,.12);border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.45);padding:14px;}
+#multiVoiceModal .row{display:flex;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.08);}
+#multiVoiceModal .row:last-child{border-bottom:none;}
+#multiVoiceModal .txt{flex:1;padding:10px 12px;border-radius:10px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);color:#fff;font-size:13px;}
+#multiVoiceModal .miniSel,#multiVoiceModal .miniInp{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);color:#fff;border-radius:10px;padding:8px 10px;font-size:12px;}
+#multiVoiceModal .topbar{display:flex;justify-content:space-between;align-items:center;gap:10px;padding-bottom:10px;}
+#multiVoiceModal .topbar .title{font-weight:650;font-size:14px;opacity:.9;}
+#multiVoiceModal .btn{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#fff;padding:8px 12px;border-radius:10px;cursor:pointer;font-size:12px;}
+#multiVoiceModal .btn.primary{background:rgba(56,189,248,.20);border-color:rgba(56,189,248,.55);}
+
+</style>
 
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 
 <body>
-<div id="versionBadge">v14 split-label-dynamic</div>
+<div id="versionBadge">v15 multi-voice-stitch-keep-26</div>
+<div id="multiVoiceModal"><div class="panel"></div></div>
 
 <header>
   <div class="topBar">
@@ -721,7 +735,7 @@ select option{ color:#111; background:#fff; }
 </div>
 
 <script>
-console.log('MP4_SRT_VERSION:', 'v14 split-label-dynamic');
+console.log('MP4_SRT_VERSION:', 'v15 multi-voice-stitch-keep-26');
 
   const state = {
     video: null, // {name, url, file, duration, width, height}
@@ -1936,6 +1950,77 @@ finalWrap.appendChild(fl);
         }
 
 
+function splitSentencesGlobal(txt){
+  const s = String(txt||"").trim();
+  if(!s) return [];
+  const out = [];
+  let cur = "";
+  for(const ch of s){
+    cur += ch;
+    if(ch==="." || ch==="?" || ch==="!"){
+      const c = cur.trim();
+      if(c) out.push(c);
+      cur = "";
+    }
+  }
+  const tail = cur.trim();
+  if(tail) out.push(tail);
+  return out.length ? out : [s];
+}
+
+function stripID3(u8){
+  if(u8.length >= 10 && u8[0]===0x49 && u8[1]===0x44 && u8[2]===0x33){
+    const size = ((u8[6]&0x7f)<<21) | ((u8[7]&0x7f)<<14) | ((u8[8]&0x7f)<<7) | (u8[9]&0x7f);
+    const total = 10 + size;
+    if(total < u8.length) return u8.slice(total);
+  }
+  return u8;
+}
+
+async function synthTTSBlob(text, voiceCfg){
+  const {voice, rate, pitch, volume} = voiceCfg;
+  const body = { text, lang:"en", voice, rate, pitch, volume };
+  const res = await fetch(AZURE_TTS_URL, {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify(body)
+  });
+  if(!res.ok){
+    const t = await res.text();
+    throw new Error("TTS failed: " + t);
+  }
+  return await res.blob();
+}
+
+async function synthTTSMp3Bytes(text, voiceCfg){
+  const blob = await synthTTSBlob(text, voiceCfg);
+  const ab = await blob.arrayBuffer();
+  return new Uint8Array(ab);
+}
+
+async function concatMp3FromParts(parts){
+  const clean = parts.map((p)=> stripID3(p));
+  const total = clean.reduce((s,p)=> s+p.length, 0);
+  const out = new Uint8Array(total);
+  let off=0;
+  for(const p of clean){
+    out.set(p, off);
+    off += p.length;
+  }
+  return new Blob([out], {type:"audio/mpeg"});
+}
+
+function ensureMultiVoice(shot){
+  if(shot.multiVoice && Array.isArray(shot.multiVoice) && shot.multiVoice.length) return;
+  const sentences = splitSentencesGlobal(shot.text||"");
+  const base = getShotVoice(shot);
+  if(sentences.length<=1){
+    shot.multiVoice = [{ text: (shot.text||"").trim(), cfg: {...base} }];
+    return;
+  }
+  shot.multiVoice = sentences.map(t=>({ text:t, cfg: {...base} }));
+}
+
 async function previewTTSForShot(shot){
     const {voice, rate, pitch, volume} = getShotVoice(shot);
     const text = (shot.text || "").trim();
@@ -2042,6 +2127,33 @@ async function previewTTSForShot(shot){
   }
 
   async function getOrGenMp3ForSegment(seg){
+    // ✅ 多聲模式：同一段內分句不同聲音，但匯出仍 1 個 mp3（段數不增加）
+    if(seg.multiVoiceEnabled){
+      ensureMultiVoice(seg);
+      const partsKey = seg.multiVoice.map(p=>{
+        const c = p.cfg || {};
+        return [String(p.text||"").trim(), c.voice||"", c.rate||"", c.pitch||"", c.volume||""].join("|");
+      }).join("||");
+      const hash = await sha1Hex("MULTI||" + partsKey);
+      const cached = await idbGet(seg.id);
+      if(cached && cached.hash === hash && cached.blob){
+        return { blob: cached.blob, hash, reused: true };
+      }
+      // generate each sentence mp3 then concat bytes (mp3 frame concat)
+      const bytes = [];
+      for(const p of seg.multiVoice){
+        const t = String(p.text||"").trim();
+        if(!t) continue;
+        const cfg = p.cfg || getShotVoice(seg);
+        bytes.push(await synthTTSMp3Bytes(t, cfg));
+      }
+      const blob = await concatMp3FromParts(bytes);
+      await idbPut({ id: seg.id, hash, blob, saved_at: Date.now() });
+      seg.voiceDirty = false;
+      return { blob, hash, reused: false };
+    }
+
+    // 單聲模式（原本）
     const v = getShotVoice(seg);
     const text = (seg.text || "").trim();
     const hash = await sha1Hex([text, v.voice, v.rate, v.pitch, v.volume].join("|"));
@@ -2049,7 +2161,6 @@ async function previewTTSForShot(shot){
     if(cached && cached.hash === hash && cached.blob){
       return { blob: cached.blob, hash, reused: true };
     }
-    // generate via Azure
     const body = { text, lang:"en", voice:v.voice, rate:v.rate, pitch:v.pitch, volume:v.volume };
     const res = await fetch(AZURE_TTS_URL, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
     if(!res.ok){
@@ -2058,110 +2169,154 @@ async function previewTTSForShot(shot){
     }
     const blob = await res.blob();
     await idbPut({ id: seg.id, hash, blob, saved_at: Date.now() });
-    // clear dirty flag (已落地)
     seg.voiceDirty = false;
     return { blob, hash, reused: false };
   }
 
-  async function exportOk2Zip(){
-    if(typeof JSZip === "undefined"){
-      alert("缺少 JSZip（CDN 下載失敗）。請確認網路可用。");
-      return;
-    }
-    const btn = el("exportOk2ZipBtn");
-    btn.disabled = true;
-    const oldTxt = btn.textContent;
-    btn.textContent = "打包中...";
 
+function openMultiVoiceModal(shot){
+  ensureMultiVoice(shot);
+  const modal = document.getElementById("multiVoiceModal");
+  const panel = modal.querySelector(".panel");
+  panel.innerHTML = "";
+
+  const top = document.createElement("div");
+  top.className = "topbar";
+  const title = document.createElement("div");
+  title.className = "title";
+  title.textContent = `句內多聲（維持段數） — #${shot.id}`;
+
+  const actions = document.createElement("div");
+  actions.style.display="flex";
+  actions.style.gap="8px";
+
+  const btnClose = document.createElement("button");
+  btnClose.className = "btn";
+  btnClose.textContent = "關閉";
+  btnClose.onclick = ()=>{ modal.style.display="none"; };
+
+  const btnPreview = document.createElement("button");
+  btnPreview.className = "btn primary";
+  btnPreview.textContent = "▶ 試聽多聲";
+  btnPreview.onclick = async ()=>{
+    btnPreview.disabled = true;
+    const old = btnPreview.textContent;
+    btnPreview.textContent = "產生中...";
     try{
-      const zip = new JSZip();
-
-      const baseName = (state.baseName || safeBaseFromImages(state.images) || "story");
-      // files: manifest + overrides
-      const manifest = buildOk2Manifest();
-      const overrides = buildOverridesAll();
-      zip.file("manifest.json", JSON.stringify(manifest, null, 2));
-      zip.file("overrides.json", JSON.stringify(overrides, null, 2));
-      // === include frames_srt jpgs (cut from source MP4) ===
-      // path: out_assets/<base>/frames_srt/seg_0001.jpg ...
-      const dataURLToUint8 = (dataURL) => {
-        const m = String(dataURL || "").match(/^data:([^;]+);base64,(.+)$/);
-        if (!m) throw new Error("bad dataURL");
-        const b64 = m[2];
-        const bin = atob(b64);
-        const u8 = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
-        return u8;
-      };
-
-      const folderOutAssets = zip.folder("out_assets");
-      const folderBase = folderOutAssets.folder(baseName);
-      const folderFrames = folderBase.folder("frames_srt");
-      if (Array.isArray(state.images) && state.images.length) {
-        for (let i = 0; i < state.images.length; i++) {
-          const it = state.images[i];
-          const name = `seg_${String(i + 1).padStart(4, "0")}.jpg`;
-          try {
-            folderFrames.file(name, dataURLToUint8(it.url), { binary: true });
-          } catch (e) {
-            console.warn("skip frame", i, e);
-          }
-        }
+      const parts = [];
+      for(const p of shot.multiVoice){
+        const t = String(p.text||"").trim();
+        if(!t) continue;
+        parts.push(await synthTTSMp3Bytes(t, p.cfg));
       }
-      // ✅ 你要的路徑：story/remp3_output/<base>/
-      const folder = zip.folder("remp3_output").folder(baseName);
-
-      // generate/reuse mp3 per segment (B: only update changed)
-      let done = 0;
-      const total = state.shots.length;
-
-      for(const seg of state.shots){
-        const text = (seg.text || "").trim();
-        if(!text){
-          // no text → skip mp3 (still create placeholder? here skip)
-          done++;
-          btn.textContent = `打包中... ${done}/${total}（跳過空段 ${seg.id}）`;
-          continue;
-        }
-        btn.textContent = `產生/重用 mp3... ${done+1}/${total}`;
-        const { blob, reused } = await getOrGenMp3ForSegment(seg);
-        folder.file(`${baseName}_${seg.id}.mp3`, blob);
-        done++;
-        btn.textContent = `打包中... ${done}/${total}` + (reused ? "（重用）" : "");
-      }
-
-      // generate zip
-      btn.textContent = "輸出 ZIP...";
-      const out = await zip.generateAsync({ type: "blob" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(out);
-      a.download = `${baseName}_OK2_PACKAGE.zip`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
-
-      // refresh cards to reflect cleared dirty tags
-      renderCards();
-      updateExportButtons();
+      const blob = await concatMp3FromParts(parts);
+      const url = URL.createObjectURL(blob);
+      const a = new Audio(url);
+      a.play();
+      a.onended = ()=> URL.revokeObjectURL(url);
     }catch(e){
       alert(String(e));
       console.error(e);
     }finally{
-      btn.disabled = false;
-      btn.textContent = oldTxt;
+      btnPreview.disabled = false;
+      btnPreview.textContent = old;
     }
-  }
+  };
 
-          function applyVoiceToRole(role, voiceCfg){
-  if(!role) return;
-  for(const s of (state.shots||[])){
-    if((s.role||"narration") === role){
-      s.voiceCfg = { ...voiceCfg };
-      s.voiceDirty = true;
-    }
-  }
+  const btnApply = document.createElement("button");
+  btnApply.className = "btn";
+  btnApply.textContent = "儲存";
+  btnApply.onclick = ()=>{
+    shot.multiVoiceEnabled = true;
+    shot.voiceDirty = true;
+    modal.style.display="none";
+    updateExportButtons();
+    const tag = document.querySelector(`.dirtyTag[data-segid="${shot.id}"]`);
+    if(tag){ tag.classList.add("on"); tag.textContent="已改"; }
+  };
+
+  actions.appendChild(btnPreview);
+  actions.appendChild(btnApply);
+  actions.appendChild(btnClose);
+
+  top.appendChild(title);
+  top.appendChild(actions);
+  panel.appendChild(top);
+
+  const VOICES = [
+    {v:"en-US-JennyNeural", t:"女聲 Jenny"},
+    {v:"en-US-GuyNeural", t:"男聲 Guy"},
+    {v:"en-US-AriaNeural", t:"甜美女 Aria"},
+    {v:"en-US-AmberNeural", t:"女孩 Amber"},
+    {v:"en-US-AnaNeural", t:"小女 Ana"},
+    {v:"en-US-DavisNeural", t:"成熟男 Davis"}
+  ];
+
+  shot.multiVoice.forEach((p)=>{
+    const row = document.createElement("div");
+    row.className = "row";
+
+    const txt = document.createElement("div");
+    txt.className = "txt";
+    txt.textContent = p.text;
+
+    const sel = document.createElement("select");
+    sel.className = "miniSel";
+    VOICES.forEach(o=>{
+      const opt=document.createElement("option");
+      opt.value=o.v; opt.textContent=o.t;
+      sel.appendChild(opt);
+    });
+    sel.value = p.cfg.voice || "en-US-JennyNeural";
+    sel.onchange = ()=>{ p.cfg.voice = sel.value; };
+
+    const rate = document.createElement("input");
+    rate.className="miniInp"; rate.style.width="88px";
+    rate.value = p.cfg.rate || "+0%";
+    rate.oninput = ()=>{ p.cfg.rate = rate.value.trim(); };
+
+    const pitch = document.createElement("input");
+    pitch.className="miniInp"; pitch.style.width="88px";
+    pitch.value = p.cfg.pitch || "+0Hz";
+    pitch.oninput = ()=>{ p.cfg.pitch = pitch.value.trim(); };
+
+    const vol = document.createElement("input");
+    vol.className="miniInp"; vol.style.width="88px";
+    vol.value = p.cfg.volume || "+0%";
+    vol.oninput = ()=>{ p.cfg.volume = vol.value.trim(); };
+
+    const btnThis = document.createElement("button");
+    btnThis.className="btn";
+    btnThis.textContent="▶ 此句";
+    btnThis.onclick = async ()=>{
+      btnThis.disabled=true;
+      try{
+        const blob = await synthTTSBlob(p.text, p.cfg);
+        const url = URL.createObjectURL(blob);
+        const a = new Audio(url);
+        a.play();
+        a.onended = ()=> URL.revokeObjectURL(url);
+      }catch(e){
+        alert(String(e));
+        console.error(e);
+      }finally{
+        btnThis.disabled=false;
+      }
+    };
+
+    row.appendChild(txt);
+    row.appendChild(sel);
+    row.appendChild(rate);
+    row.appendChild(pitch);
+    row.appendChild(vol);
+    row.appendChild(btnThis);
+    panel.appendChild(row);
+  });
+
+  modal.style.display="flex";
+  modal.onclick = (e)=>{ if(e.target===modal) modal.style.display="none"; };
 }
+
 
 function genSplitId(baseId, k){
   // baseId like "0020" -> "0020-1", "0020-2" ...
@@ -2483,6 +2638,16 @@ if (typeof __origRenderShots === 'function') {
 </script>
 </body>
 </html>
+
+
+
+
+
+
+
+
+
+
 
 
 
