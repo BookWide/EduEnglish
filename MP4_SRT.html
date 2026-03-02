@@ -1990,7 +1990,7 @@ finalWrap.appendChild(fl);
   }
 
   function ensureVoiceLibrary(){
-    // ✅ Clean v2: fixed 3 roles only (CapCut style)
+    // ✅ Default 3 roles (can extend for general / universal use)
     const FIXED = {
       narration: { name:"旁白", voice:"en-US-JennyNeural", rate:"+0%", pitch:"+0Hz", volume:"+0%" },
       lion:      { name:"獅子", voice:"en-US-GuyNeural",   rate:"-10%", pitch:"-50Hz", volume:"+10%" },
@@ -2001,7 +2001,7 @@ finalWrap.appendChild(fl);
       state.voiceLibrary = {};
     }
 
-    // keep existing settings for fixed roles if present, otherwise defaults
+    // ensure fixed roles exist (preserve user's tweaks if present)
     for(const id of Object.keys(FIXED)){
       const cur = state.voiceLibrary[id];
       state.voiceLibrary[id] = {
@@ -2011,11 +2011,24 @@ finalWrap.appendChild(fl);
       };
     }
 
-    // remove any extra sets (clean + predictable)
-    for(const k of Object.keys(state.voiceLibrary)){
-      if(!(k in FIXED)){
-        try{ delete state.voiceLibrary[k]; }catch(e){}
+    // Maintain a stable order list for UI
+    if(!Array.isArray(state.voiceSetOrder)){
+      const extraKeys = Object.keys(state.voiceLibrary).filter(k=>!(k in FIXED));
+      state.voiceSetOrder = ["narration","lion","mouse", ...extraKeys];
+    }else{
+      // make sure fixed are always at top, and keep any existing extras
+      const seen = new Set();
+      const next = [];
+      for(const k of ["narration","lion","mouse"]){ next.push(k); seen.add(k); }
+      for(const k of state.voiceSetOrder){
+        if(!k || seen.has(k)) continue;
+        if(state.voiceLibrary[k]){ next.push(k); seen.add(k); }
       }
+      // include any new keys not in order
+      for(const k of Object.keys(state.voiceLibrary)){
+        if(!seen.has(k)){ next.push(k); seen.add(k); }
+      }
+      state.voiceSetOrder = next;
     }
 
     if(!state.voiceUI) state.voiceUI = { activeSetId: "narration" };
@@ -2085,15 +2098,21 @@ finalWrap.appendChild(fl);
     const sel = document.getElementById("voiceSetSelect");
     if(!sel) return;
     sel.innerHTML = "";
-    const keys = ["narration","lion","mouse"];
-    for(const id of keys){
+
+    const FIXED = new Set(["narration","lion","mouse"]);
+    const order = Array.isArray(state.voiceSetOrder) ? state.voiceSetOrder : Object.keys(state.voiceLibrary||{});
+    for(const id of order){
+      if(!state.voiceLibrary[id]) continue;
       const opt = document.createElement("option");
       opt.value = id;
       const nm = state.voiceLibrary[id]?.name || id;
-      opt.textContent = `${nm} (${id})`;
+      // Fixed roles show (id) for clarity; custom roles show name only (clean)
+      opt.textContent = FIXED.has(id) ? `${nm} (${id})` : `${nm}`;
       sel.appendChild(opt);
     }
+
     sel.value = state.voiceUI.activeSetId || "narration";
+    refreshVoiceLibPill();
   }
 
   function refreshVoiceLibVoiceSelect(){
@@ -2192,14 +2211,6 @@ finalWrap.appendChild(fl);
   function initVoiceLibraryUI(){
     ensureVoiceLibrary();
 
-    // ✅ Clean v2: fixed 3 roles only — hide add/copy/delete UI
-    const b1=document.getElementById("btnVoiceSetAdd");
-    const b2=document.getElementById("btnVoiceSetClone");
-    const b3=document.getElementById("btnVoiceSetDelete");
-    if(b1) b1.style.display="none";
-    if(b2) b2.style.display="none";
-    if(b3) b3.style.display="none";
-
     refreshVoiceSetSelect();
     refreshVoiceLibVoiceSelect();
     loadVoiceSetToEditor(state.voiceUI.activeSetId || "narration");
@@ -2242,193 +2253,127 @@ finalWrap.appendChild(fl);
     const delBtn = document.getElementById("voiceSetDelBtn");
     const prevBtn = document.getElementById("voiceLibPreviewBtn");
 
+    const FIXED = new Set(["narration","lion","mouse"]);
+
+    function slugBaseFromName(nm){
+      nm = String(nm||"").trim();
+      // If contains latin letters/numbers, use those as base; otherwise fall back to "role"
+      const latin = nm.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g,"");
+      return latin || "role";
+    }
+
+    function createRoleWithName(displayName){
+      const base = slugBaseFromName(displayName);
+      const id = uniqueSetId(base);
+      state.voiceLibrary[id] = {
+        name: displayName || "新角色",
+        voice: "en-US-JennyNeural",
+        rate: "+0%",
+        pitch: "+0Hz",
+        volume: "+0%"
+      };
+      // place after fixed roles
+      if(!Array.isArray(state.voiceSetOrder)) state.voiceSetOrder = ["narration","lion","mouse"];
+      if(!state.voiceSetOrder.includes(id)) state.voiceSetOrder.push(id);
+
+      state.voiceUI.activeSetId = id;
+      refreshVoiceSetSelect();
+      loadVoiceSetToEditor(id);
+
+      state.voiceLibraryDirty = true;
+      const dirty = document.getElementById("voiceLibDirtyTag");
+      if(dirty){ dirty.classList.add("on"); dirty.textContent="已改"; }
+
+      if(state.shots && state.shots.length) renderCards();
+      updateExportButtons();
+    }
+
     if(addBtn){
       addBtn.addEventListener("click", ()=>{
-        const id = uniqueSetId("set");
-        state.voiceLibrary[id] = { name:"新語音集", voice:"en-US-JennyNeural", rate:"+0%", pitch:"+0Hz", volume:"+0%" };
-        state.voiceUI.activeSetId = id;
-        refreshVoiceSetSelect();
-        loadVoiceSetToEditor(id);
-        state.voiceLibraryDirty = true;
-        updateExportButtons();
+        const nm = prompt("新增語音集名稱（例如：老師 / 女主角 / 熊 / 旁白2）", "新角色");
+        if(nm === null) return;
+        const name = String(nm).trim();
+        if(!name){ alert("名稱不能空白"); return; }
+        createRoleWithName(name);
       });
     }
+
     if(dupBtn){
       dupBtn.addEventListener("click", ()=>{
-        const cur = getVoiceSet(state.voiceUI.activeSetId || "narration");
-        const id = uniqueSetId((cur.name || "set"));
-        state.voiceLibrary[id] = { ...sanitizeVoiceCfg(cur), name: (cur.name || "語音集") + " copy" };
+        const curId = state.voiceUI.activeSetId || "narration";
+        const cur = getVoiceSet(curId);
+        const defaultName = (cur.name || "語音集") + " copy";
+        const nm = prompt("複製後名稱", defaultName);
+        if(nm === null) return;
+        const name = String(nm).trim();
+        if(!name){ alert("名稱不能空白"); return; }
+
+        const base = slugBaseFromName(name);
+        const id = uniqueSetId(base);
+        state.voiceLibrary[id] = { ...sanitizeVoiceCfg(cur), name };
+        if(!Array.isArray(state.voiceSetOrder)) state.voiceSetOrder = ["narration","lion","mouse"];
+        if(!state.voiceSetOrder.includes(id)) state.voiceSetOrder.push(id);
+
         state.voiceUI.activeSetId = id;
         refreshVoiceSetSelect();
         loadVoiceSetToEditor(id);
-        state.voiceLibraryDirty = true;
-        updateExportButtons();
-      });
-    }
-    if(delBtn){
-      delBtn.addEventListener("click", ()=>{
-        const id = state.voiceUI.activeSetId || "narration";
-        if(id === "narration"){ alert("旁白（narration）不可刪除"); return; }
-        if(!confirm(`確定刪除語音集：${id}？`)) return;
 
-        delete state.voiceLibrary[id];
-        // re-point shots using this set to narration
-        if(state.shots && state.shots.length){
-          for(const s of state.shots){
-            if(s.voiceRef === id){
-              s.voiceRef = "narration";
-              s.voiceDirty = true;
-            }
-          }
-        }
-        state.voiceUI.activeSetId = "narration";
-        refreshVoiceSetSelect();
-        loadVoiceSetToEditor("narration");
         state.voiceLibraryDirty = true;
+        const dirty = document.getElementById("voiceLibDirtyTag");
+        if(dirty){ dirty.classList.add("on"); dirty.textContent="已改"; }
+
         if(state.shots && state.shots.length) renderCards();
         updateExportButtons();
       });
     }
-    if(prevBtn){
-      prevBtn.addEventListener("click", async ()=>{
-        prevBtn.disabled = true;
-        prevBtn.textContent = "產生中...";
-        try{ await previewVoiceSetSample(); }
-        catch(e){ alert(String(e)); console.error(e); }
-        finally{ prevBtn.disabled = false; prevBtn.textContent = "▶ 試聽這個語音集（用範例句）"; }
-      });
-    }
-  }
 
+    if(delBtn){
+      delBtn.addEventListener("click", ()=>{
+        const id = state.voiceUI.activeSetId || "narration";
+        if(FIXED.has(id)){
+          alert("旁白/獅子/老鼠 是預設角色，不能刪除。你可以改它的參數即可。");
+          return;
+        }
+        const nm = state.voiceLibrary[id]?.name || id;
+        if(!confirm(`確定刪除語音集「${nm}」？\n（引用到它的段落/句子會自動改回 旁白）`)) return;
 
-async function previewTTSWithText(shot, textOverride){
-          const {voice, rate, pitch, volume} = getShotVoice(shot);
-          const text = String(textOverride || "").trim();
-          if(!text){
-            alert("此段沒有文字，無法試聽。");
-            return;
-          }
-          try{
-            const url = await ttsFetchAudioUrl({ text, voice, rate, pitch, volume });
-            playAudioUrl(url);
-          }catch(err){
-            console.error(err);
-            alert("試聽失敗（可能網路/服務不可用）。");
+        try{ delete state.voiceLibrary[id]; }catch(e){}
+        if(Array.isArray(state.voiceSetOrder)){
+          state.voiceSetOrder = state.voiceSetOrder.filter(x=>x!==id);
+        }
+
+        // fix references in shots
+        if(Array.isArray(state.shots)){
+          for(const s of state.shots){
+            if(s.voiceRef === id) s.voiceRef = "narration";
+            if(s.multiVoice && Array.isArray(s.multiVoice.lines)){
+              for(const ln of s.multiVoice.lines){
+                if(ln && ln.voiceRef === id) ln.voiceRef = "narration";
+              }
+            }
           }
         }
 
+        state.voiceUI.activeSetId = "narration";
+        refreshVoiceSetSelect();
+        loadVoiceSetToEditor("narration");
 
-function splitSentencesGlobal(txt){
-  const s = String(txt||"").trim();
-  if(!s) return [];
-  const out = [];
-  let cur = "";
-  for(const ch of s){
-    cur += ch;
-    if(ch==="." || ch==="?" || ch==="!"){
-      const c = cur.trim();
-      if(c) out.push(c);
-      cur = "";
+        state.voiceLibraryDirty = true;
+        const dirty = document.getElementById("voiceLibDirtyTag");
+        if(dirty){ dirty.classList.add("on"); dirty.textContent="已改"; }
+
+        if(state.shots && state.shots.length) renderCards();
+        updateExportButtons();
+      });
     }
-  }
-  const tail = cur.trim();
-  if(tail) out.push(tail);
-  return out.length ? out : [s];
-}
 
-function stripID3(u8){
-  if(u8.length >= 10 && u8[0]===0x49 && u8[1]===0x44 && u8[2]===0x33){
-    const size = ((u8[6]&0x7f)<<21) | ((u8[7]&0x7f)<<14) | ((u8[8]&0x7f)<<7) | (u8[9]&0x7f);
-    const total = 10 + size;
-    if(total < u8.length) return u8.slice(total);
-  }
-  return u8;
-}
-
-async function synthTTSBlob(text, voiceCfg){
-  const {voice, rate, pitch, volume} = voiceCfg;
-  const body = { text, lang:"en", voice, rate, pitch, volume };
-  const res = await fetch(AZURE_TTS_URL, {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify(body)
-  });
-  if(!res.ok){
-    const t = await res.text();
-    throw new Error("TTS failed: " + t);
-  }
-  return await res.blob();
-}
-
-async function synthTTSMp3Bytes(text, voiceCfg){
-  const blob = await synthTTSBlob(text, voiceCfg);
-  const ab = await blob.arrayBuffer();
-  return new Uint8Array(ab);
-}
-
-async function concatMp3FromParts(parts){
-  const clean = parts.map((p)=> stripID3(p));
-  const total = clean.reduce((s,p)=> s+p.length, 0);
-  const out = new Uint8Array(total);
-  let off=0;
-  for(const p of clean){
-    out.set(p, off);
-    off += p.length;
-  }
-  return new Blob([out], {type:"audio/mpeg"});
-}
-
-function ensureMultiVoice(shot){
-  // ✅ Clean v2: multi-voice uses voiceRef (role) only, no separate voice system
-  if(shot.multiVoice && Array.isArray(shot.multiVoice) && shot.multiVoice.length) return;
-  const sentences = splitSentencesGlobal(shot.text||"");
-  const baseRef = (shot && shot.voiceRef) ? shot.voiceRef : "narration";
-
-  if(sentences.length<=1){
-    shot.multiVoice = [{ text: (shot.text||"").trim(), ref: baseRef }];
-    return;
-  }
-  shot.multiVoice = sentences.map(t=>({ text:t, ref: baseRef }));
-}
-
-async function previewTTSForShot(shot){
-    const {voice, rate, pitch, volume} = getShotVoice(shot);
-    const text = (shot.text || "").trim();
-    if(!text){
-      alert("此段沒有文字，無法試聽。");
-      return;
+    if(prevBtn){
+      prevBtn.addEventListener("click", previewVoiceSetSample);
     }
-    const body = {
-      text,
-      lang: "en", // 舊版兼容：你的 function 目前用 en/zh/ja。若你改成 en-US 也可在 function 端兼容。
-      voice,
-      rate,
-      pitch,
-      volume
-    };
-    const res = await fetch(AZURE_TTS_URL, {
-      method: "POST",
-      headers: { "Content-Type":"application/json" },
-      body: JSON.stringify(body)
-    });
-    if(!res.ok){
-      const t = await res.text();
-      throw new Error("TTS failed: " + t);
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = new Audio(url);
-    a.play();
-    a.onended = ()=> URL.revokeObjectURL(url);
+
+    refreshVoiceLibPill();
   }
 
-  async function sha1Hex(str){
-    const enc = new TextEncoder().encode(str);
-    const buf = await crypto.subtle.digest("SHA-1", enc);
-    return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
-  }
-
-  // IndexedDB minimal wrapper
   function idbOpen(){
     return new Promise((resolve, reject)=>{
       const req = indexedDB.open("bw_tts_cache_v1", 1);
@@ -2608,7 +2553,7 @@ function openMultiVoiceModal(shot){
   top.appendChild(actions);
   panel.appendChild(top);
 
-  const roleKeys = ["narration","lion","mouse"];
+  const roleKeys = (Array.isArray(state.voiceSetOrder) && state.voiceSetOrder.length) ? state.voiceSetOrder : Object.keys(state.voiceLibrary||{});
 
   shot.multiVoice.forEach((p)=>{
     const row = document.createElement("div");
