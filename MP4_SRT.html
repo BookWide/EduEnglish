@@ -515,6 +515,23 @@ select option{ color:#111; background:#fff; }
 <body>
 <div id="versionBadge">v17 hard-insert-multivoice-btn</div>
 <div id="multiVoiceModal"><div class="panel"></div></div>
+<div id="roleVoiceModal" style="display:none;">
+  <div class="panel">
+    <div class="mvHead">
+      <div>
+        <div class="mvTitle">角色 → 聲音（全局）</div>
+        <div class="mvSub">在 SRT 每句前加 <code>[LION]</code> / <code>[MOUSE]</code> / <code>[NARRATOR]</code>（或 <code>LION:</code>），就會自動套用下方對應聲音。單句若已手動調聲音，則不會被覆蓋。</div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button class="btn ghost" id="btnRoleAdd">＋新增角色</button>
+        <button class="btn" id="btnRoleSave">儲存</button>
+        <button class="btn ghost" id="btnRoleClose">關閉</button>
+      </div>
+    </div>
+    <div class="mvBody" id="roleVoiceBody"></div>
+  </div>
+</div>
+
 
 <header>
   <div class="topBar">
@@ -556,6 +573,15 @@ select option{ color:#111; background:#fff; }
         <p class="label"><b>2) 匯入 SRT</b><span class="smallmuted">以 SRT 自然分段（推薦）或舊固定秒數模式</span></p>
         <input id="srtInput" type="file" accept=".srt,text/plain" />
         <div class="smallmuted" id="srtInfo" style="margin-top:6px;">尚未選擇 SRT</div>
+      </div>
+
+
+      <div class="field" id="roleField">
+        <p class="label"><b>2.5) 角色標示 / 聲音鎖定</b><span class="smallmuted">在每句前加 <code>[LION]</code> / <code>[MOUSE]</code> / <code>[NARRATOR]</code>（或 <code>LION:</code>）</span></p>
+        <button class="btn" id="btnRoleVoice">設定「角色→聲音」表</button>
+        <div class="smallmuted" style="margin-top:6px;">
+          未標示角色時，預設用 <b>NARRATOR</b>。你只要改一處角色聲音，整個故事同角色都會一起套用（除非你對單句已手動調聲音）。
+        </div>
       </div>
 
       <div class="row2">
@@ -1215,6 +1241,7 @@ console.log('MP4_SRT_VERSION:', 'v17 hard-insert-multivoice-btn');
 const badges = [
   `#${pad4(idx+1)}`,
   shot.style,
+  `角色:${(shot.role||'NARRATOR')}`,
   `${segDur.toFixed(2)}s`,
   lvl
 ];
@@ -1811,38 +1838,30 @@ finalWrap.appendChild(fl);
     for(let i=0;i<n;i++){
       const ch = state.chunks[i];
       const img = state.images[i] || {name:`${state.baseName}_${pad4(i+1)}.jpg`, url:""};
-      const narration = (ch.text || "").trim();
+      const rawText = (ch.text || "").trim();
+      const ex = extractRoleFromText(rawText);
+      const role = ex.role || "NARRATOR";
+      const narration = (ex.text || "").trim();
       const lvl = detectMotionLevel(narration);
 
-      state.shots.push({
+      const shot = {
         id: i+1,
-        use_kling: false,
-
-        base: state.baseName,
-        category: cat,
-        style,
-        image: img,
+        idx: i+1,
         start: ch.start,
         end: ch.end,
+        dur: ch.dur,
         text: narration,
-        mode: cfg.mode,
-        generate_sec: cfg.generateSec,
-        target_sec: cfg.targetSec,
-        stretch_factor: cfg.stretchFactor,
-
-        motionLevel: lvl,
-        intensity: 1.0,
-        userEditedMotion: false,
-
-        userEditedSfx: false,
-        userEditedMusic: false,
-        sfxPrompt: "",
-        musicPrompt: "",
-
-        motionPrompt: "",
-        cameraPrompt: defaultCameraPrompt()
-      });
-    }
+        role,
+        rawText,
+        motion: lvl,
+        prompt: "",
+        useSegMp4: true,        // 若 reimage_output 有同編號 mp4，優先取用
+        voiceCfg: deepClone(roleVoiceMap[role] || roleVoiceMap["NARRATOR"] || DEFAULT_ROLE_VOICE_MAP["NARRATOR"]),
+        voiceDirty: false,
+        userEditedVoice: false,
+      };
+      state.shots.push(shot);
+}
 
     setStatus(`已產生 ${state.shots.length} 段`);
     renderCards();
@@ -1908,6 +1927,89 @@ finalWrap.appendChild(fl);
   
   // ===== TTS preview + mp3 cache (IndexedDB) =====
   const AZURE_TTS_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/azure-tts";
+
+  // ===== Role → Voice (global) =====
+  const ROLE_VOICE_STORAGE_KEY = "bw_role_voice_map_v1";
+  const DEFAULT_ROLE_VOICE_MAP = {
+    "NARRATOR":  { voice: "en-US-JennyNeural", rate: "+0%",  pitch: "+0Hz",   volume: "+0%" },
+    "LION":      { voice: "en-US-GuyNeural",   rate: "-5%",  pitch: "-20Hz",  volume: "+0%" },
+    "MOUSE":     { voice: "en-US-AriaNeural",  rate: "+10%", pitch: "+40Hz",  volume: "+0%" },
+    "MOM_DUCK":  { voice: "en-US-JennyNeural", rate: "+5%",  pitch: "+30Hz",  volume: "+0%" },
+    "DUCKLING":  { voice: "en-US-AnaNeural",   rate: "+15%", pitch: "+60Hz",  volume: "+0%" },
+  };
+
+  const ROLE_VOICE_CHOICES = [
+    ["en-US-JennyNeural", "女聲 Jenny"],
+    ["en-US-AriaNeural", "女聲 Aria"],
+    ["en-US-AnaNeural", "女聲 Ana"],
+    ["en-US-GuyNeural", "男聲 Guy"],
+    ["en-US-DavisNeural", "男聲 Davis"],
+    ["en-US-BrandonNeural", "男聲 Brandon"],
+    ["en-US-ChristopherNeural", "男聲 Christopher"],
+  ];
+
+  function deepClone(o){ return JSON.parse(JSON.stringify(o)); }
+
+  function normalizeRoleName(r){
+    return (r || "").toString().trim().toUpperCase().replace(/\s+/g, "_");
+  }
+
+  function loadRoleVoiceMap(){
+    try{
+      const raw = localStorage.getItem(ROLE_VOICE_STORAGE_KEY);
+      if(!raw) return deepClone(DEFAULT_ROLE_VOICE_MAP);
+      const parsed = JSON.parse(raw);
+      // merge defaults (keep user extras)
+      const merged = deepClone(DEFAULT_ROLE_VOICE_MAP);
+      for(const k of Object.keys(parsed||{})){
+        merged[normalizeRoleName(k)] = parsed[k];
+      }
+      return merged;
+    }catch(e){
+      return deepClone(DEFAULT_ROLE_VOICE_MAP);
+    }
+  }
+
+  function saveRoleVoiceMap(map){
+    const out = {};
+    for(const k of Object.keys(map||{})){
+      const nk = normalizeRoleName(k);
+      if(!nk) continue;
+      out[nk] = map[k];
+    }
+    localStorage.setItem(ROLE_VOICE_STORAGE_KEY, JSON.stringify(out));
+  }
+
+  let roleVoiceMap = loadRoleVoiceMap();
+
+  function extractRoleFromText(text){
+    const t = (text || "").toString().trim();
+    // [ROLE] text
+    let m = t.match(/^\[([^\]]{1,40})\]\s*(.*)$/);
+    if(m){
+      return { role: normalizeRoleName(m[1]), text: (m[2]||"").trim() };
+    }
+    // ROLE: text
+    m = t.match(/^([A-Za-z0-9_\-]{2,40})\s*:\s*(.*)$/);
+    if(m){
+      return { role: normalizeRoleName(m[1]), text: (m[2]||"").trim() };
+    }
+    return { role: "NARRATOR", text: t };
+  }
+
+  function applyRoleToShot(shot){
+    if(!shot) return;
+    const role = normalizeRoleName(shot.role || "NARRATOR") || "NARRATOR";
+    shot.role = role;
+    if(shot.userEditedVoice) return; // 單句已手動調聲音：不要覆蓋
+    if(roleVoiceMap[role]){
+      shot.voiceCfg = deepClone(roleVoiceMap[role]);
+    } else {
+      shot.voiceCfg = deepClone(roleVoiceMap["NARRATOR"] || DEFAULT_ROLE_VOICE_MAP["NARRATOR"]);
+    }
+  }
+
+
 
   function markVoiceDirty(shot){
   shot.voiceDirty = true;
@@ -2323,6 +2425,153 @@ function genSplitId(baseId, k){
   const digits = m ? m[0] : String(baseId);
   return `${digits}-${k+1}`;
 }
+
+
+  // ===== Role Voice Modal =====
+  const roleVoiceModal = document.getElementById("roleVoiceModal");
+  const roleVoiceBody  = document.getElementById("roleVoiceBody");
+  const btnRoleVoice   = document.getElementById("btnRoleVoice");
+  const btnRoleAdd     = document.getElementById("btnRoleAdd");
+  const btnRoleSave    = document.getElementById("btnRoleSave");
+  const btnRoleClose   = document.getElementById("btnRoleClose");
+
+  function renderRoleVoiceModal(){
+    roleVoiceBody.innerHTML = "";
+    const roles = Object.keys(roleVoiceMap || {}).sort();
+    const wrap = document.createElement("div");
+    wrap.className = "mvList";
+    for(const role of roles){
+      const cfg = roleVoiceMap[role] || {};
+      const row = document.createElement("div");
+      row.className = "mvItem";
+
+      const left = document.createElement("div");
+      left.innerHTML = `
+        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+          <span class="pill" style="font-weight:800;">${escapeHtml(role)}</span>
+          <button class="btn ghost" data-role-del="${escapeHtml(role)}">刪除</button>
+        </div>
+      `;
+
+      const right = document.createElement("div");
+      right.innerHTML = `
+        <div class="mvGrid">
+          <label>聲音
+            <select data-role-voice="${escapeHtml(role)}">
+              ${ROLE_VOICE_CHOICES.map(([v,n]) => `<option value="${v}" ${v===cfg.voice?'selected':''}>${n} (${v})</option>`).join("")}
+            </select>
+          </label>
+          <label>語速
+            <input data-role-rate="${escapeHtml(role)}" value="${cfg.rate ?? '+0%'}" placeholder="+0%">
+          </label>
+          <label>音高
+            <input data-role-pitch="${escapeHtml(role)}" value="${cfg.pitch ?? '+0Hz'}" placeholder="+0Hz">
+          </label>
+          <label>音量
+            <input data-role-vol="${escapeHtml(role)}" value="${cfg.volume ?? '+0%'}" placeholder="+0%">
+          </label>
+        </div>
+      `;
+      row.appendChild(left);
+      row.appendChild(right);
+      wrap.appendChild(row);
+    }
+    roleVoiceBody.appendChild(wrap);
+
+    roleVoiceBody.querySelectorAll("[data-role-del]").forEach(btn=>{
+      btn.addEventListener("click", ()=>{
+        const r = btn.getAttribute("data-role-del");
+        if(r==="NARRATOR"){ toast("NARRATOR 不能刪"); return; }
+        delete roleVoiceMap[r];
+        renderRoleVoiceModal();
+      });
+    });
+  }
+
+  function openRoleVoiceModal(){
+    roleVoiceMap = loadRoleVoiceMap();
+    renderRoleVoiceModal();
+    roleVoiceModal.style.display = "flex";
+  }
+
+  function closeRoleVoiceModal(){
+    roleVoiceModal.style.display = "none";
+  }
+
+  function collectRoleVoiceModal(){
+    const map = {};
+    for(const role of Object.keys(roleVoiceMap||{})){
+      map[role] = roleVoiceMap[role];
+    }
+    // collect inputs
+    roleVoiceBody.querySelectorAll("select[data-role-voice]").forEach(sel=>{
+      const role = sel.getAttribute("data-role-voice");
+      map[role] = map[role] || {};
+      map[role].voice = sel.value;
+    });
+    roleVoiceBody.querySelectorAll("input[data-role-rate]").forEach(inp=>{
+      const role = inp.getAttribute("data-role-rate");
+      map[role] = map[role] || {};
+      map[role].rate = (inp.value||"+0%").trim();
+    });
+    roleVoiceBody.querySelectorAll("input[data-role-pitch]").forEach(inp=>{
+      const role = inp.getAttribute("data-role-pitch");
+      map[role] = map[role] || {};
+      map[role].pitch = (inp.value||"+0Hz").trim();
+    });
+    roleVoiceBody.querySelectorAll("input[data-role-vol]").forEach(inp=>{
+      const role = inp.getAttribute("data-role-vol");
+      map[role] = map[role] || {};
+      map[role].volume = (inp.value||"+0%").trim();
+    });
+    // normalize keys
+    const out = {};
+    for(const k of Object.keys(map)){
+      const nk = normalizeRoleName(k);
+      if(!nk) continue;
+      out[nk] = map[k];
+    }
+    if(!out["NARRATOR"]) out["NARRATOR"] = deepClone(DEFAULT_ROLE_VOICE_MAP["NARRATOR"]);
+    return out;
+  }
+
+  if(btnRoleVoice){
+    btnRoleVoice.addEventListener("click", openRoleVoiceModal);
+  }
+  if(btnRoleClose){
+    btnRoleClose.addEventListener("click", closeRoleVoiceModal);
+  }
+  if(btnRoleAdd){
+    btnRoleAdd.addEventListener("click", ()=>{
+      const name = prompt("輸入角色名（例如 LION / MOM_DUCK）");
+      if(!name) return;
+      const role = normalizeRoleName(name);
+      if(!role) return;
+      roleVoiceMap[role] = roleVoiceMap[role] || deepClone(DEFAULT_ROLE_VOICE_MAP["NARRATOR"]);
+      renderRoleVoiceModal();
+    });
+  }
+  if(btnRoleSave){
+    btnRoleSave.addEventListener("click", ()=>{
+      const out = collectRoleVoiceModal();
+      saveRoleVoiceMap(out);
+      roleVoiceMap = out;
+      toast("已儲存角色聲音表");
+      // 重新套用到現有 shots（僅限未手動調過聲音）
+      for(const sh of (state.shots||[])){
+        if(sh && !sh.userEditedVoice){
+          sh.role = normalizeRoleName(sh.role || "NARRATOR") || "NARRATOR";
+          sh.voiceCfg = deepClone(roleVoiceMap[sh.role] || roleVoiceMap["NARRATOR"] || DEFAULT_ROLE_VOICE_MAP["NARRATOR"]);
+        }
+      }
+      renderShots();
+    });
+  }
+
+  roleVoiceModal?.addEventListener("click", (e)=>{
+    if(e.target === roleVoiceModal) closeRoleVoiceModal();
+  });
+
 
 function splitShotBySentences(shot){
   const idx = (state.shots||[]).findIndex(s=>s===shot || s.id===shot.id);
