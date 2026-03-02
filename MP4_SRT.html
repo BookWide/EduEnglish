@@ -507,13 +507,22 @@ select option{ color:#111; background:#fff; }
 #multiVoiceModal .btn{border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:#fff;padding:8px 12px;border-radius:10px;cursor:pointer;font-size:12px;}
 #multiVoiceModal .btn.primary{background:rgba(56,189,248,.20);border-color:rgba(56,189,248,.55);}
 
-</style>
+
+    .bulkRoleBar{margin-top:10px;padding:10px;border:1px solid rgba(255,255,255,.12);border-radius:12px;background:rgba(0,0,0,.18);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+    .bulkRoleBar .bulkTitle{font-size:13px;opacity:.9;margin-right:6px}
+    .bulkRoleBar .bulkInput{min-width:260px;flex:1;padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.06);color:#fff}
+    .bulkRoleBar .bulkSelect{min-width:200px;padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.06);color:#fff}
+    .roleChip{display:inline-flex;align-items:center;gap:6px;margin-top:6px}
+    .roleChip select{padding:6px 8px;border-radius:10px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.06);color:#fff}
+    .roleChip .roleTag{font-size:12px;opacity:.8}
+
+  </style>
 
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 </head>
 
 <body>
-<div id="versionBadge">v17 hard-insert-multivoice-btn</div>
+<div id="versionBadge">v21 bulk-role-ui (role-apply-fix)</div>
 <div id="multiVoiceModal"><div class="panel"></div></div>
 <div id="roleVoiceModal" style="display:none;">
   <div class="panel">
@@ -730,6 +739,14 @@ select option{ color:#111; background:#fff; }
           <button type="button" id="filterAllBtn" onclick="setViewFilter('all')">顯示全部</button>
           <button type="button" id="filterKlingBtn" onclick="setViewFilter('kling')">只顯示 Kling</button>
           <button type="button" id="filterStillBtn" onclick="setViewFilter('still')">只顯示 Still</button>
+        </div>
+
+        <div id="bulkRoleBar" class="bulkRoleBar">
+          <div class="bulkTitle">批次指定角色（不改你原本流程）</div>
+          <input id="bulkRoleRange" class="bulkInput" placeholder="段號：1-5,7,10（也可用 0001-0005）" />
+          <select id="bulkRoleSelect" class="bulkSelect"></select>
+          <button type="button" id="bulkRoleApplyBtn">套用</button>
+          <button type="button" id="bulkRoleClearBtn">清空角色</button>
         </div>
         <div class="klingHint" id="filterHint">目前顯示：全部</div>
       </div>
@@ -1233,6 +1250,41 @@ console.log('MP4_SRT_VERSION:', 'v20 role-voice-fix+shot-image');
       tlDot.className = "tlDot";
       tlRail.appendChild(tlLine);
       tlRail.appendChild(tlMeta);
+      // 角色（每段）：用下拉快速指定；若此段尚未手動調聲音（voiceDirty=false），會自動套用該角色的預設聲音
+      const roleRow = document.createElement('div');
+      roleRow.className = 'roleChip';
+      const roleSel = document.createElement('select');
+      roleSel.title = '此段角色';
+      rebuildRoleSelect(roleSel);
+      roleSel.value = shot.role || 'NARRATOR';
+
+      const roleTag = document.createElement('span');
+      roleTag.className = 'roleTag';
+      roleTag.textContent = shot.voiceDirty ? '（本段已手動調聲音，不會被角色覆蓋）' : '（套用角色預設聲音）';
+
+      roleSel.addEventListener('change', ()=>handleRoleChange());
+      roleSel.addEventListener('input',  ()=>handleRoleChange());
+      function handleRoleChange(){
+        if(roleSel.value==='__custom__'){
+          const name = (prompt('輸入新角色名稱（例：LION / MOUSE / MOM_DUCK）')||'').trim();
+          if(!name){ roleSel.value = shot.role || 'NARRATOR'; return; }
+          ensureRoleExists(name);
+          rebuildRoleSelect(roleSel);
+          roleSel.value = name;
+        }
+        // 你選了角色 => 直接以「角色預設聲音」覆蓋本段（方便批量調整）
+        shot.voiceDirty = false;
+        shot.userEditedVoice = false;
+        applyRoleToShot(shot, roleSel.value);
+        roleTag.textContent = shot.voiceDirty ? '（本段已手動調聲音，不會被角色覆蓋）' : '（套用角色預設聲音）';
+        renderCards();
+      }
+
+      roleRow.appendChild(document.createTextNode('角色：'));
+      roleRow.appendChild(roleSel);
+      roleRow.appendChild(roleTag);
+      tlRail.appendChild(roleRow);
+
       tlRail.appendChild(tlDot);
 
       const thumb = document.createElement("div");
@@ -1878,6 +1930,8 @@ finalWrap.appendChild(fl);
       state.shots.push(shot);
 }
 
+    loadRoleVoiceMap();
+    initBulkRoleBar();
     setStatus(`已產生 ${state.shots.length} 段`);
     renderCards();
   }
@@ -1969,7 +2023,113 @@ finalWrap.appendChild(fl);
     return (r || "").toString().trim().toUpperCase().replace(/\s+/g, "_");
   }
 
-  function loadRoleVoiceMap(){
+  
+  function getAllRoles(){
+    const keys = Object.keys(roleVoiceMap||{}).filter(Boolean);
+    const rest = keys.filter(k=>k!=='NARRATOR').sort((a,b)=>a.localeCompare(b));
+    return ['NARRATOR', ...rest];
+  }
+
+  function ensureRoleExists(role){
+    const r = normalizeRoleName(role||'NARRATOR');
+    if(!roleVoiceMap) roleVoiceMap = {};
+    if(!roleVoiceMap['NARRATOR']) roleVoiceMap['NARRATOR'] = { ...DEFAULT_ROLE_VOICE_MAP['NARRATOR'] };
+    if(!roleVoiceMap[r]) roleVoiceMap[r] = { ...roleVoiceMap['NARRATOR'] };
+    saveRoleVoiceMap(roleVoiceMap);
+  }
+
+  function rebuildRoleSelect(sel){
+    const cur = sel.value;
+    sel.innerHTML = '';
+    for(const r of getAllRoles()){
+      const opt=document.createElement('option');
+      opt.value=r; opt.textContent=r;
+      sel.appendChild(opt);
+    }
+    const optCustom=document.createElement('option');
+    optCustom.value='__custom__'; optCustom.textContent='＋自訂角色…';
+    sel.appendChild(optCustom);
+    if(getAllRoles().includes(cur)) sel.value = cur;
+  }
+
+  function applyRoleToShot(shot, role){
+    shot.role = normalizeRoleName(role||'NARRATOR');
+    ensureRoleExists(shot.role);
+    if(!shot.voiceDirty){
+      const rv = roleVoiceMap[shot.role] || roleVoiceMap['NARRATOR'] || DEFAULT_ROLE_VOICE_MAP['NARRATOR'];
+      shot.voiceCfg = shot.voiceCfg || {};
+      shot.voiceCfg.voice = rv.voice ?? shot.voiceCfg.voice;
+      shot.voiceCfg.rate = rv.rate ?? shot.voiceCfg.rate;
+      shot.voiceCfg.pitch = rv.pitch ?? shot.voiceCfg.pitch;
+      shot.voiceCfg.volume = rv.volume ?? shot.voiceCfg.volume;
+    }
+  }
+
+  function parseIdxRange(s){
+    if(!s) return [];
+    const out = new Set();
+    const parts = s.split(/[，,]/).map(x=>x.trim()).filter(Boolean);
+    for(const p of parts){
+      const m = p.match(/^0*(\d+)\s*-\s*0*(\d+)$/);
+      if(m){
+        let a=parseInt(m[1],10), b=parseInt(m[2],10);
+        if(Number.isNaN(a)||Number.isNaN(b)) continue;
+        if(a>b) [a,b]=[b,a];
+        for(let i=a;i<=b;i++) out.add(i);
+      }else{
+        const n = parseInt(p.replace(/^0+/,'')||'0',10);
+        if(!Number.isNaN(n) && n>0) out.add(n);
+      }
+    }
+    return Array.from(out).sort((a,b)=>a-b);
+  }
+
+  function initBulkRoleBar(){
+    const bar = document.getElementById('bulkRoleBar');
+    if(!bar) return;
+    const sel = document.getElementById('bulkRoleSelect');
+    const inp = document.getElementById('bulkRoleRange');
+    const btn = document.getElementById('bulkRoleApplyBtn');
+    const clr = document.getElementById('bulkRoleClearBtn');
+    if(!sel||!inp||!btn||!clr) return;
+
+    rebuildRoleSelect(sel);
+
+    sel.addEventListener('change', ()=>{
+      if(sel.value==='__custom__'){
+        const name = (prompt('輸入新角色名稱（例：LION / MOUSE / MOM_DUCK）')||'').trim();
+        if(!name){ sel.value='NARRATOR'; return; }
+        ensureRoleExists(name);
+        rebuildRoleSelect(sel);
+        sel.value = normalizeRoleName(name);
+      }
+    });
+
+    btn.addEventListener('click', ()=>{
+      const idxs = parseIdxRange(inp.value);
+      if(!idxs.length){ alert('請輸入段號範圍，例如 1-5,7,10'); return; }
+      const role = sel.value==='__custom__' ? 'NARRATOR' : sel.value;
+      for(const i of idxs){
+        const shot = shots.find(x=>x && x.idx===i);
+        if(shot) applyRoleToShot(shot, role);
+      }
+            renderCards();
+      alert('已套用角色到指定段號。');
+    });
+
+    clr.addEventListener('click', ()=>{
+      const idxs = parseIdxRange(inp.value);
+      if(!idxs.length){ alert('請輸入段號範圍，例如 1-5,7,10'); return; }
+      for(const i of idxs){
+        const shot = shots.find(x=>x && x.idx===i);
+        if(shot) shot.role = 'NARRATOR';
+      }
+            renderCards();
+      alert('已清空角色（設回 NARRATOR）。');
+    });
+  }
+
+function loadRoleVoiceMap(){
     try{
       const raw = localStorage.getItem(ROLE_VOICE_STORAGE_KEY);
       if(!raw) return deepClone(DEFAULT_ROLE_VOICE_MAP);
