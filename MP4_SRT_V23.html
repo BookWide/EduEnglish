@@ -7,7 +7,7 @@
 <meta http-equiv="Expires" content="0"/>
 <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>BookWide - Story Kling JSON (V22)</title>
+  <title>BookWide - Story Kling JSON (V23)</title>
   <style>
 
 
@@ -726,6 +726,13 @@ select option{ color:#111; background:#fff; }
           <button type="button" class="primary" id="voiceLibPreviewBtn">▶ 試聽這個語音集（用範例句）</button>
           <span class="dirtyTag" id="voiceLibDirtyTag">未改</span>
         </div>
+
+        <div class="btnrow" style="margin-top:10px;">
+          <button type="button" class="ghost" id="projectExportBtn">⬇ 匯出專案（設定打包）</button>
+          <button type="button" class="ghost" id="projectImportBtn">⬆ 匯入專案（回復設定）</button>
+          <input id="projectImportFile" type="file" accept="application/json,.json" style="display:none"/>
+          <span class="smallmuted" id="projectHint" style="margin-left:auto;opacity:.8;">（每個故事各自存一份；也可匯出/匯入）</span>
+        </div>
       </div>
 
 
@@ -798,7 +805,7 @@ select option{ color:#111; background:#fff; }
 </div>
 
 <script>
-console.log('MP4_SRT_VERSION:', 'V22');
+console.log('MP4_SRT_VERSION:', 'V23');
 
   const state = {
     video: null, // {name, url, file, duration, width, height}
@@ -824,9 +831,9 @@ console.log('MP4_SRT_VERSION:', 'V22');
   };
 
   // ===== Auto Save / Restore (CapCut-like) =====
-  const AUTOSAVE_KEY = "MP4_SRT_AUTOSAVE_V22"; // base family tag (do not use directly as storage key)
-  const AUTOSAVE_PREFIX = "MP4_SRT_AUTOSAVE_V22::";
-  const AUTOSAVE_LASTKEY = "MP4_SRT_AUTOSAVE_V22::LASTKEY";
+  const AUTOSAVE_KEY = "MP4_SRT_AUTOSAVE_V23"; // base family tag (do not use directly as storage key)
+  const AUTOSAVE_PREFIX = "MP4_SRT_AUTOSAVE_V23::";
+  const AUTOSAVE_LASTKEY = "MP4_SRT_AUTOSAVE_V23::LASTKEY";
 
   function _fnv1a32(str){
     // FNV-1a 32-bit
@@ -873,9 +880,10 @@ console.log('MP4_SRT_VERSION:', 'V22');
       voiceRef: s.voiceRef || "narration",
       voiceDirty: !!s.voiceDirty,
       multiVoiceEnabled: !!s.multiVoiceEnabled,
-      // multiVoice: [{text, cfg:{voice,rate,pitch,volume}}]
+      // multiVoice: [{text, ref, cfg?}]  (ref points to Voice Library set id)
       multiVoice: Array.isArray(s.multiVoice) ? s.multiVoice.map(x=>({
         text: x.text || "",
+        ref: x.ref || null,
         cfg: x.cfg ? {
           voice: x.cfg.voice || "en-US-JennyNeural",
           rate: x.cfg.rate || "+0%",
@@ -889,7 +897,7 @@ console.log('MP4_SRT_VERSION:', 'V22');
   function saveAuto(){
     try{
       const payload = {
-        v: "V22",
+        v: "V23",
         ts: Date.now(),
         voiceLibrary: state.voiceLibrary || {},
         voiceSetOrder: state.voiceSetOrder || [],
@@ -916,6 +924,7 @@ console.log('MP4_SRT_VERSION:', 'V22');
     if(Array.isArray(saved.multiVoice)){
       shot.multiVoice = saved.multiVoice.map(x=>({
         text: (x.text||""),
+        ref: x.ref || null,
         cfg: x.cfg ? {...x.cfg} : null
       }));
     }
@@ -2384,7 +2393,7 @@ async function previewTTSForShot(shot){
     if(!sel) return;
     sel.innerHTML = "";
 
-    const FIXED = new Set(["narration","lion","mouse"]);
+    const FIXED = new Set(["narration"]);
     const order = Array.isArray(state.voiceSetOrder) ? state.voiceSetOrder : Object.keys(state.voiceLibrary||{});
     for(const id of order){
       if(!state.voiceLibrary[id]) continue;
@@ -2538,7 +2547,114 @@ async function previewTTSForShot(shot){
     const delBtn = document.getElementById("voiceSetDelBtn");
     const prevBtn = document.getElementById("voiceLibPreviewBtn");
 
-    const FIXED = new Set(["narration","lion","mouse"]);
+    // ===== Project pack (export/import settings as JSON) =====
+    const projectExportBtn = document.getElementById("projectExportBtn");
+    const projectImportBtn = document.getElementById("projectImportBtn");
+    const projectImportFile = document.getElementById("projectImportFile");
+    const projectHint = document.getElementById("projectHint");
+
+    function buildProjectPayload(projectName){
+      // reuse autosave snapshot but add story text for multi-story restore
+      return {
+        v: "V23",
+        projectName: projectName || "",
+        ts: Date.now(),
+        baseName: state.baseName || "",
+        srtText: state.srtText || "",
+        voiceLibrary: state.voiceLibrary || {},
+        voiceSetOrder: state.voiceSetOrder || [],
+        voiceUI: state.voiceUI || {},
+        shotSaved: (state.shots||[]).map(_pickShotForSave)
+      };
+    }
+
+    function suggestProjectName(){
+      const base = (state.baseName || "").trim();
+      if(base) return base;
+      const key = computeStoryKey();
+      return "project_" + key;
+    }
+
+    function downloadTextFile(filename, text, mime){
+      const blob = new Blob([text], {type: mime || "application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 800);
+    }
+
+    async function exportProject(){
+      try{
+        const nm = prompt("專案檔名（不含副檔名）", suggestProjectName());
+        if(nm==null) return;
+        const safe = String(nm||"").trim().replace(/[\\\/:*?"<>|]+/g,"_").slice(0,80) || suggestProjectName();
+        const payload = buildProjectPayload(safe);
+        downloadTextFile(safe + ".mp4srt.json", JSON.stringify(payload, null, 2), "application/json");
+      }catch(e){
+        alert(String(e));
+        console.error(e);
+      }
+    }
+
+    function _loadProjectPayload(data){
+      if(!data || typeof data !== "object") throw new Error("專案檔格式不正確");
+      // restore voice library
+      if(data.voiceLibrary && typeof data.voiceLibrary === "object") state.voiceLibrary = data.voiceLibrary;
+      if(Array.isArray(data.voiceSetOrder)) state.voiceSetOrder = data.voiceSetOrder;
+      if(data.voiceUI && typeof data.voiceUI === "object") state.voiceUI = {...state.voiceUI, ...data.voiceUI};
+      // restore story text (so storyKey becomes stable)
+      if(typeof data.srtText === "string") state.srtText = data.srtText;
+
+      // stash shot settings; will be applied after buildShots
+      state._savedShotMap = new Map();
+      if(Array.isArray(data.shotSaved)){
+        for(const s of data.shotSaved){
+          if(s && typeof s.id === "number") state._savedShotMap.set(s.id, s);
+        }
+      }
+
+      // persist into autosave namespace for this story (so refresh works)
+      const k = currentAutosaveStorageKey(); __activeAutosaveKey = k;
+      try{ localStorage.setItem(k, JSON.stringify({
+        v: "V23",
+        ts: Date.now(),
+        voiceLibrary: state.voiceLibrary || {},
+        voiceSetOrder: state.voiceSetOrder || [],
+        voiceUI: state.voiceUI || {},
+        shotSaved: Array.isArray(data.shotSaved) ? data.shotSaved : []
+      })); setLastAutosaveStorageKey(k); }catch(e){}
+
+      if(typeof refreshVoiceSetSelect === "function") refreshVoiceSetSelect();
+      if(state.voiceUI && state.voiceUI.activeSetId && typeof loadVoiceSetToEditor === "function") loadVoiceSetToEditor(state.voiceUI.activeSetId);
+      if(projectHint){
+        const d = new Date((data.ts||Date.now()));
+        projectHint.textContent = `已載入：${data.projectName||"專案"}（${d.toLocaleString()}）`;
+      }
+      scheduleSave();
+    }
+
+    async function importProjectFile(file){
+      const txt = await file.text();
+      const data = JSON.parse(txt);
+      _loadProjectPayload(data);
+      alert("已匯入專案設定。接著按「產生分鏡」即可套回每段設定。");
+    }
+
+    if(projectExportBtn) projectExportBtn.addEventListener("click", exportProject);
+    if(projectImportBtn) projectImportBtn.addEventListener("click", ()=> projectImportFile && projectImportFile.click());
+    if(projectImportFile) projectImportFile.addEventListener("change", async ()=>{
+      const f = projectImportFile.files && projectImportFile.files[0];
+      if(!f) return;
+      try{ await importProjectFile(f); }catch(e){ alert("匯入失敗：" + e); console.error(e); }
+      projectImportFile.value = "";
+    });
+
+
+    const FIXED = new Set(["narration"]);
 
     function slugBaseFromName(nm){
       nm = String(nm||"").trim();
@@ -2558,7 +2674,7 @@ async function previewTTSForShot(shot){
         volume: "+0%"
       };
       // place after fixed roles
-      if(!Array.isArray(state.voiceSetOrder)) state.voiceSetOrder = ["narration","lion","mouse"];
+      if(!Array.isArray(state.voiceSetOrder)) state.voiceSetOrder = ["narration"];
       if(!state.voiceSetOrder.includes(id)) state.voiceSetOrder.push(id);
 
       state.voiceUI.activeSetId = id;
@@ -2597,7 +2713,7 @@ async function previewTTSForShot(shot){
         const base = slugBaseFromName(name);
         const id = uniqueSetId(base);
         state.voiceLibrary[id] = { ...sanitizeVoiceCfg(cur), name };
-        if(!Array.isArray(state.voiceSetOrder)) state.voiceSetOrder = ["narration","lion","mouse"];
+        if(!Array.isArray(state.voiceSetOrder)) state.voiceSetOrder = ["narration"];
         if(!state.voiceSetOrder.includes(id)) state.voiceSetOrder.push(id);
 
         state.voiceUI.activeSetId = id;
