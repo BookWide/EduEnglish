@@ -872,41 +872,9 @@ section.panel .bd .row2{ margin-top: 10px; }
 </div>
 
 <script>
-	console.log('MP4_SRT_VERSION:', 'V32');
+console.log('MP4_SRT_VERSION:', 'V31');
 
   const IMG_ONE_ENDPOINT = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/img-one";
-
-  // ===== Supabase Function Auth (browser) =====
-  // img-one 會要求 Authorization / apikey（Supabase anon key）。
-  // 為了不把 key 寫死在前端：
-  // - 第一次用到時會跳 prompt 讓你貼 anon key
-  // - 之後存在 localStorage：BW_SUPABASE_ANON_KEY
-  function getSupabaseAnonKey(){
-    try{
-      const k = (localStorage.getItem('BW_SUPABASE_ANON_KEY') || '').trim();
-      if(k) return k;
-    }catch{}
-    const k2 = (window.BW_SUPABASE_ANON_KEY || '').trim();
-    if(k2) return k2;
-    return '';
-  }
-
-  function ensureSupabaseAnonKey(){
-    let k = getSupabaseAnonKey();
-    if(k) return k;
-    k = (prompt('缺圖自動補圖需要 Supabase anon key（用來呼叫 img-one）。\n請貼上你的 anon key（只存本機 localStorage，不上傳）：') || '').trim();
-    if(k){
-      try{ localStorage.setItem('BW_SUPABASE_ANON_KEY', k); }catch{}
-      return k;
-    }
-    return '';
-  }
-
-  function supabaseAuthHeaders(){
-    const k = ensureSupabaseAnonKey();
-    if(!k) return null;
-    return { apikey: k, Authorization: `Bearer ${k}` };
-  }
 const state = {
     video: null, // {name, url, file, duration, width, height}
     sourceMode: "", // "video" | "images"
@@ -1117,6 +1085,48 @@ function computeStoryKey(){
 
   const el = (id)=>document.getElementById(id);
   const pad4 = (n)=>String(n).padStart(4,'0');
+
+  async function waitVideoDurationReady(timeoutMs=8000){
+    const v = el('srcVideo');
+    if(!v) return false;
+    // If already ready
+    if(Number.isFinite(v.duration) && v.duration>0) return true;
+
+    // Create/refresh a shared promise on state
+    if(!state.videoReadyPromise){
+      state.videoMetaReady = false;
+      state.videoReadyPromise = new Promise((resolve)=>{
+        let done=false;
+        const cleanup=()=>{
+          v.removeEventListener('loadedmetadata', onReady);
+          v.removeEventListener('durationchange', onReady);
+          v.removeEventListener('canplay', onReady);
+          if(timer) clearTimeout(timer);
+          if(!done) done=true;
+        };
+        const onReady=()=>{
+          if(Number.isFinite(v.duration) && v.duration>0){
+            cleanup();
+            state.videoMetaReady = true;
+            resolve(true);
+          }
+        };
+        v.addEventListener('loadedmetadata', onReady, {once:false});
+        v.addEventListener('durationchange', onReady, {once:false});
+        v.addEventListener('canplay', onReady, {once:false});
+        const timer=setTimeout(()=>{
+          cleanup();
+          resolve(false);
+        }, timeoutMs);
+        // kick
+        try{ v.load(); }catch(_e){}
+        // Some browsers need a seek to get duration for some MP4s
+        try{ if(v.readyState>=1) v.currentTime = Math.min(0.1, v.duration || 0.1); }catch(_e){}
+      });
+    }
+    return await state.videoReadyPromise;
+  }
+
 
   function sortByName(a,b){
     return a.name.localeCompare(b.name, undefined, {numeric:true, sensitivity:'base'});
@@ -2290,14 +2300,9 @@ if(state._savedShotMap && state._savedShotMap instanceof Map){
 
       let pngBlob = null;
       try{
-        const auth = supabaseAuthHeaders();
-        if(!auth){
-          console.warn('autofill skipped: missing Supabase anon key');
-          continue;
-        }
         const r = await fetch(IMG_ONE_ENDPOINT, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...auth },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
         if(!r.ok){
@@ -3911,16 +3916,11 @@ if (typeof __origRenderShots === 'function') {
           payload.reference_mode = "style";
         }
 
-	      const auth = supabaseAuthHeaders();
-	      if(!auth){
-	        console.warn('autofill skipped: missing Supabase anon key');
-	        return null;
-	      }
-	      const r = await fetch(IMG_ONE_ENDPOINT, {
-	        method: "POST",
-	        headers: { "Content-Type": "application/json", ...auth },
-	        body: JSON.stringify(payload),
-	      });
+        const r = await fetch(IMG_ONE_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
 
         if (!r.ok) {
           const detail = await r.text().catch(() => "");
