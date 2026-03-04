@@ -872,9 +872,10 @@ section.panel .bd .row2{ margin-top: 10px; }
 </div>
 
 <script>
-console.log('MP4_SRT_VERSION:', 'V29');
+console.log('MP4_SRT_VERSION:', 'V31');
 
-  const state = {
+  const IMG_ONE_ENDPOINT = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/img-one";
+const state = {
     video: null, // {name, url, file, duration, width, height}
     sourceMode: "", // "video" | "images"
     inputImages: [], // when sourceMode==images: [{name,file,url}]
@@ -2194,8 +2195,136 @@ if(state._savedShotMap && state._savedShotMap instanceof Map){
     }
 
     setStatus(`已產生 ${state.shots.length} 段`);
+    await maybeAutofillMissingImagesOnBuild();
     renderCards();
   }
+
+  async function maybeAutofillMissingImagesOnBuild(){
+    const cb = document.getElementById('autofillMissing');
+    if(!cb || !cb.checked) return;
+    if(!state || !state.shots || !state.shots.length) return;
+    if(!state.images || !state.images.length) return;
+
+    // collect missing indices (placeholder or missing flag)
+    const missing = [];
+    for(let i=0;i<state.images.length;i++){
+      const it = state.images[i];
+      if(!it || it.missing || !it.url || String(it.url).startsWith('data:image/svg+xml')){
+        missing.push(i);
+      }
+    }
+    if(missing.length === 0) return;
+
+    const refInput = document.getElementById('autofillStyleRef');
+    let refDataUrl = null;
+    if(refInput && refInput.files && refInput.files[0]){
+      refDataUrl = await new Promise((resolve, reject)=>{
+        const fr = new FileReader();
+        fr.onload = ()=>resolve(String(fr.result||''));
+        fr.onerror = ()=>reject(fr.error||new Error('read failed'));
+        fr.readAsDataURL(refInput.files[0]);
+      }).catch(()=>null);
+    }
+
+    setStatus(`缺圖 ${missing.length} 張，OpenAI 補圖中...`);
+
+    for(const idx of missing){
+      const seg = state.shots[idx];
+      const text = (seg && seg.text) ? String(seg.text).trim() : '';
+      if(!text){
+        // 沒文字就保持缺圖（不亂補）
+        continue;
+      }
+
+      const storyName = state.storyName || 'story';
+      const prompt = [
+        // style: 可愛/教材插畫（更平面）、帶點詭譎滑稽的表情，但不要血腥暴力
+        "Cute educational illustration, flat 2D, clean line art, warm colors, chibi proportions, friendly but sly expressions, slightly mischievous mood.",
+        "No text, no subtitles, no watermark, no logo.",
+        "Keep composition simple, clear subject, kid-friendly.",
+        "Aspect ratio 16:9.",
+        `Scene based on this narration: ${text}`
+      ].join("\n");
+
+      const payload = {
+        prompt,
+        size: "1024x1024",
+      };
+      if(refDataUrl){
+        payload.reference_images = [refDataUrl];
+        payload.reference_mode = "style";
+      }
+
+      let pngBlob = null;
+      try{
+        const r = await fetch(IMG_ONE_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if(!r.ok){
+          console.warn("autofill failed", idx, await r.text().catch(()=>'')); 
+          continue;
+        }
+        const ab = await r.arrayBuffer();
+        pngBlob = new Blob([ab], { type: "image/png" });
+      }catch(err){
+        console.warn("autofill fetch error", idx, err);
+        continue;
+      }
+
+      // convert to JPG 16:9 (1280x720) to reduce size
+      const jpgBlob = await (async ()=>{
+        try{
+          const bmp = await createImageBitmap(pngBlob);
+          const W = 1280, H = 720;
+          const canvas = document.createElement('canvas');
+          canvas.width = W; canvas.height = H;
+          const ctx = canvas.getContext('2d');
+          if(!ctx) return null;
+
+          // contain + center crop to 16:9
+          const sw = bmp.width, sh = bmp.height;
+          const targetRatio = W/H;
+          const srcRatio = sw/sh;
+          let sx=0, sy=0, sW=sw, sH=sh;
+          if(srcRatio > targetRatio){
+            // too wide
+            sW = Math.round(sh * targetRatio);
+            sx = Math.round((sw - sW)/2);
+          }else if(srcRatio < targetRatio){
+            // too tall
+            sH = Math.round(sw / targetRatio);
+            sy = Math.round((sh - sH)/2);
+          }
+          ctx.drawImage(bmp, sx, sy, sW, sH, 0, 0, W, H);
+
+          const blob = await new Promise(resolve=>canvas.toBlob(resolve, 'image/jpeg', 0.9));
+          return blob || null;
+        }catch(e){
+          console.warn("png->jpg failed", idx, e);
+          return null;
+        }
+      })();
+
+      if(!jpgBlob) continue;
+
+      // store for preview + export
+      const url = URL.createObjectURL(jpgBlob);
+      state.images[idx] = {
+        ...state.images[idx],
+        url,
+        blob: jpgBlob,
+        missing: false,
+        generated: true,
+        filename: `${storyName}_${String(idx+1).padStart(4,'0')}.jpg`,
+      };
+    }
+
+    renderCards();
+    setStatus(`缺圖補完完成（已嘗試 ${missing.length} 張）`);
+  }
+
 
 
   function buildJson(){
@@ -3773,7 +3902,7 @@ if (typeof __origRenderShots === 'function') {
           let bytes = await getImageBytes(it);
           if (!bytes) {
             // 只有缺圖才補（若啟用）
-            try { bytes = await genMissingJpegForSegment(seg); } catch (e) { console.warn(e); }
+            try { bytes = await genMissingJpegForSegment(state.shots[i]); } catch (e) { console.warn(e); }
           }
           if (!bytes) continue; // 仍缺圖：保持空白，讓你一眼看出少哪張
           // 統一輸出 JPG（省檔案大小）
