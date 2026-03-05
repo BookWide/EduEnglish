@@ -1117,53 +1117,71 @@ function computeStoryKey(){
     return hh*3600 + mm*60 + ss + ms/1000;
   }
   function parseSrt(text){
+    // Stable SRT parser: split cue text by newline first (NO regex lookahead),
+    // then classify lines into zh/en at parse time for consistent multi-voice.
     const blocks = text.replace(/\r/g,'').trim().split(/\n\s*\n/);
     const cues = [];
     for(const b of blocks){
-      const lines = b.split('\n').map(x=>x.trim()).filter(Boolean);
+      const rawLines = b.split('\n').map(x=>String(x||"").trim());
+      const lines = rawLines.filter(Boolean);
       if(lines.length < 2) continue;
+
       let timeLineIdx = 0;
       if(!lines[0].includes('-->') && lines[1] && lines[1].includes('-->')) timeLineIdx = 1;
+
       const tl = lines[timeLineIdx];
       if(!tl || !tl.includes('-->')) continue;
+
       const [a,b2] = tl.split('-->').map(s=>s.trim());
       const start = parseSrtTime(a);
       const end = parseSrtTime(b2);
 
+      // Keep original cue text lines (after the timeline line)
+      const textLines0 = lines.slice(timeLineIdx+1);
 
-      const textLines = lines.slice(timeLineIdx+1);
+      // Clean each line but keep them separated
+      const cleanLines = textLines0
+        .map(s => String(s||"")
+          .replace(/<[^>]+>/g,'')
+          .replace(/\s+/g,' ')
+          .trim()
+        )
+        .filter(Boolean);
 
-// 保留換行，方便分出「中文/英文」兩段（同一 cue 仍維持一段）
-const rawLines = textLines.join("\n")
-  .replace(/<[^>]+>/g,'')
-  .trim();
+      if(!cleanLines.length) continue;
 
-// 全文（給主畫面/Prompt 用）
-const txt = rawLines.replace(/\s+/g,' ').trim();
+      const zh_lines = [];
+      const en_lines = [];
 
-// 依「有無中文/英文」分流（同一行同時含中英就各自收一次，避免英文被吃掉）
-let zhParts = [];
-let enParts = [];
-rawLines.split(/\n+/).map(s=>String(s||"").trim()).filter(Boolean).forEach(line=>{
-  const hasZh = /[\u4e00-\u9fff]/.test(line);
-  const hasEn = /[A-Za-z]/.test(line);
-  if(hasZh) zhParts.push(line);
-  if(hasEn) enParts.push(line);
-});
-const txt_zh = zhParts.join(" ").replace(/\s+/g,' ').trim();
-const txt_en = enParts.join(" ").replace(/\s+/g,' ').trim();
+      for(const ln of cleanLines){
+        const hasZh = /[\u4e00-\u9fff]/.test(ln);
+        const hasEn = /[A-Za-z]/.test(ln);
+        if(hasZh && !hasEn){
+          zh_lines.push(ln);
+        }else if(hasEn && !hasZh){
+          en_lines.push(ln);
+        }else if(hasZh && hasEn){
+          // Mixed line: split heuristically by first Latin letter run
+          const idx = ln.search(/[A-Za-z]/);
+          if(idx > 0){
+            const a = ln.slice(0, idx).trim();
+            const b = ln.slice(idx).trim();
+            if(a) zh_lines.push(a);
+            if(b) en_lines.push(b);
+          }else{
+            zh_lines.push(ln);
+          }
+        }else{
+          // Fallback: attach to zh by default
+          zh_lines.push(ln);
+        }
+      }
 
-// ✅ 句內多聲預拆（在讀入 SRT 當下就固定拆句，避免後面不穩）
-const mvPreset = [];
-try{
-  const zhSegs = splitSentencesGlobal(txt_zh, "zh");
-  const enSegs = splitSentencesGlobal(txt_en, "en");
-  for(const s of (zhSegs||[])) { const t=String(s||"").trim(); if(t) mvPreset.push({mode:"zh", text:t}); }
-  for(const s of (enSegs||[])) { const t=String(s||"").trim(); if(t) mvPreset.push({mode:"en", text:t}); }
-}catch(e){ /* ignore */ }
+      const txt_zh = zh_lines.join(' ').replace(/\s+/g,' ').trim();
+      const txt_en = en_lines.join(' ').replace(/\s+/g,' ').trim();
+      const txt = (cleanLines.join(' ')).replace(/\s+/g,' ').trim();
 
-if(!txt) continue;
-cues.push({ start, end, text: txt, zh: txt_zh, en: txt_en, raw: rawLines, mvPreset });
+      cues.push({start,end,text:txt, zh:txt_zh, en:txt_en, zh_lines, en_lines});
     }
     cues.sort((x,y)=>x.start-y.start);
     return cues;
@@ -1173,22 +1191,43 @@ cues.push({ start, end, text: txt, zh: txt_zh, en: txt_en, raw: rawLines, mvPres
     const chunks = [];
     let cur = null;
 
+    const initFromCue = (cue)=>({
+      start: cue.start,
+      end: cue.end,
+      text: cue.text || "",
+      zh: cue.zh || "",
+      en: cue.en || "",
+      zh_lines: Array.isArray(cue.zh_lines) ? cue.zh_lines.slice() : [],
+      en_lines: Array.isArray(cue.en_lines) ? cue.en_lines.slice() : []
+    });
+
+    const mergeCueInto = (c, cue)=>{
+      c.end = Math.max(c.end, cue.end);
+      c.text = (String(c.text||"") + " " + String(cue.text||"")).trim();
+
+      const z = String(cue.zh||"").trim();
+      const e = String(cue.en||"").trim();
+      if(z) c.zh = (String(c.zh||"") + " " + z).trim();
+      if(e) c.en = (String(c.en||"") + " " + e).trim();
+
+      if(Array.isArray(cue.zh_lines)) c.zh_lines.push(...cue.zh_lines);
+      if(Array.isArray(cue.en_lines)) c.en_lines.push(...cue.en_lines);
+      return c;
+    };
+
     for(const cue of cues){
       if(!cur){
-        cur = {start: cue.start, end: cue.end, text: cue.text, zh: cue.zh||"", en: cue.en||""};
+        cur = initFromCue(cue);
         continue;
       }
       const nextEnd = Math.max(cur.end, cue.end);
       const nextDur = nextEnd - cur.start;
 
       if(nextDur <= maxSec){
-        cur.end = nextEnd;
-        cur.text = (cur.text + " " + cue.text).trim();
-        cur.zh = ((cur.zh||"") + " " + (cue.zh||"")).trim();
-        cur.en = ((cur.en||"") + " " + (cue.en||"")).trim();
+        mergeCueInto(cur, cue);
       }else{
         chunks.push(cur);
-        cur = {start: cue.start, end: cue.end, text: cue.text, zh: cue.zh||"", en: cue.en||""};
+        cur = initFromCue(cue);
       }
     }
     if(cur) chunks.push(cur);
@@ -1198,16 +1237,23 @@ cues.push({ start, end, text: txt, zh: txt_zh, en: txt_en, raw: rawLines, mvPres
       let c = chunks[i];
       while((c.end - c.start) < minSec && i < chunks.length-1){
         const n = chunks[i+1];
-        c = {start: c.start, end: n.end, text: (c.text + " " + n.text).trim(), zh: ((c.zh||"") + " " + (n.zh||"")).trim(), en: ((c.en||"") + " " + (n.en||"")).trim()};
+        // merge n into c
+        const nn = { ...n };
+        c = mergeCueInto({ ...c, end: n.end }, nn);
         i++;
       }
+      // de-dup lines but keep order
+      c.zh_lines = Array.from(new Set((c.zh_lines||[]).map(s=>String(s||"").trim()).filter(Boolean)));
+      c.en_lines = Array.from(new Set((c.en_lines||[]).map(s=>String(s||"").trim()).filter(Boolean)));
+      c.zh = (c.zh_lines.join(" ")).replace(/\s+/g," ").trim() || String(c.zh||"").replace(/\s+/g," ").trim();
+      c.en = (c.en_lines.join(" ")).replace(/\s+/g," ").trim() || String(c.en||"").replace(/\s+/g," ").trim();
+      c.text = String(c.text||"").replace(/\s+/g," ").trim();
       merged.push(c);
     }
     return merged;
   }
 
   // ✅ 固定以「圖片每張固定秒數」對齊字幕（段數 = 圖片數）
-
   function buildChunksByImages(cues, imageCount, firstSec, restSec){
     const chunks = [];
     let t = 0;
@@ -1218,23 +1264,31 @@ cues.push({ start, end, text: txt, zh: txt_zh, en: txt_en, raw: rawLines, mvPres
       t = end;
 
       const texts = [];
-      const zhs = [];
-      const ens = [];
+      const zh_lines = [];
+      const en_lines = [];
+
       for(const cue of cues){
         // overlap rule: cue intersects [start,end)
         if(cue.start >= start && cue.start < end){
-          if(cue.text) texts.push(cue.text);
-          if(cue.zh) zhs.push(cue.zh);
-          if(cue.en) ens.push(cue.en);
+          texts.push(cue.text);
+          if(Array.isArray(cue.zh_lines)) zh_lines.push(...cue.zh_lines);
+          if(Array.isArray(cue.en_lines)) en_lines.push(...cue.en_lines);
         }
       }
+      const unique = Array.from(new Set(texts.map(t=>String(t||"").replace(/\s+/g," ").trim()).filter(Boolean)));
+      const txt = unique.join(" ").trim();
 
-      const uniq = arr => Array.from(new Set(arr.map(t=>String(t||"").replace(/\s+/g," ").trim()).filter(Boolean)));
-      const txt = uniq(texts).join(" ");
-      const zh = uniq(zhs).join(" ");
-      const en = uniq(ens).join(" ");
+      const zhU = Array.from(new Set(zh_lines.map(s=>String(s||"").trim()).filter(Boolean)));
+      const enU = Array.from(new Set(en_lines.map(s=>String(s||"").trim()).filter(Boolean)));
 
-      chunks.push({start, end, text: txt, zh, en});
+      chunks.push({
+        start, end,
+        text: txt,
+        zh_lines: zhU,
+        en_lines: enU,
+        zh: zhU.join(" ").replace(/\s+/g," ").trim(),
+        en: enU.join(" ").replace(/\s+/g," ").trim()
+      });
     }
     return chunks;
   }
@@ -1249,7 +1303,11 @@ cues.push({ start, end, text: txt, zh: txt_zh, en: txt_en, raw: rawLines, mvPres
     while(i < n){
       let s0 = cues[i].start;
       let e0 = cues[i].end;
+
       let texts = [cues[i].text];
+      let zh_lines = Array.isArray(cues[i].zh_lines) ? cues[i].zh_lines.slice() : [];
+      let en_lines = Array.isArray(cues[i].en_lines) ? cues[i].en_lines.slice() : [];
+
       let count = 1;
       let j = i + 1;
 
@@ -1260,6 +1318,10 @@ cues.push({ start, end, text: txt, zh: txt_zh, en: txt_en, raw: rawLines, mvPres
         if((candEnd - s0) <= (maxSec + 1e-6)){
           e0 = candEnd;
           texts.push(cues[j].text);
+
+          if(Array.isArray(cues[j].zh_lines)) zh_lines.push(...cues[j].zh_lines);
+          if(Array.isArray(cues[j].en_lines)) en_lines.push(...cues[j].en_lines);
+
           count += 1;
           j += 1;
         }else{
@@ -1268,7 +1330,18 @@ cues.push({ start, end, text: txt, zh: txt_zh, en: txt_en, raw: rawLines, mvPres
       }
 
       const segText = texts.map(t=>String(t||"").trim()).filter(Boolean).join(" ").trim() || "A short moment in the story.";
-      segs.push({start:s0, end:e0, text:segText});
+
+      const zhU = Array.from(new Set(zh_lines.map(s=>String(s||"").trim()).filter(Boolean)));
+      const enU = Array.from(new Set(en_lines.map(s=>String(s||"").trim()).filter(Boolean)));
+
+      segs.push({
+        start:s0, end:e0,
+        text:segText,
+        zh_lines: zhU,
+        en_lines: enU,
+        zh: zhU.join(" ").replace(/\s+/g," ").trim(),
+        en: enU.join(" ").replace(/\s+/g," ").trim()
+      });
       i = j;
     }
     return segs;
@@ -2207,6 +2280,10 @@ finalWrap.appendChild(fl);
         start: ch.start,
         end: ch.end,
         text: narration,
+        zh: (ch.zh || ""),
+        en: (ch.en || ""),
+        zh_lines: Array.isArray(ch.zh_lines) ? ch.zh_lines.slice() : [],
+        en_lines: Array.isArray(ch.en_lines) ? ch.en_lines.slice() : [],
         mode: cfg.mode,
         generate_sec: cfg.generateSec,
         target_sec: cfg.targetSec,
@@ -2500,39 +2577,21 @@ async function maybeAutoFillMissingImagesOnBuild(){
 
 
   // ===== FIX: missing global TTS helpers for multi-voice / preview =====
-function splitSentencesGlobal(txt, mode){
-  // mode: "zh" | "en" | "mixed"
+function splitSentencesGlobal(txt){
   const s = String(txt||"").trim();
   if(!s) return [];
   const out = [];
   let cur = "";
-  const isEnd = (ch)=>{
-    // English sentence end
-    if(ch==="." || ch==="?" || ch==="!") return true;
-    // Chinese sentence end
-    if(ch==="。" || ch==="？" || ch==="！" || ch==="；" || ch==="…" ) return true;
-    // line breaks
-    if(ch==="\n") return true;
-    return false;
-  };
   for(const ch of s){
     cur += ch;
-    if(isEnd(ch)){
-      const c = cur.replace(/\n+/g," ").trim();
+    if(ch==="." || ch==="?" || ch==="!"){
+      const c = cur.trim();
       if(c) out.push(c);
       cur = "";
     }
   }
-  const tail = cur.replace(/\n+/g," ").trim();
+  const tail = cur.trim();
   if(tail) out.push(tail);
-
-  // If requested mode, lightly filter
-  if(mode==="zh"){
-    return out.filter(x=>/[\u4e00-\u9fff]/.test(x)).length ? out.filter(x=>/[\u4e00-\u9fff]/.test(x)) : (s ? [s] : []);
-  }
-  if(mode==="en"){
-    return out.filter(x=>/[A-Za-z]/.test(x)).length ? out.filter(x=>/[A-Za-z]/.test(x)) : (s ? [s] : []);
-  }
   return out.length ? out : [s];
 }
 function stripID3(u8){
@@ -2578,38 +2637,84 @@ function ensureMultiVoice(shot){
 
   const base = getShotVoice(shot);
 
-  // ✅ 若在讀入 SRT 時已預先拆好句內多聲，就直接用（最穩）
-  if(Array.isArray(shot.mvPreset) && shot.mvPreset.length){
-    shot.multiVoice = shot.mvPreset.map(p=>({ text: String(p.text||"").trim(), cfg: {...base}, mode: p.mode||"" }));
-    shot.multiVoice = shot.multiVoice.filter(x=>x.text);
-    if(shot.multiVoice.length) return;
-  }
+  const zh_lines = Array.isArray(shot.zh_lines) ? shot.zh_lines.slice() : [];
+  const en_lines = Array.isArray(shot.en_lines) ? shot.en_lines.slice() : [];
 
-  // ✅ 先把中文/英文分開（同一段仍維持一個 shot，但句內多聲會拆成「中文句」「英文句」兩組）
-  const parts = [];
-  const zh = String(shot.zh||"").trim();
-  const en = String(shot.en||"").trim();
-  const full = String(shot.text||"").trim();
+  const zhText = (String(shot.zh||"").trim() || zh_lines.join(" ").trim());
+  const enText = (String(shot.en||"").trim() || en_lines.join(" ").trim());
 
-  if(zh) parts.push({mode:"zh", text: zh});
-  if(en) parts.push({mode:"en", text: en});
-  if(!parts.length && full) parts.push({mode:"mixed", text: full});
-
-  const sentences = [];
-  for(const p of parts){
-    const segs = splitSentencesGlobal(p.text, p.mode);
-    for(const s of segs){
-      const t = String(s||"").trim();
-      if(t) sentences.push(t);
+  // stable sentence split (no lookahead)
+  const splitZh = (s)=>{
+    s = String(s||"").replace(/\s+/g," ").trim();
+    if(!s) return [];
+    const out = [];
+    let buf = "";
+    for(const ch of s){
+      buf += ch;
+      if("。！？；".includes(ch)){
+        const t = buf.trim();
+        if(t) out.push(t);
+        buf = "";
+      }
     }
+    const tail = buf.trim();
+    if(tail) out.push(tail);
+    return out.length ? out : [s];
+  };
+  const splitEn = (s)=>{
+    s = String(s||"").replace(/\s+/g," ").trim();
+    if(!s) return [];
+    const out = [];
+    let buf = "";
+    for(let i=0;i<s.length;i++){
+      const ch = s[i];
+      buf += ch;
+      if(ch==="." || ch==="!" || ch==="?"){
+        const next = s[i+1] || "";
+        if(next===" " || next===""){
+          const t = buf.trim();
+          if(t) out.push(t);
+          buf = "";
+        }
+      }
+    }
+    const tail = buf.trim();
+    if(tail) out.push(tail);
+    return out.length ? out : [s];
+  };
+
+  const parts = [];
+
+  // If we have per-line arrays, use them first (most faithful to SRT)
+  if(zh_lines.length){
+    for(const ln of zh_lines){
+      const t = String(ln||"").trim();
+      if(t) parts.push(t);
+    }
+  }else if(zhText){
+    parts.push(...splitZh(zhText));
   }
 
-  if(sentences.length<=1){
-    shot.multiVoice = [{ text: (sentences[0]||full||zh||en||"").trim(), cfg: {...base} }];
+  if(en_lines.length){
+    for(const ln of en_lines){
+      const t = String(ln||"").trim();
+      if(t) parts.push(t);
+    }
+  }else if(enText){
+    parts.push(...splitEn(enText));
+  }
+
+  if(!parts.length){
+    const sentences = splitSentencesGlobal(shot.text||"");
+    if(sentences.length<=1){
+      shot.multiVoice = [{ text: (shot.text||"").trim(), cfg: {...base} }];
+      return;
+    }
+    shot.multiVoice = sentences.map(t=>({ text:t, cfg: {...base} }));
     return;
   }
 
-  shot.multiVoice = sentences.map(t=>({ text: t, cfg: {...base} }));
+  shot.multiVoice = parts.map(t=>({ text:t, cfg: {...base} }));
 }
 async function previewTTSForShot(shot){
     const {voice, rate, pitch, volume} = getShotVoice(shot);
@@ -3380,7 +3485,7 @@ function openMultiVoiceModal(shot){
       opt.textContent = state.voiceLibrary[rid]?.name ? `${state.voiceLibrary[rid].name}` : rid;
       sel.appendChild(opt);
     }
-    sel.value = p.ref || (p.mode==="zh" ? "zh_narration" : (p.mode==="en" ? "narration" : "")) || shot.voiceRef || "narration";
+    sel.value = p.ref || shot.voiceRef || "narration";
     /* onchange bound after syncRO */
 
     setCell.appendChild(setLab);
