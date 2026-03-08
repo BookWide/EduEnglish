@@ -575,7 +575,7 @@ section.panel .bd .row2{ margin-top: 10px; }
 </head>
 
 <body>
-<div id="versionBadge">V28.1</div>
+<div id="versionBadge">V28.2</div>
 <div id="multiVoiceModal"><div class="panel"></div></div>
 
 <header>
@@ -811,8 +811,10 @@ section.panel .bd .row2{ margin-top: 10px; }
         <button id="applyDefaultBtn">重置動態基底/運鏡</button>
         <button id="copyJsonBtn" disabled>複製 JSON</button>
         <button class="primary" id="downloadJsonBtn" disabled>下載 JSON</button>
-        <button class="primary" id="exportOk2ZipBtn" disabled>匯出 OK2 套件（ZIP：只更新變動段）</button>
+        <button class="primary" id="genMp3Btn" disabled>先產生／補缺 MP3</button>
+        <button class="primary" id="exportOk2ZipBtn" disabled>MP3 完整後再打包匯出</button>
         <button class="danger" id="clearBtn">清空</button>
+        <span class="pill" id="mp3CachePill">MP3：0/0</span>
       
       <div id="klingTools" class="field" style="margin-top:12px;">
         <p class="label"><b>省成本：只讓少數段用 Kling</b><span class="smallmuted">勾選後，JSON 會標記 use_kling</span></p>
@@ -859,7 +861,7 @@ section.panel .bd .row2{ margin-top: 10px; }
 </div>
 
 <script>
-console.log('MP4_SRT_VERSION:', 'V28.1');
+console.log('MP4_SRT_VERSION:', 'V28.2');
 
   const state = {
     video: null, // {name, url, file, duration, width, height}
@@ -3011,6 +3013,140 @@ async function previewTTSForShot(shot){
     alert(`已清掉 ${fixed} 筆壞 mp3 快取`);
   }
 
+
+  async function getExpectedHashForSegment(seg){
+    const segText = String(seg.text || "").trim();
+    if (!segText) return null;
+
+    if(seg.multiVoiceEnabled){
+      ensureMultiVoice(seg);
+      const partsKey = seg.multiVoice.map(p=>{
+        const ref = p.ref || seg.voiceRef || "narration";
+        const c = sanitizeVoiceCfg(getVoiceSet(ref));
+        return [
+          String(p.text || "").trim(),
+          ref,
+          c.voice || "",
+          c.rate || "",
+          c.pitch || "",
+          c.volume || ""
+        ].join("|");
+      }).join("||");
+      return await sha1Hex("MULTI||" + partsKey);
+    }
+
+    const cfg = getShotVoice(seg);
+    const key = [
+      segText,
+      cfg.voice || "",
+      cfg.rate || "",
+      cfg.pitch || "",
+      cfg.volume || ""
+    ].join("|");
+    return await sha1Hex("SINGLE||" + key);
+  }
+
+  async function getCachedValidMp3ForSegment(seg){
+    const expectedHash = await getExpectedHashForSegment(seg);
+    if (!expectedHash) return null;
+    const cached = await idbGet(seg.id);
+    if (!cached || cached.hash !== expectedHash || !cached.blob || !isUsableMp3Blob(cached.blob)) {
+      return null;
+    }
+    return { blob: cached.blob, hash: cached.hash };
+  }
+
+  async function getMp3CacheStats(){
+    const shots = Array.isArray(state.shots) ? state.shots : [];
+    let ready = 0;
+    let missing = 0;
+    for (const seg of shots){
+      const text = String(seg.text || "").trim();
+      if (!text) continue;
+      const ok = await getCachedValidMp3ForSegment(seg);
+      if (ok) ready++;
+      else missing++;
+    }
+    return { total: shots.filter(s=>String(s.text||"").trim()).length, ready, missing };
+  }
+
+  async function refreshMp3CachePill(){
+    const pill = el("mp3CachePill");
+    if (!pill) return;
+    if (!state.shots || !state.shots.length){
+      pill.textContent = "MP3：0/0";
+      return;
+    }
+    pill.textContent = "MP3：檢查中...";
+    try{
+      const st = await getMp3CacheStats();
+      pill.textContent = `MP3：${st.ready}/${st.total}`;
+    }catch(err){
+      pill.textContent = "MP3：檢查失敗";
+      console.warn(err);
+    }
+  }
+
+  async function generateMp3CacheAll(){
+    if(!state.shots || !state.shots.length){
+      alert("請先產生分鏡");
+      return;
+    }
+
+    const btn = el("genMp3Btn");
+    const expBtn = el("exportOk2ZipBtn");
+    const oldTxt = btn.textContent;
+    btn.disabled = true;
+    if (expBtn) expBtn.disabled = true;
+
+    const errors = [];
+    const targets = state.shots.filter(s => String(s.text || "").trim());
+    let done = 0;
+    let built = 0;
+    let reused = 0;
+    let failed = 0;
+
+    try{
+      for(const seg of targets){
+        const sid = String(seg.id).padStart(4, "0");
+        btn.textContent = `產生 MP3... ${done + 1}/${targets.length}`;
+        try{
+          const cached = await getCachedValidMp3ForSegment(seg);
+          if (cached){
+            reused++;
+          }else{
+            const out = await getOrGenMp3ForSegment(seg);
+            if (!out || !out.blob || !isUsableMp3Blob(out.blob)) {
+              throw new Error("TTS returned bad mp3 blob");
+            }
+            built++;
+          }
+        }catch(err){
+          failed++;
+          errors.push(`#${sid} ${String(err && err.message ? err.message : err)}`);
+        }
+        done++;
+        await refreshMp3CachePill();
+      }
+
+      if (errors.length){
+        alert(`MP3 產生完成，但仍有 ${failed} 段失敗。
+可再按一次「先產生／補缺 MP3」重跑缺段。`);
+        console.warn("MP3 errors:
+" + errors.join("
+"));
+      } else {
+        alert(`MP3 已完整完成。
+新產生 ${built} 段，重用 ${reused} 段。`);
+      }
+    }finally{
+      btn.disabled = false;
+      btn.textContent = oldTxt;
+      updateExportButtons();
+      await refreshMp3CachePill();
+    }
+  }
+
   function buildOk2Manifest(){
     const base = state.baseName || safeBaseFromImages(state.images) || "story";
     return {
@@ -3386,7 +3522,10 @@ function splitShotBySentences(shot){
 function updateExportButtons(){
     const ok = state.shots && state.shots.length > 0;
     const b = el("exportOk2ZipBtn");
+    const g = el("genMp3Btn");
+    if(g) g.disabled = !ok;
     if(b) b.disabled = !ok;
+    refreshMp3CachePill();
   }
 
 
@@ -3545,6 +3684,7 @@ el("srtInput").addEventListener("change", async (e)=>{
   el("buildBtn").addEventListener("click", buildShots);
   el("copyJsonBtn").addEventListener("click", copyJson);
   el("downloadJsonBtn").addEventListener("click", downloadJson);
+  el("genMp3Btn").addEventListener("click", generateMp3CacheAll);
   el("exportOk2ZipBtn").addEventListener("click", exportOk2Zip);
   updateExportButtons();
   // ✅ restore last session first
@@ -3673,6 +3813,18 @@ if (typeof __origRenderShots === 'function') {
       alert("缺少 JSZip（CDN 下載失敗）。請確認網路可用。");
       return;
     }
+    if(!state.shots || !state.shots.length){
+      alert("請先產生分鏡");
+      return;
+    }
+
+    const stats = await getMp3CacheStats();
+    if (stats.missing > 0){
+      alert(`目前 MP3 尚未完整（${stats.ready}/${stats.total}）。
+請先按「先產生／補缺 MP3」，確認完整後再打包。`);
+      return;
+    }
+
     const btn = el("exportOk2ZipBtn");
     btn.disabled = true;
     const oldTxt = btn.textContent;
@@ -3683,13 +3835,11 @@ if (typeof __origRenderShots === 'function') {
 
       const baseName = getStoryBaseName();
       const root = zip.folder(baseName);
-      // files: manifest + overrides
       const manifest = buildOk2Manifest();
       const overrides = buildOverridesAll();
       root.file("manifest.json", JSON.stringify(manifest, null, 2));
       root.file("overrides.json", JSON.stringify(overrides, null, 2));
-      // === include frames_srt jpgs (cut from source MP4) ===
-      // path: <base>/out_assets/seg_0001.jpg..
+
       const dataURLToUint8 = (dataURL) => {
         const m = String(dataURL || "").match(/^data:([^;]+);base64,(.+)$/);
         if (!m) throw new Error("bad dataURL");
@@ -3701,7 +3851,7 @@ if (typeof __origRenderShots === 'function') {
       };
 
       const folderFrames = root.folder("out_assets");
-if (Array.isArray(state.images) && state.images.length) {
+      if (Array.isArray(state.images) && state.images.length) {
         for (let i = 0; i < state.images.length; i++) {
           const it = state.images[i];
           const name = `seg_${String(i + 1).padStart(4, "0")}.jpg`;
@@ -3712,29 +3862,30 @@ if (Array.isArray(state.images) && state.images.length) {
           }
         }
       }
-      // ✅ 你要的路徑：story/remp3_output/<base>/
+
       const folder = root.folder("remp3_output");
-// generate/reuse mp3 per segment (B: only update changed)
       let done = 0;
       const total = state.shots.length;
 
       for(const seg of state.shots){
-        const text = (seg.text || "").trim();
+        const text = String(seg.text || "").trim();
         if(!text){
-          // no text → skip mp3 (still create placeholder? here skip)
           done++;
           btn.textContent = `打包中... ${done}/${total}（跳過空段 ${seg.id}）`;
           continue;
         }
-        btn.textContent = `產生/重用 mp3... ${done+1}/${total}`;
-        const { blob, reused } = await getOrGenMp3ForSegment(seg);
+
+        const cached = await getCachedValidMp3ForSegment(seg);
+        if (!cached || !cached.blob){
+          throw new Error(`seg ${seg.id} mp3 遺失，請先重跑「先產生／補缺 MP3」`);
+        }
+
         const sid = String(seg.id).padStart(4,'0');
-        folder.file(`${baseName}_${sid}.mp3`, blob);
+        folder.file(`${baseName}_${sid}.mp3`, cached.blob);
         done++;
-        btn.textContent = `打包中... ${done}/${total}` + (reused ? "（重用）" : "");
+        btn.textContent = `打包中... ${done}/${total}`;
       }
 
-      // generate zip
       btn.textContent = "輸出 ZIP...";
       const out = await zip.generateAsync({ type: "blob" });
       const a = document.createElement("a");
@@ -3745,7 +3896,6 @@ if (Array.isArray(state.images) && state.images.length) {
       a.remove();
       setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
 
-      // refresh cards to reflect cleared dirty tags
       renderCards();
       updateExportButtons();
     }catch(e){
