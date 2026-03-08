@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>AI 工作流 - 全素材打包系統 (v4)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        :root { --bg: #0b0f1a; --card: #161e2e; --accent: #10b981; --blue: #3b82f6; --text: #e2e8f0; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; height: 100vh; overflow: hidden; }
+        
+        /* 側邊控制欄 */
+        #sidebar { width: 380px; background: var(--card); padding: 25px; border-right: 1px solid #2d3748; overflow-y: auto; }
+        .config-section { background: rgba(0,0,0,0.2); padding: 15px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #334155; }
+        .btn { background: var(--blue); border: none; color: white; padding: 12px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: 600; margin-bottom: 10px; transition: 0.3s; }
+        .btn:hover { filter: brightness(1.2); }
+        .btn-download { background: #f59e0b; } /* 橘色代表最終導出 */
+        
+        /* 主編輯區 */
+        #main-editor { flex: 1; padding: 30px; overflow-y: auto; background: #020617; }
+        .scene-block { background: var(--card); border-radius: 15px; padding: 20px; margin-bottom: 30px; border: 1px solid #2d3748; display: flex; gap: 20px; }
+        .scene-media { width: 280px; text-align: center; }
+        .scene-media img { width: 100%; border-radius: 10px; border: 2px solid #334155; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+        
+        /* 語音調整列 */
+        .sentence-row { background: #1f2937; padding: 10px; border-radius: 8px; margin-top: 8px; display: flex; align-items: center; gap: 10px; border-left: 4px solid var(--blue); }
+        .sentence-row input[type="text"] { flex: 1; background: transparent; border: none; color: white; border-bottom: 1px solid #4b5563; outline: none; }
+        .audio-params { display: flex; gap: 6px; font-size: 11px; color: #9ca3af; }
+        .audio-params input { width: 40px; background: #0b0f1a; color: #fff; border: 1px solid #4b5563; border-radius: 4px; text-align: center; }
+
+        input[type="file"] { font-size: 12px; margin-top: 5px; color: #94a3b8; }
+        #v-hidden, #c-hidden { display: none; }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>🎨 AI 全素材工作流</h2>
+    
+    <div class="config-section">
+        <label>1. 上傳字幕 (SRT)</label>
+        <input type="file" id="srtIn" accept=".srt">
+    </div>
+
+    <div class="config-section">
+        <label>2. 圖片來源 (二選一)</label>
+        <p style="font-size: 11px; color: #6b7280;">模式 A：上傳 MP4 自動切圖</p>
+        <input type="file" id="videoIn" accept="video/mp4">
+        <p style="font-size: 11px; color: #6b7280; margin-top:10px;">模式 B：上傳多張 JPG 圖片</p>
+        <input type="file" id="imgsIn" accept="image/*" multiple>
+    </div>
+
+    <div class="config-section">
+        <label>Azure TTS 串接地址:</label>
+        <input type="text" id="apiLink" placeholder="Supabase Function URL" style="width:100%; margin-top:5px; background:#0b0f1a; color:white; border:1px solid #334155;">
+    </div>
+
+    <button class="btn" onclick="initializeWorkflow()">⚡ 1. 解析並生成預覽</button>
+    <button class="btn btn-download" onclick="generateAndZip()">📦 2. 合成 MP3 並一鍵打包</button>
+    
+    <div id="status-bar" style="margin-top:20px; font-size:13px; color:var(--accent); white-space: pre-line;"></div>
+</div>
+
+<div id="main-editor">
+    <div id="render-area"><h1>等待匯入資源...</h1></div>
+</div>
+
+<video id="v-hidden"></video>
+<canvas id="c-hidden"></canvas>
+
+<script>
+    let masterData = [];
+    let manualImages = [];
+    const v = document.getElementById('v-hidden');
+    const c = document.getElementById('c-hidden');
+
+    // 處理圖片多選
+    document.getElementById('imgsIn').onchange = (e) => manualImages = Array.from(e.target.files);
+
+    async function initializeWorkflow() {
+        const sFile = document.getElementById('srtIn').files[0];
+        if(!sFile) return alert("請先上傳 SRT 字幕");
+
+        const status = document.getElementById('status-bar');
+        status.innerText = "正在解析中...";
+        
+        const srtItems = parseSRT(await sFile.text());
+        const vFile = document.getElementById('videoIn').files[0];
+        if(vFile) { v.src = URL.createObjectURL(vFile); await new Promise(r => v.onloadedmetadata = r); }
+
+        masterData = [];
+        let tempArr = [];
+        let startTime = 0;
+
+        // 每 15 秒分為一個大段落 (Scene)
+        srtItems.forEach((item, i) => {
+            tempArr.push({...item, rate: "0%", pitch: "0%"});
+            if (item.end - startTime >= 15 || i === srtItems.length - 1) {
+                masterData.push({ id: masterData.length + 1, time: startTime, sentences: [...tempArr], img: null });
+                startTime = item.end;
+                tempArr = [];
+            }
+        });
+
+        render();
+        status.innerText = `解析完成：共 ${masterData.length} 個分鏡`;
+    }
+
+    async function render() {
+        const area = document.getElementById('render-area');
+        area.innerHTML = '';
+
+        for (let [idx, scene] of masterData.entries()) {
+            let imgData = "";
+            if (manualImages[idx]) {
+                imgData = await fileToDataURL(manualImages[idx]);
+            } else if (v.src) {
+                imgData = await capture(scene.time);
+            } else {
+                imgData = "https://via.placeholder.com/280x157/161e2e/e2e8f0?text=Scene+"+scene.id;
+            }
+            scene.img = imgData;
+
+            const div = document.createElement('div');
+            div.className = 'scene-block';
+            div.innerHTML = `
+                <div class="scene-media">
+                    <img src="${imgData}" id="img-node-${scene.id}" onclick="changeSingleImg(${scene.id})">
+                    <p style="font-size:12px; margin-top:10px;">分鏡 #${scene.id.toString().padStart(3,'0')}</p>
+                </div>
+                <div style="flex:1">
+                    <textarea style="width:100%; height:40px; background:#0b0f1a; color:var(--accent); border:1px solid #334155; border-radius:6px; padding:5px; margin-bottom:10px;" placeholder="輸入 AI 生成 Prompt..."></textarea>
+                    ${scene.sentences.map((s, si) => `
+                        <div class="sentence-row">
+                            <button onclick="previewAudio('${s.text}', ${scene.id}, ${si})" style="background:none; border:none; cursor:pointer; color:var(--blue);">▶️</button>
+                            <input type="text" value="${s.text}" onchange="masterData[${idx}].sentences[${si}].text=this.value">
+                            <div class="audio-params">
+                                R:<input type="text" value="${s.rate}" onchange="masterData[${idx}].sentences[${si}].rate=this.value">
+                                P:<input type="text" value="${s.pitch}" onchange="masterData[${idx}].sentences[${si}].pitch=this.value">
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+            area.appendChild(div);
+        }
+    }
+
+    // --- 核心打包邏輯 ---
+    async function generateAndZip() {
+        const apiUrl = document.getElementById('apiLink').value;
+        if(!apiUrl) return alert("請輸入 Azure TTS API 地址 (Supabase URL)");
+        
+        const status = document.getElementById('status-bar');
+        const zip = new JSZip();
+        const imgFolder = zip.folder("images");
+        const audioFolder = zip.folder("audio");
+        
+        status.innerText = "🚀 開始打包...\n正在請求語音合成中，請稍候...";
+
+        try {
+            for (let scene of masterData) {
+                // 1. 存圖片
+                const imgBase64 = scene.img.split(',')[1];
+                imgFolder.file(`scene_${scene.id.toString().padStart(3,'0')}.jpg`, imgBase64, {base64: true});
+
+                // 2. 存語音 (逐句合成)
+                for (let [si, s] of scene.sentences.entries()) {
+                    status.innerText = `正在合成：分鏡 ${scene.id} 第 ${si+1} 句...`;
+                    const res = await fetch(apiUrl, {
+                        method: 'POST',
+                        body: JSON.stringify({ text: s.text, lang: "zh", rate: s.rate, pitch: s.pitch })
+                    });
+                    const blob = await res.blob();
+                    audioFolder.file(`scene_${scene.id}_${si+1}.mp3`, blob);
+                }
+            }
+
+            // 3. 存更新後的 SRT
+            let srtOutput = "";
+            let counter = 1;
+            masterData.forEach(scene => {
+                scene.sentences.forEach(s => {
+                    srtOutput += `${counter++}\n${s.start} --> ${s.end}\n${s.text}\n\n`;
+                });
+            });
+            zip.file("final_subtitle.srt", srtOutput);
+            zip.file("config.json", JSON.stringify(masterData, null, 2));
+
+            const content = await zip.generateAsync({type:"blob"});
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(content);
+            a.download = "AI_Story_Full_Bundle.zip";
+            a.click();
+            status.innerText = "✅ 打包完成！請檢查下載路徑。";
+        } catch (err) {
+            status.innerText = "❌ 失敗：" + err.message;
+        }
+    }
+
+    // --- 輔助工具 ---
+    async function previewAudio(text, sceneId, sIdx) {
+        const url = document.getElementById('apiLink').value;
+        const item = masterData[sceneId-1].sentences[sIdx];
+        const res = await fetch(url, { method: 'POST', body: JSON.stringify({ text, lang: "zh", rate: item.rate, pitch: item.pitch }) });
+        const blob = await res.blob();
+        new Audio(URL.createObjectURL(blob)).play();
+    }
+
+    function parseSRT(t) { return t.split(/\n\s*\n/).filter(x=>x.trim()).map(b=>{
+        const l = b.split('\n'); const m = l[1].split(' --> ');
+        return { start: m[0].trim(), end: m[1].trim(), text: l.slice(2).join(' ') };
+    });}
+
+    function capture(t) {
+        const timeParts = t.split(':');
+        const seconds = (+timeParts[0]) * 3600 + (+timeParts[1]) * 60 + parseFloat(timeParts[2].replace(',','.'));
+        return new Promise(r => {
+            v.currentTime = seconds;
+            v.onseeked = () => {
+                c.width = v.videoWidth/2; c.height = v.videoHeight/2;
+                c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+                r(c.toDataURL('image/jpeg', 0.8));
+            };
+        });
+    }
+
+    function fileToDataURL(f) { return new Promise(r => { const rd = new FileReader(); rd.onload = e => r(e.target.result); rd.readAsDataURL(f); }); }
+    
+    function changeSingleImg(id) {
+        const input = document.createElement('input');
+        input.type = 'file'; input.accept = 'image/*';
+        input.onchange = async (e) => {
+            const file = e.target.files[0];
+            const url = await fileToDataURL(file);
+            document.getElementById(`img-node-${id}`).src = url;
+            masterData[id-1].img = url;
+        };
+        input.click();
+    }
+</script>
+</body>
+</html>
