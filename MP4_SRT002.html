@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MP4_SRT002</title>
+<style>
+:root{--bg:#0b1020;--panel:#11182b;--line:#27324d;--text:#eef3ff;--muted:#9fb0d7;--acc:#71e1ff}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI","Noto Sans TC",sans-serif;background:var(--bg);color:var(--text)}
+header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+h1{font-size:18px;margin:0}
+.wrap{display:grid;grid-template-columns:380px 1fr;gap:14px;padding:14px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+.hd{padding:12px 14px;border-bottom:1px solid var(--line);font-weight:700}
+.bd{padding:14px}
+.field{margin:0 0 12px}
+.label{font-size:12px;color:var(--muted);margin:0 0 6px}
+textarea,input,select{width:100%;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:#0d1425;color:var(--text)}
+textarea{min-height:100px;resize:vertical}
+button{padding:10px 14px;border-radius:10px;border:1px solid var(--line);background:#15203a;color:var(--text);cursor:pointer;font-weight:700}
+button.primary{background:#193454;border-color:#2f6ca0}
+button:hover{filter:brightness(1.05)}
+.btnrow{display:flex;gap:8px;flex-wrap:wrap}
+.help{font-size:12px;color:var(--muted);line-height:1.5}
+.grid{display:flex;flex-direction:column;gap:12px;padding:14px}
+.seg{border:1px solid var(--line);border-radius:14px;background:#0d1425}
+.seghd{padding:10px 12px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+.segbd{padding:12px}
+.row2,.row3{display:grid;gap:10px}
+.row2{grid-template-columns:1fr 1fr}
+.row3{grid-template-columns:1fr 1fr 1fr}
+.textline{white-space:pre-wrap;line-height:1.45;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#0a1120}
+.pill{display:inline-block;padding:4px 8px;border-radius:999px;border:1px solid var(--line);font-size:12px;color:var(--muted)}
+@media (max-width:1100px){.wrap{grid-template-columns:1fr}}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>MP4_SRT002</h1>
+  <div class="pill">reimage / cinematic / camera / srt_update</div>
+</header>
+<div class="wrap">
+  <section class="panel">
+    <div class="hd">全域設定</div>
+    <div class="bd">
+      <div class="field">
+        <div class="label">匯入 SRT</div>
+        <input id="srtFile" type="file" accept=".srt,text/plain">
+      </div>
+      <div class="field">
+        <div class="label">或直接貼上 SRT</div>
+        <textarea id="srtText" placeholder="貼上 SRT"></textarea>
+      </div>
+      <div class="field">
+        <div class="label">全域 reimage 差異滑桿（0.00 ~ 1.00）</div>
+        <input id="globalReimageStrength" type="number" min="0" max="1" step="0.05" value="0.60">
+        <div class="help">先改 0.60 看效果。之後 Python 可依這個值讀設定。</div>
+      </div>
+      <div class="field">
+        <div class="label">全域 cinematic prompt</div>
+        <textarea id="globalCinePrompt" placeholder="storybook illustration, cinematic lighting, warm tone"></textarea>
+      </div>
+      <div class="field">
+        <div class="label">全域鏡頭模式</div>
+        <select id="globalCameraMode">
+          <option value="fixed">fixed</option>
+          <option value="auto" selected>auto</option>
+          <option value="random">random</option>
+        </select>
+      </div>
+      <div class="field">
+        <div class="label">字幕更新模式</div>
+        <select id="srtUpdateMode">
+          <option value="original_only">original_only</option>
+          <option value="generate_updated_srt" selected>generate_updated_srt</option>
+        </select>
+      </div>
+      <div class="btnrow">
+        <button class="primary" id="buildBtn">產生分段</button>
+        <button id="autoCineBtn">自動生成 cinematic prompt</button>
+        <button id="autoCamBtn">自動分配鏡頭</button>
+        <button class="primary" id="exportBtn">匯出 OK2（含 srt_update）</button>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <span class="pill" id="segCount">段數：0</span>
+      </div>
+      <div class="help">
+        這版只先把 3 個前台能力做進來：<br>
+        1. reimage 差異滑桿<br>
+        2. cinematic prompt 自動生成<br>
+        3. 鏡頭運動隨機化<br>
+        匯出會包含 original.srt 與 srt_update.meta.json。
+      </div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="hd">段落設定</div>
+    <div class="grid" id="segments"></div>
+  </section>
+</div>
+
+<script>
+const state = { segments: [] };
+const $ = id => document.getElementById(id);
+
+function parseSrtTime(t){
+  const m = String(t).trim().match(/(\d+):(\d+):(\d+)[,.](\d+)/);
+  if(!m) return 0;
+  return (+m[1])*3600 + (+m[2])*60 + (+m[3]) + (+m[4])/1000;
+}
+
+function parseSrt(text){
+  const blocks = String(text || '').replace(/\r/g,'').trim().split(/\n\s*\n/);
+  const out = [];
+  for(const b of blocks){
+    const lines = b.split('\n').map(s=>s.trim()).filter(Boolean);
+    if(lines.length < 2) continue;
+    let tIdx = 0;
+    if(!lines[0].includes('-->') && lines[1] && lines[1].includes('-->')) tIdx = 1;
+    const tl = lines[tIdx];
+    if(!tl || !tl.includes('-->')) continue;
+    const [a,b2] = tl.split('-->').map(s=>s.trim());
+    const textLines = lines.slice(tIdx+1);
+    const txt = textLines.join(' ').replace(/<[^>]+>/g,'').replace(/\s+/g,' ').trim();
+    if(!txt) continue;
+    out.push({
+      idx: out.length + 1,
+      id4: String(out.length + 1).padStart(4,'0'),
+      start: parseSrtTime(a),
+      end: parseSrtTime(b2),
+      text: txt,
+      reimage_strength: +$('globalReimageStrength').value || 0.60,
+      cinematic_prompt: '',
+      camera_mode: $('globalCameraMode').value,
+      update_srt_timing: true,
+      multiVoiceEnabled: false,
+      multiVoice: []
+    });
+  }
+  return out;
+}
+
+function randomCamera(){
+  const arr = ['closeup','medium','wide','low_angle','over_shoulder'];
+  return arr[Math.floor(Math.random()*arr.length)];
+}
+
+function cameraForIndex(i, mode){
+  if(mode === 'fixed') return 'fixed';
+  if(mode === 'random') return randomCamera();
+  const arr = ['closeup','medium','wide','low_angle','over_shoulder'];
+  return arr[i % arr.length];
+}
+
+function autoPromptForText(txt, cam){
+  const t = String(txt || '').toLowerCase();
+  let mood = 'warm storybook lighting';
+  if(/giant|danger|roar|angry|dark|night/.test(t)) mood = 'dramatic cinematic lighting';
+  if(/morning|sunrise|hello|market/.test(t)) mood = 'soft morning light';
+  if(/magic|beanstalk|cloud|castle/.test(t)) mood = 'fantasy glowing light';
+  return `${cam} shot, ${mood}, children's storybook illustration, dynamic composition`;
+}
+
+function renderSegments(){
+  const wrap = $('segments');
+  wrap.innerHTML = '';
+  $('segCount').textContent = `段數：${state.segments.length}`;
+  state.segments.forEach((seg, i) => {
+    const card = document.createElement('div');
+    card.className = 'seg';
+    card.innerHTML = `
+      <div class="seghd">
+        <div>#${seg.id4}</div>
+        <div class="pill">${seg.start.toFixed(2)} - ${seg.end.toFixed(2)}s</div>
+      </div>
+      <div class="segbd">
+        <div class="field">
+          <div class="label">段落文字</div>
+          <div class="textline"></div>
+        </div>
+        <div class="row3">
+          <div class="field">
+            <div class="label">reimage 差異</div>
+            <input class="reStrength" type="number" min="0" max="1" step="0.05" value="${seg.reimage_strength.toFixed(2)}">
+          </div>
+          <div class="field">
+            <div class="label">鏡頭模式</div>
+            <select class="camMode">
+              <option value="fixed"${seg.camera_mode==='fixed'?' selected':''}>fixed</option>
+              <option value="auto"${seg.camera_mode==='auto'?' selected':''}>auto</option>
+              <option value="random"${seg.camera_mode==='random'?' selected':''}>random</option>
+              <option value="closeup"${seg.camera_mode==='closeup'?' selected':''}>closeup</option>
+              <option value="medium"${seg.camera_mode==='medium'?' selected':''}>medium</option>
+              <option value="wide"${seg.camera_mode==='wide'?' selected':''}>wide</option>
+              <option value="low_angle"${seg.camera_mode==='low_angle'?' selected':''}>low_angle</option>
+              <option value="over_shoulder"${seg.camera_mode==='over_shoulder'?' selected':''}>over_shoulder</option>
+            </select>
+          </div>
+          <div class="field">
+            <div class="label">更新字幕時間</div>
+            <select class="updSrt">
+              <option value="true"${seg.update_srt_timing ? ' selected':''}>true</option>
+              <option value="false"${!seg.update_srt_timing ? ' selected':''}>false</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <div class="label">cinematic prompt</div>
+          <textarea class="cinePrompt">${seg.cinematic_prompt || ''}</textarea>
+        </div>
+        <div class="btnrow">
+          <button class="autoOne">自動生成本段 prompt</button>
+        </div>
+      </div>
+    `;
+    card.querySelector('.textline').textContent = seg.text;
+    card.querySelector('.reStrength').addEventListener('input', e => seg.reimage_strength = +e.target.value || 0.60);
+    card.querySelector('.camMode').addEventListener('change', e => seg.camera_mode = e.target.value);
+    card.querySelector('.updSrt').addEventListener('change', e => seg.update_srt_timing = e.target.value === 'true');
+    card.querySelector('.cinePrompt').addEventListener('input', e => seg.cinematic_prompt = e.target.value);
+    card.querySelector('.autoOne').addEventListener('click', () => {
+      const cam = (seg.camera_mode && !['auto','random'].includes(seg.camera_mode)) ? seg.camera_mode : cameraForIndex(i, 'auto');
+      seg.cinematic_prompt = autoPromptForText(seg.text, cam);
+      renderSegments();
+    });
+    wrap.appendChild(card);
+  });
+}
+
+$('srtFile').addEventListener('change', async (e) => {
+  const f = e.target.files?.[0];
+  if(!f) return;
+  $('srtText').value = await f.text();
+});
+
+$('buildBtn').addEventListener('click', () => {
+  const txt = $('srtText').value.trim();
+  if(!txt){ alert('請先匯入或貼上 SRT'); return; }
+  state.segments = parseSrt(txt);
+  renderSegments();
+});
+
+$('autoCineBtn').addEventListener('click', () => {
+  state.segments.forEach((seg, i) => {
+    const cam = (seg.camera_mode && !['auto','random'].includes(seg.camera_mode)) ? seg.camera_mode : cameraForIndex(i, 'auto');
+    seg.cinematic_prompt = autoPromptForText(seg.text, cam);
+  });
+  renderSegments();
+});
+
+$('autoCamBtn').addEventListener('click', () => {
+  const mode = $('globalCameraMode').value;
+  state.segments.forEach((seg, i) => seg.camera_mode = cameraForIndex(i, mode));
+  renderSegments();
+});
+
+function buildManifest(){
+  return {
+    version: 'MP4_SRT002',
+    reimage_strength_default: +$('globalReimageStrength').value || 0.60,
+    cinematic_prompt_default: $('globalCinePrompt').value.trim(),
+    camera_mode_default: $('globalCameraMode').value,
+    srt_update_mode: $('srtUpdateMode').value,
+    segment_count: state.segments.length
+  };
+}
+
+function buildOverrides(){
+  const out = {};
+  state.segments.forEach(seg => {
+    out[seg.id4] = {
+      reimage_strength: seg.reimage_strength,
+      cinematic_prompt: seg.cinematic_prompt,
+      camera_mode: seg.camera_mode,
+      update_srt_timing: !!seg.update_srt_timing
+    };
+  });
+  return out;
+}
+
+function buildSrtUpdateMeta(){
+  const meta = {
+    version: 'MP4_SRT002',
+    srt_update_mode: $('srtUpdateMode').value,
+    segments: {}
+  };
+  state.segments.forEach(seg => {
+    meta.segments[seg.id4] = {
+      text: seg.text,
+      start: seg.start,
+      end: seg.end,
+      update_srt_timing: !!seg.update_srt_timing,
+      multiVoiceEnabled: !!seg.multiVoiceEnabled,
+      multiVoice: seg.multiVoice || []
+    };
+  });
+  return meta;
+}
+
+$('exportBtn').addEventListener('click', async () => {
+  if(!state.segments.length){ alert('請先產生分段'); return; }
+  const zip = new JSZip();
+  zip.file('manifest.json', JSON.stringify(buildManifest(), null, 2));
+  zip.file('overrides.json', JSON.stringify(buildOverrides(), null, 2));
+  zip.file('out_assets/original.srt', $('srtText').value);
+  zip.file('out_assets/srt_update.meta.json', JSON.stringify(buildSrtUpdateMeta(), null, 2));
+  const blob = await zip.generateAsync({type:'blob'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'MP4_SRT002_OK2_PACKAGE.zip';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1500);
+});
+</script>
+</body>
+</html>
