@@ -1173,6 +1173,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
     supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     window.supa = supa;
+    const BW_ALLOW_MULTI_DEVICE = true; // patched: allow phone + browser login at the same time
     // kick off initial loads (after supa is ready)
     try{
       if (window.__BW_NEED_INIT) {
@@ -1214,6 +1215,10 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     }
 
     async function BW_forceSignOut(){
+      if (BW_ALLOW_MULTI_DEVICE) {
+        console.info('[BW] multi-device mode enabled: skip forced sign out');
+        return;
+      }
       try{ localStorage.setItem('bw_forced_logout','1'); }catch(_){}
       try{ await supa.auth.signOut({ scope:'global' }); }
        catch(_){ try{ try{ await supa.auth.signOut({ scope:'global' }); }
@@ -1232,8 +1237,17 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     async function BW_enforceTakeover(user){
       try{
         if(!user || !user.id) return;
+        if (BW_ALLOW_MULTI_DEVICE) {
+          const up = await supa.from('profiles')
+            .update({ last_seen_at: new Date().toISOString() })
+            .eq('id', user.id);
+          if(up.error){
+            console.warn('[BW] heartbeat-only update blocked:', up.error.message||up.error);
+          }
+          return;
+        }
         const deviceId = BW_getDeviceId();
-        // 直接覆寫 profiles.current_device_id（新裝置接管）
+        // 單裝置模式：直接覆寫 profiles.current_device_id（新裝置接管）
         const up = await supa.from('profiles')
           .update({ current_device_id: deviceId, last_seen_at: new Date().toISOString() })
           .eq('id', user.id);
@@ -1251,6 +1265,24 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       const my = BW_getDeviceId();
       const uid = user && user.id;
       if(!uid) return null;
+      if (BW_ALLOW_MULTI_DEVICE) {
+        const tick = async ()=>{
+          if(running) return;
+          running = true;
+          try{
+            const up = await supa.from('profiles')
+              .update({ last_seen_at: new Date().toISOString() })
+              .eq('id', uid);
+            if(up.error){
+              console.warn('[BW] multi-device heartbeat blocked:', up.error.message||up.error);
+            }
+          }finally{
+            running = false;
+          }
+        };
+        tick();
+        return setInterval(tick, 30*1000);
+      }
 
       const tick = async ()=>{
         if(running) return;
