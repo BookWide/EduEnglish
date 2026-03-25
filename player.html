@@ -794,6 +794,7 @@ async function loadVideo(){
 
   const row = window.__ASSET_ROW__ || {};
   const youtubeId = row.youtube_id || getYoutubeIdFromUrl(row.youtube_url || '');
+  const preferred = String(row.preferred_source || 'youtube').toLowerCase();
 
   const sources = [];
   const seen = new Set();
@@ -844,65 +845,80 @@ async function loadVideo(){
     if (!sources.length) {
       console.warn('[Player] 沒有任何影片來源可試');
       showHtml5();
-      return;
+      return false;
     }
     i = 0;
-    setSrc(0);
+    return setSrc(0);
   };
 
-  if (!youtubeId) {
-    tryHtml5First();
+  const tryYouTubeFirst = async () => {
+    if (!youtubeId) return false;
+    try {
+      await loadYouTubeApi();
+      showYouTube();
+      ytStarted = false;
+      if (ytStartTimer) clearTimeout(ytStartTimer);
+      ytStartTimer = setTimeout(() => {
+        if (!ytStarted) {
+          fallbackToHtml5('youtube timeout');
+          tryHtml5First();
+        }
+      }, 8000);
+
+      ytPlayer = new YT.Player('ytPlayer', {
+        videoId: youtubeId,
+        playerVars: {
+          playsinline: 1,
+          rel: 0,
+          modestbranding: 1,
+          enablejsapi: 1
+        },
+        events: {
+          onReady: (ev) => {
+            try {
+              const r = Number(speedRange?.value || 1) || 1;
+              try { ev.target.setPlaybackRate(r); } catch(_e) {}
+              ev.target.playVideo();
+            } catch(_e) {}
+          },
+          onStateChange: (ev) => {
+            if (window.YT && ev.data === YT.PlayerState.PLAYING) {
+              ytStarted = true;
+              if (ytStartTimer) {
+                clearTimeout(ytStartTimer);
+                ytStartTimer = null;
+              }
+            }
+          },
+          onError: () => {
+            fallbackToHtml5('youtube error');
+            tryHtml5First();
+          }
+        }
+      });
+      return true;
+    } catch (e) {
+      console.warn('[Player] youtube load failed', e);
+      fallbackToHtml5('youtube api failed');
+      tryHtml5First();
+      return false;
+    }
+  };
+
+  if (preferred === 'mp4' || preferred === 'cloudflare') {
+    const ok = tryHtml5First();
+    if (!ok && youtubeId) {
+      await tryYouTubeFirst();
+    }
     return;
   }
 
-  try {
-    await loadYouTubeApi();
-    showYouTube();
-    ytStarted = false;
-    if (ytStartTimer) clearTimeout(ytStartTimer);
-    ytStartTimer = setTimeout(() => {
-      if (!ytStarted) {
-        fallbackToHtml5('youtube timeout');
-        tryHtml5First();
-      }
-    }, 8000);
-
-    ytPlayer = new YT.Player('ytPlayer', {
-      videoId: youtubeId,
-      playerVars: {
-        playsinline: 1,
-        rel: 0,
-        modestbranding: 1,
-        enablejsapi: 1
-      },
-      events: {
-        onReady: (ev) => {
-          try {
-            const r = Number(speedRange?.value || 1) || 1;
-            try { ev.target.setPlaybackRate(r); } catch(_e) {}
-            ev.target.playVideo();
-          } catch(_e) {}
-        },
-        onStateChange: (ev) => {
-          if (window.YT && ev.data === YT.PlayerState.PLAYING) {
-            ytStarted = true;
-            if (ytStartTimer) {
-              clearTimeout(ytStartTimer);
-              ytStartTimer = null;
-            }
-          }
-        },
-        onError: () => {
-          fallbackToHtml5('youtube error');
-          tryHtml5First();
-        }
-      }
-    });
-  } catch (e) {
-    console.warn('[Player] youtube load failed', e);
-    fallbackToHtml5('youtube api failed');
-    tryHtml5First();
+  if (youtubeId) {
+    await tryYouTubeFirst();
+    return;
   }
+
+  tryHtml5First();
 }
 
 /* ==== 字幕 ==== */
@@ -1641,7 +1657,7 @@ async function speakText(text, lang){
     try {
       const { data, error } = await playerSupa
         .from('assets')
-        .select('is_published, mp4_url, youtube_url, youtube_id, cover_url, duration_sec, difficulty_level, title')
+        .select('is_published, mp4_url, youtube_url, youtube_id, preferred_source, cover_url, duration_sec, difficulty_level, title')
         .eq('category', category)
         .eq('slug', slug)
         .maybeSingle();
