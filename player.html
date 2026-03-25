@@ -459,6 +459,9 @@ tr.speaking{
     <section class="page" id="pageLeft">
       <section class="left">
         <div class="videoWrap">
+          <div id="ytWrap" style="position:absolute;inset:0;display:none;background:#000;z-index:2;">
+            <div id="ytPlayer" style="width:100%;height:100%;"></div>
+          </div>
           <video id="player" playsinline controls></video>
         </div>
         <div class="controls">
@@ -645,6 +648,8 @@ if(btnJpIndex){
 
 /* 影片 & 控制 */
 const video=$('#player');
+const ytWrap=$('#ytWrap');
+let ytPlayer=null, activeSource='html5', ytTickTimer=null, ytStarted=false, ytStartTimer=null;
 const cuesBody=$('#cuesBody');
 const cuesStatus=$('#cuesStatus');
 const btnPrev=$('#btnPrev'),btnPlay=$('#btnPlay'),
@@ -675,17 +680,123 @@ function setOffset(v){
 }
 window.player={setOffset,clearRepeat:()=>{loopSentence=false;btnReplay?.classList.remove('blue');}};
 
+function getYoutubeIdFromUrl(url=''){
+  const s=String(url||'').trim();
+  if(!s) return '';
+  let m=s.match(/[?&]v=([^&#]+)/);
+  if(m && m[1]) return m[1];
+  m=s.match(/youtu\.be\/([^?&#/]+)/);
+  if(m && m[1]) return m[1];
+  m=s.match(/youtube\.com\/embed\/([^?&#/]+)/);
+  if(m && m[1]) return m[1];
+  return '';
+}
+
+function isUsingYouTube(){ return activeSource==='youtube' && ytPlayer; }
+function getCurrentPlaybackTime(){
+  if(isUsingYouTube()){
+    try{return Number(ytPlayer.getCurrentTime())||0;}catch(e){return 0;}
+  }
+  return Number(video.currentTime)||0;
+}
+function setCurrentPlaybackTime(sec){
+  const t=Math.max(0, Number(sec)||0);
+  if(isUsingYouTube()){
+    try{ ytPlayer.seekTo(t, true); }catch(e){}
+    return;
+  }
+  try{ video.currentTime=t; }catch(e){}
+}
+function playActive(){
+  if(isUsingYouTube()){
+    try{ ytPlayer.playVideo(); }catch(e){}
+    return;
+  }
+  video.play().catch(()=>{});
+}
+function pauseActive(){
+  if(isUsingYouTube()){
+    try{ ytPlayer.pauseVideo(); }catch(e){}
+    return;
+  }
+  video.pause();
+}
+function activePaused(){
+  if(isUsingYouTube()){
+    try{ return ytPlayer.getPlayerState() !== 1; }catch(e){ return true; }
+  }
+  return video.paused;
+}
+function setPlaybackRateActive(rate){
+  const r=Number(rate)||1;
+  if(isUsingYouTube()){
+    try{ ytPlayer.setPlaybackRate(r); }catch(e){}
+  }
+  video.playbackRate=r;
+}
+function showHtml5(){
+  activeSource='html5';
+  if(ytStartTimer){ clearTimeout(ytStartTimer); ytStartTimer=null; }
+  if(ytTickTimer){ clearInterval(ytTickTimer); ytTickTimer=null; }
+  ytStarted=false;
+  if(ytWrap) ytWrap.style.display='none';
+  video.style.display='block';
+  video.controls=true;
+}
+function showYouTube(){
+  activeSource='youtube';
+  if(ytWrap) ytWrap.style.display='block';
+  video.pause();
+  video.style.display='none';
+  video.controls=false;
+  if(ytTickTimer) clearInterval(ytTickTimer);
+  ytTickTimer=setInterval(handlePlaybackTick, 250);
+}
+function loadYouTubeApi(){
+  return new Promise((resolve,reject)=>{
+    if(window.YT && window.YT.Player) return resolve();
+    const prior=window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady=function(){
+      try{ if(typeof prior==='function') prior(); }catch(e){}
+      resolve();
+    };
+    if(document.querySelector('script[data-yt-api="1"]')) return;
+    const s=document.createElement('script');
+    s.src='https://www.youtube.com/iframe_api';
+    s.async=true;
+    s.dataset.ytApi='1';
+    s.onerror=reject;
+    document.head.appendChild(s);
+  });
+}
+function fallbackToHtml5(reason=''){
+  console.warn('[Player] fallback to html5', reason||'');
+  try{ if(ytPlayer && ytPlayer.stopVideo) ytPlayer.stopVideo(); }catch(e){}
+  showHtml5();
+}
+function handlePlaybackTick(){
+  if(!cues.length) return;
+  const i=currentIndex();
+  highlightRow(i);
+  if(loopSentence){
+    const [s,e]=sentenceRange(i);
+    const t=getCurrentPlaybackTime()+offset;
+    if(t>=e-0.02){
+      setCurrentPlaybackTime(Math.max(0,s-offset+0.0001));
+      playActive();
+    }
+  }
+}
+
 async function loadVideo(){
   const SUPA_PUBLIC_BASE = 'https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public';
   const SUPA_VIDEOS_BASE = SUPA_PUBLIC_BASE + '/videos';
 
+  const row = window.__ASSET_ROW__ || {};
+  const youtubeId = row.youtube_id || getYoutubeIdFromUrl(row.youtube_url || '');
+
   const sources = [];
   const seen = new Set();
-
-  // ✅ DB 內若有指定 mp4_url / cover_url（assets）就優先用
-  try {
-    if (window.__ASSET_ROW__ && window.__ASSET_ROW__.mp4_url) add(window.__ASSET_ROW__.mp4_url);
-  } catch(_e) {}
 
   function add(url){
     if (!url || seen.has(url)) return;
@@ -693,55 +804,106 @@ async function loadVideo(){
     sources.push(url);
   }
 
-  // 基本 slug
+  try {
+    if (row && row.mp4_url) add(row.mp4_url);
+  } catch(_e) {}
+
   const slugMain = slug;
-  const slugNoPro = slug.replace(/^pro-/, '');   // 例如：pro-l1a-06-... → l1a-06-...
+  const slugNoPro = slug.replace(/^pro-/, '');
   const slugCandidates = [slugMain];
+  if (cat === 'pro' && slugNoPro !== slugMain) slugCandidates.push(slugNoPro);
 
-  if (cat === 'pro' && slugNoPro !== slugMain) {
-    slugCandidates.push(slugNoPro);
-  }
-
-  // 依序把所有可能路徑加入 sources
   slugCandidates.forEach(s => {
-    // Supabase：有分類、無分類兩種都試
     add(`${SUPA_VIDEOS_BASE}/${cat}/${s}.mp4`);
     add(`${SUPA_VIDEOS_BASE}/${s}.mp4`);
-
-    // 本站：有分類、無分類
     add(`${BASE}/videos/${cat}/${s}.mp4`);
     add(`${BASE}/videos/${s}.mp4`);
   });
 
-  // 只有非 PRO 類別才用 houyi 當最後備援
-  if (cat !== 'pro') {
-    add(`${BASE}/videos/story/houyi.mp4`);
-  }
+  if (cat !== 'pro') add(`${BASE}/videos/story/houyi.mp4`);
 
   let i = 0;
   function setSrc(k){
-    if (!sources[k]) return;
+    if (!sources[k]) return false;
+    showHtml5();
     video.src = sources[k];
-    console.log('[Player] try video source', (k+1) + '/' + sources.length, sources[k]);
+    console.log('[Player] try html5 source', (k+1) + '/' + sources.length, sources[k]);
+    return true;
   }
 
-  if (!sources.length) {
-    console.warn('[Player] 沒有任何影片來源可試');
-    return;
-  }
-
-  setSrc(0);
-
-  video.addEventListener('error', () => {
+  video.onerror = () => {
     if (i < sources.length - 1) {
       i++;
       setSrc(i);
     } else {
       console.warn('[Player] 所有影片來源都失敗了');
     }
-  }, { passive: true });
-}
+  };
 
+  const tryHtml5First = () => {
+    if (!sources.length) {
+      console.warn('[Player] 沒有任何影片來源可試');
+      showHtml5();
+      return;
+    }
+    i = 0;
+    setSrc(0);
+  };
+
+  if (!youtubeId) {
+    tryHtml5First();
+    return;
+  }
+
+  try {
+    await loadYouTubeApi();
+    showYouTube();
+    ytStarted = false;
+    if (ytStartTimer) clearTimeout(ytStartTimer);
+    ytStartTimer = setTimeout(() => {
+      if (!ytStarted) {
+        fallbackToHtml5('youtube timeout');
+        tryHtml5First();
+      }
+    }, 8000);
+
+    ytPlayer = new YT.Player('ytPlayer', {
+      videoId: youtubeId,
+      playerVars: {
+        playsinline: 1,
+        rel: 0,
+        modestbranding: 1,
+        enablejsapi: 1
+      },
+      events: {
+        onReady: (ev) => {
+          try {
+            const r = Number(speedRange?.value || 1) || 1;
+            try { ev.target.setPlaybackRate(r); } catch(_e) {}
+            ev.target.playVideo();
+          } catch(_e) {}
+        },
+        onStateChange: (ev) => {
+          if (window.YT && ev.data === YT.PlayerState.PLAYING) {
+            ytStarted = true;
+            if (ytStartTimer) {
+              clearTimeout(ytStartTimer);
+              ytStartTimer = null;
+            }
+          }
+        },
+        onError: () => {
+          fallbackToHtml5('youtube error');
+          tryHtml5First();
+        }
+      }
+    });
+  } catch (e) {
+    console.warn('[Player] youtube load failed', e);
+    fallbackToHtml5('youtube api failed');
+    tryHtml5First();
+  }
+}
 
 /* ==== 字幕 ==== */
 async function loadCues(){
@@ -1307,16 +1469,16 @@ $$('.tabs .tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab
 /* ==== 播放控制 + 跟隨句子 ==== */
 speedRange.addEventListener('input',()=>{
   const r=Number(speedRange.value)||1;
-  video.playbackRate=r;
+  setPlaybackRateActive(r);
   speedVal.textContent=`${r.toFixed(2)}x`;
 });
 btnPlay.addEventListener('click',()=>{
-  if(video.paused) video.play();
-  else video.pause();
+  if(activePaused()) playActive();
+  else pauseActive();
 });
 
 function currentIndex(){
-  const t=video.currentTime+offset;
+  const t=getCurrentPlaybackTime()+offset;
   let i=0;while(i+1<cues.length && cues[i+1].t<=t+0.0001)i++;
   return i;
 }
@@ -1342,9 +1504,9 @@ function sentenceRange(i){
 }
 function seekTo(idx,play=true){
   if(!cues[idx])return;
-  video.currentTime=Math.max(0,cues[idx].t-offset+0.0001);
+  setCurrentPlaybackTime(Math.max(0,cues[idx].t-offset+0.0001));
   highlightRow(idx);
-  if(play) video.play();
+  if(play) playActive();
 }
 
 btnPrev.addEventListener('click',()=>seekTo(Math.max(0,currentIndex()-1),true));
@@ -1368,18 +1530,7 @@ $('#btnAutoSync').addEventListener('click',()=>{
   alert('先讓影片與字幕對到一個句子，再用偏移 +/-0.5 微調即可。\n（目前只有簡易手動校準）');
 });
 
-video.addEventListener('timeupdate',()=>{
-  if(!cues.length)return;
-  const i=currentIndex();highlightRow(i);
-  if(loopSentence){
-    const [s,e]=sentenceRange(i);
-    const t=video.currentTime+offset;
-    if(t>=e-0.02){
-      video.currentTime=Math.max(0,s-offset+0.0001);
-      video.play();
-    }
-  }
-});
+video.addEventListener('timeupdate',handlePlaybackTick);
 
 /* ==== TTS (iOS-friendly) ==== */
 const TTS_CLOUD_ENDPOINT = window.BOOKWIDE_TTS_ENDPOINT || ""; 
@@ -1490,7 +1641,7 @@ async function speakText(text, lang){
     try {
       const { data, error } = await playerSupa
         .from('assets')
-        .select('is_published, mp4_url, cover_url, duration_sec, difficulty_level, title')
+        .select('is_published, mp4_url, youtube_url, youtube_id, cover_url, duration_sec, difficulty_level, title')
         .eq('category', category)
         .eq('slug', slug)
         .maybeSingle();
@@ -1679,7 +1830,7 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     if (saved != null) setOffset(parseFloat(saved)); else setOffset(0);
 
     const r = Number(speedRange.value) || 1;
-    video.playbackRate = r;
+    setPlaybackRateActive(r);
     speedVal.textContent = `${r.toFixed(2)}x`;
 
     await loadVideo();
