@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Email 通知中心｜BookWide</title>
+
+<style>
+:root{
+  --bg:#f4f6fb;
+  --card:#fff;
+  --muted:#6b7280;
+  --border:#e5e7eb;
+  --brand:#2563eb;
+  --ok:#15803d;
+  --fail:#b91c1c;
+}
+body{
+  margin:0;
+  font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;
+  background:var(--bg);
+}
+.wrap{
+  max-width:1100px;
+  margin:24px auto;
+  padding:0 16px 40px;
+}
+h1{margin:0 0 6px}
+.sub{color:var(--muted);font-size:14px;margin-bottom:16px}
+.card{
+  background:var(--card);
+  border-radius:16px;
+  padding:16px;
+  box-shadow:0 10px 30px rgba(15,23,42,.08);
+  margin-bottom:16px;
+}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input{
+  flex:1;
+  padding:10px 14px;
+  border-radius:999px;
+  border:1px solid var(--border);
+  font-size:14px;
+  min-width:260px;
+}
+button{
+  padding:10px 18px;
+  border-radius:999px;
+  border:0;
+  background:var(--brand);
+  color:#fff;
+  cursor:pointer;
+  font-size:14px;
+  white-space:nowrap;
+}
+button.secondary{background:#111827}
+button.ghost{background:#e5e7eb;color:#111827}
+button.danger{background:#b91c1c}
+table{
+  width:100%;
+  border-collapse:collapse;
+  font-size:14px;
+}
+th,td{
+  padding:8px 6px;
+  border-bottom:1px solid var(--border);
+}
+th{text-align:left;color:#4b5563;white-space:nowrap}
+.pill{
+  padding:3px 10px;
+  border-radius:999px;
+  font-size:12px;
+  display:inline-block;
+  white-space:nowrap;
+}
+.ok{background:#ecfdf3;color:var(--ok)}
+.fail{background:#fff1f2;color:var(--fail)}
+.small{font-size:12px;color:var(--muted)}
+pre{margin:8px 0 0;white-space:pre-wrap;word-break:break-word}
+</style>
+</head>
+
+<body>
+<div class="wrap">
+  <a href="../admin.html">← 回上頁</a>
+  <h1>Email 通知中心</h1>
+  <p class="sub">查詢付款成功信 / 補寄（補寄只透過 Edge Function）</p>
+
+  <div class="card">
+    <div class="row">
+      <input id="mtn" placeholder="輸入 MerchantTradeNo（例：BW2512290828596）" />
+      <button id="btnQuery">查詢</button>
+      <button class="secondary" id="btnResendOne">強制補寄</button>
+      <button class="ghost" id="btnReload">重新整理</button>
+    </div>
+
+    <div class="row" style="margin-top:10px;">
+      <button class="danger" id="btnResendAllFail">補寄所有 MAIL_FAIL</button>
+      <button class="ghost" id="btnExportCSV">匯出 CSV（最近 50 筆）</button>
+      <label class="small" style="display:flex;align-items:center;gap:6px;">
+        <input type="checkbox" id="chkBcc" />
+        BCC 一份到 pmktools@gmail.com
+      </label>
+    </div>
+
+    <div id="status" class="small" style="margin-top:10px;">初始化中…</div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px;">查詢結果</h3>
+    <div id="result" class="small">尚未查詢</div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;">
+      <h3 style="margin:0;">最近寄信紀錄（MAIL_RESULT）</h3>
+      <div class="small">只顯示最近 50 筆</div>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>時間</th>
+          <th>MerchantTradeNo</th>
+          <th>結果</th>
+          <th>To</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody id="logs">
+        <tr><td colspan="5" class="small">載入中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+
+const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+const SUPABASE_ANON_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+
+const supa = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
+});
+
+const $ = q => document.querySelector(q);
+
+const fmt = (ts)=>{
+  if(!ts) return '';
+  const d = new Date(ts);
+  if(isNaN(d)) return String(ts);
+  return d.toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false});
+};
+const pill = ok => `<span class="pill ${ok?'ok':'fail'}">${ok?'MAIL_OK':'MAIL_FAIL'}</span>`;
+const safeStr = v => {
+  if(v === null || v === undefined) return '';
+  if(typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+};
+
+function setStatus(t){ $('#status').textContent = t; }
+function setError(t){ $('#status').innerHTML = `<span class="pill fail">ERROR</span> ${t}`; }
+
+async function mustAdmin(){
+  // 1) 必須登入
+  const u = await supa.auth.getUser();
+  const user = u?.data?.user;
+  if(!user){
+    setError('尚未登入（或被單裝置踢下線）。請先重新登入後再開此頁。');
+    throw new Error('not login');
+  }
+
+  // 2) 必須是 admin（profiles.is_admin）
+  const p = await supa.from('profiles').select('is_admin,email').eq('id', user.id).maybeSingle();
+  if(p.error){
+    setError('讀取 profiles 失敗：' + p.error.message);
+    throw p.error;
+  }
+  if(!p.data?.is_admin){
+    setError('你不是管理員（profiles.is_admin=false）');
+    throw new Error('not admin');
+  }
+  setStatus('管理員登入中：' + (p.data.email || user.email || ''));
+}
+
+/* ====== 讀最近 50 筆 MAIL_RESULT ====== */
+async function loadRecent(){
+  const tbody = $('#logs');
+  tbody.innerHTML = `<tr><td colspan="5" class="small">載入中…</td></tr>`;
+  try{
+    const r = await supa
+      .from('ecpay_callbacks')
+      .select('created_at, merchant_trade_no, rtn_code, raw_body')
+      .eq('method','MAIL_RESULT')
+      .order('created_at',{ascending:false})
+      .limit(50);
+
+    if(r.error) throw r.error;
+
+    const rows = (r.data || []).map(x=>{
+      const ok = x.rtn_code === 'MAIL_OK';
+      let to = '', detail = '';
+      try{
+        const parsed = typeof x.raw_body === 'string' ? JSON.parse(x.raw_body) : x.raw_body;
+        to = parsed?.to || parsed?.toMain || '';
+        detail = parsed?.detail || parsed?.message || safeStr(parsed);
+      }catch(_){
+        detail = safeStr(x.raw_body);
+      }
+      return { created_at: fmt(x.created_at), merchant_trade_no: x.merchant_trade_no||'', ok, to, detail };
+    });
+
+    renderLogs(rows);
+  }catch(e){
+    tbody.innerHTML = `<tr><td colspan="5" class="small">讀取失敗：${e.message||e}</td></tr>`;
+  }
+}
+
+function renderLogs(rows){
+  const tbody = $('#logs');
+  if(!rows.length){
+    tbody.innerHTML = `<tr><td colspan="5" class="small">沒有紀錄</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = rows.map(r=>`
+    <tr>
+      <td>${r.created_at}</td>
+      <td>${r.merchant_trade_no}</td>
+      <td>${pill(!!r.ok)}</td>
+      <td>${r.to||''}</td>
+      <td>${safeStr(r.detail||'')}</td>
+    </tr>
+  `).join('');
+}
+
+/* ====== 查詢單筆 ====== */
+async function doQuery(){
+  const mtn = $('#mtn').value.trim();
+  if(!mtn) return alert('請輸入 MerchantTradeNo');
+
+  $('#result').textContent = '查詢中…';
+  try{
+    const r = await supa
+      .from('ecpay_callbacks')
+      .select('created_at, merchant_trade_no, rtn_code, raw_body')
+      .eq('method','MAIL_RESULT')
+      .eq('merchant_trade_no', mtn)
+      .order('created_at',{ascending:false})
+      .limit(20);
+
+    if(r.error) throw r.error;
+
+    const list = r.data || [];
+    if(!list.length){
+      $('#result').innerHTML = `${pill(false)} 找不到紀錄：這筆 MTN 沒有 MAIL_RESULT`;
+      return;
+    }
+    const latest = list[0];
+    $('#result').innerHTML = `
+      <div>${pill(latest.rtn_code === 'MAIL_OK')} <b>${latest.merchant_trade_no}</b>　<span class="small">${fmt(latest.created_at)}</span></div>
+      <pre>${safeStr(latest.raw_body)}</pre>
+    `;
+
+    // 同筆 MTN 的歷史也顯示
+    const rows = list.map(x=>{
+      let to='', detail='';
+      try{
+        const parsed = typeof x.raw_body === 'string' ? JSON.parse(x.raw_body) : x.raw_body;
+        to = parsed?.to || parsed?.toMain || '';
+        detail = parsed?.detail || parsed?.message || safeStr(parsed);
+      }catch(_){
+        detail = safeStr(x.raw_body);
+      }
+      return { created_at: fmt(x.created_at), merchant_trade_no: x.merchant_trade_no||'', ok: x.rtn_code==='MAIL_OK', to, detail };
+    });
+    renderLogs(rows);
+  }catch(e){
+    $('#result').innerHTML = `<span class="pill fail">查詢失敗</span> ${e.message||e}`;
+  }
+}
+
+/* ====== 補寄單筆（Edge Function） ====== */
+async function doResendOne(){
+  const mtn = $('#mtn').value.trim();
+  if(!mtn) return alert('請輸入 MerchantTradeNo');
+  if(!confirm('確定要強制補寄？')) return;
+
+  const copyTo = $('#chkBcc').checked ? 'pmktools@gmail.com' : null;
+
+  try{
+    const { data, error } = await supa.functions.invoke('admin-resend-email', {
+      body: { merchant_trade_no: mtn, force: true, copy_to: copyTo }
+    });
+    if(error) throw error;
+    alert('補寄已送出');
+    console.log(data);
+    await loadRecent();
+  }catch(e){
+    alert('補寄失敗：' + (e.message||e));
+  }
+}
+
+/* ====== 補寄所有 FAIL（讀表 -> 逐筆呼叫） ====== */
+async function doResendAllFail(){
+  if(!confirm('確定要補寄所有 MAIL_FAIL？')) return;
+
+  const copyTo = $('#chkBcc').checked ? 'pmktools@gmail.com' : null;
+
+  const r = await supa
+    .from('ecpay_callbacks')
+    .select('merchant_trade_no, created_at')
+    .eq('method','MAIL_RESULT')
+    .eq('rtn_code','MAIL_FAIL')
+    .order('created_at',{ascending:false})
+    .limit(200);
+
+  if(r.error){
+    alert('讀取 FAIL 失敗：' + r.error.message);
+    return;
+  }
+
+  const uniq = [];
+  const seen = new Set();
+  for(const x of (r.data||[])){
+    const mtn = x.merchant_trade_no;
+    if(!mtn || seen.has(mtn)) continue;
+    seen.add(mtn);
+    uniq.push(mtn);
+  }
+  if(!uniq.length){
+    alert('目前沒有 MAIL_FAIL');
+    return;
+  }
+
+  $('#result').innerHTML = `<span class="small">補寄中… 共 ${uniq.length} 筆</span>`;
+  let ok=0, fail=0;
+
+  for(const mtn of uniq){
+    try{
+      const rr = await supa.functions.invoke('admin-resend-email', {
+        body: { merchant_trade_no: mtn, force: true, copy_to: copyTo }
+      });
+      if(rr.error) throw rr.error;
+      ok++;
+    }catch(_){
+      fail++;
+    }
+  }
+
+  $('#result').innerHTML = `<span class="small">補寄完成：OK ${ok} / FAIL ${fail}</span>`;
+  await loadRecent();
+}
+
+/* ====== 匯出 CSV ====== */
+async function exportCSV(){
+  const r = await supa
+    .from('ecpay_callbacks')
+    .select('created_at, merchant_trade_no, rtn_code, raw_body')
+    .eq('method','MAIL_RESULT')
+    .order('created_at',{ascending:false})
+    .limit(50);
+
+  if(r.error){
+    alert('匯出失敗：' + r.error.message);
+    return;
+  }
+
+  const rows = (r.data||[]).map(x=>{
+    let to='', detail='';
+    try{
+      const parsed = typeof x.raw_body === 'string' ? JSON.parse(x.raw_body) : x.raw_body;
+      to = parsed?.to || parsed?.toMain || '';
+      detail = parsed?.detail || parsed?.message || safeStr(parsed);
+    }catch(_){
+      detail = safeStr(x.raw_body);
+    }
+    return {
+      created_at: fmt(x.created_at),
+      merchant_trade_no: x.merchant_trade_no||'',
+      result: x.rtn_code||'',
+      to,
+      detail
+    };
+  });
+
+  if(!rows.length){
+    alert('沒有資料可匯出');
+    return;
+  }
+
+  const header = Object.keys(rows[0]).join(',');
+  const body = rows.map(r =>
+    Object.values(r).map(v => `"${String(v??'').replace(/"/g,'""')}"`).join(',')
+  ).join('\n');
+
+  const csv = header + '\n' + body;
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `mail_result_${Date.now()}.csv`;
+  a.click();
+}
+
+/* ====== 綁定事件 ====== */
+$('#btnQuery').addEventListener('click', doQuery);
+$('#btnResendOne').addEventListener('click', doResendOne);
+$('#btnReload').addEventListener('click', loadRecent);
+$('#btnResendAllFail').addEventListener('click', doResendAllFail);
+$('#btnExportCSV').addEventListener('click', exportCSV);
+$('#mtn').addEventListener('keydown', (e)=>{ if(e.key==='Enter') doQuery(); });
+
+/* ====== 啟動 ====== */
+try{
+  await mustAdmin();
+  await loadRecent();
+}catch(_){
+  // mustAdmin 已經把原因顯示到 status 了
+}
+</script>
+
+</body>
+</html>
+
+
+
+
+
+
