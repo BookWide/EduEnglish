@@ -190,7 +190,7 @@
       throw new Error('supabase not found');
     }
 
-    const DASHBOARD_URL = '/learning/index.html';
+    const DASHBOARD_URL = './learning-dashboard.html';
 
     const ROLE_MAP = {
       education: [
@@ -355,29 +355,40 @@
       return [];
     }
 
-    async function waitForSessionReady(maxMs = 10000, stepMs = 250) {
-      const start = Date.now();
-
-      while ((Date.now() - start) < maxMs) {
-        try {
-          const result = await Promise.race([
-            supabase.auth.getSession(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('session timeout')), 3000))
+    async function resolveCurrentUser() {
+      try {
+        if (window.BW?.getUser) {
+          const user = await Promise.race([
+            window.BW.getUser(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('BW.getUser timeout')), 5000))
           ]);
-
-          if (result?.data?.session?.user) return result.data.session.user;
-        } catch (_e) {
+          if (user) return user;
         }
+      } catch (_e) {}
 
-        await new Promise(r => setTimeout(r, stepMs));
-      }
+      try {
+        const { data, error } = await Promise.race([
+          supabase.auth.getUser(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('auth.getUser timeout')), 5000))
+        ]);
+        if (error) throw error;
+        if (data?.user) return data.user;
+      } catch (_e) {}
+
+      try {
+        const { data, error } = await Promise.race([
+          supabase.auth.getSession(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('auth.getSession timeout')), 5000))
+        ]);
+        if (error) throw error;
+        if (data?.session?.user) return data.session.user;
+      } catch (_e) {}
 
       return null;
     }
 
     async function getCurrentUser() {
-      const user = await waitForSessionReady();
-      return user ?? null;
+      return await resolveCurrentUser();
     }
 
     async function loadProfile() {
@@ -390,7 +401,7 @@
           ensureRoleOptions('', '');
           renderSceneChips();
           showMsg('warn', '未登入或登入狀態失效，請先回首頁重新登入');
-          setDebug('loadProfile: session not ready or missing');
+          setDebug('loadProfile: user not found via BW.getUser / auth.getUser / auth.getSession');
           return;
         }
 
@@ -476,7 +487,7 @@
 
         if (!currentUser) {
           showMsg('warn', '未登入或登入狀態失效，請先回首頁重新登入');
-          setDebug('saveProfile: session not ready or missing');
+          setDebug('saveProfile: user not found via BW.getUser / auth.getUser / auth.getSession');
           return;
         }
 
@@ -557,7 +568,8 @@
     ensureRoleOptions('', '');
 
     supabase.auth.onAuthStateChange((event, session) => {
-      if (session?.user && !currentUser) {
+      if (session?.user) {
+        currentUser = session.user;
         loadProfile();
       }
     });
