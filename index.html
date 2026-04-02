@@ -1170,7 +1170,14 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     const SUPABASE_ANON_KEY =
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
-    supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        flowType: 'pkce'
+      }
+    });
     window.supa = supa;
     const BW_ALLOW_MULTI_DEVICE = true; // patched: allow phone + browser login at the same time
     // kick off initial loads (after supa is ready)
@@ -1494,7 +1501,16 @@ if(data.current_device_id !== my){
     }
 
     if (btnLogin) {
-      btnLogin.addEventListener('click', ()=>{ window.location.href = '/login.html?next=' + encodeURIComponent(location.pathname + location.search + location.hash); });
+      btnLogin.addEventListener('click', ()=>{
+        try {
+          const url = new URL(location.href);
+          if (!url.searchParams.get('next')) {
+            url.searchParams.set('next', location.pathname + location.search + location.hash);
+            history.replaceState({}, document.title, url.pathname + '?' + url.searchParams.toString() + url.hash);
+          }
+        } catch(_) {}
+        openModal('login');
+      });
     }
 
     async function doLogout(){
@@ -1584,6 +1600,22 @@ if(data.current_device_id !== my){
     if (oauthWeChat)   oauthWeChat.addEventListener('click', notReady);
 
 
+    async function waitForAuthReady(maxMs = 8000, stepMs = 250) {
+      const start = Date.now();
+      while ((Date.now() - start) < maxMs) {
+        try {
+          const { data: userData } = await supa.auth.getUser();
+          if (userData?.user) return userData.user;
+        } catch(_) {}
+        try {
+          const { data: sessData } = await supa.auth.getSession();
+          if (sessData?.session?.user) return sessData.session.user;
+        } catch(_) {}
+        await new Promise(r => setTimeout(r, stepMs));
+      }
+      return null;
+    }
+
     authSubmit.addEventListener('click', async ()=>{
       authErr.textContent = '';
       const email = authEmail.value.trim();
@@ -1594,21 +1626,40 @@ if(data.current_device_id !== my){
         return;
       }
 
+      authSubmit.disabled = true;
+      authSubmit.textContent = authMode === 'login' ? '登入中…' : '註冊中…';
+
       try {
         if (authMode === 'login') {
-          const { data, error } = await supa.auth.signInWithPassword({ email, password });
+          const { error } = await supa.auth.signInWithPassword({ email, password });
           if (error) throw error;
+
+          const user = await waitForAuthReady();
+          if (!user) {
+            throw new Error('登入成功，但尚未取得登入狀態，請再試一次。');
+          }
+
           await initAuthAndProfile();
           closeModal();
+          redirectToNext();
         } else {
-          const { data, error } = await supa.auth.signUp({ email, password });
+          const { error } = await supa.auth.signUp({ email, password });
           if (error) throw error;
           authErr.textContent = '註冊成功，請到信箱收信完成驗證，然後再登入。';
         }
       } catch (err) {
         console.error(err);
         authErr.textContent = err.message || '操作失敗，請稍後再試。';
+      } finally {
+        authSubmit.disabled = false;
+        authSubmit.textContent = authMode === 'login' ? '登入' : '註冊';
       }
+    });
+
+    [authEmail, authPass].forEach(el => {
+      el?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') authSubmit.click();
+      });
     });
 
     linkForgot.addEventListener('click', async ()=>{
@@ -1630,6 +1681,30 @@ if(data.current_device_id !== my){
         authErr.textContent = err.message || '寄送失敗，請稍後再試。';
       }
     });
+
+
+    supa.auth.onAuthStateChange(async (event, session) => {
+      try {
+        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+          await initAuthAndProfile();
+          redirectToNext();
+        } else if (event === 'SIGNED_OUT') {
+          await paintUser(null);
+          if (typeof renderGrid === 'function') renderGrid();
+        }
+      } catch (e) {
+        console.warn('onAuthStateChange handler failed:', e);
+      }
+    });
+
+    (function handleAuthHashEntry(){
+      const h = String(location.hash || '').toLowerCase();
+      if (h === '#login') {
+        setTimeout(()=>openModal('login'), 0);
+      } else if (h === '#signup') {
+        setTimeout(()=>openModal('signup'), 0);
+      }
+    })();
 
     async function initAuthAndProfile(){
       try {
