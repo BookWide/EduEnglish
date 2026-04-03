@@ -1032,6 +1032,7 @@ const fillInput = $("fillInput");
     return ts;
   }
 
+
   function computeUnlockedWeek(){
     const ts = ensureAnchorTs();
     const diff = Date.now() - ts;
@@ -1039,15 +1040,21 @@ const fillInput = $("fillInput");
     const passed = diff / weekMs; // 0.0, 1.0, 2.0...
     const base = Math.max(1, Math.min(MAX_WEEKS, Math.floor(passed + ADVANCE_WEEKS) + 1));
 
-    // --- Level cap (front) ---
+    // --- Level cap (front, synced with level-survey.html) ---
     // Priority:
-    // 1) BW_LEVEL_UNLOCKED_WEEK = number (e.g. 8)
-    // 2) BW_LEVEL_WEEK_MAP = JSON mapping (e.g. {"A":1,"B":6,"C":12})
-    // 3) BW_LEVEL_RESULT = "A"|"B"|"C" (default A=1,B=6,C=12)
+    // 0) BW_LEVEL_WEEK_CAP = number (written by level-survey.html)
+    // 1) BW_LEVEL_UNLOCKED_WEEK = number
+    // 2) BW_LEVEL_WEEK_MAP + BW_LEVEL_RESULT
+    // 3) BW_CEFR_LEVEL / BW_CEFR_RESULT
     let cap = null;
     try{
-      const n = Number(localStorage.getItem("BW_LEVEL_UNLOCKED_WEEK"));
-      if(Number.isFinite(n) && n > 0) cap = Math.floor(n);
+      const capDirect = Number(localStorage.getItem("BW_LEVEL_WEEK_CAP"));
+      if(Number.isFinite(capDirect) && capDirect > 0) cap = Math.floor(capDirect);
+
+      if(cap == null){
+        const n = Number(localStorage.getItem("BW_LEVEL_UNLOCKED_WEEK"));
+        if(Number.isFinite(n) && n > 0) cap = Math.floor(n);
+      }
 
       if(cap == null){
         let map = null;
@@ -1060,6 +1067,13 @@ const fillInput = $("fillInput");
         const def = {A:1, B:6, C:12};
         const wk = (map && map[r] != null) ? Number(map[r]) : def[r];
         if(Number.isFinite(wk) && wk > 0) cap = Math.floor(wk);
+      }
+
+      if(cap == null){
+        const cefr = (localStorage.getItem("BW_CEFR_LEVEL") || localStorage.getItem("BW_CEFR_RESULT") || "").trim().toUpperCase();
+        const cefrMap = {A0:1, A1:4, A2:8, B1:16, B2:32, C1:999, C2:999};
+        const wk = Number(cefrMap[cefr]);
+        if(Number.isFinite(wk) && wk > 0) cap = Math.min(MAX_WEEKS, Math.floor(wk));
       }
     }catch(_){}
 
@@ -1554,20 +1568,29 @@ try{showReport();}catch(e){}
     showToast("已收藏");
   }
 
+
   async function loadSceneById(id, title){
     activeSceneId = id;
-    activeSceneTitle = title || id;
+    const sceneMeta = ((indexData && Array.isArray(indexData.scenes)) ? indexData.scenes : []).find(s => String(s?.id||"") === String(id||"")) || null;
+    activeSceneTitle = title || sceneMeta?.title || id;
 
-    const url = new URL("/talk/" + encodeURIComponent(id) + ".json", location.origin).toString();
-    const fallback = [
-      url,
-      new URL("./" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /talk/
-      new URL("../talk/" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /checklist/
-    ];
+    const explicitFile = String(sceneMeta?.file || sceneMeta?.url || "").trim();
+    const fallback = [];
+    if(explicitFile){
+      fallback.push(new URL(explicitFile, location.origin).toString());
+      fallback.push(new URL(explicitFile, location.href).toString());
+    }
+    fallback.push(
+      new URL("/talk/" + encodeURIComponent(id) + ".json", location.origin).toString(),
+      new URL("./" + encodeURIComponent(id) + ".json", location.href).toString(),
+      new URL("../talk/" + encodeURIComponent(id) + ".json", location.href).toString()
+    );
+
     try{
       activeScene = await fetchJsonAny(fallback);
       currentSceneJson = activeScene;
-      if(fileTag) fileTag.textContent = (activeSceneId ? (activeSceneId + ".json") : "");
+      const fileBase = explicitFile ? (explicitFile.split("/").pop() || "") : (activeSceneId ? (activeSceneId + ".json") : "");
+      if(fileTag) fileTag.textContent = fileBase;
       // 任務文字：優先 title_zh/title_en，其次用 scene / id
       const tz = safeText(activeScene?.title_zh || activeScene?.titleZh || "");
       const te = safeText(activeScene?.title_en || activeScene?.titleEn || "");
@@ -1593,9 +1616,10 @@ try{showReport();}catch(e){}
     turnIdx = 0;
     fillInput.value = "";
     updateUI();
-    // autoplay first line
     speak(currentTurn().en);
   }
+
+
 
   function buildWeekMap(){
     byWeek = new Map();
@@ -1603,16 +1627,22 @@ try{showReport();}catch(e){}
     for(const s of scenes){
       const id = s.id || s.scene_id || s.key;
       if(!id) continue;
-      const wk = getWeekFromId(id);
+      const wk = Number(s?.week || 0) || getWeekFromId(id);
       if(!wk) continue;
       if(!byWeek.has(wk)) byWeek.set(wk, []);
-      byWeek.get(wk).push({id, title: s.title || id, level: s.level || s.lev || ""});
+      byWeek.get(wk).push({
+        id,
+        title: s.title || id,
+        level: s.level || s.lev || "",
+        week: wk,
+        file: s.file || s.url || ""
+      });
     }
-    // stable sort
     for(const [wk, arr] of byWeek){
       arr.sort((a,b)=>String(a.id).localeCompare(String(b.id)));
     }
   }
+
 
   function renderPicker(){
   modalBody.innerHTML = "";
@@ -1652,6 +1682,7 @@ try{showReport();}catch(e){}
         activeWeek = wk;
         try{ localStorage.setItem(LS_LAST_SCENE, it.id); }catch(_){}
         closeModal();
+        try{ localStorage.setItem(LS_WEEK, String(wk)); }catch(_e){}
         loadSceneById(it.id, it.title);
       });
 
@@ -1751,6 +1782,16 @@ async function init(){
     }
 
     buildWeekMap();
+
+    // 先把 activeWeek 對到「有內容且已解鎖」的週，避免落在空週造成一直載入
+    const availableWeeks = Array.from(byWeek.keys()).map(Number).filter(n => Number.isFinite(n)).sort((a,b)=>a-b);
+    if(availableWeeks.length){
+      const unlockedWeeks = availableWeeks.filter(w => w <= unlockedWeek);
+      if(!unlockedWeeks.includes(activeWeek)){
+        activeWeek = unlockedWeeks.length ? unlockedWeeks[unlockedWeeks.length - 1] : availableWeeks[0];
+      }
+    }
+
     renderPicker();
 
     // pick scene
@@ -1829,7 +1870,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
+          if(Number(mapped.week) <= Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
           try{ localStorage.setItem(LS_LAST_SCENE, mapped.id); }catch(_e){}
         }
@@ -1846,7 +1887,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
+          if(Number(mapped.week) <= Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
         }
       }else{
@@ -1854,9 +1895,12 @@ async function init(){
         firstTitle = forcedScene;
       }
     }else{
-      // default: pick first in current active week; else first in index
+      // default: pick first in current active week; else nearest available unlocked week; else first in index
       let pick = allScenes.find(s => Number(s?.week||0) === Number(activeWeek||0));
-      if(!pick) pick = allScenes[0] || null;
+      if(!pick){
+        const unlockedScenes = allScenes.filter(s => Number(s?.week||0) > 0 && Number(s?.week||0) <= Number(unlockedWeek||0));
+        pick = unlockedScenes[0] || allScenes[0] || null;
+      }
       if(pick){
         firstId = pick.id; firstTitle = pick.title || pick.id;
       }
@@ -2141,13 +2185,11 @@ function bwSaveTalkDailyScore(){
 
 <script id="bw-level-unlock-override">
 (function(){
-  // Read MAX unlocked week (cap) from localStorage.
-  // Priority:
-  // 1) BW_LEVEL_UNLOCKED_WEEK = number (e.g. 8)
-  // 2) BW_LEVEL_WEEK_MAP = JSON mapping (e.g. {"A":1,"B":6,"C":12})
-  // 3) BW_LEVEL_RESULT = "A" | "B" | "C" (defaults A=1, B=6, C=12)
   function getOverrideWeek(){
     try{
+      const capDirect = Number(localStorage.getItem("BW_LEVEL_WEEK_CAP"));
+      if(Number.isFinite(capDirect) && capDirect > 0) return Math.floor(capDirect);
+
       const n = Number(localStorage.getItem("BW_LEVEL_UNLOCKED_WEEK"));
       if(Number.isFinite(n) && n > 0) return Math.floor(n);
 
@@ -2161,6 +2203,11 @@ function bwSaveTalkDailyScore(){
       const def = {A:1, B:6, C:12};
       const week = (map && map[r] != null) ? Number(map[r]) : def[r];
       if(Number.isFinite(week) && week > 0) return Math.floor(week);
+
+      const cefr = (localStorage.getItem("BW_CEFR_LEVEL") || localStorage.getItem("BW_CEFR_RESULT") || "").trim().toUpperCase();
+      const cefrMap = {A0:1, A1:4, A2:8, B1:16, B2:32, C1:999, C2:999};
+      const cefrWeek = Number(cefrMap[cefr]);
+      if(Number.isFinite(cefrWeek) && cefrWeek > 0) return Math.floor(cefrWeek);
     }catch(_){}
     return null;
   }
