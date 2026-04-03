@@ -6,7 +6,7 @@
 <title>英文程度測驗｜BookWide</title>
 
 <!-- Supabase -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" onerror="window.__bwSupabaseLoadError=true"></script>
 
 <style>
 :root{
@@ -368,6 +368,7 @@ a{color:inherit}
   </div>
 
   <div class="toast" id="toast"></div>
+  <div class="toast" id="debugToast" style="display:none; bottom:66px; border-radius:16px; white-space:pre-wrap"></div>
 </div>
 
 <script>
@@ -381,9 +382,7 @@ a{color:inherit}
 const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-  auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
-});
+let supabase = null;
 
 const $ = (id)=>document.getElementById(id);
 const toastEl = $("toast");
@@ -392,6 +391,41 @@ function toast(msg){
   toastEl.style.display = "block";
   clearTimeout(toast._t);
   toast._t = setTimeout(()=>toastEl.style.display="none", 1700);
+}
+
+const debugToastEl = $("debugToast");
+function debugToast(msg, keepMs=4200){
+  if(!debugToastEl) return;
+  debugToastEl.textContent = msg;
+  debugToastEl.style.display = "block";
+  clearTimeout(debugToast._t);
+  debugToast._t = setTimeout(()=>debugToastEl.style.display="none", keepMs);
+}
+function logError(scope, err){
+  const msg = (err && (err.message || err.details || err.hint || err.code)) ? String(err.message || err.details || err.hint || err.code) : String(err || "Unknown error");
+  console.error("[level-survey]", scope, err);
+  return msg;
+}
+function safePath(path){
+  try{
+    return new URL(path, location.origin).toString();
+  }catch(_e){
+    return path;
+  }
+}
+async function ensureSupabaseReady(){
+  if(supabase) return supabase;
+  const started = Date.now();
+  if(window.__bwSupabaseLoadError) throw new Error("Supabase SDK CDN 載入失敗");\n  while(Date.now() - started < 5000){
+    if(window.supabase && typeof window.supabase.createClient === "function"){
+      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
+      });
+      return supabase;
+    }
+    await new Promise(r=>setTimeout(r, 120));
+  }
+  throw new Error("Supabase SDK 載入失敗");
 }
 
 function todayTW(){
@@ -627,6 +661,8 @@ function finish(){
 async function saveToProfile(level, score, cap){
   $("saveHint").textContent = "正在寫入你的帳號資料…";
   try{
+    await ensureSupabaseReady();
+
     const payload = {
       id: uid,
       email: (user && user.email) ? user.email : null,
@@ -635,41 +671,74 @@ async function saveToProfile(level, score, cap){
       level_updated_at: new Date().toISOString(),
     };
 
-    // 1) 優先用 upsert：新帳號可能還沒有 profiles row
-    let { error } = await supabase
+    const existsRes = await supabase
       .from("profiles")
-      .upsert(payload, { onConflict: "id" });
+      .select("id")
+      .eq("id", uid)
+      .maybeSingle();
 
-    // 2) 若 RLS 未開 insert 權限，upsert 可能失敗；退回 update
-    if(error){
+    if(existsRes.error){
+      const msg = logError("profiles.select", existsRes.error);
+      $("saveHint").textContent = "讀取帳號資料失敗：" + msg;
+      debugToast("讀取 profiles 失敗
+" + msg, 5200);
+      return false;
+    }
+
+    let writeError = null;
+
+    if(existsRes.data && existsRes.data.id){
       const r = await supabase
         .from("profiles")
         .update({
+          email: payload.email,
           cefr_level: level,
           cefr_score: score,
           level_updated_at: payload.level_updated_at,
         })
         .eq("id", uid);
-      error = r.error;
+      writeError = r.error || null;
+    }else{
+      const insertRes = await supabase
+        .from("profiles")
+        .insert(payload);
+      writeError = insertRes.error || null;
+
+      if(writeError){
+        const retry = await supabase
+          .from("profiles")
+          .upsert(payload, { onConflict: "id" });
+        writeError = retry.error || null;
+      }
     }
 
-    if(error){
-      $("saveHint").textContent = "寫入失敗（權限或網路問題），但本機已記住結果。";
-      return;
+    if(writeError){
+      const msg = logError("profiles.write", writeError);
+      $("saveHint").textContent = "寫入失敗：" + msg;
+      debugToast("profiles 寫入失敗
+" + msg, 6500);
+      return false;
     }
+
     $("saveHint").textContent = `已更新：${level}（Talk 將解鎖到 W${cap}）`;
-  }catch(_e){
-    $("saveHint").textContent = "寫入失敗（網路或權限問題），但本機已記住結果。";
+    return true;
+  }catch(err){
+    const msg = logError("saveToProfile.catch", err);
+    $("saveHint").textContent = "寫入失敗：" + msg;
+    debugToast("存檔例外
+" + msg, 6500);
+    return false;
   }
 }
 
 async function guard(){
   // require login
+  await ensureSupabaseReady();
   const { data: sess } = await supabase.auth.getSession();
   session = sess && sess.session;
   if(!session || !session.user){
     const red = encodeURIComponent(location.pathname + location.search + location.hash);
-    location.replace("/account/login.html?redirect=" + red);
+    location.replace(safePath("/account/login.html?redirect=" + red));
     return false;
   }
   user = session.user;
@@ -685,7 +754,12 @@ async function guard(){
     .eq("id", uid)
     .maybeSingle();
 
-  if(!error && prof) profile = prof;
+  if(error){
+    const msg = logError("guard.profiles", error);
+    debugToast("讀取既有等級失敗\n" + msg, 4800);
+  }else if(prof){
+    profile = prof;
+  }
 
   // show existing level (if any)
   if(profile && profile.cefr_level){
@@ -702,11 +776,11 @@ async function guard(){
 
 // ----- events -----
 $("btnBack").onclick = ()=>history.back();
-$("btnHome").onclick = ()=>location.replace("/");
-$("btnGoTalk").onclick = ()=>location.replace("/talk.html");
+$("btnHome").onclick = ()=>location.replace(safePath("/"));
+$("btnGoTalk").onclick = ()=>location.replace(safePath("/talk.html"));
 $("btnAgain").onclick = ()=>startQuiz(true);
 $("btnRetake").onclick = ()=>startQuiz(true);
-$("btnQuit").onclick = ()=>location.replace("/");
+$("btnQuit").onclick = ()=>location.replace(safePath("/"));
 $("btnSkip").onclick = ()=>{
   // skip counts as answered? no
   idx++;
@@ -715,6 +789,7 @@ $("btnSkip").onclick = ()=>{
 $("btnStart").onclick = ()=>startQuiz(false);
 
 function startQuiz(force){
+  if(!user || !uid){ toast("尚未登入或資料未載入"); return; }
   idx = 0;
   correct = 0;
   answered = 0;
@@ -733,7 +808,11 @@ function startQuiz(force){
     $("progressText").textContent = "準備開始";
     $("progressFill").style.width = "0%";
   }catch(e){
-    toast("載入失敗，請重新整理。");
+    const msg = logError("init", e);
+    $("progressText").textContent = "載入失敗";
+    $("progressFill").style.width = "0%";
+    toast("載入失敗");
+    debugToast("初始化失敗\n" + msg, 6500);
   }
 })();
 </script>
