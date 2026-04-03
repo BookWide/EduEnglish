@@ -1503,16 +1503,34 @@ try{showReport();}catch(e){}
     activeSceneId = id;
     activeSceneTitle = title || id;
 
+    const sceneMeta = (Array.isArray(indexData?.scenes) ? indexData.scenes : []).find(s => String(s?.id||"") === String(id||""));
+    const sceneFile = String(sceneMeta?.file || "").trim();
+
+    const fallback = [];
+    if(sceneFile){
+      try{ fallback.push(new URL(sceneFile, location.origin).toString()); }catch(_e){}
+      try{ fallback.push(new URL(sceneFile, location.href).toString()); }catch(_e){}
+    }
+
     const url = new URL("/talk/" + encodeURIComponent(id) + ".json", location.origin).toString();
-    const fallback = [
+    fallback.push(
       url,
       new URL("./" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /talk/
-      new URL("../talk/" + encodeURIComponent(id) + ".json", location.href).toString(), // if talk.html in /checklist/
-    ];
+      new URL("../talk/" + encodeURIComponent(id) + ".json", location.href).toString() // if talk.html in /checklist/
+    );
+
+    const uniqueFallback = [...new Set(fallback.filter(Boolean))];
     try{
-      activeScene = await fetchJsonAny(fallback);
+      activeScene = await fetchJsonAny(uniqueFallback);
       currentSceneJson = activeScene;
-      if(fileTag) fileTag.textContent = (activeSceneId ? (activeSceneId + ".json") : "");
+      if(fileTag){
+        if(sceneFile){
+          const tag = String(sceneFile).split("?")[0].split("#")[0].split("/").pop() || (activeSceneId + ".json");
+          fileTag.textContent = tag;
+        }else{
+          fileTag.textContent = (activeSceneId ? (activeSceneId + ".json") : "");
+        }
+      }
       // 任務文字：優先 title_zh/title_en，其次用 scene / id
       const tz = safeText(activeScene?.title_zh || activeScene?.titleZh || "");
       const te = safeText(activeScene?.title_en || activeScene?.titleEn || "");
@@ -1548,10 +1566,15 @@ try{showReport();}catch(e){}
     for(const s of scenes){
       const id = s.id || s.scene_id || s.key;
       if(!id) continue;
-      const wk = getWeekFromId(id);
+      const wk = Number(s?.week || 0) || getWeekFromId(id);
       if(!wk) continue;
       if(!byWeek.has(wk)) byWeek.set(wk, []);
-      byWeek.get(wk).push({id, title: s.title || id, level: s.level || s.lev || ""});
+      byWeek.get(wk).push({
+        id,
+        title: s.title || id,
+        level: s.level || s.lev || "",
+        file: s.file || s.url || ""
+      });
     }
     // stable sort
     for(const [wk, arr] of byWeek){
@@ -1565,7 +1588,7 @@ try{showReport();}catch(e){}
     const list = byWeek.get(wk) || [];
     if(!list.length) continue;
 
-    const locked = wk > unlockedWeek;
+    const locked = false;
 
     const g = document.createElement("div");
     g.className = "group";
@@ -1676,10 +1699,9 @@ async function init(){
   const urlT = getTeacherFromURL();
   setTeacher(urlT || savedT || (selTeacher ? selTeacher.value : "teacher.mp4"));
     getOverrides();
-    unlockedWeek = 108; // talk_A 測試：全解鎖到 W108
+    unlockedWeek = 108; // talk_A 後台：全開到 W108
     const savedWeek = parseInt(localStorage.getItem(LS_WEEK)||"0",10) || 0;
-    // admin=1 測試：避免把 activeWeek 設成 W999（index 沒有會讓清單空白），預設從 W1 開始
-    activeWeek = Math.min(Math.max(savedWeek || (isAdmin ? 1 : unlockedWeek), 1), unlockedWeek);
+    activeWeek = Math.min(Math.max(savedWeek || 1, 1), unlockedWeek);
 
     // 模式：對話(dialogue) / 跟讀(shadow)
     try{ talkMode = localStorage.getItem("talk_mode") || "dialogue"; }catch(_e){ talkMode = "dialogue"; }
@@ -1696,6 +1718,12 @@ async function init(){
 
     buildWeekMap();
     renderPicker();
+
+    const availableWeeks = Array.from(byWeek.keys()).sort((a,b)=>a-b);
+    if(!byWeek.has(activeWeek)){
+      activeWeek = availableWeeks[0] || 1;
+      try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
+    }
 
     // pick scene
     const params = new URLSearchParams(location.search);
@@ -1773,7 +1801,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
+          activeWeek = Number(mapped.week) || activeWeek; // 後台全開：直接切到對應週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
           try{ localStorage.setItem(LS_LAST_SCENE, mapped.id); }catch(_e){}
         }
@@ -1790,7 +1818,7 @@ async function init(){
         firstTitle = mapped.title || mapped.id;
         // force week to match the resolved scene (so top bar shows correct W#)
         if(mapped.week){
-          if(Number(mapped.week)==Number(unlockedWeek)) activeWeek = Number(mapped.week)||activeWeek;// 只允許當週
+          activeWeek = Number(mapped.week) || activeWeek; // 後台全開：直接切到對應週
           try{ localStorage.setItem("talk_active_week", String(activeWeek)); }catch(_e){}
         }
       }else{
