@@ -362,15 +362,67 @@ function renderAll(){
   const selected=state.schedule.find(x=>x.day===state.selectedDay)||state.schedule[0];
   renderTimeline(state.workRoadmap, state.relaxRoadmap);renderCurve(state.schedule,state.progress,state.selectedDay);renderCalendar(state.schedule,state.progress,state.selectedDay);renderLessonDay(selected,state.progress)
 }
+function filterAssetsByProfile(assets, profile){
+  const roleMatched = assets.filter(x => (x.role_codes || []).includes(profile.role_code));
+  const domainMatched = assets.filter(x => x.domain_code === profile.domain_code);
+  const levelMatched = assets.filter(x => normalizeLevel(x.level_code) === profile.level_code);
+  const sceneMatched = assets.filter(x => (x.scene_tags || []).some(tag => (profile.scene_priority || []).includes(tag)));
+
+  const strict = assets.filter(x =>
+    x.domain_code === profile.domain_code &&
+    (x.role_codes || []).includes(profile.role_code)
+  );
+
+  const semi = assets.filter(x =>
+    x.domain_code === profile.domain_code ||
+    (x.role_codes || []).includes(profile.role_code)
+  );
+
+  const merged = [];
+  const seen = new Set();
+  [strict, semi, roleMatched, domainMatched, levelMatched, sceneMatched].forEach(list => {
+    list.forEach(item => {
+      if(!item || !item.slug || seen.has(item.slug)) return;
+      seen.add(item.slug);
+      merged.push(item);
+    });
+  });
+
+  return {
+    strict,
+    semi,
+    merged,
+    counts: {
+      strict: strict.length,
+      semi: semi.length,
+      role: roleMatched.length,
+      domain: domainMatched.length
+    }
+  };
+}
+
+function renderProfileExplain(profile, counts){
+  const sub = document.querySelector('.hero .sub');
+  if(!sub) return;
+  sub.textContent = `目前依 PROFILE 排課：${profile.domain_code} / ${profile.role_code} / ${profile.level_code}。主線先抓 role + domain 符合教材，不夠才往外補。strict=${counts.strict}，semi=${counts.semi}，role=${counts.role}，domain=${counts.domain}`;
+}
+
 async function bootstrap(){
   try{
     state.profile = await loadProfile();
     updateProfileUI(state.profile);
     const assets = await loadAssets();
     state.allAssets = assets;
-    state.workRoadmap = buildRoleRoadmap(assets.filter(x=>x.domain_code), state.profile);
-    state.relaxRoadmap = buildRelaxRoadmap(assets, state.profile);
-    state.schedule = buildSchedule(state.workRoadmap, state.relaxRoadmap, assets, 14);
+
+    const filtered = filterAssetsByProfile(assets, state.profile);
+    renderProfileExplain(state.profile, filtered.counts);
+
+    const workSource = filtered.merged.length ? filtered.merged : assets;
+    const relaxSource = assets;
+
+    state.workRoadmap = buildRoleRoadmap(workSource.filter(x=>x.domain_code), state.profile);
+    state.relaxRoadmap = buildRelaxRoadmap(relaxSource, state.profile);
+    state.schedule = buildSchedule(state.workRoadmap, state.relaxRoadmap, workSource, 14);
     if(!state.schedule.length) state.schedule = buildSchedule([], [], assets, 14);
     renderAll();
   }catch(err){
