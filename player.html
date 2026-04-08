@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器（4 分頁最終版）</title>
+<title>BookWide 播放器（5 分頁 Talk 版）</title>
 
 <style>
 :root{
@@ -255,6 +255,69 @@ tr.speaking{
   min-height:54px;
 }
 
+
+
+/* Talk */
+.talk-head{
+  padding:10px 12px 8px;
+  border-bottom:1px solid #162a48;
+}
+.talk-actions{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+  margin-top:8px;
+}
+.talk-list{
+  padding:0 0 12px;
+}
+.talk-item{
+  display:grid;
+  grid-template-columns:72px 84px minmax(0,1fr) auto;
+  gap:10px;
+  align-items:start;
+  padding:10px 12px;
+  border-bottom:1px solid #162a48;
+  background:#0f1f34;
+}
+.talk-item:nth-child(2n){background:#0d1a2b;}
+.talk-item:hover{background:#0f2a4e;}
+.talk-item.active{box-shadow:inset 3px 0 0 0 rgba(60,124,255,.7);background:rgba(60,124,255,.10);}
+.talk-time{
+  color:rgba(255,255,255,.75);
+  font-family:ui-monospace,Consolas,monospace;
+  white-space:nowrap;
+}
+.talk-role{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:4px 8px;
+  border-radius:999px;
+  background:#13233f;
+  border:1px solid #24446f;
+  font-size:12px;
+  font-weight:700;
+  white-space:nowrap;
+}
+.talk-role.role-student{background:#14335f;border-color:#2c5aa3;}
+.talk-role.role-teacher{background:#163524;border-color:#2d8b57;}
+.talk-role.role-ai{background:#33204d;border-color:#7c4dff;}
+.talk-lines{min-width:0;}
+.talk-en{font-size:16px;line-height:1.6;word-break:break-word;}
+.talk-zh,.talk-ja{margin-top:4px;color:#d7e2f4;opacity:.96;line-height:1.55;}
+.talk-side{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  justify-content:flex-end;
+}
+@media (max-width:860px){
+  .talk-item{grid-template-columns:1fr;}
+  .talk-side{justify-content:flex-start;}
+}
+
 /* 手機：左右兩頁 */
 @media (max-width:860px) and (orientation:portrait){
   html,body{
@@ -483,6 +546,22 @@ tr.speaking{
             <input id="speedRange" type="range" min="0.5" max="2" step="0.05" value="1" />
             <span id="speedVal">1.00x</span>
           </div>
+
+          <!-- Talk 對話 -->
+          <div class="pane" id="pane-talk" style="display:none">
+            <div class="talk-head">
+              <div class="muted" id="talkStatus">（Talk 對話載入中…）</div>
+              <div class="talk-actions">
+                <button class="btn sm" id="btnTalkSpeakCurrent">🔊 朗讀目前句</button>
+                <button class="btn sm" id="btnTalkSpeakZh">中</button>
+                <button class="btn sm" id="btnTalkSpeakJa">日</button>
+                <button class="btn sm" id="btnTalkPrev">◀ 上一句</button>
+                <button class="btn sm" id="btnTalkNext">下一句 ▶</button>
+                <span class="muted" id="talkProgress">第 0/0 句</span>
+              </div>
+            </div>
+            <div id="talkList" class="talk-list"></div>
+          </div>
         </div>
       </section>
     </section>
@@ -496,6 +575,7 @@ tr.speaking{
             <div class="tab" data-tab="quiz">測驗</div>
             <div class="tab" data-tab="vocab">單字</div>
             <div class="tab" data-tab="ai">AI互動</div>
+            <div class="tab" data-tab="talk">Talk</div>
           </div>
 
           <!-- 字幕 -->
@@ -632,7 +712,7 @@ const chkFollow=$('#chkFollow');
 const speedRange=$('#speedRange'),speedVal=$('#speedVal');
 
 const paneSub=$('#pane-sub'),paneQuiz=$('#pane-quiz'),
-      paneVocab=$('#pane-vocab'),paneAI=$('#pane-ai');
+      paneVocab=$('#pane-vocab'),paneAI=$('#pane-ai'),paneTalk=$('#pane-talk');
 
 let cues=[],offset=0,loopSentence=false;// PRO 課程：slug 對應 groupId / Level 的快取（未來守門用）
 const proSlugToGroupId = {};
@@ -644,6 +724,7 @@ function levelOfGroupId(groupId){
 }
 // TODO: 未來若要依訂閱等級守門，可在這裡加入 userMaxLevel 判斷。
 let quizData=[],currentQuizCat='all';
+let talkData=[],talkCurrentIndex=0;
 
 function setOffset(v){
   offset=Number(v)||0;
@@ -1362,6 +1443,131 @@ async function loadAI(){
 }
 
 
+
+
+/* ==== Talk（dialogue.json） ==== */
+async function loadTalk(){
+  const status=$('#talkStatus');
+  const listEl=$('#talkList');
+  const progressEl=$('#talkProgress');
+  const candidates=[
+    `${BASE}/data/${cat}/${slug}/${slug}.dialogue.json?v=${vnow}`,
+    `${BASE}/data/${cat}/${slug}/dialogue-${slug}.json?v=${vnow}`,
+    `${BASE}/data/${cat}/${slug}/talk-${slug}.json?v=${vnow}`
+  ];
+  let data=null, usedUrl='';
+  for(const url of candidates){
+    try{
+      const r=await fetch(url,{cache:'no-store'});
+      if(!r.ok) continue;
+      data=await r.json();
+      usedUrl=url;
+      break;
+    }catch(_e){}
+  }
+  if(!data){
+    if(status) status.textContent='❌ Talk 對話讀取失敗（未找到 dialogue.json）';
+    if(listEl) listEl.innerHTML='';
+    if(progressEl) progressEl.textContent='第 0/0 句';
+    talkData=[];
+    talkCurrentIndex=0;
+    return;
+  }
+
+  const arr = Array.isArray(data) ? data : (data.dialogue || data.items || []);
+  talkData = arr.map((row, idx) => ({
+    role: String(row.role || row.speaker || row.character || (idx % 2 === 0 ? 'student' : 'teacher')).trim().toLowerCase(),
+    text: String(row.text || row.line_en || row.en || '').trim(),
+    zh: String(row.zh || row.line_zh || row.cn || '').trim(),
+    ja: String(row.ja || row.line_ja || row.jp || '').trim(),
+    time: String(row.time || '').trim(),
+    _sec: toSec(row.time || row.t0 || 0)
+  })).filter(x=>x.text || x.zh || x.ja);
+
+  talkCurrentIndex=0;
+  if(status) status.textContent=`已載入 Talk：${usedUrl}`;
+  renderTalk();
+
+  $('#btnTalkPrev')?.addEventListener('click',()=>{
+    if(!talkData.length) return;
+    talkCurrentIndex=(talkCurrentIndex-1+talkData.length)%talkData.length;
+    renderTalk(true);
+  });
+  $('#btnTalkNext')?.addEventListener('click',()=>{
+    if(!talkData.length) return;
+    talkCurrentIndex=(talkCurrentIndex+1)%talkData.length;
+    renderTalk(true);
+  });
+  $('#btnTalkSpeakCurrent')?.addEventListener('click',()=>speakTalkLine('en'));
+  $('#btnTalkSpeakZh')?.addEventListener('click',()=>speakTalkLine('zh'));
+  $('#btnTalkSpeakJa')?.addEventListener('click',()=>speakTalkLine('ja'));
+
+  function onTalkListClick(e){
+    const btn=e.target.closest('[data-act]');
+    if(!btn) return;
+    const idx=Number(btn.dataset.idx || 0);
+    if(Number.isNaN(idx) || !talkData[idx]) return;
+    talkCurrentIndex=idx;
+    const item=talkData[idx];
+    const act=btn.dataset.act;
+    if(act==='jump'){
+      setCurrentPlaybackTime(Math.max(0,(Number(item._sec)||0)-offset));
+      playActive();
+    }else if(act==='speak-en'){
+      if(item.text) speakText(item.text,'en-US');
+    }else if(act==='speak-zh'){
+      if(item.zh) speakText(item.zh,'zh-TW');
+    }else if(act==='speak-ja'){
+      if(item.ja) speakText(item.ja,'ja-JP');
+    }
+    renderTalk(true);
+  }
+  listEl.onclick = onTalkListClick;
+}
+
+function renderTalk(scrollIntoView=false){
+  const listEl=$('#talkList');
+  const progressEl=$('#talkProgress');
+  if(!listEl) return;
+  if(!talkData.length){
+    listEl.innerHTML='';
+    if(progressEl) progressEl.textContent='第 0/0 句';
+    return;
+  }
+  listEl.innerHTML=talkData.map((item,idx)=>{
+    const roleClass = `role-${esc(item.role || 'student')}`;
+    const roleLabel = item.role || 'student';
+    return `<div class="talk-item ${idx===talkCurrentIndex?'active':''}" data-talk-row="${idx}">
+      <div class="talk-time">${esc(item.time || fmt(item._sec || 0))}</div>
+      <div><span class="talk-role ${roleClass}">${esc(roleLabel)}</span></div>
+      <div class="talk-lines">
+        <div class="talk-en">${esc(item.text || '')}</div>
+        ${item.zh ? `<div class="talk-zh">${esc(item.zh)}</div>` : ''}
+        ${item.ja ? `<div class="talk-ja">${esc(item.ja)}</div>` : ''}
+      </div>
+      <div class="talk-side">
+        <button class="btn sm" data-act="jump" data-idx="${idx}">跳句</button>
+        <button class="btn sm" data-act="speak-en" data-idx="${idx}">英</button>
+        <button class="btn sm" data-act="speak-zh" data-idx="${idx}">中</button>
+        <button class="btn sm" data-act="speak-ja" data-idx="${idx}">日</button>
+      </div>
+    </div>`;
+  }).join('');
+  if(progressEl) progressEl.textContent=`第 ${talkCurrentIndex+1}/${talkData.length} 句`;
+  if(scrollIntoView){
+    const active = listEl.querySelector(`[data-talk-row="${talkCurrentIndex}"]`);
+    active?.scrollIntoView({block:'nearest', behavior:'smooth'});
+  }
+}
+
+function speakTalkLine(lang='en'){
+  if(!talkData.length) return;
+  const item=talkData[talkCurrentIndex] || {};
+  if(lang==='zh' && item.zh) return speakText(item.zh,'zh-TW');
+  if(lang==='ja' && item.ja) return speakText(item.ja,'ja-JP');
+  if(item.text) return speakText(item.text,'en-US');
+}
+
 /* ==== AI 語音作答（瀏覽器語音辨識） ==== */
 (function(){
   const btnRec = $('#btnRec');
@@ -1414,12 +1620,13 @@ async function loadAI(){
     }
   });
 })();
-/* ==== 四個 tab 切換 + 手機右頁 focus ==== */
+/* ==== 五個 tab 切換 + 手機右頁 focus ==== */
 function showTab(name){
   paneSub.style.display=(name==='sub')?'':'none';
   paneQuiz.style.display=(name==='quiz')?'':'none';
   paneVocab.style.display=(name==='vocab')?'':'none';
   paneAI.style.display =(name==='ai')?'':'none';
+  if(paneTalk) paneTalk.style.display=(name==='talk')?'':'none';
   $$('.tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
 
   if(name!=='sub' && window.matchMedia('(max-width:860px) and (orientation:portrait)').matches){
@@ -1840,6 +2047,7 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     await loadQuiz();
     await loadVocab();
     await loadAI();
+    await loadTalk();
 
     showTab('sub');
   } catch (e) {
