@@ -292,6 +292,8 @@
     let currentUser = null;
     let HAS_ACTIVE_SUBSCRIPTION = false;
     let DOMAIN_LOCKED = false;
+    const ADMIN_EMAILS = ['pmktools@gmail.com'];
+    const FROM_SUBSCRIPTION = new URLSearchParams(location.search).get('from') === 'subscription';
 
     function showMsg(type, text) {
       const cls = type === 'ok' ? 'ok' : type === 'err' ? 'err' : type === 'warn' ? 'warn' : '';
@@ -410,10 +412,17 @@
       return null;
     }
 
+    function isAdminUser(user) {
+      if (!user) return false;
+      const email = String(user.email || '').toLowerCase().trim();
+      return ADMIN_EMAILS.includes(email);
+    }
+
     function applyProfileLock(locked) {
       DOMAIN_LOCKED = !!locked;
-      $('#domain_code').disabled = DOMAIN_LOCKED || !HAS_ACTIVE_SUBSCRIPTION;
-      $('#role_code').disabled = DOMAIN_LOCKED || !HAS_ACTIVE_SUBSCRIPTION;
+      const admin = isAdminUser(currentUser);
+      $('#domain_code').disabled = admin ? false : (DOMAIN_LOCKED || !HAS_ACTIVE_SUBSCRIPTION);
+      $('#role_code').disabled = admin ? false : (DOMAIN_LOCKED || !HAS_ACTIVE_SUBSCRIPTION);
     }
 
     function isOrderActive(orderRow) {
@@ -461,7 +470,7 @@
         HAS_ACTIVE_SUBSCRIPTION = !!activeOrder;
         applyProfileLock(false);
 
-        if (!HAS_ACTIVE_SUBSCRIPTION) {
+        if (!HAS_ACTIVE_SUBSCRIPTION && !isAdminUser(currentUser)) {
           selectedScenes = [];
           renderSceneChips();
           setGuide('🔒 尚未啟用有效訂閱：請先完成訂閱，之後回到這頁選擇你的職業主題與角色身份。');
@@ -469,9 +478,13 @@
           setDebug([
             `user.id = ${currentUser.id}`,
             `email = ${currentUser.email || '(空)'}`,
-            `subscription_active = false`
+            `subscription_active = false`,
+            `admin_bypass = false`
           ].join('\n'));
           return;
+        } else if (!HAS_ACTIVE_SUBSCRIPTION && isAdminUser(currentUser)) {
+          HAS_ACTIVE_SUBSCRIPTION = true;
+          setGuide('🛠 管理員模式：已啟用最高權限，可直接調整職業主題與角色身份，不受訂閱鎖定限制。');
         }
 
         const { data, error } = await supabase
@@ -491,7 +504,7 @@
 
         const domainCode = data?.domain_code ?? '';
         const roleCode = data?.role_code ?? '';
-        const isLocked = !!(domainCode && roleCode);
+        const isLocked = !!(domainCode && roleCode) && !FROM_SUBSCRIPTION && !isAdminUser(currentUser);
 
         $('#domain_code').value = domainCode;
         ensureRoleOptions(domainCode, roleCode);
@@ -508,6 +521,8 @@
           `user.id = ${currentUser.id}`,
           `email = ${currentUser.email || '(空)'}`,
           `subscription_active = ${HAS_ACTIVE_SUBSCRIPTION}`,
+          `from_subscription = ${FROM_SUBSCRIPTION}`,
+          `admin_bypass = ${isAdminUser(currentUser)}`,
           `domain_code = ${domainCode || '(空)'}`,
           `role_code = ${roleCode || '(空)'}`,
           `role_valid = ${isValidRole(domainCode, roleCode)}`,
@@ -516,7 +531,14 @@
           `domain_locked = ${isLocked}`
         ].join('\n'));
 
-        if (isLocked) {
+        if (isAdminUser(currentUser)) {
+          setGuide('🛠 管理員模式：你具有最高權限，可直接修改工作類型與角色身份，不會被鎖定。');
+          showMsg('ok', '✅ 管理員模式：可自由調整職業主題設定');
+        } else if (FROM_SUBSCRIPTION) {
+          setGuide('👉 你是從訂閱流程進來的：請重新確認「工作類型」與「角色身份」，儲存後才會正式鎖定。');
+          pulseField($('#domain_code'));
+          showMsg('ok', '✅ 請完成職業主題設定');
+        } else if (isLocked) {
           setGuide('✅ 已完成職業主題設定：系統已鎖定你的工作類型與角色身份。若需更換，請重新訂閱後再設定。');
           showMsg('warn', '🔒 已完成職業主題設定，如需更換請重新訂閱');
         } else {
@@ -568,14 +590,14 @@
           return;
         }
 
-        if (!HAS_ACTIVE_SUBSCRIPTION) {
+        if (!HAS_ACTIVE_SUBSCRIPTION && !isAdminUser(currentUser)) {
           setGuide('🔒 目前尚未啟用有效訂閱，請先完成訂閱後再進行職業主題設定。');
           showMsg('warn', '請先完成有效訂閱，再設定職業主題');
           setDebug('saveProfile blocked: no active subscription');
           return;
         }
 
-        if (DOMAIN_LOCKED) {
+        if (DOMAIN_LOCKED && !isAdminUser(currentUser)) {
           setGuide('🔒 此帳號已完成職業主題設定，目前無法修改。如需更換，請重新訂閱後再設定。');
           showMsg('warn', '此帳號已完成職業主題設定，無法修改');
           setDebug('saveProfile blocked: domain locked');
@@ -636,7 +658,7 @@
         ].join('\n'));
 
         setGuide('✅ 職業主題設定完成，系統正在為你開啟學習控制台...');
-        showMsg('ok', '✅ 已保存，跳轉學習控制台...');
+        showMsg('ok', isAdminUser(currentUser) ? '✅ 管理員設定已保存，跳轉學習控制台...' : '✅ 已保存，跳轉學習控制台...');
 
         setTimeout(() => {
           location.href = DASHBOARD_URL + '?profile_updated=1';
