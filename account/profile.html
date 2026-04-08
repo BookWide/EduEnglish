@@ -101,6 +101,19 @@
       <section class="section">
         <h2 class="section-title">學習設定</h2>
         <div class="section-desc">先選工作類型，再選角色身份。這版已補上角色初始化、舊資料回填、防呆驗證，並等待登入狀態恢復後再讀取。</div>
+        <div style="font-size:13px;color:#64748b;margin:-4px 0 8px;">
+          訂閱後 → 完成英語程度評測 → 設定職業主題 → 開始學習
+        </div>
+        <div id="guideBox" style="
+          margin:12px 0 16px;
+          padding:12px 14px;
+          border-radius:12px;
+          background:#f8fafc;
+          border:1px solid #e5e7eb;
+          color:#334155;
+          font-size:14px;
+          line-height:1.65;
+        "></div>
 
         <div class="row">
           <div>
@@ -277,11 +290,29 @@
     const debugBox = $('#debugBox');
     let selectedScenes = [];
     let currentUser = null;
+    let HAS_ACTIVE_SUBSCRIPTION = false;
     let DOMAIN_LOCKED = false;
 
     function showMsg(type, text) {
       const cls = type === 'ok' ? 'ok' : type === 'err' ? 'err' : type === 'warn' ? 'warn' : '';
       msg.innerHTML = cls ? `<span class="${cls}">${text}</span>` : text;
+    }
+
+    function setGuide(text) {
+      const box = $('#guideBox');
+      if (box) box.innerHTML = text;
+    }
+
+    function pulseField(el) {
+      if (!el) return;
+      const oldOutline = el.style.outline;
+      const oldBorder = el.style.borderColor;
+      el.style.outline = '3px solid rgba(37,99,235,.18)';
+      el.style.borderColor = '#2563eb';
+      setTimeout(() => {
+        el.style.outline = oldOutline;
+        el.style.borderColor = oldBorder;
+      }, 1600);
     }
 
     function setDebug(info) {
@@ -379,10 +410,31 @@
       return null;
     }
 
-    function applyDomainLock(locked) {
+    function applyProfileLock(locked) {
       DOMAIN_LOCKED = !!locked;
-      $('#domain_code').disabled = DOMAIN_LOCKED;
-      $('#role_code').disabled = DOMAIN_LOCKED;
+      $('#domain_code').disabled = DOMAIN_LOCKED || !HAS_ACTIVE_SUBSCRIPTION;
+      $('#role_code').disabled = DOMAIN_LOCKED || !HAS_ACTIVE_SUBSCRIPTION;
+    }
+
+    function isOrderActive(orderRow) {
+      if (!orderRow) return false;
+      const status = String(orderRow.status || '').toLowerCase();
+      if (status !== 'paid') return false;
+      if (!orderRow.expire_at) return true;
+      const exp = new Date(orderRow.expire_at);
+      return !isNaN(exp.getTime()) && exp > new Date();
+    }
+
+    async function fetchLatestActiveSubscription(userId) {
+      const { data, error } = await supabase
+        .from('orders')
+        .select('id,status,paid_at,expire_at,buyer_id,user_id')
+        .or(`buyer_id.eq.${userId},user_id.eq.${userId}`)
+        .order('paid_at', { ascending: false, nullsFirst: false });
+
+      if (error) throw error;
+      const rows = Array.isArray(data) ? data : [];
+      return rows.find(isOrderActive) || null;
     }
 
     async function loadProfile() {
@@ -392,9 +444,11 @@
 
         if (!currentUser) {
           $('#userEmail').textContent = '';
-          applyDomainLock(false);
+          HAS_ACTIVE_SUBSCRIPTION = false;
+          applyProfileLock(false);
           ensureRoleOptions('', '');
           renderSceneChips();
+          setGuide('🔒 尚未登入：請先登入帳號，再進行訂閱與職業主題設定。');
           showMsg('warn', '未登入或登入狀態失效，請先回首頁重新登入');
           setDebug('loadProfile: no user from auth.getUser()/getSession()');
           return;
@@ -402,6 +456,23 @@
 
         $('#userEmail').textContent = currentUser.email || '';
         ensureRoleOptions('', '');
+
+        const activeOrder = await fetchLatestActiveSubscription(currentUser.id);
+        HAS_ACTIVE_SUBSCRIPTION = !!activeOrder;
+        applyProfileLock(false);
+
+        if (!HAS_ACTIVE_SUBSCRIPTION) {
+          selectedScenes = [];
+          renderSceneChips();
+          setGuide('🔒 尚未啟用有效訂閱：請先完成訂閱，之後回到這頁選擇你的職業主題與角色身份。');
+          showMsg('warn', '請先完成有效訂閱，再回來選擇職業主題與角色身份');
+          setDebug([
+            `user.id = ${currentUser.id}`,
+            `email = ${currentUser.email || '(空)'}`,
+            `subscription_active = false`
+          ].join('\n'));
+          return;
+        }
 
         const { data, error } = await supabase
           .from('profiles')
@@ -420,14 +491,11 @@
 
         const domainCode = data?.domain_code ?? '';
         const roleCode = data?.role_code ?? '';
+        const isLocked = !!(domainCode && roleCode);
 
         $('#domain_code').value = domainCode;
         ensureRoleOptions(domainCode, roleCode);
-        applyDomainLock(!!domainCode);
-
-        if (domainCode) {
-          showMsg('warn', '🔒 已選定職業主題與角色身份，如需更換請重新訂閱');
-        }
+        applyProfileLock(isLocked);
         $('#level_code').value = data?.level_code ?? 'beginner';
         $('#daily_minutes').value = String(data?.daily_minutes ?? 10);
         $('#talk_enabled').value = String(data?.talk_enabled ?? true);
@@ -439,14 +507,23 @@
         setDebug([
           `user.id = ${currentUser.id}`,
           `email = ${currentUser.email || '(空)'}`,
+          `subscription_active = ${HAS_ACTIVE_SUBSCRIPTION}`,
           `domain_code = ${domainCode || '(空)'}`,
           `role_code = ${roleCode || '(空)'}`,
           `role_valid = ${isValidRole(domainCode, roleCode)}`,
           `domain_label = ${DOMAIN_LABEL[domainCode] || '(無)'}`,
-          `role_label = ${getRoleLabel(domainCode, roleCode) || '(無或舊資料)'}`
+          `role_label = ${getRoleLabel(domainCode, roleCode) || '(無或舊資料)'}`,
+          `domain_locked = ${isLocked}`
         ].join('\n'));
 
-        showMsg('ok', '✅ 就緒');
+        if (isLocked) {
+          setGuide('✅ 已完成職業主題設定：系統已鎖定你的工作類型與角色身份。若需更換，請重新訂閱後再設定。');
+          showMsg('warn', '🔒 已完成職業主題設定，如需更換請重新訂閱');
+        } else {
+          setGuide('👉 請先選擇「工作類型」，再選擇「角色身份」，完成後儲存即可啟用你的學習控制台。此設定完成後將會鎖定。');
+          pulseField($('#domain_code'));
+          showMsg('ok', '✅ 可進行職業主題設定');
+        }
       } catch (e) {
         console.error(e);
         showMsg('err', `讀取失敗：${e.message || e}`);
@@ -491,8 +568,16 @@
           return;
         }
 
+        if (!HAS_ACTIVE_SUBSCRIPTION) {
+          setGuide('🔒 目前尚未啟用有效訂閱，請先完成訂閱後再進行職業主題設定。');
+          showMsg('warn', '請先完成有效訂閱，再設定職業主題');
+          setDebug('saveProfile blocked: no active subscription');
+          return;
+        }
+
         if (DOMAIN_LOCKED) {
-          showMsg('warn', '此帳號已鎖定職業主題與角色身份，無法修改');
+          setGuide('🔒 此帳號已完成職業主題設定，目前無法修改。如需更換，請重新訂閱後再設定。');
+          showMsg('warn', '此帳號已完成職業主題設定，無法修改');
           setDebug('saveProfile blocked: domain locked');
           return;
         }
@@ -539,7 +624,7 @@
         if (saveError) throw saveError;
 
         $('#onboarding_done_text').value = '已啟用學習控制台';
-        applyDomainLock(true);
+        applyProfileLock(true);
 
         setDebug([
           `save success`,
@@ -550,6 +635,7 @@
           `scene_priority = ${JSON.stringify(updateData.scene_priority)}`
         ].join('\n'));
 
+        setGuide('✅ 職業主題設定完成，系統正在為你開啟學習控制台...');
         showMsg('ok', '✅ 已保存，跳轉學習控制台...');
 
         setTimeout(() => {
@@ -565,6 +651,7 @@
     }
 
     $('#domain_code').addEventListener('change', function() {
+      if (DOMAIN_LOCKED || !HAS_ACTIVE_SUBSCRIPTION) return;
       ensureRoleOptions(this.value, '');
     });
 
