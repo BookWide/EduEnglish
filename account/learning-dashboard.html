@@ -68,7 +68,7 @@
     <div class="hero-grid">
       <div>
         <h1 style="margin:0 0 8px;font-size:30px">行事曆 + 完成紀錄 + 解鎖系統</h1>
-        <div class="sub">工作日走角色路線；週末走舊影片休閒路線。資料來源統一改為 Supabase assets。</div>
+        <div class="sub">工作日走角色路線；週末走舊影片休閒路線。此頁已與 profile 同步，未完成訂閱或未設定職業主題時會自動導回正確流程。</div>
         <div class="chips">
           <span class="chip">工作：醫療照護</span>
           <span class="chip">角色：護士</span>
@@ -132,6 +132,51 @@
 const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const ADMIN_EMAILS = ['pmktools@gmail.com'];
+
+function isAdminEmail(email){
+  return ADMIN_EMAILS.includes(String(email || '').toLowerCase().trim());
+}
+
+async function checkDashboardAccess(){
+  const { data:{ user } } = await supabaseClient.auth.getUser();
+
+  if(!user){
+    location.href = '../index.html';
+    return { blocked:true };
+  }
+
+  if(isAdminEmail(user.email)){
+    return { blocked:false, user, admin:true };
+  }
+
+  const { data: orders } = await supabaseClient
+    .from('orders')
+    .select('status,expire_at,paid_at,buyer_id,user_id')
+    .or(`buyer_id.eq.${user.id},user_id.eq.${user.id}`)
+    .order('paid_at', { ascending:false, nullsFirst:false });
+
+  const list = Array.isArray(orders) ? orders : [];
+  const hasActivePaid = list.some(o => String(o?.status || '').toLowerCase() === 'paid' && (!o?.expire_at || (new Date(o.expire_at)).getTime() > Date.now()));
+
+  if(!hasActivePaid){
+    location.href = '../account/subscription.html';
+    return { blocked:true };
+  }
+
+  const { data: profile } = await supabaseClient
+    .from('profiles')
+    .select('domain_code,role_code')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  if(!profile || !profile.domain_code || !profile.role_code){
+    location.href = '../account/profile.html?from=subscription';
+    return { blocked:true };
+  }
+
+  return { blocked:false, user, admin:false };
+}
 
 const DEFAULT_PROFILE = {domain_code:"healthcare", role_code:"nurse", level_code:"beginner", scene_priority:["medical","daily"], daily_minutes:10};
 const STORAGE_KEY = "BW_DASH_V3_ASSETS_PROGRESS";
@@ -440,6 +485,8 @@ function renderProfileExplain(profile, filterInfo){
 
 async function bootstrap(){
   try{
+    const guard = await checkDashboardAccess();
+    if (guard?.blocked) return;
     state.profile = await loadProfile();
     updateProfileUI(state.profile);
     const assets = await loadAssets();
