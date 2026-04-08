@@ -585,12 +585,24 @@ tr.speaking{
               </div>
             </div>
             <div style="padding:10px 12px;border-bottom:1px solid #162a48;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+              <button class="btn sm blue" id="btnTalkDoTurn" type="button">▶ 開始本輪</button>
+              <button class="btn sm" id="btnTalkRec" type="button">🎙️ 我來說</button>
+              <button class="btn sm" id="btnTalkStopRec" type="button" disabled>⛔ 停止</button>
               <button class="btn sm" id="btnTalkSpeakLine" type="button">🔊 朗讀目前句</button>
               <button class="btn sm" id="btnTalkSpeakZh" type="button">中</button>
               <button class="btn sm" id="btnTalkSpeakJa" type="button">日</button>
               <button class="btn sm" id="btnTalkPrev" type="button">◀ 上一句</button>
               <button class="btn sm" id="btnTalkNext" type="button">下一句 ▶</button>
+              <label class="muted" style="display:inline-flex;align-items:center;gap:6px;"><input id="talkAutoAdvance" type="checkbox" checked /> AI 後自動下一句</label>
               <span class="muted" id="talkCounter">第 0/0 句</span>
+            </div>
+            <div style="padding:10px 12px;border-bottom:1px solid #162a48;">
+              <div id="talkLiveBox" style="background:#091426;border:1px solid #183459;border-radius:12px;padding:12px;">
+                <div class="muted" style="margin-bottom:6px">口說區</div>
+                <div id="talkLiveHint" style="margin-bottom:8px;color:#cddcff;">按「開始本輪」或「我來說」開始練習。</div>
+                <div id="talkTranscript" style="min-height:24px;font-size:18px;line-height:1.5;"></div>
+                <div id="talkFeedback" style="margin-top:8px;color:var(--muted);line-height:1.6;"></div>
+              </div>
             </div>
             <div id="talkList" style="padding:0 0 12px;"></div>
           </div>
@@ -1514,6 +1526,109 @@ function highlightTalkRow(){
   const rows = $$('#talkList .talk-row');
   rows.forEach((row, i) => row.style.background = i === talkCurrentIdx ? 'rgba(60,124,255,.14)' : 'transparent');
 }
+
+function isTalkUserTurn(item){
+  if(!item) return false;
+  if(talkMode !== 'roleplay') return true;
+  if(!talkSelectedRole) return false;
+  return item.role === talkSelectedRole;
+}
+function setTalkLiveState(hint='', transcript='', feedback=''){
+  if(talkLiveHint) talkLiveHint.textContent = hint || '';
+  if(talkTranscriptEl) talkTranscriptEl.textContent = transcript || '';
+  if(talkFeedbackEl) talkFeedbackEl.textContent = feedback || '';
+}
+function stopTalkRecognition(resetButtons=true){
+  try{ if(talkRecognition) talkRecognition.stop(); }catch(_e){}
+  if(resetButtons){
+    talkRecBusy = false;
+    if(btnTalkRec) btnTalkRec.disabled = false;
+    if(btnTalkStopRec) btnTalkStopRec.disabled = true;
+  }
+}
+function getTalkSR(){
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+function startTalkRecognition(){
+  const item = talkData[talkCurrentIdx];
+  if(!item) return;
+  const SR = getTalkSR();
+  if(!SR){
+    setTalkLiveState('此瀏覽器不支援語音辨識。', '', '可直接照句子開口說，再手動按下一句。');
+    return;
+  }
+  stopTalkRecognition(false);
+  talkTranscript = '';
+  talkRecognition = new SR();
+  talkRecognition.lang = 'en-US';
+  talkRecognition.interimResults = true;
+  talkRecognition.continuous = true;
+  talkRecBusy = true;
+  if(btnTalkRec) btnTalkRec.disabled = true;
+  if(btnTalkStopRec) btnTalkStopRec.disabled = false;
+  setTalkLiveState(`輪到你說：${talkSelectedRole || item.role}`, '', '請看著英文句子開口說；系統會先記錄你說出的內容。');
+  talkRecognition.onresult = (e) => {
+    let s = '';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      s += e.results[i][0].transcript + ' ';
+    }
+    talkTranscript = s.trim();
+    setTalkLiveState(`輪到你說：${talkSelectedRole || item.role}`, talkTranscript, '說完後按「停止」，再按「下一句」。');
+  };
+  talkRecognition.onerror = () => {
+    talkRecBusy = false;
+    if(btnTalkRec) btnTalkRec.disabled = false;
+    if(btnTalkStopRec) btnTalkStopRec.disabled = true;
+    setTalkLiveState('語音辨識中斷。', talkTranscript, '可再按一次「我來說」重試。');
+  };
+  talkRecognition.onend = () => {
+    talkRecBusy = false;
+    if(btnTalkRec) btnTalkRec.disabled = false;
+    if(btnTalkStopRec) btnTalkStopRec.disabled = true;
+    const expected = (item.text || '').trim();
+    let fb = '已停止收音。';
+    if(talkTranscript){
+      fb += expected ? ` 你說的是：${talkTranscript}` : '';
+    }else{
+      fb += ' 沒有收到語音內容。';
+    }
+    setTalkLiveState(`輪到你說：${talkSelectedRole || item.role}`, talkTranscript, fb);
+  };
+  try{ talkRecognition.start(); }catch(_e){
+    talkRecBusy = false;
+    if(btnTalkRec) btnTalkRec.disabled = false;
+    if(btnTalkStopRec) btnTalkStopRec.disabled = true;
+    setTalkLiveState('語音辨識啟動失敗。', '', '請再按一次，或確認瀏覽器已允許麥克風。');
+  }
+}
+function doTalkTurn(){
+  const item = talkData[talkCurrentIdx];
+  if(!item) return;
+  setTalkCurrent(talkCurrentIdx, true);
+  const userTurn = isTalkUserTurn(item);
+  if(talkMode === 'roleplay' && talkSelectedRole){
+    if(userTurn){
+      startTalkRecognition();
+      return;
+    }
+    stopTalkRecognition();
+    setTalkLiveState(`現在由 AI / 影片角色 ${item.role} 出句。`, '', '聽完後若有勾選「AI 後自動下一句」，會自動往下。');
+    speakText(item.text || '', 'en-US');
+    if(talkAutoAdvance && talkAutoAdvance.checked){
+      const ms = Math.max(1400, Math.min(5000, (item.text || '').length * 85));
+      setTimeout(() => {
+        if(talkCurrentIdx < talkData.length - 1){
+          setTalkCurrent(talkCurrentIdx + 1, true);
+        }
+      }, ms);
+    }
+    return;
+  }
+  stopTalkRecognition();
+  setTalkLiveState('跟讀模式：先聽，再跟著說。', '', '你可以按「我來說」錄下自己的口說。');
+  speakText(item.text || '', 'en-US');
+}
+
 function renderTalkCurrent(){
   if(!talkCurrentCard) return;
   if(!talkData.length){
@@ -1523,12 +1638,12 @@ function renderTalkCurrent(){
   }
   const item = talkData[talkCurrentIdx] || talkData[0];
   const roleBadge = `<span class="chip" style="margin-left:8px">${esc(item.role)}</span>`;
-  let helper = '模式：跟讀。可用「跳句 / 朗讀 / 上一句 / 下一句」練習。';
+  let helper = '模式：跟讀。先按「開始本輪」聽句子，再按「我來說」自己開口。';
   if(talkMode === 'roleplay'){
     if(talkSelectedRole){
       helper = item.role === talkSelectedRole
-        ? `角色扮演：現在輪到你（${esc(talkSelectedRole)}）說。`
-        : `角色扮演：現在由 AI / 影片角色 ${esc(item.role)} 出句。`;
+        ? `角色扮演：現在輪到你（${esc(talkSelectedRole)}）說。按「開始本輪」或「我來說」開始。`
+        : `角色扮演：現在由 AI / 影片角色 ${esc(item.role)} 出句。按「開始本輪」聽對方說。`;
     } else {
       helper = '角色扮演：先選你扮演的角色，再開始練習。';
     }
@@ -1605,6 +1720,7 @@ async function loadTalk(){
   if(talkStatus) talkStatus.textContent = `已載入 Talk：${hit.replace(location.origin,'')}`;
   renderTalkCurrent();
   renderTalkList();
+  setTalkLiveState('Talk 已載入。', '', '可先選角色，再按「開始本輪」。');
   if(!talkSyncTimer){
     talkSyncTimer = setInterval(() => {
       if(!talkData.length) return;
@@ -1619,12 +1735,15 @@ async function loadTalk(){
 }
 talkModeShadowBtn?.addEventListener('click', ()=>setTalkMode('shadow'));
 talkModeRoleplayBtn?.addEventListener('click', ()=>setTalkMode('roleplay'));
-talkRoleSelect?.addEventListener('change', ()=>{ talkSelectedRole = talkRoleSelect.value || ''; renderTalkCurrent(); });
+talkRoleSelect?.addEventListener('change', ()=>{ talkSelectedRole = talkRoleSelect.value || ''; renderTalkCurrent(); setTalkLiveState(talkSelectedRole ? `你扮演：${talkSelectedRole}` : '請先選擇你扮演的角色。', '', '角色扮演時，按「開始本輪」即可輪流練習。'); });
 btnTalkSpeakLine?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.text || '', 'en-US'); });
 btnTalkSpeakZh?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.zh || '', 'zh-TW'); });
 btnTalkSpeakJa?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.ja || '', 'ja-JP'); });
 btnTalkPrev?.addEventListener('click', ()=> setTalkCurrent(talkCurrentIdx - 1, true));
 btnTalkNext?.addEventListener('click', ()=> setTalkCurrent(talkCurrentIdx + 1, true));
+btnTalkDoTurn?.addEventListener('click', ()=> doTalkTurn());
+btnTalkRec?.addEventListener('click', ()=> startTalkRecognition());
+btnTalkStopRec?.addEventListener('click', ()=> stopTalkRecognition());
 
 /* ==== 五個 tab 切換 + 手機右頁 focus ==== */
 function showTab(name){
