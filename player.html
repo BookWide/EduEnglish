@@ -586,22 +586,28 @@ tr.speaking{
             </div>
             <div style="padding:10px 12px;border-bottom:1px solid #162a48;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
               <button class="btn sm" id="btnTalkStartTurn" type="button">▶ 開始本輪</button>
-              <button class="btn sm" id="btnTalkSpeakMe" type="button">🎙️ 我來說</button>
-              <button class="btn sm" id="btnTalkStopRec" type="button">⛔ 停止</button>
+              <button class="btn sm" id="btnTalkSpeakMic" type="button">🎙 我來說</button>
+              <button class="btn sm" id="btnTalkStopMic" type="button">⛔ 停止</button>
               <button class="btn sm" id="btnTalkSpeakLine" type="button">🔊 朗讀目前句</button>
               <button class="btn sm" id="btnTalkSpeakZh" type="button">中</button>
               <button class="btn sm" id="btnTalkSpeakJa" type="button">日</button>
               <button class="btn sm" id="btnTalkPrev" type="button">◀ 上一句</button>
               <button class="btn sm" id="btnTalkNext" type="button">下一句 ▶</button>
-              <label class="muted"><input id="talkAutoNext" type="checkbox" checked> AI 後自動下一句</label>
               <span class="muted" id="talkCounter">第 0/0 句</span>
             </div>
+            <div style="padding:10px 12px;border-bottom:1px solid #162a48;display:flex;flex-wrap:wrap;gap:10px;align-items:center;">
+              <label class="muted"><input id="talkAutoNext" type="checkbox" checked /> AI 後自動下一句</label>
+              <label class="muted"><input id="talkAutoSlow" type="checkbox" checked /> 自動調速</label>
+              <span class="muted">語速</span>
+              <input id="talkRateRange" type="range" min="0.6" max="1.2" step="0.1" value="0.8" />
+              <span class="muted" id="talkRateVal">0.8x</span>
+            </div>
             <div style="padding:12px;border-bottom:1px solid #162a48;">
-              <div class="muted" style="margin-bottom:8px">口說區</div>
-              <div style="background:#0e2038;border:1px solid #183459;border-radius:14px;padding:14px;min-height:96px;">
-                <div id="talkSpeechMode" class="muted">輸到你說：—</div>
-                <div id="talkSpeechText" style="margin-top:8px;line-height:1.7;">辨識文字：—</div>
-                <div id="talkSpeechScore" class="muted" style="margin-top:8px;">相似度：—</div>
+              <div class="muted" style="margin-bottom:6px">口說區</div>
+              <div id="talkSpeechBox" style="background:#0e2038;border:1px solid #183459;border-radius:14px;padding:14px;min-height:120px;">
+                <div id="talkSpeechRole" style="color:var(--muted);margin-bottom:8px;">輸到你說：—</div>
+                <div id="talkSpeechText" style="font-size:18px;line-height:1.6;">辨識文字：—</div>
+                <div id="talkSpeechScore" style="margin-top:8px;color:#dce7ff;">相似度：—</div>
               </div>
             </div>
             <div id="talkList" style="padding:0 0 12px;"></div>
@@ -643,6 +649,9 @@ let slug=params.get('slug')||'houyi';
     let CURRENT_USER_IS_ADMIN = false;
 if(slug==='huyi') slug='houyi';
 const vnow=Date.now();
+try{
+  TALK_RATE = Number(localStorage.getItem('BW_TALK_RATE') || '0.8') || 0.8;
+}catch(_e){ TALK_RATE = 0.8; }
 
 // 設定回首頁連結
 const homeLink = document.getElementById('homeLink');
@@ -685,12 +694,16 @@ function levelOfGroupId(groupId){
 // TODO: 未來若要依訂閱等級守門，可在這裡加入 userMaxLevel 判斷。
 let quizData=[],currentQuizCat='all';
 let talkData=[], talkLoaded=false, talkMode='shadow', talkSelectedRole='', talkCurrentIdx=0, talkSyncTimer=null;
+let talkRecognition=null, talkLastScore=0, TALK_RATE=0.8;
 const talkStatus=$('#talkStatus'), talkRoleSelect=$('#talkRoleSelect'), talkCurrentCard=$('#talkCurrentCard'), talkList=$('#talkList'), talkCounter=$('#talkCounter');
 const talkModeShadowBtn=$('#talkModeShadow'), talkModeRoleplayBtn=$('#talkModeRoleplay');
-const btnTalkStartTurn=$('#btnTalkStartTurn'), btnTalkSpeakMe=$('#btnTalkSpeakMe'), btnTalkStopRec=$('#btnTalkStopRec');
+const btnTalkStartTurn=$('#btnTalkStartTurn'), btnTalkSpeakMic=$('#btnTalkSpeakMic'), btnTalkStopMic=$('#btnTalkStopMic');
 const btnTalkSpeakLine=$('#btnTalkSpeakLine'), btnTalkSpeakZh=$('#btnTalkSpeakZh'), btnTalkSpeakJa=$('#btnTalkSpeakJa'), btnTalkPrev=$('#btnTalkPrev'), btnTalkNext=$('#btnTalkNext');
-const talkAutoNext=$('#talkAutoNext'), talkSpeechMode=$('#talkSpeechMode'), talkSpeechText=$('#talkSpeechText'), talkSpeechScore=$('#talkSpeechScore');
-let talkRecognition=null;
+const talkSpeechRole=$('#talkSpeechRole'), talkSpeechText=$('#talkSpeechText'), talkSpeechScore=$('#talkSpeechScore');
+const talkAutoNext=$('#talkAutoNext'), talkAutoSlow=$('#talkAutoSlow'), talkRateRange=$('#talkRateRange'), talkRateVal=$('#talkRateVal');
+
+if(talkRateRange) talkRateRange.value = String(TALK_RATE);
+if(talkRateVal) talkRateVal.textContent = TALK_RATE.toFixed(1) + 'x';
 
 
 function setOffset(v){
@@ -1505,6 +1518,7 @@ function fillTalkRoleOptions(){
     talkSelectedRole = roles[0];
     talkRoleSelect.value = roles[0];
   }
+  updateTalkSpeechBox('', '—');
 }
 function findTalkCurrentIdx(){
   if(!talkData.length) return 0;
@@ -1528,6 +1542,94 @@ function setTalkCurrent(idx, shouldSeek=false){
 function highlightTalkRow(){
   const rows = $$('#talkList .talk-row');
   rows.forEach((row, i) => row.style.background = i === talkCurrentIdx ? 'rgba(60,124,255,.14)' : 'transparent');
+}
+function talkRateFor(lang='en-US'){
+  let rate = Number(TALK_RATE)||0.8;
+  if(talkAutoSlow?.checked){
+    const item = talkData[talkCurrentIdx] || {};
+    const wordCount = String(item.text || '').trim().split(/\s+/).filter(Boolean).length;
+    if(lang.startsWith('en')){
+      if(wordCount >= 16) rate = Math.min(rate, 0.7);
+      else if(wordCount >= 11) rate = Math.min(rate, 0.8);
+      if(talkLastScore > 0 && talkLastScore < 60) rate = Math.min(rate, 0.7);
+      else if(talkLastScore >= 60 && talkLastScore < 80) rate = Math.min(rate, 0.8);
+    }
+  }
+  return Math.max(0.6, Math.min(1.2, rate));
+}
+function updateTalkSpeechBox(transcript='', scoreText='—'){
+  if(talkSpeechRole){
+    const roleTxt = talkMode === 'roleplay'
+      ? `輸到你說：${talkSelectedRole || '未選角色'}`
+      : `輸到你說：跟讀：${talkSelectedRole || 'speaker'}`;
+    talkSpeechRole.textContent = roleTxt;
+  }
+  if(talkSpeechText) talkSpeechText.textContent = '辨識文字：' + (transcript || '—');
+  if(talkSpeechScore) talkSpeechScore.textContent = '相似度：' + scoreText;
+}
+function startTalkRecognition(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+  if(!SR){
+    updateTalkSpeechBox('此瀏覽器不支援語音辨識', '—');
+    return;
+  }
+  if(talkRecognition){
+    try{ talkRecognition.stop(); }catch(_e){}
+  }
+  const rec = new SR();
+  talkRecognition = rec;
+  rec.lang = 'en-US';
+  rec.interimResults = true;
+  rec.continuous = false;
+  updateTalkSpeechBox('正在聽...', '—');
+  rec.onresult = (e) => {
+    let transcript = '';
+    for(let i = e.resultIndex; i < e.results.length; i++){
+      transcript += e.results[i][0].transcript + ' ';
+    }
+    transcript = transcript.trim();
+    const target = talkData[talkCurrentIdx]?.text || '';
+    const score = similarityScore(transcript, target);
+    talkLastScore = score;
+    updateTalkSpeechBox(transcript, score + '%');
+  };
+  rec.onerror = () => {
+    updateTalkSpeechBox('辨識失敗，請再試一次', '—');
+  };
+  rec.onend = () => {};
+  rec.start();
+}
+function stopTalkRecognition(){
+  if(talkRecognition){
+    try{ talkRecognition.stop(); }catch(_e){}
+  }
+}
+function startTalkTurn(){
+  const item = talkData[talkCurrentIdx];
+  if(!item) return;
+  if(talkMode === 'roleplay' && talkSelectedRole && item.role !== talkSelectedRole){
+    speakText(item.text || '', 'en-US');
+    if(talkAutoNext?.checked){
+      setTimeout(() => setTalkCurrent(talkCurrentIdx + 1, true), 1600);
+    }
+    return;
+  }
+  startTalkRecognition();
+}
+function similarityScore(spoken, target){
+  const a = String(spoken || '').trim().toLowerCase().replace(/[^a-z0-9' ]+/g,' ').split(/\s+/).filter(Boolean);
+  const b = String(target || '').trim().toLowerCase().replace(/[^a-z0-9' ]+/g,' ').split(/\s+/).filter(Boolean);
+  if(!a.length || !b.length) return 0;
+  let hit = 0;
+  const pool = [...a];
+  for(const w of b){
+    const idx = pool.indexOf(w);
+    if(idx >= 0){
+      hit += 1;
+      pool.splice(idx,1);
+    }
+  }
+  return Math.max(0, Math.min(100, Math.round((hit / b.length) * 100)));
 }
 function renderTalkCurrent(){
   if(!talkCurrentCard) return;
@@ -1558,7 +1660,7 @@ function renderTalkCurrent(){
     <div style="margin-top:6px;color:#c8d5ef;line-height:1.6;">${esc(item.ja) || '—'}</div>
     <div style="margin-top:12px;color:var(--muted)">${helper}</div>`;
   if(talkCounter) talkCounter.textContent = `第 ${talkCurrentIdx+1}/${talkData.length} 句`;
-  refreshTalkSpeechMode();
+  updateTalkSpeechBox(talkSpeechText?.textContent?.replace(/^辨識文字：/,'').trim() === '—' ? '' : (talkSpeechText?.textContent||'').replace(/^辨識文字：/,'').trim(), (talkSpeechScore?.textContent||'').replace(/^相似度：/,'').trim() || '—');
 }
 function renderTalkList(){
   if(!talkList) return;
@@ -1633,110 +1735,22 @@ async function loadTalk(){
     }, 500);
   }
 }
-
-function getTalkSR(){
-  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
-}
-function normalizeTalkCompareText(s=''){
-  return String(s||'').toLowerCase().replace(/[^a-z0-9'\s]/g,' ').replace(/\s+/g,' ').trim();
-}
-function talkSimilarity(spoken, target){
-  const a = normalizeTalkCompareText(spoken).split(' ').filter(Boolean);
-  const b = normalizeTalkCompareText(target).split(' ').filter(Boolean);
-  if(!a.length || !b.length) return 0;
-  let hit = 0;
-  b.forEach(w => { if(a.includes(w)) hit += 1; });
-  return Math.round((hit / b.length) * 100);
-}
-function updateTalkSpeechBox(text='', score=null){
-  if(talkSpeechText) talkSpeechText.textContent = '辨識文字：' + (text || '—');
-  if(talkSpeechScore) talkSpeechScore.textContent = '相似度：' + (typeof score === 'number' ? `${score}%` : '—');
-}
-function refreshTalkSpeechMode(){
-  if(!talkSpeechMode) return;
-  const item = talkData[talkCurrentIdx];
-  if(!item){
-    talkSpeechMode.textContent = '輸到你說：—';
-    return;
-  }
-  if(talkMode === 'roleplay'){
-    if(talkSelectedRole && item.role === talkSelectedRole){
-      talkSpeechMode.textContent = `輪到你說：${talkSelectedRole}`;
-    }else{
-      talkSpeechMode.textContent = `現在聽對方：${item.role || 'speaker'}`;
-    }
-  }else{
-    talkSpeechMode.textContent = `輸到你說：跟讀：${item.role || 'speaker'}`;
-  }
-}
-function stopTalkRecognition(){
-  if(talkRecognition){
-    try{ talkRecognition.stop(); }catch(_e){}
-  }
-}
-function startTalkRecognition(){
-  const item = talkData[talkCurrentIdx];
-  const SR = getTalkSR();
-  if(!SR){
-    updateTalkSpeechBox('此瀏覽器不支援語音辨識', null);
-    return;
-  }
-  stopTalkRecognition();
-  talkRecognition = new SR();
-  talkRecognition.lang = 'en-US';
-  talkRecognition.interimResults = true;
-  talkRecognition.continuous = false;
-  updateTalkSpeechBox('正在聽...', null);
-  if(btnTalkSpeakMe) btnTalkSpeakMe.disabled = true;
-  if(btnTalkStopRec) btnTalkStopRec.disabled = false;
-
-  talkRecognition.onresult = (e) => {
-    let spoken = '';
-    for(let i = e.resultIndex; i < e.results.length; i++){
-      spoken += e.results[i][0].transcript + ' ';
-    }
-    spoken = spoken.trim();
-    const score = item ? talkSimilarity(spoken, item.text || '') : null;
-    updateTalkSpeechBox(spoken, score);
-  };
-  const resetTalkRec = () => {
-    if(btnTalkSpeakMe) btnTalkSpeakMe.disabled = false;
-    if(btnTalkStopRec) btnTalkStopRec.disabled = true;
-  };
-  talkRecognition.onend = resetTalkRec;
-  talkRecognition.onerror = (e) => {
-    updateTalkSpeechBox(`辨識失敗（${e.error || 'unknown'}）`, null);
-    resetTalkRec();
-  };
-  talkRecognition.start();
-}
-function startTalkTurn(){
-  const item = talkData[talkCurrentIdx];
-  if(!item) return;
-  refreshTalkSpeechMode();
-  if(talkMode === 'roleplay' && talkSelectedRole && item.role !== talkSelectedRole){
-    speakText(item.text || '', 'en-US');
-    if(talkAutoNext?.checked){
-      setTimeout(() => setTalkCurrent(talkCurrentIdx + 1, true), 1600);
-    }
-    return;
-  }
-  startTalkRecognition();
-}
 talkModeShadowBtn?.addEventListener('click', ()=>setTalkMode('shadow'));
 talkModeRoleplayBtn?.addEventListener('click', ()=>setTalkMode('roleplay'));
 talkRoleSelect?.addEventListener('change', ()=>{ talkSelectedRole = talkRoleSelect.value || ''; renderTalkCurrent(); });
+btnTalkStartTurn?.addEventListener('click', ()=> startTalkTurn());
+btnTalkSpeakMic?.addEventListener('click', ()=> startTalkRecognition());
+btnTalkStopMic?.addEventListener('click', ()=> stopTalkRecognition());
 btnTalkSpeakLine?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.text || '', 'en-US'); });
 btnTalkSpeakZh?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.zh || '', 'zh-TW'); });
 btnTalkSpeakJa?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.ja || '', 'ja-JP'); });
 btnTalkPrev?.addEventListener('click', ()=> setTalkCurrent(talkCurrentIdx - 1, true));
 btnTalkNext?.addEventListener('click', ()=> setTalkCurrent(talkCurrentIdx + 1, true));
-
-btnTalkStartTurn?.addEventListener('click', ()=> startTalkTurn());
-btnTalkSpeakMe?.addEventListener('click', ()=> startTalkRecognition());
-btnTalkStopRec?.addEventListener('click', ()=> stopTalkRecognition());
-if(btnTalkStopRec) btnTalkStopRec.disabled = true;
-
+talkRateRange?.addEventListener('input', ()=>{
+  TALK_RATE = Number(talkRateRange.value)||0.8;
+  if(talkRateVal) talkRateVal.textContent = TALK_RATE.toFixed(1) + 'x';
+  localStorage.setItem('BW_TALK_RATE', String(TALK_RATE));
+});
 
 /* ==== 五個 tab 切換 + 手機右頁 focus ==== */
 function showTab(name){
@@ -1792,8 +1806,7 @@ function highlightRow(idx){
   trs.forEach(tr=>tr.classList.remove('active','speaking'));
   const tr=trs[idx];if(!tr) return;
   tr.classList.add('active','speaking');
-  // 修正：只做高亮，不再自動捲動右側面板。
-  // 這樣使用者可自由閱讀字幕 / 單字，不會被影片時間強制拉回。
+  // 保留高亮，但取消自動捲動，讓右側可自由閱讀。
 }
 function sentenceRange(i){
   if(!cues[i])return[0,0];
@@ -1898,41 +1911,35 @@ function pickVoice(lang){
 async function speakText(text, lang){
   if(!text) return;
 
-  // ✅ iPhone 日文常見問題：Web Speech 可能沒有 ja voice 或念起來像英文
-  // 解法：iOS + 日文 → 優先走雲端 MP3（若你有設 TTS_CLOUD_ENDPOINT）
-  const target = (lang||"").toLowerCase();
-  const preferCloud = isIOS() && target.startsWith("ja");
+  const target = (lang||'').toLowerCase();
+  const preferCloud = isIOS() && target.startsWith('ja');
   if(preferCloud){
-    const ok = await cloudTTS(text, lang || "ja-JP");
+    const ok = await cloudTTS(text, lang || 'ja-JP');
     if(ok) return;
   }
 
-  // 一般情況：先用 browser TTS（快、免錢）
   try{
-    if (!("speechSynthesis" in window)) throw new Error("no speechSynthesis");
+    if (!('speechSynthesis' in window)) throw new Error('no speechSynthesis');
     speechSynthesis.cancel();
 
     const u = new SpeechSynthesisUtterance(text);
-    u.lang = lang || "en-US";
-    u.rate = 1;
+    u.lang = lang || 'en-US';
+    u.rate = talkRateFor(u.lang);
     u.pitch = 1;
 
     const v = pickVoice(u.lang);
     if(v) u.voice = v;
 
-    // 若是 iOS 但沒有對應 voice，也嘗試走雲端（最後備援）
-    if(isIOS() && !v && (target.startsWith("ja") || target.startsWith("zh"))){
-      const ok = await cloudTTS(text, lang || "ja-JP");
+    if(isIOS() && !v && (target.startsWith('ja') || target.startsWith('zh'))){
+      const ok = await cloudTTS(text, lang || 'ja-JP');
       if(ok) return;
     }
 
     speechSynthesis.speak(u);
   }catch(e){
-    // 最後備援：雲端（若有）
-    await cloudTTS(text, lang || "en-US");
+    await cloudTTS(text, lang || 'en-US');
   }
 }
-
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
   async function ensureVideoPublished(category, slug, isAdmin) {
