@@ -413,6 +413,23 @@ function safePath(path){
     return path;
   }
 }
+
+function getNextTarget(defaultPath="/talk.html"){
+  try{
+    const u = new URL(location.href);
+    const raw = (u.searchParams.get("next") || "").trim();
+    if(!raw) return safePath(defaultPath);
+    const resolved = new URL(raw, location.origin);
+    if(resolved.origin !== location.origin) return safePath(defaultPath);
+    return resolved.toString();
+  }catch(_e){
+    return safePath(defaultPath);
+  }
+}
+function isMissingProfileLevelColumnsError(err){
+  const msg = (err && (err.message || err.details || err.hint || err.code)) ? String(err.message || err.details || err.hint || err.code) : "";
+  return /cefr_level|cefr_score|level_updated_at/i.test(msg) && /profiles|schema cache|column/i.test(msg);
+}
 async function ensureSupabaseReady(){
   if(bwSbClient) return bwSbClient;
   const started = Date.now();
@@ -652,7 +669,9 @@ function finish(){
   // persist to localStorage for fast reads
   try{
     localStorage.setItem("BW_CEFR_LEVEL", level);
+    localStorage.setItem("BW_CEFR_RESULT", level);
     localStorage.setItem("BW_LEVEL_WEEK_CAP", String(cap));
+    localStorage.setItem("BW_LEVEL_UNLOCKED_WEEK", String(cap));
   }catch(_e){}
 
   // write to profiles
@@ -681,7 +700,8 @@ async function saveToProfile(level, score, cap){
     if(existsRes.error){
       const msg = logError("profiles.select", existsRes.error);
       $("saveHint").textContent = "讀取帳號資料失敗：" + msg;
-      debugToast("讀取 profiles 失敗\n" + msg, 5200);
+      debugToast("讀取 profiles 失敗
+" + msg, 5200);
       return false;
     }
 
@@ -713,18 +733,31 @@ async function saveToProfile(level, score, cap){
     }
 
     if(writeError){
+      if(isMissingProfileLevelColumnsError(writeError)){
+        $("saveHint").textContent = `已完成：${level}（已先寫入本機，Talk 先解鎖到 W${cap}）`;
+        debugToast("profiles 缺少 cefr_level / cefr_score / level_updated_at 欄位
+請先執行 SQL 補欄位；目前 Talk 仍會依本機結果解鎖。", 6500);
+        return true;
+      }
       const msg = logError("profiles.write", writeError);
       $("saveHint").textContent = "寫入失敗：" + msg;
-      debugToast("profiles 寫入失敗\n" + msg, 6500);
+      debugToast("profiles 寫入失敗
+" + msg, 6500);
       return false;
     }
 
     $("saveHint").textContent = `已更新：${level}（Talk 將解鎖到 W${cap}）`;
     return true;
   }catch(err){
+    if(isMissingProfileLevelColumnsError(err)){
+      $("saveHint").textContent = `已完成：${level}（已先寫入本機，Talk 先解鎖到 W${cap}）`;
+      debugToast("profiles 缺少 level 欄位；目前 Talk 仍會依本機結果解鎖。", 6500);
+      return true;
+    }
     const msg = logError("saveToProfile.catch", err);
     $("saveHint").textContent = "寫入失敗：" + msg;
-    debugToast("存檔例外\n" + msg, 6500);
+    debugToast("存檔例外
+" + msg, 6500);
     return false;
   }
 }
@@ -775,7 +808,7 @@ async function guard(){
 // ----- events -----
 $("btnBack").onclick = ()=>history.back();
 $("btnHome").onclick = ()=>location.replace(safePath("/"));
-$("btnGoTalk").onclick = ()=>location.replace(safePath("/talk.html"));
+$("btnGoTalk").onclick = ()=>location.replace(getNextTarget("/talk.html"));
 $("btnAgain").onclick = ()=>startQuiz(true);
 $("btnRetake").onclick = ()=>startQuiz(true);
 $("btnQuit").onclick = ()=>location.replace(safePath("/"));
