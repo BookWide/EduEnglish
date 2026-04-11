@@ -182,7 +182,7 @@
 
       <div class="footer">
         <div class="small">共 <b id="count">0</b> 筆（依目前篩選）</div>
-        <div class="small">提示：更新後通常 1–2 秒內生效（取決於 CDN/瀏覽器快取）。</div>
+        <div class="small">提示：下架 = 只隱藏；永久刪除 = 刪 assets + 加黑名單 + 加入 R2 待刪清單。</div>
       </div>
     </div>
   </div>
@@ -636,12 +636,13 @@
         </td>
         <td data-k="更新" class="mono">${upd}</td>
         <td data-k="狀態">
-          <div class="toggle">
+          <div class="toggle" style="flex-wrap:wrap; align-items:center;">
             <label class="switch">
               <input type="checkbox" data-id="${escapeHtml(id)}" ${on ? "checked" : ""}>
               <span class="slider"></span>
             </label>
             <span class="status ${on ? "on" : "off"}">${on ? "已上架" : "已下架"}</span>
+            <button class="btn delBtn" type="button" data-id="${escapeHtml(id)}" style="background:#111827; padding:7px 12px;">永久刪除</button>
           </div>
         </td>
       </tr>`;
@@ -727,6 +728,73 @@
       .replaceAll("'", "&#39;");
   }
 
+
+function inferR2KeyFromUrl(url){
+  const s = String(url || '').trim();
+  if (!s) return '';
+  try{
+    const u = new URL(s);
+    return String(u.pathname || '').replace(/^\/+/, '');
+  }catch(_e){
+    const m = s.match(/https?:\/\/[^/]+\/(.+)$/i);
+    return m && m[1] ? m[1] : '';
+  }
+}
+
+async function addBadVideoRecord(row){
+  const payload = {
+    slug: String(row.slug || '').trim(),
+    youtube_id: String(row.youtube_id || extractYouTubeId(row.youtube_url || '') || '').trim(),
+    title: String(row.title || '').trim(),
+    category: String(row.category || '').trim(),
+    source_url: String(row.youtube_url || '').trim(),
+    note: 'from launch delete',
+  };
+  const { error } = await supa.from('bad_videos').upsert(payload, { onConflict: 'slug' });
+  if (error) throw error;
+}
+
+async function addPendingDeleteRecord(row){
+  const payload = {
+    slug: String(row.slug || '').trim(),
+    category: String(row.category || '').trim(),
+    title: String(row.title || '').trim(),
+    youtube_id: String(row.youtube_id || extractYouTubeId(row.youtube_url || '') || '').trim(),
+    mp4_url: String(row.mp4_url || '').trim(),
+    cover_url: String(row.cover_url || '').trim(),
+    mp4_key: inferR2KeyFromUrl(row.mp4_url),
+    cover_key: inferR2KeyFromUrl(row.cover_url),
+    source_url: String(row.youtube_url || '').trim(),
+    status: 'pending',
+    note: 'queued by launch delete',
+  };
+  const { error } = await supa.from('pending_r2_delete').insert(payload);
+  if (error) throw error;
+}
+
+async function hardDeleteOne(slug){
+  const row = state.rows.find(x => String(x.slug || '') === String(slug || ''));
+  if (!row) throw new Error('找不到該筆資料，請先重新整理');
+
+  const confirmText = prompt(`輸入 DELETE 確認永久刪除：\n${slug}`);
+  if (confirmText !== 'DELETE') return false;
+
+  setBusy(true, `永久刪除：${slug}`);
+  try{
+    await addBadVideoRecord(row);
+    await addPendingDeleteRecord(row);
+
+    const { error } = await supa.from('assets').delete().eq('slug', slug);
+    if (error) throw error;
+
+    toast('已永久刪除', `${slug}：assets 已刪 + 已入黑名單 + 已加入 R2 待刪清單`);
+    await loadVideos(true);
+    return true;
+  } finally {
+    setBusy(false);
+  }
+}
+
   async function loadVideos(preserve = true) {
     // Preserve current UI selections
     const prev = preserve ? {
@@ -742,7 +810,7 @@
     // 把常用欄位都抓出來（如果你未來又加欄位也不影響）
     const { data, error } = await supa
       .from('assets')
-      .select('slug,category,title,is_published,difficulty_level,duration_sec,cover_url,mp4_url,youtube_url,youtube_id,preferred_source')
+      .select('slug,category,title,is_published,difficulty_level,duration_sec,cover_url,mp4_url,youtube_url,youtube_id,preferred_source,domain_code,lesson_type,role_codes,scene_tags')
       .order('category', { ascending: true }).order('slug', { ascending: true });
 
     if (error) throw error;
@@ -842,6 +910,24 @@
       els.reloadBtn.onclick = ()=>loadVideos().catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOnBtn.onclick = ()=>bulkSet(true).catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOffBtn.onclick = ()=>bulkSet(false).catch(err=>{console.error(err); alert(err?.message||err);});
+
+
+els.tbody.addEventListener('click', async (ev)=>{
+  const btn = ev.target;
+  if (!(btn instanceof HTMLElement)) return;
+  if (!btn.classList.contains('delBtn')) return;
+  const slug = (btn.dataset.id || '').trim();
+  if (!slug) return;
+  btn.disabled = true;
+  try{
+    await hardDeleteOne(slug);
+  } catch(err){
+    console.error(err);
+    alert(`永久刪除失敗：\n${err?.message || err}\n\n提示：請先在 Supabase 建立 bad_videos / pending_r2_delete 兩張表。`);
+  } finally {
+    btn.disabled = false;
+  }
+});
 
       // difficulty_level quick edit (auto-save)
       els.tbody.addEventListener('change', async (ev)=>{
