@@ -296,7 +296,7 @@
         <div class="field">
           <label class="label">執行模式</label>
           <select id="runMode">
-            <option value="full">完整流程（01→04→05→06→03）</option>
+            <option value="full">完整流程（01→02→04→05→06→03）</option>
             <option value="json_only">只重跑 JSON</option>
             <option value="upload_only">只跑上傳</option>
             <option value="git_only">只跑 Git</option>
@@ -469,25 +469,62 @@
       job.log = "送出主機中...";
       renderJobs();
 
-      // 之後可接真 API
-      // fetch("http://localhost:8787/run", {...})
-
-      setTimeout(() => {
-        job.status = "success";
-        job.slug = `${job.majorCategory}-${Math.random().toString(36).slice(2, 8)}`;
-        job.log =
-`主機已接收任務
-五大類: ${job.majorCategory}
-層級: ${job.publishTier}
-domain: ${job.domain}
-模式: ${job.runMode}
-自動 push: ${job.autoPush ? "是" : "否"}
-自動上架: ${job.autoPublish ? "是" : "否"}
-備註: ${job.remark || "-"}
-
-完成 ✔`;
+      fetch("http://127.0.0.1:8787/run", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          url: job.url,
+          majorCategory: job.majorCategory,
+          publishTier: job.publishTier,
+          domain: job.domain,
+          runMode: job.runMode,
+          autoPush: job.autoPush,
+          autoPublish: job.autoPublish,
+          priorityRun: job.priorityRun,
+          remark: job.remark
+        })
+      })
+      .then(async res => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(data.error || ("HTTP " + res.status));
+        }
+        job.log = "主機已接收，背景執行中...";
         renderJobs();
-      }, 1800);
+        pollJob(job);
+      })
+      .catch(err => {
+        job.status = "failed";
+        job.log = "主機連線失敗: " + err.message;
+        renderJobs();
+      });
+    }
+
+    function pollJob(job) {
+      const timer = setInterval(() => {
+        fetch("http://127.0.0.1:8787/status")
+          .then(res => res.json())
+          .then(data => {
+            if (data.last_url && job.url === data.last_url) {
+              job.status = data.last_status === "idle" ? "running" : data.last_status;
+              job.log =
+`狀態: ${data.last_status}
+開始: ${data.last_started_at || "-"}
+結束: ${data.last_finished_at || "-"}
+returncode: ${data.last_returncode ?? "-"}
+log: ${data.last_log_file || "-"}
+error: ${data.last_error || "-"}`;
+
+              if (data.last_status === "success" || data.last_status === "failed") {
+                clearInterval(timer);
+              }
+              renderJobs();
+            }
+          })
+          .catch(() => {});
+      }, 2000);
     }
 
     function retryJob(id) {
