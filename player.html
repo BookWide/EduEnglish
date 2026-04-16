@@ -483,6 +483,13 @@ tr.speaking{
             <input id="speedRange" type="range" min="0.5" max="2" step="0.05" value="1" />
             <span id="speedVal">1.00x</span>
           </div>
+          <div class="row" style="gap:10px">
+            <span class="chip">時長 <span id="durationBadge">0:00</span></span>
+            <span class="chip">金幣 <span id="coinBadge">1</span></span>
+            <span class="chip">餘額 <span id="walletBadge">0</span></span>
+            <span class="chip">試看前 60 秒</span>
+            <button class="btn sm blue" id="btnUnlockNow" type="button">立即解鎖</button>
+          </div>
         </div>
       </section>
     </section>
@@ -644,7 +651,10 @@ const paramBase=params.get('base');
 // BASE：若網址帶 ?base= 則優先，其次依 ROOT_BASE（/EduEnglish 或空字串）
 const BASE = (paramBase!=null ? paramBase : ROOT_BASE);
 const cat =(params.get('cat')||'story').toLowerCase();
-let slug=params.get('slug')||'houyi';
+function normalizeSlug(v=''){
+  return String(v || '').trim().toLowerCase().replaceAll('_','-');
+}
+let slug=normalizeSlug(params.get('slug')||'houyi');
 const domainParam = (params.get('domain') || '').trim().toLowerCase();
 
 function inferProDomainFromSlug(slugText=''){
@@ -893,6 +903,13 @@ async function loadVideo(){
   const youtubeId = row.youtube_id || getYoutubeIdFromUrl(row.youtube_url || '');
   const preferred = String(row.preferred_source || 'youtube').toLowerCase();
 
+  // cover / poster 對齊
+  try{
+    if (row && row.cover_url) {
+      video.poster = row.cover_url;
+    }
+  }catch(_e){}
+
   const sources = [];
   const seen = new Set();
 
@@ -902,10 +919,12 @@ async function loadVideo(){
     sources.push(url);
   }
 
+  // 1) 優先吃 assets.mp4_url
   try {
     if (row && row.mp4_url) add(row.mp4_url);
   } catch(_e) {}
 
+  // 2) 保留舊版 fallback，讓大部分舊片仍可播
   const slugMain = slug;
   const slugNoPro = slug.replace(/^pro-/, '');
   const slugCandidates = [slugMain];
@@ -921,10 +940,12 @@ async function loadVideo(){
   if (cat !== 'pro') add(`${BASE}/videos/story/houyi.mp4`);
 
   let i = 0;
+
   function setSrc(k){
     if (!sources[k]) return false;
     showHtml5();
     video.src = sources[k];
+    video.load();
     console.log('[Player] try html5 source', (k+1) + '/' + sources.length, sources[k]);
     return true;
   }
@@ -934,13 +955,13 @@ async function loadVideo(){
       i++;
       setSrc(i);
     } else {
-      console.warn('[Player] 所有影片來源都失敗了');
+      console.warn('[Player] 所有影片來源都失敗了', { slug, sources, assetRow: row });
     }
   };
 
   const tryHtml5First = () => {
     if (!sources.length) {
-      console.warn('[Player] 沒有任何影片來源可試');
+      console.warn('[Player] 沒有任何影片來源可試', { slug, assetRow: row });
       showHtml5();
       return false;
     }
@@ -1002,7 +1023,8 @@ async function loadVideo(){
     }
   };
 
-  if (preferred === 'mp4' || preferred === 'cloudflare') {
+  // 穩定版：只要 assets 明確指定 mp4 / cloudflare，就先走 html5
+  if ((row && row.mp4_url) || preferred === 'mp4' || preferred === 'cloudflare') {
     const ok = tryHtml5First();
     if (!ok && youtubeId) {
       await tryYouTubeFirst();
@@ -2048,6 +2070,137 @@ async function speakText(text, lang){
   }
 }
 
+
+function calcCoins(durationSec){
+  const min = (Number(durationSec)||0) / 60;
+  if (min <= 5) return 1;
+  if (min <= 10) return 2;
+  if (min <= 20) return 3;
+  if (min <= 30) return 4;
+  return 5;
+}
+
+async function loadWalletCoins(userId){
+  try{
+    const { data, error } = await playerSupa
+      .from('user_wallets')
+      .select('coins')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (error) throw error;
+    return Number((data && data.coins) || 0);
+  }catch(e){
+    console.warn('[BW-player] loadWalletCoins failed', e);
+    return 0;
+  }
+}
+
+async function hasUnlocked(userId, lessonSlug){
+  try{
+    const { data, error } = await playerSupa
+      .from('video_unlocks')
+      .select('user_id')
+      .eq('user_id', userId)
+      .eq('video_slug', lessonSlug)
+      .maybeSingle();
+    if (error) throw error;
+    return !!data;
+  }catch(e){
+    console.warn('[BW-player] hasUnlocked failed', e);
+    return false;
+  }
+}
+
+async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
+  try{
+    const wallet = await loadWalletCoins(userId);
+    if (wallet < coinCost) return { ok:false, reason:'insufficient', wallet };
+
+    const { error: walletErr } = await playerSupa
+      .from('user_wallets')
+      .update({ coins: wallet - coinCost })
+      .eq('user_id', userId);
+    if (walletErr) throw walletErr;
+
+    const { error: unlockErr } = await playerSupa
+      .from('video_unlocks')
+      .upsert({ user_id: userId, video_slug: lessonSlug }, { onConflict: 'user_id,video_slug' });
+    if (unlockErr) throw unlockErr;
+
+    try{
+      await playerSupa.from('coin_logs').insert({
+        user_id: userId,
+        change: -coinCost,
+        reason: 'unlock_video',
+        video_slug: lessonSlug
+      });
+    }catch(_e){}
+
+    return { ok:true, wallet: wallet - coinCost };
+  }catch(e){
+    console.warn('[BW-player] spendCoinsAndUnlock failed', e);
+    return { ok:false, reason:'db_error' };
+  }
+}
+
+async function setupCoinGate(user){
+  const row = window.__ASSET_ROW__ || {};
+  const durationSec = Number(row.duration_sec || 0);
+  const coinCost = Number(row.coin_cost || calcCoins(durationSec));
+  const durationBadge = document.getElementById('durationBadge');
+  const coinBadge = document.getElementById('coinBadge');
+  const walletBadge = document.getElementById('walletBadge');
+  const btnUnlockNow = document.getElementById('btnUnlockNow');
+
+  if (durationBadge) durationBadge.textContent = fmt(durationSec || 0);
+  if (coinBadge) coinBadge.textContent = String(coinCost || 1);
+
+  const unlocked = await hasUnlocked(user.id, slug);
+  let wallet = await loadWalletCoins(user.id);
+  if (walletBadge) walletBadge.textContent = String(wallet);
+  if (btnUnlockNow) btnUnlockNow.style.display = unlocked ? 'none' : 'inline-flex';
+
+  if (unlocked) return;
+
+  let gatePassed = false;
+  const passGate = async () => {
+    if (gatePassed) return true;
+    const result = await spendCoinsAndUnlock(user.id, slug, coinCost);
+    if (!result.ok){
+      if (result.reason === 'insufficient'){
+        alert('金幣不足，請先購買。');
+        location.href = (ROOT_BASE || '') + '/pricing.html';
+        return false;
+      }
+      alert('解鎖失敗，請稍後再試。');
+      return false;
+    }
+    gatePassed = true;
+    wallet = Number(result.wallet || 0);
+    if (walletBadge) walletBadge.textContent = String(wallet);
+    if (btnUnlockNow) btnUnlockNow.style.display = 'none';
+    return true;
+  };
+
+  if (btnUnlockNow){
+    btnUnlockNow.onclick = async () => {
+      const ok = await passGate();
+      if (ok) playActive();
+    };
+  }
+
+  const onTimeUpdate = async () => {
+    if (gatePassed) return;
+    const t = getCurrentPlaybackTime();
+    if (t < 60) return;
+    pauseActive();
+    const ok = await passGate();
+    if (ok) playActive();
+  };
+
+  video.addEventListener('timeupdate', onTimeUpdate);
+}
+
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
   async function ensureVideoPublished(category, slug, isAdmin) {
     try {
@@ -2269,6 +2422,7 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     speedVal.textContent = `${r.toFixed(2)}x`;
 
     await loadVideo();
+    await setupCoinGate(user);
     await loadCues();
     await loadQuiz();
     await loadVocab();
