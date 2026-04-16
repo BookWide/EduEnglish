@@ -644,10 +644,7 @@ const paramBase=params.get('base');
 // BASE：若網址帶 ?base= 則優先，其次依 ROOT_BASE（/EduEnglish 或空字串）
 const BASE = (paramBase!=null ? paramBase : ROOT_BASE);
 const cat =(params.get('cat')||'story').toLowerCase();
-function normalizeSlug(v){
-  return String(v || '').trim().toLowerCase().replaceAll('_','-');
-}
-let slug=normalizeSlug(params.get('slug')||'houyi');
+let slug=params.get('slug')||'houyi';
 const domainParam = (params.get('domain') || '').trim().toLowerCase();
 
 function inferProDomainFromSlug(slugText=''){
@@ -875,7 +872,6 @@ function fallbackToHtml5(reason=''){
   showHtml5();
 }
 function handlePlaybackTick(){
-  handleCoinGateTimeUpdate();
   if(!cues.length) return;
   const i=currentIndex();
   highlightRow(i);
@@ -1953,7 +1949,6 @@ $('#btnAutoSync').addEventListener('click',()=>{
 });
 
 video.addEventListener('timeupdate',handlePlaybackTick);
-video.addEventListener('timeupdate',handleCoinGateTimeUpdate);
 
 /* ==== TTS (iOS-friendly) ==== */
 const TTS_CLOUD_ENDPOINT = window.BOOKWIDE_TTS_ENDPOINT || ""; 
@@ -2053,204 +2048,12 @@ async function speakText(text, lang){
   }
 }
 
-
-function calcCoinCost(durationSec){
-  const min = Math.ceil((Number(durationSec||0))/60);
-  if(min <= 5) return 1;
-  if(min <= 10) return 2;
-  if(min <= 20) return 3;
-  if(min <= 30) return 4;
-  return 5;
-}
-
-const COIN_GATE = {
-  previewSec: 60,
-  enabled: false,
-  unlocked: false,
-  checking: false,
-  user: null,
-  durationSec: 0,
-  cost: 0,
-  walletCoins: null,
-  barEl: null,
-};
-
-function formatDurationSec(sec){
-  sec = Math.max(0, Number(sec)||0);
-  const m = Math.floor(sec/60);
-  const s = sec % 60;
-  return `${m}:${String(s).padStart(2,'0')}`;
-}
-
-function ensureCoinGateBar(){
-  if(COIN_GATE.barEl) return COIN_GATE.barEl;
-  const controls = document.querySelector('.controls');
-  if(!controls) return null;
-  const row = document.createElement('div');
-  row.id = 'coinGateBar';
-  row.className = 'row';
-  row.style.justifyContent = 'space-between';
-  row.style.alignItems = 'center';
-  row.style.gap = '10px';
-  row.innerHTML = `
-    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-      <span class="chip" id="coinDurationChip">時長 --:--</span>
-      <span class="chip" id="coinCostChip">金幣 --</span>
-      <span class="chip" id="coinWalletChip">餘額 --</span>
-      <span class="chip" id="coinStateChip">未解鎖</span>
-    </div>
-    <button class="btn sm blue" id="btnUnlockNow" type="button">立即解鎖</button>
-  `;
-  controls.appendChild(row);
-  row.querySelector('#btnUnlockNow')?.addEventListener('click', async ()=>{
-    await triggerCoinUnlock(true);
-  });
-  COIN_GATE.barEl = row;
-  return row;
-}
-
-function renderCoinGateBar(){
-  const row = ensureCoinGateBar();
-  if(!row) return;
-  const durationChip = row.querySelector('#coinDurationChip');
-  const costChip = row.querySelector('#coinCostChip');
-  const walletChip = row.querySelector('#coinWalletChip');
-  const stateChip = row.querySelector('#coinStateChip');
-  if(durationChip) durationChip.textContent = `時長 ${formatDurationSec(COIN_GATE.durationSec)}`;
-  if(costChip) costChip.textContent = `金幣 ${COIN_GATE.cost}`;
-  if(walletChip) walletChip.textContent = `餘額 ${COIN_GATE.walletCoins == null ? '--' : COIN_GATE.walletCoins}`;
-  if(stateChip) stateChip.textContent = COIN_GATE.unlocked ? '已解鎖' : `試看前 ${COIN_GATE.previewSec} 秒`;
-}
-
-async function loadWalletCoins(userId){
-  try{
-    const { data, error } = await playerSupa
-      .from('user_wallets')
-      .select('coins')
-      .eq('user_id', userId)
-      .maybeSingle();
-    if(error) throw error;
-    COIN_GATE.walletCoins = Number(data?.coins ?? 0);
-  }catch(e){
-    console.warn('[coin-gate] load wallet failed', e);
-    COIN_GATE.walletCoins = 0;
-  }
-  renderCoinGateBar();
-}
-
-async function loadUnlockState(userId, videoSlug){
-  try{
-    const { data, error } = await playerSupa
-      .from('video_unlocks')
-      .select('user_id, video_slug')
-      .eq('user_id', userId)
-      .eq('video_slug', videoSlug)
-      .maybeSingle();
-    if(error) throw error;
-    COIN_GATE.unlocked = !!data;
-  }catch(e){
-    console.warn('[coin-gate] load unlock failed', e);
-    COIN_GATE.unlocked = false;
-  }
-  renderCoinGateBar();
-}
-
-async function setupCoinGate(user){
-  COIN_GATE.user = user || null;
-  const row = window.__ASSET_ROW__ || {};
-  COIN_GATE.durationSec = Number(row.duration_sec || 0) || 0;
-  COIN_GATE.cost = Number(row.coin_cost || 0) || calcCoinCost(COIN_GATE.durationSec);
-  COIN_GATE.enabled = !!user && cat === 'pro' && COIN_GATE.cost > 0;
-  COIN_GATE.unlocked = false;
-  renderCoinGateBar();
-  if(!COIN_GATE.enabled) return;
-  await loadUnlockState(user.id, slug);
-  await loadWalletCoins(user.id);
-}
-
-async function triggerCoinUnlock(manual=false){
-  if(!COIN_GATE.enabled || COIN_GATE.unlocked || COIN_GATE.checking || !COIN_GATE.user) return true;
-  COIN_GATE.checking = true;
-  try{
-    pauseActive();
-    await loadUnlockState(COIN_GATE.user.id, slug);
-    if(COIN_GATE.unlocked){
-      renderCoinGateBar();
-      return true;
-    }
-
-    await loadWalletCoins(COIN_GATE.user.id);
-    if((COIN_GATE.walletCoins ?? 0) < COIN_GATE.cost){
-      alert(`金幣不足，這支影片需要 ${COIN_GATE.cost} 金幣，你目前只有 ${COIN_GATE.walletCoins ?? 0} 金幣。`);
-      location.href = (ROOT_BASE || '') + '/pricing.html';
-      return false;
-    }
-
-    if(manual !== true){
-      const ok = confirm(`這支影片需要 ${COIN_GATE.cost} 金幣。
-解鎖後可永久觀看。
-
-是否現在解鎖？`);
-      if(!ok) return false;
-    }
-
-    const newCoins = Math.max(0, Number(COIN_GATE.walletCoins || 0) - Number(COIN_GATE.cost || 0));
-    const { error: walletErr } = await playerSupa
-      .from('user_wallets')
-      .update({ coins: newCoins, updated_at: new Date().toISOString() })
-      .eq('user_id', COIN_GATE.user.id);
-    if(walletErr) throw walletErr;
-
-    const { error: unlockErr } = await playerSupa
-      .from('video_unlocks')
-      .insert({
-        user_id: COIN_GATE.user.id,
-        video_slug: slug,
-        unlocked_at: new Date().toISOString()
-      });
-    if(unlockErr && !String(unlockErr.message||'').toLowerCase().includes('duplicate')) throw unlockErr;
-
-    try{
-      await playerSupa
-        .from('coin_logs')
-        .insert({
-          user_id: COIN_GATE.user.id,
-          change: -COIN_GATE.cost,
-          reason: 'unlock_video',
-          video_slug: slug,
-          created_at: new Date().toISOString()
-        });
-    }catch(logErr){
-      console.warn('[coin-gate] coin log failed', logErr);
-    }
-
-    COIN_GATE.walletCoins = newCoins;
-    COIN_GATE.unlocked = true;
-    renderCoinGateBar();
-    playActive();
-    return true;
-  }catch(e){
-    console.error('[coin-gate] unlock failed', e);
-    alert('金幣守門失敗，請稍後再試。');
-    return false;
-  }finally{
-    COIN_GATE.checking = false;
-  }
-}
-
-async function handleCoinGateTimeUpdate(){
-  if(!COIN_GATE.enabled || COIN_GATE.unlocked || COIN_GATE.checking) return;
-  const t = getCurrentPlaybackTime();
-  if(t < COIN_GATE.previewSec) return;
-  await triggerCoinUnlock(false);
-}
-
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
   async function ensureVideoPublished(category, slug, isAdmin) {
     try {
       const { data, error } = await playerSupa
         .from('assets')
-        .select('is_published, mp4_url, youtube_url, youtube_id, preferred_source, cover_url, duration_sec, coin_cost, difficulty_level, title, domain_code')
+        .select('is_published, mp4_url, youtube_url, youtube_id, preferred_source, cover_url, duration_sec, difficulty_level, title, domain_code')
         .eq('category', category)
         .eq('slug', slug)
         .maybeSingle();
@@ -2408,8 +2211,6 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
       window.location.href = (ROOT_BASE || '') + '/services/video.html';
       return;
     }
-
-    await setupCoinGate(user);
 
 // 3-4) 訂閱通過後，若尚未完成 Level Survey → 先做一次（之後不再打擾）
     let hasBest = false;
