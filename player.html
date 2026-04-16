@@ -679,6 +679,36 @@ function buildLessonDataUrl(fileName){
   return `${BASE}/data/${cat}/${slug}/${fileName}?v=${vnow}`;
 }
 
+async function fetchJsonFirstHit(fileNames = []){
+  let lastErr = null;
+  for (const fileName of fileNames) {
+    const url = buildLessonDataUrl(fileName);
+    try {
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      return { url, data, fileName };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('No JSON hit');
+}
+
+function normalizeAiTopics(raw){
+  if (Array.isArray(raw)) return raw;
+  if (raw && Array.isArray(raw.items)) return raw.items;
+  if (raw && Array.isArray(raw.topics)) return raw.topics;
+  return [];
+}
+
+function normalizeTalkItems(raw){
+  if (Array.isArray(raw)) return raw;
+  if (raw && Array.isArray(raw.dialogue)) return raw.dialogue;
+  if (raw && Array.isArray(raw.items)) return raw.items;
+  return [];
+}
+
     let CURRENT_USER_IS_ADMIN = false;
 if(slug==='huyi') slug='houyi';
 const vnow=Date.now();
@@ -1380,18 +1410,38 @@ async function loadVocab(){
 
 /* ==== AI（三語示範 + 對應朗讀） ==== */
 async function loadAI(){
-  const url=`${BASE}/data/${cat}/${slug}/ai-${slug}.json?v=${vnow}`;
+  const sel = $('#aiTopic');
+  const prompt = $('#aiPrompt');
+  const hint = $('#aiHint');
+  const reply = $('#aiReply');
+  const progress = $('#aiProgress');
+
   try{
-    const r=await fetch(url,{cache:'no-store'});
-    if(!r.ok) throw 0;
-    const data=await r.json();
-    const topics=Array.isArray(data)?data:(data.topics||[]);
-    const sel=$('#aiTopic');
-    sel.innerHTML=topics.map((t,i)=>`
-      <option value="${i}">${esc(t.title||t.q||('題目'+(i+1)))}</option>`).join('');
-    const prompt=$('#aiPrompt'),hint=$('#aiHint'),reply=$('#aiReply');
-    const total=topics.length;let idx=0;
-    let currentLang='en';
+    const hit = await fetchJsonFirstHit([
+      `ai-${slug}.json`,
+      `ai.json`
+    ]);
+
+    const topics = normalizeAiTopics(hit.data);
+
+    if(!topics.length){
+      if(sel) sel.innerHTML = '<option value="">沒有 AI 題目</option>';
+      if(prompt) prompt.value = '';
+      if(hint) hint.textContent = '—';
+      if(reply) reply.textContent = '（AI 題目是空的）';
+      if(progress) progress.textContent = '第 0/0 題';
+      window.__AI_TOPICS__ = [];
+      window.__AI_CURRENT_INDEX__ = 0;
+      return;
+    }
+
+    if(sel){
+      sel.innerHTML = topics.map((t,i)=>`
+        <option value="${i}">${esc(t.title||t.q||('題目'+(i+1)))}</option>`).join('');
+    }
+
+    let idx = 0;
+    let currentLang = 'en';
 
     function getSamples(t){
       const jaObj=(t.ja && typeof t.ja==='object')?t.ja:null;
@@ -1421,23 +1471,38 @@ async function loadAI(){
       if(lang==='zh') text=sampleZh||sampleEn||sampleJa;
       else if(lang==='ja') text=sampleJa||sampleEn||sampleZh;
       else text=sampleEn||sampleZh||sampleJa;
-      reply.textContent=text||'(尚無示範句)';
+      if(reply) reply.textContent=text||'(尚無示範句)';
     }
 
     function render(){
-      const t=topics[idx]||{};
-      prompt.value=t.prompt||t.q||'';
-      hint.textContent=t.hint||'';
-      setReplyByLang(t,currentLang);
-      $('#aiProgress').textContent=`第 ${idx+1}/${total} 題`;
-      sel.value=String(idx);
+      const t = topics[idx] || {};
+      if(prompt) prompt.value = t.prompt || t.q || '';
+      if(hint) hint.textContent = t.hint || '—';
+      setReplyByLang(t, currentLang);
+      if(progress) progress.textContent = `第 ${idx+1}/${topics.length} 題`;
+      if(sel) sel.value = String(idx);
+      window.__AI_TOPICS__ = topics;
+      window.__AI_CURRENT_INDEX__ = idx;
     }
-    if(total) render();
 
-    sel.onchange=()=>{idx=+sel.value|0;render();};
-    $('#btnPrevTopic').onclick=()=>{idx=(idx-1+total)%total;render();};
-    $('#btnNextTopic').onclick=()=>{idx=(idx+1)%total;render();};
-    $('#btnTts').onclick=()=>speakText(prompt.value,'en-US');
+    render();
+
+    if(sel){
+      sel.onchange = ()=>{
+        idx = +sel.value|0;
+        render();
+      };
+    }
+
+    $('#btnPrevTopic').onclick=()=>{
+      idx=(idx-1+topics.length)%topics.length;
+      render();
+    };
+    $('#btnNextTopic').onclick=()=>{
+      idx=(idx+1)%topics.length;
+      render();
+    };
+    $('#btnTts').onclick=()=>speakText((prompt && prompt.value) || '','en-US');
 
     $('#aiDemoEn').onclick=()=>{currentLang='en';render();};
     $('#aiDemoZh').onclick=()=>{currentLang='zh';render();};
@@ -1453,7 +1518,16 @@ async function loadAI(){
       if(text) speakText(text,langCode);
     };
 
-  }catch(e){console.warn(e);}
+  }catch(e){
+    console.warn(e);
+    if(sel) sel.innerHTML = '<option value="">AI 載入失敗</option>';
+    if(prompt) prompt.value = '';
+    if(hint) hint.textContent = '—';
+    if(reply) reply.textContent = '⚠️ AI 題庫讀取失敗';
+    if(progress) progress.textContent = '第 0/0 題';
+    window.__AI_TOPICS__ = [];
+    window.__AI_CURRENT_INDEX__ = 0;
+  }
 }
 
 
@@ -1728,21 +1802,18 @@ async function loadTalk(){
   if(talkLoaded) return;
   talkLoaded = true;
   if(talkStatus) talkStatus.textContent = '（Talk 載入中…）';
-  const candidates = [
-    `${BASE}/data/${cat}/${slug}/${slug}.dialogue.json?v=${vnow}`,
-    `${BASE}/data/${cat}/${slug}/dialogue-${slug}.json?v=${vnow}`,
-    `${BASE}/data/${cat}/${slug}/talk-${slug}.json?v=${vnow}`
-  ];
-  let payload = null, hit = '';
-  for(const url of candidates){
-    try{
-      const r = await fetch(url, {cache:'no-store'});
-      if(!r.ok) continue;
-      payload = await r.json();
-      hit = url;
-      break;
-    }catch(_e){}
-  }
+
+  let payload = null, hit = null;
+  try{
+    hit = await fetchJsonFirstHit([
+      `${slug}.dialogue.json`,
+      `dialogue-${slug}.json`,
+      `dialogue.json`,
+      `talk-${slug}.json`
+    ]);
+    payload = hit.data;
+  }catch(_e){}
+
   if(!payload){
     talkData = [];
     if(talkStatus) talkStatus.textContent = '（尚未載入 Talk）';
@@ -1750,13 +1821,15 @@ async function loadTalk(){
     renderTalkList();
     return;
   }
-  const raw = Array.isArray(payload) ? payload : (Array.isArray(payload.dialogue) ? payload.dialogue : []);
+
+  const raw = normalizeTalkItems(payload);
   talkData = raw.map(normalizeTalkItem).filter(x => x.text || x.zh || x.ja);
   fillTalkRoleOptions();
   talkCurrentIdx = 0;
-  if(talkStatus) talkStatus.textContent = `已載入 Talk：${hit.replace(location.origin,'')}`;
+  if(talkStatus) talkStatus.textContent = `已載入 Talk：${(hit && hit.fileName) || ''}`;
   renderTalkCurrent();
   renderTalkList();
+
   if(!talkSyncTimer){
     talkSyncTimer = setInterval(() => {
       if(!talkData.length) return;
