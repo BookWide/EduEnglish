@@ -114,24 +114,29 @@
 
     <h1>我的訂閱</h1>
 
+    <div id="returnNotice" class="card" style="display:none;padding:16px 20px;margin-top:10px;">
+      <div style="font-weight:900;color:#065f46;">付款成功通知</div>
+      <div id="returnNoticeText" class="muted" style="margin-top:6px;">系統正在確認你的付款與金幣入帳。</div>
+    </div>
+
     <div class="card">
-      <h3>目前訂閱 <span id="subStatus" class="pill neu">檢查中</span><span id="walletPill" class="pill neu">金幣：讀取中</span></h3>
+      <h3>目前訂閱 <span id="subStatus" class="pill neu">檢查中</span><span id="walletPill" class="pill neu" style="margin-left:8px;">金幣：讀取中</span></h3>
 
       <div class="grid2">
         <div id="currentSub" class="muted">讀取中…</div>
         <div id="currentRight" class="muted"></div>
       </div>
-      <div id="walletNotice" class="tiny" style="margin-top:10px;color:#334155;font-weight:800;">目前金幣：讀取中…</div>
 
       <div id="avoidDup" style="margin-top:14px;display:none;"></div>
       <div id="nextStepBox" class="tiny" style="margin-top:10px;color:#475569;"></div>
+      <div id="walletNotice" class="tiny" style="margin-top:8px;color:#334155;font-weight:800;">目前金幣：讀取中…</div>
 
       <div class="actionsRow">
-        <a href="/pricing.html" class="btn primary" id="btnGoPricing">前往訂閱</a>
+        <a href="../pricing.html" class="btn primary" id="btnGoPricing">前往訂閱</a>
         <button class="btn" id="btnLocked" style="display:none;" disabled>訂閱中（已鎖定避免重複）</button>
         <button class="btn dark" id="btnStartLevel" style="display:none;">（選填）英語程度評測</button>
-        <a href="/account/profile.html" class="btn primary" id="btnGoProfile" style="display:none;">前往設定職業主題</a>
-        <a href="/account/learning-dashboard.html" class="btn dark" id="btnGoDashboard" style="display:none;">前往學習控制台</a>
+        <a href="./profile.html" class="btn primary" id="btnGoProfile" style="display:none;">前往設定職業主題</a>
+        <a href="./learning-dashboard.html" class="btn dark" id="btnGoDashboard" style="display:none;">前往學習控制台</a>
       </div>
     </div>
 
@@ -225,31 +230,75 @@ function daysLeft(expire_at){
   if(isNaN(exp.getTime())) return null;
   const diff = exp.getTime() - Date.now();
   return Math.ceil(diff / 86400000);
+
+async function getSessionUser(sb){
+  try{
+    let { data: { session } } = await sb.auth.getSession();
+    if (!session) {
+      await new Promise(r=>setTimeout(r, 250));
+      ({ data: { session } } = await sb.auth.getSession());
+    }
+    if (session?.user) return session.user;
+
+    const { data: authData, error: authErr } = await sb.auth.getUser();
+    if (authErr) {
+      console.error('[subscription] getUser error', authErr);
+      return null;
+    }
+    return authData?.user || null;
+  }catch(err){
+    console.error('[subscription] getSessionUser error', err);
+    return null;
+  }
 }
-async function loadWalletCoins(sb, userId){
+async function getWalletCoins(sb, userId){
   try{
     const { data, error } = await sb
       .from('profiles')
       .select('wallet_coins')
       .eq('id', userId)
       .single();
-    if(error) throw error;
+    if (error) throw error;
     return Number(data?.wallet_coins || 0);
   }catch(err){
-    console.error('[subscription] loadWalletCoins error', err);
+    console.error('[subscription] getWalletCoins error', err);
     return 0;
   }
 }
 function renderWalletCoins(n){
   const coins = Number(n || 0);
-  if ($walletPill) $walletPill.textContent = `金幣：${coins}`;
-  if ($walletNotice) $walletNotice.textContent = `目前可用金幣：${coins}`;
+  const wp = $("walletPill");
+  const wn = $("walletNotice");
+  if (wp) wp.textContent = `金幣：${coins}`;
+  if (wn) wn.textContent = `目前金幣：${coins}`;
+}
+function renderLoggedOutState(){
+  $("whoChip").textContent = "未登入";
+  $("subStatus").textContent = "未登入";
+  $("subStatus").className = "pill bad";
+  renderWalletCoins(0);
+  $("currentSub").innerHTML = `<div class="mono" style="color:var(--bad);font-weight:900;">請先登入後查看訂閱與金幣</div>`;
+  $("currentRight").innerHTML = `<div class="muted">付款成功後若回到這頁顯示未登入，請重新登入一次即可同步資料。</div>`;
+  $("historyBody").innerHTML = `<tr><td colspan="3" class="muted">請先登入後查看歷史訂單。</td></tr>`;
+}
+function renderReturnNotice(){
+  const p = new URL(location.href).searchParams;
+  const rtn = p.get("rtn");
+  const mtn = p.get("mtn");
+  const box = $("returnNotice");
+  const txt = $("returnNoticeText");
+  if (!box || !txt) return;
+  if (rtn === "1" || mtn) {
+    box.style.display = "block";
+    txt.textContent = `付款已返回系統${mtn ? `（訂單號：${mtn}）` : ""}，若金幣未即時顯示，重新登入後再刷新本頁即可同步。`;
+  }
+}
 }
 
-$("btnHome").onclick = () => location.href = "/index.html";
+$("btnHome").onclick = () => location.href = "../index.html";
 $("btnBack").onclick = () => {
   if (history.length > 1) history.back();
-  else location.href = "/index.html";
+  else location.href = "../index.html";
 };
 
 (async () => {
@@ -264,8 +313,6 @@ $("btnBack").onclick = () => {
   const $goPricing = $("btnGoPricing");
   const $goProfile = $("btnGoProfile");
   const $goDashboard = $("btnGoDashboard");
-  const $walletPill = $("walletPill");
-  const $walletNotice = $("walletNotice");
 
   if(!(await waitSupabase(5000))){
     $status.textContent = "錯誤";
@@ -277,12 +324,9 @@ $("btnBack").onclick = () => {
 
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+  await sb.auth.getSession();
   const { data: authData, error: authErr } = await sb.auth.getUser();
   const user = authData?.user;
-  if (user?.id) {
-    const coins = await loadWalletCoins(sb, user.id);
-    renderWalletCoins(coins);
-  }
 
   if(authErr || !user){
     $who.textContent = "未登入";
