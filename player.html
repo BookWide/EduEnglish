@@ -407,6 +407,13 @@ tr.speaking{
 
   async function bwPlayerGetUser() {
     try {
+      let { data: { session } } = await playerSupa.auth.getSession();
+      if (!session) {
+        await new Promise(r => setTimeout(r, 250));
+        ({ data: { session } } = await playerSupa.auth.getSession());
+      }
+      if (session?.user) return session.user;
+
       const { data, error } = await playerSupa.auth.getUser();
       if (error || !data || !data.user) return null;
       return data.user;
@@ -2113,12 +2120,12 @@ function calcCoins(durationSec){
 async function loadWalletCoins(userId){
   try{
     const { data, error } = await playerSupa
-      .from('user_wallets')
-      .select('coins')
-      .eq('user_id', userId)
-      .maybeSingle();
+      .from('profiles')
+      .select('wallet_coins')
+      .eq('id', userId)
+      .single();
     if (error) throw error;
-    return Number((data && data.coins) || 0);
+    return Number(data?.wallet_coins || 0);
   }catch(e){
     console.warn('[BW-player] loadWalletCoins failed', e);
     return 0;
@@ -2128,10 +2135,10 @@ async function loadWalletCoins(userId){
 async function hasUnlocked(userId, lessonSlug){
   try{
     const { data, error } = await playerSupa
-      .from('video_unlocks')
-      .select('user_id')
+      .from('asset_unlocks')
+      .select('id')
       .eq('user_id', userId)
-      .eq('video_slug', lessonSlug)
+      .eq('asset_slug', lessonSlug)
       .maybeSingle();
     if (error) throw error;
     return !!data;
@@ -2146,25 +2153,19 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
     const wallet = await loadWalletCoins(userId);
     if (wallet < coinCost) return { ok:false, reason:'insufficient', wallet };
 
+    const already = await hasUnlocked(userId, lessonSlug);
+    if (already) return { ok:true, wallet, already:true };
+
     const { error: walletErr } = await playerSupa
-      .from('user_wallets')
-      .update({ coins: wallet - coinCost })
-      .eq('user_id', userId);
+      .from('profiles')
+      .update({ wallet_coins: wallet - coinCost })
+      .eq('id', userId);
     if (walletErr) throw walletErr;
 
     const { error: unlockErr } = await playerSupa
-      .from('video_unlocks')
-      .upsert({ user_id: userId, video_slug: lessonSlug }, { onConflict: 'user_id,video_slug' });
+      .from('asset_unlocks')
+      .insert({ user_id: userId, asset_slug: lessonSlug });
     if (unlockErr) throw unlockErr;
-
-    try{
-      await playerSupa.from('coin_logs').insert({
-        user_id: userId,
-        change: -coinCost,
-        reason: 'unlock_video',
-        video_slug: lessonSlug
-      });
-    }catch(_e){}
 
     return { ok:true, wallet: wallet - coinCost };
   }catch(e){
@@ -2199,7 +2200,13 @@ async function setupCoinGate(user){
     if (!result.ok){
       if (result.reason === 'insufficient'){
         alert('金幣不足，請先購買。');
-        location.href = (ROOT_BASE || '') + '/pricing.html';
+        const q = new URLSearchParams();
+        q.set('from', 'player');
+        q.set('slug', slug);
+        q.set('cat', cat);
+        if (domainParam) q.set('domain', domainParam);
+        q.set('return', location.pathname + location.search);
+        location.href = (ROOT_BASE || '') + '/pricing.html?' + q.toString();
         return false;
       }
       alert('解鎖失敗，請稍後再試。');
