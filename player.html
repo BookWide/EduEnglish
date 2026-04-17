@@ -2231,15 +2231,7 @@ async function setupCoinGate(user){
   if (walletBadge) walletBadge.textContent = String(wallet);
   if (btnUnlockNow) btnUnlockNow.style.display = unlocked ? 'none' : 'inline-flex';
 
-  if (coinGateTimer) {
-    clearInterval(coinGateTimer);
-    coinGateTimer = null;
-  }
-
-  if (unlocked) {
-    window.__BW_COIN_GATE_READY__ = true;
-    return;
-  }
+  if (unlocked) return;
 
   let gatePassed = false;
   let gateInFlight = null;
@@ -2271,10 +2263,6 @@ async function setupCoinGate(user){
       wallet = Number(result.wallet || 0);
       if (walletBadge) walletBadge.textContent = String(wallet);
       if (btnUnlockNow) btnUnlockNow.style.display = 'none';
-      if (coinGateTimer) {
-        clearInterval(coinGateTimer);
-        coinGateTimer = null;
-      }
       return true;
     })();
 
@@ -2292,22 +2280,16 @@ async function setupCoinGate(user){
     };
   }
 
-  const onGateTick = async () => {
+  const onTimeUpdate = async () => {
     if (gatePassed || gateInFlight) return;
-    const t = Number(getCurrentPlaybackTime()) || 0;
-    if (t < trialSeconds) return;
-
+    const t = getCurrentPlaybackTime();
+    if (t < 60) return;
     pauseActive();
     const ok = await passGate();
-    if (ok) {
-      playActive();
-    } else {
-      setCurrentPlaybackTime(Math.max(0, trialSeconds - 1));
-    }
+    if (ok) playActive();
   };
 
-  coinGateTimer = setInterval(onGateTick, 500);
-  window.__BW_COIN_GATE_READY__ = true;
+  video.addEventListener('timeupdate', onTimeUpdate);
 }
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
@@ -2842,8 +2824,6 @@ let trialSeconds = 60;
 let currentUser = null;
 let walletCoins = 0;
 let coinLockBound = false;
-let coinGateTimer = null;
-window.__BW_COIN_GATE_READY__ = window.__BW_COIN_GATE_READY__ || false;
 
 function currentReturnUrl(){
   return location.pathname + location.search;
@@ -2927,48 +2907,33 @@ function unlockPlayerUI() {
 }
 
 function setupCoinLock() {
-  if (window.__BW_COIN_GATE_READY__) return;
   if (coinLockBound) return;
   coinLockBound = true;
 
-  const legacyTick = async () => {
-    if (window.__BW_COIN_GATE_READY__) {
-      if (coinGateTimer) {
-        clearInterval(coinGateTimer);
-        coinGateTimer = null;
-      }
-      return;
-    }
+  video.addEventListener('timeupdate', async () => {
     if (unlocked) return;
-    const t = Number(getCurrentPlaybackTime()) || 0;
-    if (t < trialSeconds) return;
+    if (video.currentTime < trialSeconds) return;
 
-    pauseActive();
+    video.pause();
 
     const already = await checkUnlocked();
     if (already) {
       unlockPlayerUI();
-      playActive();
+      video.play().catch(()=>{});
       return;
     }
 
     const ok = confirm(
-      `🔒 此影片需 ${coinCost} 金幣
-你目前有 ${walletCoins} 金幣
-
-是否立即解鎖？`
+      `🔒 此影片需 ${coinCost} 金幣\n你目前有 ${walletCoins} 金幣\n\n是否立即解鎖？`
     );
 
     if (!ok) {
-      setCurrentPlaybackTime(Math.max(0, trialSeconds - 1));
+      video.currentTime = Math.max(0, trialSeconds - 1);
       return;
     }
 
     await unlockVideo();
-  };
-
-  if (coinGateTimer) clearInterval(coinGateTimer);
-  coinGateTimer = setInterval(legacyTick, 500);
+  });
 }
 
 async function unlockVideo() {
@@ -3023,7 +2988,10 @@ async function unlockVideo() {
 document.getElementById('btnUnlockNow').onclick = unlockVideo;
 
 (async () => {
-  // legacy coin bootstrap disabled: 正式以 setupCoinGate(user) 為主，避免 YouTube / HTML5 各跑一套扣幣流程
+  await initWallet();
+  await initCoinCost();
+  await checkUnlocked();
+  setupCoinLock();
 })();
 
 </script>
