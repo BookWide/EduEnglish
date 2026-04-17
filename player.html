@@ -2755,178 +2755,185 @@ async function loadProOutline(){
   }
 }
 
-<!-- 🔥 BookWide Player V3 最終金幣鎖版 -->
-
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-
 <script>
-const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
-const SUPABASE_KEY = "你的 anon key（你原本就有）";
 
-const supa = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-
+let unlocked = false;
+let coinCost = 1;
+let trialSeconds = 60;
 let currentUser = null;
 let walletCoins = 0;
-let coinCost = 1;
-let currentSlug = new URLSearchParams(location.search).get("slug");
+let coinLockBound = false;
 
-/* =========================
-   🔐 初始化
-========================= */
-async function initPlayerCoin(){
-  const { data } = await supa.auth.getUser();
-  currentUser = data?.user;
-  if(!currentUser) return;
-
-  await loadWallet();
-  await checkUnlocked();
+function currentReturnUrl(){
+  return location.pathname + location.search;
 }
 
-/* =========================
-   💰 讀錢（每次都即時）
-========================= */
-async function loadWallet(){
-  const { data } = await supa
+function goToPricing(){
+  const p = new URLSearchParams();
+  p.set('from', 'player');
+  p.set('slug', slug);
+  p.set('cat', cat);
+  p.set('return', currentReturnUrl());
+  if (domainParam) p.set('domain', domainParam);
+  location.href = `${ROOT_BASE || ''}/pricing.html?` + p.toString();
+}
+
+async function refreshWallet(){
+  currentUser = await bwPlayerGetUser();
+  if (!currentUser) return 0;
+
+  const { data, error } = await playerSupa
     .from('profiles')
     .select('wallet_coins')
     .eq('id', currentUser.id)
     .single();
 
+  if (error) {
+    console.error('[coin] refreshWallet error', error);
+    return 0;
+  }
+
   walletCoins = data?.wallet_coins || 0;
-  document.getElementById("walletBadge").textContent = walletCoins;
+  const badge = document.getElementById('walletBadge');
+  if (badge) badge.textContent = walletCoins;
+  return walletCoins;
 }
 
-/* =========================
-   🔓 檢查是否已解鎖
-========================= */
-async function checkUnlocked(){
-  const { data } = await supa
+async function initWallet(){
+  await refreshWallet();
+}
+
+async function initCoinCost() {
+  let row = window.__ASSET_ROW__ || null;
+
+  if (!row || row.coin_cost == null) {
+    const { data, error } = await playerSupa
+      .from('assets')
+      .select('coin_cost')
+      .eq('slug', slug)
+      .maybeSingle();
+
+    if (!error && data) row = { ...(row || {}), ...data };
+  }
+
+  coinCost = Number(row?.coin_cost || 1) || 1;
+  const badge = document.getElementById('coinBadge');
+  if (badge) badge.textContent = coinCost;
+}
+
+async function checkUnlocked() {
+  currentUser = await bwPlayerGetUser();
+  if (!currentUser) return false;
+
+  const { data, error } = await playerSupa
     .from('asset_unlocks')
     .select('id')
     .eq('user_id', currentUser.id)
-    .eq('asset_slug', currentSlug)
+    .eq('asset_slug', slug)
     .maybeSingle();
 
-  if(data){
-    unlockPlayerUI();
-  }else{
-    lockPlayerUI();
+  if (error) {
+    console.error('[coin] checkUnlocked error', error);
+    return false;
   }
+
+  unlocked = !!data;
+  return unlocked;
 }
 
-/* =========================
-   🔒 鎖 UI（60秒試看）
-========================= */
-function lockPlayerUI(){
-  const video = document.querySelector("video");
+function unlockPlayerUI() {
+  unlocked = true;
+}
 
-  video.addEventListener("timeupdate", ()=>{
-    if(video.currentTime > 60){
-      video.pause();
-      alert("🔒 試看結束，請解鎖");
+function setupCoinLock() {
+  if (coinLockBound) return;
+  coinLockBound = true;
+
+  video.addEventListener('timeupdate', async () => {
+    if (unlocked) return;
+    if (video.currentTime < trialSeconds) return;
+
+    video.pause();
+
+    const already = await checkUnlocked();
+    if (already) {
+      unlockPlayerUI();
+      video.play().catch(()=>{});
+      return;
     }
+
+    const ok = confirm(
+      `🔒 此影片需 ${coinCost} 金幣\n你目前有 ${walletCoins} 金幣\n\n是否立即解鎖？`
+    );
+
+    if (!ok) {
+      video.currentTime = Math.max(0, trialSeconds - 1);
+      return;
+    }
+
+    await unlockVideo();
   });
 }
 
-/* =========================
-   🔓 解鎖 UI
-========================= */
-function unlockPlayerUI(){
-  console.log("已解鎖");
+async function unlockVideo() {
+  currentUser = await bwPlayerGetUser();
+  if (!currentUser) {
+    await ensureAuth({ next: currentReturnUrl() });
+    return;
+  }
+
+  await refreshWallet();
+
+  const already = await checkUnlocked();
+  if (already) {
+    unlockPlayerUI();
+    video.play().catch(()=>{});
+    return;
+  }
+
+  const { data, error } = await playerSupa.rpc('unlock_asset', {
+    p_slug: slug
+  });
+
+  if (error) {
+    console.error('[coin] unlock_asset rpc error', error);
+    alert('系統錯誤，請稍後再試');
+    return;
+  }
+
+  if (!data || !data.ok) {
+    const reason = data?.error || 'unknown';
+
+    if (reason === 'not_logged_in') {
+      await ensureAuth({ next: currentReturnUrl() });
+      return;
+    }
+
+    if (reason === 'not_enough') {
+      goToPricing();
+      return;
+    }
+
+    alert('解鎖失敗，請稍後再試');
+    return;
+  }
+
+  await refreshWallet();
+  unlocked = true;
+  alert(data.already ? '✅ 已解鎖' : `✅ 解鎖成功${data.cost ? `（扣 ${data.cost} 金幣）` : ''}`);
+  video.play().catch(()=>{});
 }
 
-/* =========================
-   💳 解鎖按鈕（核心）
-========================= */
-document.getElementById("btnUnlockNow").onclick = async ()=>{
+document.getElementById('btnUnlockNow').onclick = unlockVideo;
 
-  // ⭐ 每次重新抓錢（關鍵）
-  await loadWallet();
+(async () => {
+  await initWallet();
+  await initCoinCost();
+  await checkUnlocked();
+  setupCoinLock();
+})();
 
-  if(walletCoins < coinCost){
-    alert("❌ 金幣不足");
-    return;
-  }
-
-  // ⭐ 檢查是否已解鎖（避免重扣）
-  const { data: existing } = await supa
-    .from('asset_unlocks')
-    .select('id')
-    .eq('user_id', currentUser.id)
-    .eq('asset_slug', currentSlug)
-    .maybeSingle();
-
-  if(existing){
-    alert("✅ 已解鎖（不重扣）");
-    unlockPlayerUI();
-    return;
-  }
-
-  // ⭐ 扣幣
-  const newCoins = walletCoins - coinCost;
-
-  await supa
-    .from('profiles')
-    .update({ wallet_coins: newCoins })
-    .eq('id', currentUser.id);
-
-  // ⭐ 寫入解鎖紀錄
-  await supa
-    .from('asset_unlocks')
-    .insert({
-      user_id: currentUser.id,
-      asset_slug: currentSlug
-    });
-
-  walletCoins = newCoins;
-  document.getElementById("walletBadge").textContent = walletCoins;
-
-  unlockPlayerUI();
-
-  alert("🎉 解鎖成功！");
-};
-
-/* =========================
-   🚀 啟動
-========================= */
-initPlayerCoin();
-
-</script>
-
-  
 </script>
 
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
