@@ -859,7 +859,7 @@ function playActive(){
     try{ ytPlayer.playVideo(); }catch(e){}
     return;
   }
-  playActive();
+  video.play().catch(()=>{});
 }
 function pauseActive(){
   if(isUsingYouTube()){
@@ -1888,32 +1888,13 @@ async function loadTalk(){
   if(talkStatus) talkStatus.textContent = '（Talk 載入中…）';
 
   let payload = null, hit = null;
-  let dialoguePaths = [];
-
   try{
-    const indexHit = await fetchJsonFirstHit([`index-${slug}.json`]);
-    const indexData = indexHit && indexHit.data ? indexHit.data : null;
-    const dialogRef = String((indexData && indexData.dialogue) || '').trim();
-    if (dialogRef) {
-      const clean = dialogRef.replace(/^\.\//, '');
-      dialoguePaths.push(clean);
-    }
-  }catch(_e){}
-
-  dialoguePaths.push(
-    `${slug}.dialogue.json`,
-    `${slug}-dialogue.json`,
-    `dialogue-${slug}.json`,
-    `dialogue.json`,
-    `talk-${slug}.json`,
-    `${slug}.talk.json`
-  );
-
-  // dedupe
-  dialoguePaths = [...new Set(dialoguePaths.filter(Boolean))];
-
-  try{
-    hit = await fetchJsonFirstHit(dialoguePaths);
+    hit = await fetchJsonFirstHit([
+      `${slug}.dialogue.json`,
+      `dialogue-${slug}.json`,
+      `dialogue.json`,
+      `talk-${slug}.json`
+    ]);
     payload = hit.data;
   }catch(_e){}
 
@@ -2835,6 +2816,7 @@ async function loadProOutline(){
   }
 }
 
+<script>
 
 let unlocked = false;
 let coinCost = 1;
@@ -2842,6 +2824,9 @@ let trialSeconds = 60;
 let currentUser = null;
 let walletCoins = 0;
 let coinLockBound = false;
+let coinLockTimer = null;
+let coinLockBusy = false;
+let coinPromptShown = false;
 
 function currentReturnUrl(){
   return location.pathname + location.search;
@@ -2928,30 +2913,46 @@ function setupCoinLock() {
   if (coinLockBound) return;
   coinLockBound = true;
 
-  video.addEventListener('timeupdate', async () => {
-    if (unlocked) return;
-    if (video.currentTime < trialSeconds) return;
+  if (coinLockTimer) clearInterval(coinLockTimer);
+  coinLockTimer = setInterval(async () => {
+    if (unlocked || coinLockBusy) return;
 
-    video.pause();
+    const nowTime = getCurrentPlaybackTime();
+    if (nowTime < trialSeconds) return;
 
-    const already = await checkUnlocked();
-    if (already) {
-      unlockPlayerUI();
-      playActive();
-      return;
+    coinLockBusy = true;
+    pauseActive();
+
+    try {
+      const already = await checkUnlocked();
+      if (already) {
+        unlockPlayerUI();
+        coinPromptShown = false;
+        playActive();
+        return;
+      }
+
+      await refreshWallet();
+      if (coinPromptShown) return;
+      coinPromptShown = true;
+
+      const ok = confirm(
+        `🔒 此影片需 ${coinCost} 金幣
+你目前有 ${walletCoins} 金幣
+
+是否立即解鎖？`
+      );
+
+      if (!ok) {
+        setCurrentPlaybackTime(Math.max(0, trialSeconds - 1));
+        return;
+      }
+
+      await unlockVideo();
+    } finally {
+      coinLockBusy = false;
     }
-
-    const ok = confirm(
-      `🔒 此影片需 ${coinCost} 金幣\n你目前有 ${walletCoins} 金幣\n\n是否立即解鎖？`
-    );
-
-    if (!ok) {
-      setCurrentPlaybackTime(Math.max(0, trialSeconds - 1));
-      return;
-    }
-
-    await unlockVideo();
-  });
+  }, 500);
 }
 
 async function unlockVideo() {
@@ -2966,6 +2967,7 @@ async function unlockVideo() {
   const already = await checkUnlocked();
   if (already) {
     unlockPlayerUI();
+    coinPromptShown = false;
     playActive();
     return;
   }
@@ -2999,6 +3001,7 @@ async function unlockVideo() {
 
   await refreshWallet();
   unlocked = true;
+  coinPromptShown = false;
   alert(data.already ? '✅ 已解鎖' : `✅ 解鎖成功${data.cost ? `（扣 ${data.cost} 金幣）` : ''}`);
   playActive();
 }
