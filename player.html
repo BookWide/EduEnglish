@@ -940,29 +940,39 @@ async function loadVideo(){
   const SUPA_VIDEOS_BASE = SUPA_PUBLIC_BASE + '/videos';
 
   const row = window.__ASSET_ROW__ || {};
-  const youtubeId = row.youtube_id || getYoutubeIdFromUrl(row.youtube_url || '');
-  const preferred = String(row.preferred_source || 'youtube').toLowerCase();
+  const youtubeUrl = String(row.youtube_url || '').trim();
+  const youtubeId = String(row.youtube_id || getYoutubeIdFromUrl(youtubeUrl) || '').trim();
+  const preferredRaw = String(row.preferred_source || 'youtube').trim().toLowerCase();
+  const preferred = (preferredRaw === 'cloudflare') ? 'mp4' : preferredRaw;
 
   // cover / poster 對齊
   try{
-    if (row && row.cover_url) {
-      video.poster = row.cover_url;
-    }
+    if (row && row.cover_url) video.poster = row.cover_url;
   }catch(_e){}
 
   const sources = [];
   const seen = new Set();
 
   function add(url){
-    if (!url || seen.has(url)) return;
-    seen.add(url);
-    sources.push(url);
+    const u = String(url || '').trim();
+    if (!u || seen.has(u)) return;
+    seen.add(u);
+    sources.push(u);
   }
 
-  // 1) 優先吃 assets.mp4_url
-  try {
+  function destroyYouTubePlayer(){
+    try{
+      if (ytPlayer && typeof ytPlayer.destroy === 'function') ytPlayer.destroy();
+    }catch(_e){}
+    ytPlayer = null;
+    const mount = document.getElementById('ytPlayer');
+    if (mount) mount.innerHTML = '';
+  }
+
+  // 1) assets.mp4_url
+  try{
     if (row && row.mp4_url) add(row.mp4_url);
-  } catch(_e) {}
+  }catch(_e){}
 
   // 2) 保留舊版 fallback，讓大部分舊片仍可播
   const slugMain = slug;
@@ -983,6 +993,7 @@ async function loadVideo(){
 
   function setSrc(k){
     if (!sources[k]) return false;
+    destroyYouTubePlayer();
     showHtml5();
     video.src = sources[k];
     video.load();
@@ -994,6 +1005,9 @@ async function loadVideo(){
     if (i < sources.length - 1) {
       i++;
       setSrc(i);
+    } else if (youtubeId && activeSource !== 'youtube') {
+      console.warn('[Player] html5 exhausted, fallback to youtube', { slug, youtubeId, preferred, sources });
+      tryYouTubeFirst();
     } else {
       console.warn('[Player] 所有影片來源都失敗了', { slug, sources, assetRow: row });
     }
@@ -1001,8 +1015,7 @@ async function loadVideo(){
 
   const tryHtml5First = () => {
     if (!sources.length) {
-      console.warn('[Player] 沒有任何影片來源可試', { slug, assetRow: row });
-      showHtml5();
+      console.warn('[Player] 沒有任何 html5/mp4 來源可試', { slug, assetRow: row });
       return false;
     }
     i = 0;
@@ -1013,6 +1026,7 @@ async function loadVideo(){
     if (!youtubeId) return false;
     try {
       await loadYouTubeApi();
+      destroyYouTubePlayer();
       showYouTube();
       ytStarted = false;
       if (ytStartTimer) clearTimeout(ytStartTimer);
@@ -1054,6 +1068,7 @@ async function loadVideo(){
           }
         }
       });
+      console.log('[Player] using youtube first', { slug, youtubeId, preferred });
       return true;
     } catch (e) {
       console.warn('[Player] youtube load failed', e);
@@ -1063,21 +1078,31 @@ async function loadVideo(){
     }
   };
 
-  // 穩定版：只要 assets 明確指定 mp4 / cloudflare，就先走 html5
-  if ((row && row.mp4_url) || preferred === 'mp4' || preferred === 'cloudflare') {
-    const ok = tryHtml5First();
-    if (!ok && youtubeId) {
-      await tryYouTubeFirst();
+  // 最終版：YouTube 優先；只有明確指定 mp4 / cloudflare 時才先走 html5
+  if (preferred === 'youtube') {
+    if (youtubeId) {
+      const ok = await tryYouTubeFirst();
+      if (ok) return;
     }
+    const ok = tryHtml5First();
+    if (!ok && youtubeId) await tryYouTubeFirst();
     return;
   }
 
+  if (preferred === 'mp4') {
+    const ok = tryHtml5First();
+    if (!ok && youtubeId) await tryYouTubeFirst();
+    return;
+  }
+
+  // 未指定或值異常：優先 YouTube，有問題再退 mp4
   if (youtubeId) {
-    await tryYouTubeFirst();
-    return;
+    const ok = await tryYouTubeFirst();
+    if (ok) return;
   }
 
-  tryHtml5First();
+  const ok = tryHtml5First();
+  if (!ok && youtubeId) await tryYouTubeFirst();
 }
 
 /* ==== 字幕 ==== */
