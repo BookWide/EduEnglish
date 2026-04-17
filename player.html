@@ -717,15 +717,8 @@ function buildLessonDataUrls(fileName){
   };
 
   if(cat === 'pro'){
-    // 先走舊版寬鬆路徑，避免把原本 GitHub 結構讀壞
+    // 舊版寬鬆路徑優先，避免把既有 GitHub 結構讀壞
     add(`${BASE}/data/pro/${slug}/${fileName}?v=${vnow}`);
-
-    const rawDomain = String(domainParam || '').trim().toLowerCase();
-    if (rawDomain) {
-      add(`${BASE}/data/pro/${rawDomain}/${slug}/${fileName}?v=${vnow}`);
-      add(`${BASE}/data/pro/${rawDomain.replaceAll('_','-')}/${slug}/${fileName}?v=${vnow}`);
-      add(`${BASE}/data/pro/${rawDomain.replaceAll('-','_')}/${slug}/${fileName}?v=${vnow}`);
-    }
 
     const domains = getLessonDomainCandidates();
     domains.forEach(d => {
@@ -733,7 +726,6 @@ function buildLessonDataUrls(fileName){
     });
   }
 
-  // 非 pro 與最終保底
   add(`${BASE}/data/${cat}/${slug}/${fileName}?v=${vnow}`);
   return urls;
 }
@@ -754,6 +746,95 @@ async function fetchJsonFirstHit(fileNames = []){
     }
   }
   throw lastErr || new Error('No JSON hit');
+}
+
+let __LESSON_INDEX_CACHE__ = null;
+
+function toAbsUrlMaybe(baseUrl, ref){
+  const s = String(ref || '').trim();
+  if (!s) return '';
+  try { return new URL(s, baseUrl).toString(); }
+  catch(_e){ return ''; }
+}
+
+async function fetchJsonByUrls(urls = []){
+  let lastErr = null;
+  for (const u of urls){
+    if (!u) continue;
+    try {
+      const r = await fetch(u, { cache:'no-store' });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      return { url:u, data };
+    } catch(err){
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('No JSON URL hit');
+}
+
+async function getLessonIndexConfig(){
+  if (__LESSON_INDEX_CACHE__) return __LESSON_INDEX_CACHE__;
+  const names = [`index-${slug}.json`, 'index.json'];
+  let hit = null;
+  for (const fileName of names){
+    try{
+      hit = await fetchJsonFirstHit([fileName]);
+      if (hit && hit.data) break;
+    }catch(_e){}
+  }
+  __LESSON_INDEX_CACHE__ = hit || null;
+  return __LESSON_INDEX_CACHE__;
+}
+
+function buildIndexResourceUrls(indexHit, value){
+  if (!indexHit || !indexHit.url) return [];
+  const out = [];
+  const seen = new Set();
+  const add = (u) => {
+    if (!u || seen.has(u)) return;
+    seen.add(u);
+    out.push(u);
+  };
+  if (typeof value === 'string') {
+    add(toAbsUrlMaybe(indexHit.url, value));
+  } else if (value && typeof value === 'object') {
+    Object.values(value).forEach(v => { if (typeof v === 'string') add(toAbsUrlMaybe(indexHit.url, v)); });
+  }
+  return out;
+}
+
+function normalizeDialogueIndexValue(indexData){
+  if (!indexData || typeof indexData !== 'object') return '';
+  const raw = indexData.dialogue || indexData.talk || indexData.dialogue_url || '';
+  return typeof raw === 'string' ? raw : '';
+}
+
+function normalizeCuesIndexValue(indexData){
+  if (!indexData || typeof indexData !== 'object') return null;
+  return indexData.cues || indexData.cue || indexData.cues_url || null;
+}
+
+function normalizeIndexStringValue(indexData, key){
+  if (!indexData || typeof indexData !== 'object') return '';
+  const v = indexData[key];
+  return typeof v === 'string' ? v : '';
+}
+
+function normalizeCurrentPlayableTime(){
+  return Number(getCurrentPlaybackTime()) || 0;
+}
+
+function setCurrentPlayableTime(sec){
+  setCurrentPlaybackTime(sec);
+}
+
+function pausePlayable(){
+  pauseActive();
+}
+
+function playPlayable(){
+  playActive();
 }
 
 function normalizeAiTopics(raw){
@@ -870,7 +951,7 @@ function playActive(){
     try{ ytPlayer.playVideo(); }catch(e){}
     return;
   }
-  video.play().catch(()=>{});
+  playPlayable();
 }
 function pauseActive(){
   if(isUsingYouTube()){
@@ -1118,10 +1199,17 @@ async function loadVideo(){
 
 /* ==== 字幕 ==== */
 async function loadCues(){
-  // 最終版：所有類別都統一走 cues.json，字幕維持前面 4 大分頁的顯示方式
   cuesStatus.textContent='（字幕載入中…）';
   try{
-    const hit = await fetchJsonFirstHit([`cues-${slug}.json`]);
+    let hit = null;
+    const idxHit = await getLessonIndexConfig();
+    const directUrls = buildIndexResourceUrls(idxHit, normalizeCuesIndexValue(idxHit && idxHit.data));
+    if (directUrls.length){
+      const directHit = await fetchJsonByUrls(directUrls);
+      hit = { ...directHit, fileName: directUrls[0] };
+    } else {
+      hit = await fetchJsonFirstHit([`cues-${slug}.json`]);
+    }
     const url = hit.url;
     const data = hit.data;
     cues=(Array.isArray(data)?data:(data.cues||[]))
@@ -1136,7 +1224,6 @@ async function loadCues(){
         </td>
       </tr>`).join('');
 
-    // 讀出來源網址（若有）
     let srcUrl='';
     if(Array.isArray(data) && data.length && data[0].source_url){
       srcUrl=data[0].source_url;
@@ -1152,20 +1239,18 @@ async function loadCues(){
     }
   }catch(e){
     console.warn(e);
-    cuesStatus.textContent='⚠️ 字幕讀取失敗：'+url;
+    cuesStatus.textContent='⚠️ 字幕讀取失敗';
   }
 
   cuesBody.addEventListener('click',e=>{
     const tr=e.target.closest('tr'); if(!tr)return;
     const i=+tr.dataset.i;
 
-    // 點時間區塊：跟隨 + 影片跳轉
     if(e.target.closest('.cue-time')){
       seekTo(i,true);
       return;
     }
 
-    // 點文字：只用瀏覽器 TTS
     let lang='en-US',text='';
     if(e.target.closest('.ja-line')){lang='ja-JP';text=e.target.closest('.ja-line').textContent.trim();}
     else if(e.target.closest('.zh-line')){lang='zh-TW';text=e.target.closest('.zh-line').textContent.trim();}
@@ -1180,7 +1265,15 @@ async function loadCues(){
 async function loadQuiz(){
   const meta=$('#quizMeta');
   try{
-    const hit = await fetchJsonFirstHit([`quiz-${slug}.json`]);
+    let hit = null;
+    const idxHit = await getLessonIndexConfig();
+    const quizRef = normalizeIndexStringValue(idxHit && idxHit.data, 'quiz');
+    if (quizRef) {
+      const directHit = await fetchJsonByUrls(buildIndexResourceUrls(idxHit, quizRef));
+      hit = { ...directHit, fileName: quizRef };
+    } else {
+      hit = await fetchJsonFirstHit([`quiz-${slug}.json`]);
+    }
     const url = hit.url;
     const raw = hit.data;
     const arr=Array.isArray(raw)?raw:(raw.questions||raw.data||[]);
@@ -1197,7 +1290,7 @@ async function loadQuiz(){
     setupQuizButtons();
   }catch(e){
     console.warn(e);
-    meta.textContent='❌ 題庫讀取失敗：'+url;
+    meta.textContent='❌ 題庫讀取失敗';
   }
 }
 
@@ -1395,7 +1488,15 @@ async function loadVocab(){
   const vStatus = $('#vocabStatus'), vBox = $('#vocabBox');
 
   try{
-    const hit = await fetchJsonFirstHit([`vocab-${slug}.json`]);
+    let hit = null;
+    const idxHit = await getLessonIndexConfig();
+    const vocabRef = normalizeIndexStringValue(idxHit && idxHit.data, 'vocab');
+    if (vocabRef) {
+      const directHit = await fetchJsonByUrls(buildIndexResourceUrls(idxHit, vocabRef));
+      hit = { ...directHit, fileName: vocabRef };
+    } else {
+      hit = await fetchJsonFirstHit([`vocab-${slug}.json`]);
+    }
     const url = hit.url;
     const list = hit.data;
 
@@ -1488,8 +1589,8 @@ async function loadVocab(){
 
       if(act === 'jump'){
         const p = toSec(e.target.dataset.time || 0);
-        video.currentTime = Math.max(0,p);
-        video.play();
+        setCurrentPlayableTime(Math.max(0,p));
+        playPlayable();
       }
 
       if(act === 'speak'){
@@ -1498,7 +1599,7 @@ async function loadVocab(){
     });
   }catch(e){
     console.warn(e);
-    vStatus.textContent = '⚠️ 讀取失敗：' + url;
+    vStatus.textContent = '⚠️ 讀取失敗';
   }
 }
 
@@ -1512,10 +1613,18 @@ async function loadAI(){
   const progress = $('#aiProgress');
 
   try{
-    const hit = await fetchJsonFirstHit([
-      `ai-${slug}.json`,
-      `ai.json`
-    ]);
+    let hit = null;
+    const idxHit = await getLessonIndexConfig();
+    const aiRef = normalizeIndexStringValue(idxHit && idxHit.data, 'ai');
+    if (aiRef) {
+      const directHit = await fetchJsonByUrls(buildIndexResourceUrls(idxHit, aiRef));
+      hit = { ...directHit, fileName: aiRef };
+    } else {
+      hit = await fetchJsonFirstHit([
+        `ai-${slug}.json`,
+        `ai.json`
+      ]);
+    }
 
     const topics = normalizeAiTopics(hit.data);
 
@@ -1900,16 +2009,28 @@ async function loadTalk(){
 
   let payload = null, hit = null;
   try{
-    hit = await fetchJsonFirstHit([
-      `${slug}.dialogue.json`,
-      `${slug}-dialogue.json`,
-      `dialogue-${slug}.json`,
-      `dialogue.json`,
-      `talk-${slug}.json`,
-      `${slug}.talk.json`
-    ]);
-    payload = hit.data;
+    const idxHit = await getLessonIndexConfig();
+    const dialogueRef = normalizeDialogueIndexValue(idxHit && idxHit.data);
+    if (dialogueRef) {
+      const directHit = await fetchJsonByUrls(buildIndexResourceUrls(idxHit, dialogueRef));
+      hit = { ...directHit, fileName: dialogueRef };
+      payload = hit.data;
+    }
   }catch(_e){}
+
+  if(!payload){
+    try{
+      hit = await fetchJsonFirstHit([
+        `${slug}.dialogue.json`,
+        `${slug}-dialogue.json`,
+        `dialogue-${slug}.json`,
+        `dialogue.json`,
+        `talk-${slug}.json`,
+        `${slug}.talk.json`
+      ]);
+      payload = hit.data;
+    }catch(_e){}
+  }
 
   if(!payload){
     talkData = [];
@@ -2837,6 +2958,8 @@ let trialSeconds = 60;
 let currentUser = null;
 let walletCoins = 0;
 let coinLockBound = false;
+let coinLockTimer = null;
+let coinPrompting = false;
 
 function currentReturnUrl(){
   return location.pathname + location.search;
@@ -2923,30 +3046,41 @@ function setupCoinLock() {
   if (coinLockBound) return;
   coinLockBound = true;
 
-  video.addEventListener('timeupdate', async () => {
-    if (unlocked) return;
-    if (video.currentTime < trialSeconds) return;
+  const tick = async () => {
+    if (unlocked || coinPrompting) return;
+    const t = normalizeCurrentPlayableTime();
+    if (t < trialSeconds) return;
 
-    video.pause();
+    coinPrompting = true;
+    pausePlayable();
 
-    const already = await checkUnlocked();
-    if (already) {
-      unlockPlayerUI();
-      video.play().catch(()=>{});
-      return;
+    try {
+      const already = await checkUnlocked();
+      if (already) {
+        unlockPlayerUI();
+        playPlayable();
+        return;
+      }
+
+      const ok = confirm(
+        `🔒 此影片需 ${coinCost} 金幣
+你目前有 ${walletCoins} 金幣
+
+是否立即解鎖？`
+      );
+
+      if (!ok) {
+        setCurrentPlayableTime(Math.max(0, trialSeconds - 1));
+        return;
+      }
+
+      await unlockVideo();
+    } finally {
+      coinPrompting = false;
     }
+  };
 
-    const ok = confirm(
-      `🔒 此影片需 ${coinCost} 金幣\n你目前有 ${walletCoins} 金幣\n\n是否立即解鎖？`
-    );
-
-    if (!ok) {
-      video.currentTime = Math.max(0, trialSeconds - 1);
-      return;
-    }
-
-    await unlockVideo();
-  });
+  coinLockTimer = setInterval(tick, 500);
 }
 
 async function unlockVideo() {
@@ -2961,7 +3095,7 @@ async function unlockVideo() {
   const already = await checkUnlocked();
   if (already) {
     unlockPlayerUI();
-    video.play().catch(()=>{});
+    playPlayable();
     return;
   }
 
@@ -2995,7 +3129,7 @@ async function unlockVideo() {
   await refreshWallet();
   unlocked = true;
   alert(data.already ? '✅ 已解鎖' : `✅ 解鎖成功${data.cost ? `（扣 ${data.cost} 金幣）` : ''}`);
-  video.play().catch(()=>{});
+  playPlayable();
 }
 
 document.getElementById('btnUnlockNow').onclick = unlockVideo;
