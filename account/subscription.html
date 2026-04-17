@@ -141,6 +141,14 @@
     </div>
 
     <div class="card">
+      <h3>錢包總覽 <span id="walletSummaryPill" class="pill neu">統計中</span></h3>
+      <div class="grid2">
+        <div id="walletSummaryLeft" class="muted">讀取中…</div>
+        <div id="walletSummaryRight" class="muted"></div>
+      </div>
+    </div>
+
+    <div class="card">
       <h3>歷史訂單</h3>
       <table>
         <thead>
@@ -155,6 +163,22 @@
         </tbody>
       </table>
       <div id="debug" class="tiny" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="card">
+      <h3>最近金幣流水</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>時間</th>
+            <th>說明</th>
+            <th>變動</th>
+          </tr>
+        </thead>
+        <tbody id="coinLogBody">
+          <tr><td colspan="3" class="muted">讀取中…</td></tr>
+        </tbody>
+      </table>
     </div>
 
   </div>
@@ -230,6 +254,7 @@ function daysLeft(expire_at){
   if(isNaN(exp.getTime())) return null;
   const diff = exp.getTime() - Date.now();
   return Math.ceil(diff / 86400000);
+}
 
 async function getSessionUser(sb){
   try{
@@ -271,6 +296,126 @@ function renderWalletCoins(n){
   const wn = $("walletNotice");
   if (wp) wp.textContent = `金幣：${coins}`;
   if (wn) wn.textContent = `目前金幣：${coins}`;
+}
+function renderWalletSummary({coins=0, granted=0, spent=0, latestGrant=0} = {}){
+  const pill = $("walletSummaryPill");
+  const left = $("walletSummaryLeft");
+  const right = $("walletSummaryRight");
+  if (pill) pill.textContent = `餘額：${coins}`;
+  if (left) {
+    left.innerHTML = `
+      <div class="kv">
+        <div class="muted">目前餘額：</div><div class="rightAmount">${coins}</div>
+        <div class="muted">訂閱累計發幣：</div><div class="mono">${granted}</div>
+      </div>
+    `;
+  }
+  if (right) {
+    right.innerHTML = `
+      <div class="kv">
+        <div class="muted">累計已消耗：</div><div class="mono">${spent}</div>
+        <div class="muted">最近一次發幣：</div><div class="mono">${latestGrant}</div>
+      </div>
+    `;
+  }
+}
+function renderCoinLogs(rows){
+  const body = $("coinLogBody");
+  if (!body) return;
+  if (!rows || !rows.length){
+    body.innerHTML = `<tr><td colspan="3" class="muted">目前沒有金幣流水資料</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(r => {
+    const amount = Number(r.amount || 0);
+    const sign = amount > 0 ? "+" : "";
+    const reason = r.reason || (amount > 0 ? "訂閱發幣" : "影片解鎖");
+    const color = amount > 0 ? "#065f46" : "#b91c1c";
+    return `
+      <tr>
+        <td class="mono">${fmtDate(r.created_at)}</td>
+        <td>${reason}${r.asset_slug ? `：${r.asset_slug}` : ""}</td>
+        <td class="mono" style="color:${color};font-weight:900;">${sign}${amount}</td>
+      </tr>
+    `;
+  }).join("");
+}
+async function loadWalletOverview(sb, userId){
+  const result = { coins: 0, granted: 0, spent: 0, latestGrant: 0, logs: [] };
+
+  result.coins = await getWalletCoins(sb, userId);
+
+  try{
+    const { data: orders } = await sb
+      .from("orders")
+      .select("coins_added, coins_granted, paid_at, status, buyer_id, user_id")
+      .or(`buyer_id.eq.${userId},user_id.eq.${userId}`)
+      .eq("status", "paid")
+      .order("paid_at", { ascending: false });
+
+    const paid = Array.isArray(orders) ? orders : [];
+    result.granted = paid.reduce((sum, o) => sum + Number(o.coins_added || 0), 0);
+    result.latestGrant = Number((paid.find(o => Number(o.coins_added || 0) > 0)?.coins_added) || 0);
+  }catch(err){
+    console.error("[wallet] orders summary error", err);
+  }
+
+  try{
+    const { data: unlocks } = await sb
+      .from("asset_unlocks")
+      .select("asset_slug, unlocked_at")
+      .eq("user_id", userId)
+      .order("unlocked_at", { ascending: false });
+
+    const unlockRows = Array.isArray(unlocks) ? unlocks : [];
+
+    let costMap = {};
+    if (unlockRows.length){
+      const slugs = [...new Set(unlockRows.map(x => x.asset_slug).filter(Boolean))];
+      const { data: assets } = await sb
+        .from("assets")
+        .select("slug, coin_cost")
+        .in("slug", slugs);
+      (assets || []).forEach(a => costMap[a.slug] = Number(a.coin_cost || 0));
+    }
+
+    result.logs = unlockRows.slice(0, 20).map(u => ({
+      created_at: u.unlocked_at,
+      amount: -Number(costMap[u.asset_slug] || 0),
+      reason: "影片解鎖",
+      asset_slug: u.asset_slug
+    }));
+
+    result.spent = result.logs.reduce((sum, r) => sum + Math.abs(Number(r.amount || 0)), 0);
+  }catch(err){
+    console.error("[wallet] unlock logs error", err);
+  }
+
+  try{
+    const { data: grantOrders } = await sb
+      .from("orders")
+      .select("coins_added, paid_at, status, buyer_id, user_id")
+      .or(`buyer_id.eq.${userId},user_id.eq.${userId}`)
+      .eq("status", "paid")
+      .gt("coins_added", 0)
+      .order("paid_at", { ascending: false })
+      .limit(20);
+
+    const grantRows = (grantOrders || []).map(o => ({
+      created_at: o.paid_at,
+      amount: Number(o.coins_added || 0),
+      reason: "訂閱發幣",
+      asset_slug: ""
+    }));
+
+    result.logs = [...grantRows, ...result.logs]
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .slice(0, 20);
+  }catch(err){
+    console.error("[wallet] grant logs error", err);
+  }
+
+  return result;
 }
 function renderLoggedOutState(){
   $("whoChip").textContent = "未登入";
@@ -324,17 +469,14 @@ $("btnBack").onclick = () => {
 
   const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-  await sb.auth.getSession();
-  const { data: authData, error: authErr } = await sb.auth.getUser();
-  const user = authData?.user;
+  renderReturnNotice();
+  const user = await getSessionUser(sb);
 
-  if(authErr || !user){
-    $who.textContent = "未登入";
-    $status.textContent = "未登入";
-    $status.className = "pill bad";
-    $current.innerHTML = `<div style="color:var(--bad);font-weight:900;">尚未登入</div>`;
-    $history.innerHTML = `<tr><td colspan="3" class="muted">請先登入</td></tr>`;
-$debug.textContent = "";
+  if(!user){
+    renderLoggedOutState();
+    $debug.textContent = "";
+    renderWalletSummary({coins:0, granted:0, spent:0, latestGrant:0});
+    renderCoinLogs([]);
     return;
   }
 
@@ -342,6 +484,11 @@ $debug.textContent = "";
   const uidShort = String(user.id || "").slice(0,8);
   $who.textContent = `${email} · ${uidShort}`;
   $debug.textContent = `auth uid: ${user.id}`;
+
+  const walletInfo = await loadWalletOverview(sb, user.id);
+  renderWalletCoins(walletInfo.coins);
+  renderWalletSummary(walletInfo);
+  renderCoinLogs(walletInfo.logs);
 
   // ✅ 這裡多抓 total/subtotal
   const { data: orders, error: ordersErr } = await sb
@@ -366,7 +513,7 @@ return;
     $history.innerHTML = `<tr><td colspan="3" class="muted">沒有任何訂單</td></tr>`;
 
     // ✅ 未訂閱：直接導回你的成熟訂閱入口（pricing）
-    setTimeout(()=>location.replace('/pricing.html'), 120);
+    setTimeout(()=>location.replace('../pricing.html'), 120);
     return;
   }
 
@@ -381,7 +528,7 @@ return;
 
   if(!active){
     // ✅ 沒有有效訂閱：回到 pricing（讓用戶完成你既有的 checkout/綠界流程）
-    setTimeout(()=>location.replace('/pricing.html'), 120);
+    setTimeout(()=>location.replace('../pricing.html'), 120);
     return;
   }
 
@@ -430,7 +577,7 @@ return;
       const qs = new URLSearchParams(location.search);
       const isReturn = qs.has('rtn') || qs.has('mtn');
       if (isReturn && !hasCareerSetup) {
-        location.replace('/account/profile.html?from=subscription');
+        location.replace('./profile.html?from=subscription');
         return;
       }
     }catch(_e){}
@@ -442,7 +589,7 @@ return;
           btnLevel.textContent = '（選填）英語程度評測';
           btnLevel.style.display = 'inline-flex';
           btnLevel.onclick = () => {
-            location.href = '/account/level-survey.html?next=' + encodeURIComponent('/account/learning-dashboard.html');
+            location.href = './level-survey.html?next=' + encodeURIComponent('./learning-dashboard.html');
           };
         }else{
           const label = `已完成英語程度評測：${profileLevel}${(profileWeek?`（W${profileWeek}）`:``)}`;
