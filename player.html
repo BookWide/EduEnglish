@@ -2149,13 +2149,18 @@ async function hasUnlocked(userId, lessonSlug){
 }
 
 async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
+  const wallet = await loadWalletCoins(userId);
+
+  if (wallet < coinCost) {
+    return { ok:false, reason:'insufficient', wallet };
+  }
+
+  const already = await hasUnlocked(userId, lessonSlug);
+  if (already) {
+    return { ok:true, wallet, already:true };
+  }
+
   try{
-    const wallet = await loadWalletCoins(userId);
-    if (wallet < coinCost) return { ok:false, reason:'insufficient', wallet };
-
-    const already = await hasUnlocked(userId, lessonSlug);
-    if (already) return { ok:true, wallet, already:true };
-
     const { error: walletErr } = await playerSupa
       .from('profiles')
       .update({ wallet_coins: wallet - coinCost })
@@ -2170,7 +2175,17 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
     return { ok:true, wallet: wallet - coinCost };
   }catch(e){
     console.warn('[BW-player] spendCoinsAndUnlock failed', e);
-    return { ok:false, reason:'db_error' };
+
+    // 已經成功寫入解鎖時，視為成功，避免假失敗提示
+    try{
+      const unlockedNow = await hasUnlocked(userId, lessonSlug);
+      if (unlockedNow) {
+        const walletNow = await loadWalletCoins(userId);
+        return { ok:true, wallet: walletNow, already:true };
+      }
+    }catch(_e){}
+
+    return { ok:false, reason:'db_error', wallet };
   }
 }
 
@@ -2194,29 +2209,43 @@ async function setupCoinGate(user){
   if (unlocked) return;
 
   let gatePassed = false;
+  let gateInFlight = null;
+
   const passGate = async () => {
     if (gatePassed) return true;
-    const result = await spendCoinsAndUnlock(user.id, slug, coinCost);
-    if (!result.ok){
-      if (result.reason === 'insufficient'){
-        alert('金幣不足，請先購買。');
-        const q = new URLSearchParams();
-        q.set('from', 'player');
-        q.set('slug', slug);
-        q.set('cat', cat);
-        if (domainParam) q.set('domain', domainParam);
-        q.set('return', location.pathname + location.search);
-        location.href = (ROOT_BASE || '') + '/pricing.html?' + q.toString();
+    if (gateInFlight) return gateInFlight;
+
+    gateInFlight = (async () => {
+      const result = await spendCoinsAndUnlock(user.id, slug, coinCost);
+
+      if (!result.ok){
+        if (result.reason === 'insufficient'){
+          alert('金幣不足，請先購買。');
+          const q = new URLSearchParams();
+          q.set('from', 'player');
+          q.set('slug', slug);
+          q.set('cat', cat);
+          if (domainParam) q.set('domain', domainParam);
+          q.set('return', location.pathname + location.search);
+          location.href = (ROOT_BASE || '') + '/pricing.html?' + q.toString();
+          return false;
+        }
+        alert('解鎖失敗，請稍後再試。');
         return false;
       }
-      alert('解鎖失敗，請稍後再試。');
-      return false;
+
+      gatePassed = true;
+      wallet = Number(result.wallet || 0);
+      if (walletBadge) walletBadge.textContent = String(wallet);
+      if (btnUnlockNow) btnUnlockNow.style.display = 'none';
+      return true;
+    })();
+
+    try{
+      return await gateInFlight;
+    }finally{
+      gateInFlight = null;
     }
-    gatePassed = true;
-    wallet = Number(result.wallet || 0);
-    if (walletBadge) walletBadge.textContent = String(wallet);
-    if (btnUnlockNow) btnUnlockNow.style.display = 'none';
-    return true;
   };
 
   if (btnUnlockNow){
@@ -2227,7 +2256,7 @@ async function setupCoinGate(user){
   }
 
   const onTimeUpdate = async () => {
-    if (gatePassed) return;
+    if (gatePassed || gateInFlight) return;
     const t = getCurrentPlaybackTime();
     if (t < 60) return;
     pauseActive();
