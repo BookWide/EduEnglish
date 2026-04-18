@@ -1,14 +1,11 @@
-// ====== BookWide Supabase Helper (merged export + global) ======
-// v20251228-device-fix2
-// - 修正 SyntaxError：把 ANON KEY 改成「單行純字串」(不可換行、不可少引號)
+// ====== BookWide Supabase Helper ======
+// ✅ 一手機 + 一桌機 限制版（正式守門）
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
-/* ========= Project (public anon) ========= */
 export const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-export const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+export const SUPABASE_ANON_KEY = '你的anon key';
 
-/* ========= Client (singleton) ========= */
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
     persistSession: true,
@@ -17,7 +14,8 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   },
 });
 
-/* ========= device id ========= */
+/* ========= 裝置 ========= */
+
 function getDeviceId() {
   let id = localStorage.getItem('bw_device_id');
   if (!id) {
@@ -27,46 +25,25 @@ function getDeviceId() {
   return id;
 }
 
-// DEBUG: prevent sticky forced logout flags from previous sessions
-try{ localStorage.removeItem('bw_forced_logout'); localStorage.removeItem('bw_device_strikes'); }catch(_){ }
+function getDeviceType() {
+  const ua = navigator.userAgent || '';
+  return /Android|iPhone|iPad|Mobile/i.test(ua) ? 'mobile' : 'desktop';
+}
+
+function getDeviceColumn(type) {
+  return type === 'mobile'
+    ? 'current_mobile_device_id'
+    : 'current_desktop_device_id';
+}
+
+/* ========= 核心 ========= */
 
 export const BW = {
   supa: supabase,
 
   async getUser() {
     const { data } = await supabase.auth.getUser();
-    return data?.user ?? null;
-  },
-
-  async requireAdmin(redirect = '/index.html?noadmin=1') {
-    const user = await this.getUser();
-    if (!user) {
-      location.href = '/index.html#login';
-      throw new Error('not logged in');
-    }
-    const r = await supabase
-      .from('profiles')
-      .select('is_admin')
-      .eq('id', user.id)
-      .maybeSingle();
-
-    if (r.error) {
-      console.warn('requireAdmin profiles read error', r.error);
-      location.href = redirect;
-      throw r.error;
-    }
-    if (!r.data?.is_admin) {
-      location.href = redirect;
-      throw new Error('not admin');
-    }
-    return true;
-  },
-
-  isOnlineWithin(ts, minutes = 10) {
-    if (!ts) return false;
-    const d = new Date(ts);
-    if (isNaN(d)) return false;
-    return (Date.now() - d.getTime()) <= minutes * 60 * 1000;
+    return data?.user || null;
   },
 
   async markCurrentDevice() {
@@ -74,98 +51,97 @@ export const BW = {
     if (!user) return;
 
     const deviceId = getDeviceId();
-    const r = await supabase
-      .from('profiles')
-      .update({
-        current_device_id: deviceId,
-        last_seen_at: new Date().toISOString(),
-      })
-      .eq('id', user.id);
+    const type = getDeviceType();
+    const col = getDeviceColumn(type);
 
-    if (r.error) console.warn('markCurrentDevice error', r.error);
+    const payload = {
+      last_seen_at: new Date().toISOString(),
+    };
+    payload[col] = deviceId;
+
+    await supabase
+      .from('profiles')
+      .update(payload)
+      .eq('id', user.id);
   },
 
-  startHeartbeat(minutes = 2) {
+  async forceLogout() {
+    try { localStorage.setItem('bw_kicked', '1'); } catch(e){}
+    await supabase.auth.signOut();
+    location.href = '/login.html?kick=1';
+  },
+
+  startHeartbeat(min = 2) {
     let running = false;
-    const myDevice = getDeviceId();
+    const myId = getDeviceId();
+    const type = getDeviceType();
+    const col = getDeviceColumn(type);
 
     const beat = async () => {
       if (running) return;
       running = true;
+
       try {
         const user = await this.getUser();
         if (!user) return;
 
-        const r = await supabase
+        const { data } = await supabase
           .from('profiles')
-          .select('current_device_id')
+          .select(col)
           .eq('id', user.id)
-          .maybeSingle();
+          .single();
 
-        if (r.error) {
-          console.warn('heartbeat profiles read error', r.error);
+        const current = data?.[col];
+
+        // ❗ 核心：裝置被換掉 → 強制登出
+        if (current && current !== myId) {
+          console.warn('被其他裝置取代 → 強制登出');
+          await this.forceLogout();
           return;
         }
 
-        if (r.data?.current_device_id && r.data.current_device_id !== myDevice) {
-          localStorage.setItem('bw_kick_detected','1'); console.warn('[BW] mismatch detected (debug, not logging out)'); return;
-        }
-
-        const u = await supabase
+        // heartbeat 更新
+        await supabase
           .from('profiles')
           .update({ last_seen_at: new Date().toISOString() })
           .eq('id', user.id);
 
-        if (u.error) console.warn('heartbeat update error', u.error);
+      } catch (e) {
+        console.error('heartbeat error', e);
       } finally {
         running = false;
       }
     };
 
     beat();
-    return setInterval(beat, Math.max(1, minutes) * 60 * 1000);
+    return setInterval(beat, min * 60 * 1000);
   },
 
-  popForcedLogoutHint() {
-    if (localStorage.getItem('bw_forced_logout') === '1') {
-      localStorage.removeItem('bw_forced_logout');
-      alert('此帳號已在另一個裝置登入，您已被登出');
+  showKickMsg() {
+    if (localStorage.getItem('bw_kicked') === '1') {
+      localStorage.removeItem('bw_kicked');
+      alert('此帳號已在其他裝置登入');
     }
-  },
-
-  startIdleLogout(minutes = 30, redirect = '/login.html?timeout=1') {
-    const ms = minutes * 60 * 1000;
-    let timer;
-
-    const reset = () => {
-      clearTimeout(timer);
-      timer = setTimeout(async () => {
-        console.warn('[BW] signOut suppressed (debug)');
-        location.href = redirect;
-      }, ms);
-    };
-
-    ['click', 'mousemove', 'keydown', 'touchstart', 'scroll']
-      .forEach(evt => window.addEventListener(evt, reset, { passive: true }));
-
-    reset();
-  },
+  }
 };
 
-if (typeof window !== 'undefined') {
-  window.BW = window.BW || BW;
-}
+/* ========= 自動啟動 ========= */
 
 supabase.auth.onAuthStateChange(async (event, session) => {
   if (event === 'SIGNED_IN' && session?.user) {
     await BW.markCurrentDevice();
-    BW.startHeartbeat(2);
+    BW.startHeartbeat(1);
   }
 });
 
 (async () => {
+  BW.showKickMsg();
+
   const user = await BW.getUser();
-  if (user) BW.startHeartbeat(2);
+  if (user) {
+    await BW.markCurrentDevice();
+    BW.startHeartbeat(1);
+  }
 })();
 
 
