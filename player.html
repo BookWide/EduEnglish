@@ -495,6 +495,7 @@ tr.speaking{
             <span class="chip">金幣 <span id="coinBadge">1</span></span>
             <span class="chip">餘額 <span id="walletBadge">0</span></span>
             <span class="chip">試看前 60 秒</span>
+            <span class="chip" id="coinRuleHint">規則：1-10→1 / 11-20→2 / 21-30→3 / 31-40→4 / 41+→5</span>
             <button class="btn sm blue" id="btnUnlockNow" type="button">立即解鎖</button>
           </div>
         </div>
@@ -2216,28 +2217,69 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
     return { ok:true, wallet, already:true };
   }
 
+  const newBalance = wallet - coinCost;
+  let walletUpdated = false;
+  let ledgerInserted = false;
+  let unlockInserted = false;
+
   try{
     const { error: walletErr } = await playerSupa
       .from('profiles')
-      .update({ wallet_coins: wallet - coinCost })
+      .update({ wallet_coins: newBalance })
       .eq('id', userId);
     if (walletErr) throw walletErr;
+    walletUpdated = true;
+
+    const { error: ledgerErr } = await playerSupa
+      .from('coin_transactions')
+      .insert({
+        user_id: userId,
+        change: -coinCost,
+        balance_after: newBalance,
+        ref_slug: lessonSlug,
+        note: `影片解鎖: ${lessonSlug}`
+      });
+    if (ledgerErr) throw ledgerErr;
+    ledgerInserted = true;
 
     const { error: unlockErr } = await playerSupa
       .from('asset_unlocks')
       .insert({ user_id: userId, asset_slug: lessonSlug });
     if (unlockErr) throw unlockErr;
+    unlockInserted = true;
 
-    return { ok:true, wallet: wallet - coinCost };
+    return { ok:true, wallet: newBalance };
   }catch(e){
     console.warn('[BW-player] spendCoinsAndUnlock failed', e);
 
-    // 已經成功寫入解鎖時，視為成功，避免假失敗提示
+    // 若解鎖已成功寫入，視為成功，避免重複扣
     try{
       const unlockedNow = await hasUnlocked(userId, lessonSlug);
       if (unlockedNow) {
         const walletNow = await loadWalletCoins(userId);
         return { ok:true, wallet: walletNow, already:true };
+      }
+    }catch(_e){}
+
+    // rollback：若未完成解鎖，盡量把先前步驟回復
+    try{
+      if (!unlockInserted && ledgerInserted) {
+        await playerSupa
+          .from('coin_transactions')
+          .delete()
+          .eq('user_id', userId)
+          .eq('ref_slug', lessonSlug)
+          .eq('change', -coinCost)
+          .eq('balance_after', newBalance);
+      }
+    }catch(_e){}
+
+    try{
+      if (!unlockInserted && walletUpdated) {
+        await playerSupa
+          .from('profiles')
+          .update({ wallet_coins: wallet })
+          .eq('id', userId);
       }
     }catch(_e){}
 
@@ -2271,6 +2313,8 @@ async function setupCoinGate(user){
     durationReady = true;
     if (durationBadge) durationBadge.textContent = fmt(d);
     if (coinBadge) coinBadge.textContent = String(resolvedCoinCost);
+    const coinRuleHint = document.getElementById('coinRuleHint');
+    if (coinRuleHint) coinRuleHint.textContent = `規則：${Math.ceil(d/60)} 分鐘 → ${resolvedCoinCost} 金幣`; 
     if (btnUnlockNow) btnUnlockNow.disabled = false;
     return true;
   };
