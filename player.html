@@ -385,28 +385,10 @@ tr.speaking{
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script type="module">
-import { BW } from './supa.js';
-
-window.BW = BW;
-
-(async () => {
-  try {
-    BW.popForcedLogoutHint();
-
-    const user = await BW.getUser();
-    if (!user) return;
-
-    const ok = await BW.guardCurrentDeviceNow();
-    if (!ok) return;
-
-    await BW.markCurrentDevice();
-    BW.startHeartbeat(2);
-    BW.startIdleLogout(60, '/login.html?timeout=1');
-  } catch (err) {
-    console.error('[BW] guard bootstrap error', err);
+<script>
+  // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
+  if (window.BW && typeof BW.startIdleLogout === 'function') {
   }
-})();
 </script>
 <script>
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
@@ -465,6 +447,213 @@ window.BW = BW;
   async function supaGetUser() {
     return await bwPlayerGetUser();
   }
+
+  function bwPlayerGetDeviceId() {
+    let id = localStorage.getItem('bw_player_device_id');
+    if (!id) {
+      id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('bw_' + Date.now() + '_' + Math.random().toString(16).slice(2));
+      localStorage.setItem('bw_player_device_id', id);
+    }
+    return id;
+  }
+
+  function bwPlayerGetDeviceType() {
+    const ua = navigator.userAgent || '';
+    const isMobile =
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
+      window.innerWidth <= 900;
+    return isMobile ? 'mobile' : 'desktop';
+  }
+
+  async function bwPlayerIsAdmin(user) {
+    try {
+      if (!user) return false;
+      const r = await playerSupa
+        .from('profiles')
+        .select('is_admin')
+        .eq('id', user.id)
+        .maybeSingle();
+      return !!r.data?.is_admin;
+    } catch (err) {
+      console.warn('[player-guard] isAdmin error', err);
+      return false;
+    }
+  }
+
+  async function bwPlayerReadProfileDevice(user) {
+    return await playerSupa
+      .from('profiles')
+      .select('current_mobile_device_id,current_desktop_device_id')
+      .eq('id', user.id)
+      .maybeSingle();
+  }
+
+  async function bwPlayerMarkCurrentDevice(user) {
+    try {
+      if (!user) return true;
+      if (await bwPlayerIsAdmin(user)) return true;
+
+      const deviceId = bwPlayerGetDeviceId();
+      const deviceType = bwPlayerGetDeviceType();
+      const payload = {
+        last_seen_at: new Date().toISOString(),
+      };
+
+      if (deviceType === 'mobile') {
+        payload.current_mobile_device_id = deviceId;
+      } else {
+        payload.current_desktop_device_id = deviceId;
+      }
+
+      const r = await playerSupa
+        .from('profiles')
+        .update(payload)
+        .eq('id', user.id);
+
+      if (r.error) {
+        console.warn('[player-guard] markCurrentDevice error', r.error);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn('[player-guard] markCurrentDevice crash', err);
+      return false;
+    }
+  }
+
+  async function bwPlayerForcedLogout(reason) {
+    try {
+      if (reason === 'idle') {
+        alert('您已閒置 30 分鐘，系統將自動登出');
+      } else {
+        alert('此帳號已在另一台同類型裝置登入，您已被強制登出');
+      }
+    } catch (_) {}
+
+    try {
+      await playerSupa.auth.signOut();
+    } catch (_) {}
+
+    setTimeout(() => {
+      const qs = reason === 'idle' ? '?timeout=1' : '?kick=1';
+      location.href = '/login.html' + qs;
+    }, 350);
+  }
+
+  async function bwPlayerGuardCurrentDeviceNow(user) {
+    try {
+      if (!user) return true;
+      if (await bwPlayerIsAdmin(user)) return true;
+
+      const myDevice = bwPlayerGetDeviceId();
+      const deviceType = bwPlayerGetDeviceType();
+      const r = await bwPlayerReadProfileDevice(user);
+
+      if (r.error) {
+        console.warn('[player-guard] guard read error', r.error);
+        return true;
+      }
+
+      const currentId = deviceType === 'mobile'
+        ? r.data?.current_mobile_device_id
+        : r.data?.current_desktop_device_id;
+
+      if (currentId && currentId !== myDevice) {
+        await bwPlayerForcedLogout('kick');
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.warn('[player-guard] guardCurrentDeviceNow crash', err);
+      return true;
+    }
+  }
+
+  let __bwHeartbeatTimer = null;
+  function bwPlayerStartHeartbeat(minutes = 2) {
+    if (__bwHeartbeatTimer) clearInterval(__bwHeartbeatTimer);
+
+    let running = false;
+    const beat = async () => {
+      if (running) return;
+      running = true;
+      try {
+        const user = await bwPlayerGetUser();
+        if (!user) return;
+        if (await bwPlayerIsAdmin(user)) return;
+
+        const myDevice = bwPlayerGetDeviceId();
+        const deviceType = bwPlayerGetDeviceType();
+        const r = await bwPlayerReadProfileDevice(user);
+
+        if (r.error) {
+          console.warn('[player-guard] heartbeat read error', r.error);
+          return;
+        }
+
+        const currentId = deviceType === 'mobile'
+          ? r.data?.current_mobile_device_id
+          : r.data?.current_desktop_device_id;
+
+        if (currentId && currentId !== myDevice) {
+          await bwPlayerForcedLogout('kick');
+          return;
+        }
+
+        const payload = { last_seen_at: new Date().toISOString() };
+        if (deviceType === 'mobile') {
+          payload.current_mobile_device_id = myDevice;
+        } else {
+          payload.current_desktop_device_id = myDevice;
+        }
+
+        const u = await playerSupa
+          .from('profiles')
+          .update(payload)
+          .eq('id', user.id);
+
+        if (u.error) {
+          console.warn('[player-guard] heartbeat update error', u.error);
+        }
+      } finally {
+        running = false;
+      }
+    };
+
+    beat();
+    __bwHeartbeatTimer = setInterval(beat, Math.max(1, minutes) * 60 * 1000);
+    return __bwHeartbeatTimer;
+  }
+
+  let __bwIdleTimer = null;
+  function bwPlayerStartIdleLogout(minutes = 30) {
+    const ms = minutes * 60 * 1000;
+
+    const reset = () => {
+      clearTimeout(__bwIdleTimer);
+      __bwIdleTimer = setTimeout(async () => {
+        await bwPlayerForcedLogout('idle');
+      }, ms);
+    };
+
+    ['click', 'mousemove', 'keydown', 'touchstart', 'scroll']
+      .forEach(evt => window.addEventListener(evt, reset, { passive: true }));
+
+    reset();
+  }
+
+  async function bwPlayerInitDeviceGuard() {
+    const user = await bwPlayerGetUser();
+    if (!user) return;
+
+    const okBeforeMark = await bwPlayerGuardCurrentDeviceNow(user);
+    if (!okBeforeMark) return;
+
+    await bwPlayerMarkCurrentDevice(user);
+    bwPlayerStartHeartbeat(2);
+    bwPlayerStartIdleLogout(30);
+  }
+
 </script>
 </head>
 <body>
@@ -790,6 +979,14 @@ const homeLink = document.getElementById('homeLink');
 if(homeLink){
   homeLink.href = (ROOT_BASE || '') + '/account/learning-dashboard.html';
 }
+
+
+try{
+  bwPlayerInitDeviceGuard();
+}catch(err){
+  console.warn('[player-guard] init error', err);
+}
+
 
 const btnEnIndex = document.getElementById('btnEnIndex');
 const btnJpIndex = document.getElementById('btnJpIndex');
