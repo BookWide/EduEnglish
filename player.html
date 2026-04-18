@@ -382,26 +382,28 @@ tr.speaking{
 
 </style>
 
-<!-- BW player guard integrated: local client + single-device + idle 30m -->
+<!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
+<!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
+  if (window.BW && typeof BW.startIdleLogout === 'function') {
+  }
+</script>
 <script>
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
   const SUPABASE_ANON_KEY =
     'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
+  // 根路徑：github.io 底下用 /EduEnglish，自訂網域 (bookwide.net) 用空字串
   const ROOT_BASE = (
     location.pathname.startsWith('/EduEnglish') ||
     location.hostname.includes('github.io')
   ) ? '/EduEnglish' : '';
 
-  const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    auth: {
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: true,
-    },
-  });
+  // 僅供 player.html 使用的 Supabase Client
+  const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
   async function bwPlayerGetUser() {
     try {
@@ -421,142 +423,19 @@ tr.speaking{
     }
   }
 
-  function bwGetDeviceId() {
-    let id = localStorage.getItem('bw_device_id');
-    if (!id) {
-      id = crypto.randomUUID();
-      localStorage.setItem('bw_device_id', id);
-    }
-    return id;
-  }
-
-  function bwGetDeviceType() {
-    const ua = navigator.userAgent || '';
-    const isMobile =
-      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
-      window.innerWidth <= 900;
-    return isMobile ? 'mobile' : 'desktop';
-  }
-
-  async function bwReadProfileGuard(userId) {
-    return await playerSupa
-      .from('profiles')
-      .select('is_admin,current_mobile_device_id,current_desktop_device_id,last_seen_at')
-      .eq('id', userId)
-      .maybeSingle();
-  }
-
-  async function bwMarkCurrentDevice(user) {
-    if (!user?.id) return true;
-    const r = await bwReadProfileGuard(user.id);
-    if (r.error) {
-      console.warn('[BW-player] guard profile read error =', r.error);
-      return false;
-    }
-    if (r.data?.is_admin) return true;
-
-    const payload = { last_seen_at: new Date().toISOString() };
-    const myId = bwGetDeviceId();
-    const type = bwGetDeviceType();
-    if (type === 'mobile') payload.current_mobile_device_id = myId;
-    else payload.current_desktop_device_id = myId;
-
-    const u = await playerSupa.from('profiles').update(payload).eq('id', user.id);
-    if (u.error) {
-      console.warn('[BW-player] guard markCurrentDevice error =', u.error);
-      return false;
-    }
-    return true;
-  }
-
-  async function bwForceLogoutWithHint(reason = 'kick') {
-    try {
-      if (reason === 'idle') {
-        alert('您已閒置 30 分鐘，系統將自動登出。');
-      } else {
-        alert('此帳號已在另一台同類型裝置登入，您已被強制登出。');
-      }
-    } catch (_) {}
-
-    try {
-      await playerSupa.auth.signOut();
-    } catch (_) {}
-
-    setTimeout(() => {
-      const loginBase = (ROOT_BASE || '') + '/login.html';
-      const url = reason === 'idle' ? (loginBase + '?timeout=1') : (loginBase + '?kick=1');
-      location.href = url;
-    }, 350);
-  }
-
-  async function bwGuardCurrentDeviceNow(user) {
-    if (!user?.id) return false;
-    const r = await bwReadProfileGuard(user.id);
-    if (r.error) {
-      console.warn('[BW-player] guardCurrentDeviceNow read error =', r.error);
-      return false;
-    }
-    if (r.data?.is_admin) return true;
-
-    const myId = bwGetDeviceId();
-    const type = bwGetDeviceType();
-    const currentId = type === 'mobile' ? r.data?.current_mobile_device_id : r.data?.current_desktop_device_id;
-
-    if (currentId && currentId !== myId) {
-      await bwForceLogoutWithHint('kick');
-      return false;
-    }
-    return true;
-  }
-
-  let __bwHeartbeatTimer = null;
-  function bwStartHeartbeat(user, minutes = 2) {
-    if (__bwHeartbeatTimer) clearInterval(__bwHeartbeatTimer);
-
-    let running = false;
-    const beat = async () => {
-      if (running) return;
-      running = true;
-      try {
-        const ok = await bwGuardCurrentDeviceNow(user);
-        if (!ok) return;
-        await bwMarkCurrentDevice(user);
-      } finally {
-        running = false;
-      }
-    };
-
-    beat();
-    __bwHeartbeatTimer = setInterval(beat, Math.max(1, minutes) * 60 * 1000);
-    return __bwHeartbeatTimer;
-  }
-
-  let __bwIdleTimer = null;
-  function bwStartIdleLogout(minutes = 30) {
-    const ms = minutes * 60 * 1000;
-
-    const reset = () => {
-      clearTimeout(__bwIdleTimer);
-      __bwIdleTimer = setTimeout(async () => {
-        await bwForceLogoutWithHint('idle');
-      }, ms);
-    };
-
-    ['click', 'mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
-      window.addEventListener(evt, reset, { passive: true });
-    });
-
-    reset();
-  }
-
+  // 提供給舊程式使用的守門 / 取 user 函式
   async function ensureAuth(options = {}) {
     const redirect = options.redirect || (ROOT_BASE + '/account/learning-dashboard.html');
-    const next = options.next || (location.pathname + location.search);
+    const next =
+      options.next || (location.pathname + location.search);
 
     const user = await bwPlayerGetUser();
     if (user) return user;
 
-    const url = redirect + '?denied=signin&next=' + encodeURIComponent(next);
+    const url =
+      redirect +
+      '?denied=signin&next=' +
+      encodeURIComponent(next);
     window.location.href = url;
     return null;
   }
@@ -568,7 +447,7 @@ tr.speaking{
   async function supaGetUser() {
     return await bwPlayerGetUser();
   }
-</script></script>
+</script>
 </head>
 <body>
 <header>
@@ -2501,15 +2380,6 @@ user = await waitUser(1500, 250);
       if (badge) badge.textContent = email;
     }
   }
-// 2.5️⃣ player 專用守門：同類型裝置只允許一台，並啟用 30 分鐘閒置登出
-if (user) {
-  const okGuard = await bwGuardCurrentDeviceNow(user);
-  if (!okGuard) return;
-  await bwMarkCurrentDevice(user);
-  bwStartHeartbeat(user, 2);
-  bwStartIdleLogout(30);
-}
-
 // 3️⃣ 已登入且非 preview：
 //    先以 profiles.expires_at 作為權威；若缺值但 orders 有有效訂單 → 放行並回填 profiles.expires_at（修正『已訂閱仍被彈去 pricing』）
 //    同時：訂閱通過後若尚未完成 Level Survey → 只導一次到 /account/level-survey.html
@@ -2664,6 +2534,7 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     speedVal.textContent = `${r.toFixed(2)}x`;
 
     await loadVideo();
+    await setupCoinGate(user);
     await loadCues();
     await loadQuiz();
     await loadVocab();
