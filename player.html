@@ -2227,65 +2227,137 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
   }
 }
 
-async function setupCoinGate(user){
+function getRowDurationSec(){
   const row = window.__ASSET_ROW__ || {};
+  const sec = Number(row.duration_sec || 0);
+  return (Number.isFinite(sec) && sec > 0) ? sec : 0;
+}
+
+function readActualDurationSec(){
+  try{
+    if (isUsingYouTube() && ytPlayer && typeof ytPlayer.getDuration === 'function') {
+      const d = Number(ytPlayer.getDuration()) || 0;
+      if (Number.isFinite(d) && d > 0) return d;
+    }
+  }catch(_e){}
+
+  try{
+    const d = Number(video.duration) || 0;
+    if (Number.isFinite(d) && d > 0) return d;
+  }catch(_e){}
+
+  return 0;
+}
+
+function setCoinUiPending(msg){
   const durationBadge = document.getElementById('durationBadge');
   const coinBadge = document.getElementById('coinBadge');
+  const btnUnlockNow = document.getElementById('btnUnlockNow');
+  if (durationBadge) durationBadge.textContent = '--:--';
+  if (coinBadge) coinBadge.textContent = '?';
+  if (btnUnlockNow){
+    btnUnlockNow.disabled = true;
+    btnUnlockNow.title = msg || '影片時長尚未取得';
+  }
+}
+
+function applyDurationCoinUi(durationSec){
+  const durationBadge = document.getElementById('durationBadge');
+  const coinBadge = document.getElementById('coinBadge');
+  const btnUnlockNow = document.getElementById('btnUnlockNow');
+  const safeSec = Number(durationSec) || 0;
+
+  if (safeSec > 0){
+    const coinCost = calcCoins(safeSec);
+    window.__BW_DURATION_SEC__ = safeSec;
+    window.__BW_COIN_COST__ = coinCost;
+    if (durationBadge) durationBadge.textContent = fmt(safeSec);
+    if (coinBadge) coinBadge.textContent = String(coinCost);
+    if (btnUnlockNow){
+      btnUnlockNow.disabled = false;
+      btnUnlockNow.title = '';
+    }
+    return coinCost;
+  }
+
+  window.__BW_DURATION_SEC__ = 0;
+  window.__BW_COIN_COST__ = 0;
+  setCoinUiPending();
+  return 0;
+}
+
+async function waitForSyncedDuration(maxWaitMs = 12000){
+  if (window.__BW_DURATION_PROMISE__) return await window.__BW_DURATION_PROMISE__;
+
+  window.__BW_DURATION_PROMISE__ = (async () => {
+    const start = Date.now();
+    let best = readActualDurationSec();
+    const rowDuration = getRowDurationSec();
+
+    while (Date.now() - start < maxWaitMs){
+      const current = readActualDurationSec();
+      if (current > best) best = current;
+
+      if (best >= 60){
+        applyDurationCoinUi(best);
+        window.__BW_DURATION_READY__ = true;
+        return best;
+      }
+
+      await new Promise(r => setTimeout(r, 250));
+    }
+
+    if (best > 0){
+      applyDurationCoinUi(best);
+      window.__BW_DURATION_READY__ = best >= 60;
+      return best;
+    }
+
+    if (rowDuration > 0){
+      applyDurationCoinUi(rowDuration);
+      window.__BW_DURATION_READY__ = rowDuration >= 60;
+      return rowDuration;
+    }
+
+    applyDurationCoinUi(0);
+    window.__BW_DURATION_READY__ = false;
+    return 0;
+  })();
+
+  try{
+    return await window.__BW_DURATION_PROMISE__;
+  }finally{
+    window.__BW_DURATION_PROMISE__ = null;
+  }
+}
+
+async function ensureDurationReadyForUnlock(){
+  const sec = await waitForSyncedDuration();
+  if (!sec || sec < 60){
+    setCoinUiPending('影片時長尚未取得');
+    return 0;
+  }
+  return sec;
+}
+
+async function setupCoinGate(user){
   const walletBadge = document.getElementById('walletBadge');
   const btnUnlockNow = document.getElementById('btnUnlockNow');
 
-  function readDurationSec(){
-    const candidates = [
-      Number(row.duration_sec || 0),
-      Number(row.duration || 0),
-      Number(window.__BW_DURATION_SEC__ || 0),
-      Number(video?.duration || 0),
-      Number(isUsingYouTube() && ytPlayer && typeof ytPlayer.getDuration === 'function' ? ytPlayer.getDuration() : 0)
-    ];
-    for (const n of candidates){
-      if (Number.isFinite(n) && n >= 30) return n;
-    }
-    return 0;
-  }
-
-  function refreshDurationAndCoinUI(){
-    const sec = readDurationSec();
-    const ok = sec >= 30;
-    if (durationBadge) durationBadge.textContent = ok ? fmt(sec) : '--:--';
-    if (coinBadge) coinBadge.textContent = ok ? String(calcCoins(sec)) : '?';
-    if (btnUnlockNow){
-      btnUnlockNow.disabled = !ok;
-      btnUnlockNow.title = ok ? '' : '影片時長尚未取得，暫時不能解鎖';
-    }
-    window.__BW_DURATION_SEC__ = sec;
-    window.__BW_COIN_COST__ = ok ? calcCoins(sec) : 0;
-    return { sec, ok, coinCost: ok ? calcCoins(sec) : 0 };
-  }
-
-  let meta = refreshDurationAndCoinUI();
+  setCoinUiPending();
 
   const unlocked = await hasUnlocked(user.id, slug);
   let wallet = await loadWalletCoins(user.id);
   if (walletBadge) walletBadge.textContent = String(wallet);
   if (btnUnlockNow) btnUnlockNow.style.display = unlocked ? 'none' : 'inline-flex';
 
-  const syncMeta = () => { meta = refreshDurationAndCoinUI(); };
+  const refreshDurationSoon = () => {
+    waitForSyncedDuration().catch(err => console.warn('[coin] waitForSyncedDuration error', err));
+  };
 
-  try{
-    video.addEventListener('loadedmetadata', syncMeta);
-    video.addEventListener('durationchange', syncMeta);
-  }catch(_e){}
-
-  const ytMetaTimer = setInterval(() => {
-    if (btnUnlockNow && btnUnlockNow.style.display === 'none') {
-      clearInterval(ytMetaTimer);
-      return;
-    }
-    const before = window.__BW_DURATION_SEC__ || 0;
-    const after = readDurationSec();
-    if (after && after !== before) syncMeta();
-  }, 1000);
-  window.__BW_YT_META_TIMER__ = ytMetaTimer;
+  video.addEventListener('loadedmetadata', refreshDurationSoon, { passive:true });
+  video.addEventListener('durationchange', refreshDurationSoon, { passive:true });
+  refreshDurationSoon();
 
   if (unlocked) return;
 
@@ -2293,18 +2365,19 @@ async function setupCoinGate(user){
   let gateInFlight = null;
 
   const passGate = async () => {
-    meta = refreshDurationAndCoinUI();
-    if (!meta.ok){
-      alert('影片時長尚未取得，暫時不能解鎖。請等影片資訊載入完成後再試。');
-      pauseActive();
-      return false;
-    }
-
     if (gatePassed) return true;
     if (gateInFlight) return gateInFlight;
 
     gateInFlight = (async () => {
-      const result = await spendCoinsAndUnlock(user.id, slug, meta.coinCost);
+      const durationSec = await ensureDurationReadyForUnlock();
+      if (!durationSec){
+        alert('影片時長尚未取得，暫時不能解鎖。');
+        return false;
+      }
+
+      const coinCost = calcCoins(durationSec);
+      applyDurationCoinUi(durationSec);
+      const result = await spendCoinsAndUnlock(user.id, slug, coinCost);
 
       if (!result.ok){
         if (result.reason === 'insufficient'){
@@ -2361,6 +2434,7 @@ async function setupCoinGate(user){
 
   video.addEventListener('timeupdate', onTimeUpdate);
 }
+
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
   async function ensureVideoPublished(category, slug, isAdmin) {
@@ -2885,11 +2959,6 @@ async function loadProOutline(){
     cuesStatus.textContent='（PRO 課程清單載入失敗）';
   }
 }
-
-<script>
-
-
-</script>
 
 </body>
 </html>
