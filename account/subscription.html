@@ -185,7 +185,7 @@
 
 <script type="module">
 const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmJdOiImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
 async function waitSupabase(ms = 4000){
   const start = Date.now();
@@ -203,37 +203,28 @@ function fmtDate(v){
 }
 
 /**
- * ✅ 這裡是關鍵修正：
  * - total / subtotal：視為「元」
  * - total_cents / unit_price：視為「分」
  */
 function moneyNTDFromRow(o){
   if(!o) return "-";
 
-  // 1) total（元）
   if (typeof o.total === "number" && o.total > 0) {
     return "NT$ " + Math.round(o.total).toLocaleString("en-US");
   }
-
-  // 2) subtotal（元）
   if (typeof o.subtotal === "number" && o.subtotal > 0) {
     return "NT$ " + Math.round(o.subtotal).toLocaleString("en-US");
   }
-
-  // 3) total_cents（分）
   if (typeof o.total_cents === "number" && o.total_cents > 0) {
     const ntd = Math.round(o.total_cents / 100);
     return "NT$ " + ntd.toLocaleString("en-US");
   }
-
-  // 4) unit_price*quantity（分）
   if (typeof o.unit_price === "number" && o.unit_price > 0) {
     const q = (typeof o.quantity === "number" && o.quantity>0) ? o.quantity : 1;
     const cents = o.unit_price * q;
     const ntd = Math.round(cents / 100);
     return "NT$ " + ntd.toLocaleString("en-US");
   }
-
   return "NT$ 0";
 }
 
@@ -334,7 +325,7 @@ function renderCoinLogs(rows){
     return `
       <tr>
         <td class="mono">${fmtDate(r.created_at)}</td>
-        <td>${reason}${r.asset_slug ? `：${r.asset_slug}` : ""}</td>
+        <td>${reason}</td>
         <td class="mono" style="color:${color};font-weight:900;">${sign}${amount}</td>
       </tr>
     `;
@@ -361,34 +352,29 @@ async function loadWalletOverview(sb, userId){
   }
 
   try{
-    const { data: unlocks } = await sb
-      .from("asset_unlocks")
-      .select("asset_slug, unlocked_at")
+    const { data: txs, error: txErr } = await sb
+      .from("coin_transactions")
+      .select("created_at, note, change, balance_after, ref_slug")
       .eq("user_id", userId)
-      .order("unlocked_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(20);
 
-    const unlockRows = Array.isArray(unlocks) ? unlocks : [];
+    if (txErr) throw txErr;
 
-    let costMap = {};
-    if (unlockRows.length){
-      const slugs = [...new Set(unlockRows.map(x => x.asset_slug).filter(Boolean))];
-      const { data: assets } = await sb
-        .from("assets")
-        .select("slug, coin_cost")
-        .in("slug", slugs);
-      (assets || []).forEach(a => costMap[a.slug] = Number(a.coin_cost || 0));
-    }
+    const txRows = Array.isArray(txs) ? txs : [];
 
-    result.logs = unlockRows.slice(0, 20).map(u => ({
-      created_at: u.unlocked_at,
-      amount: -Number(costMap[u.asset_slug] || 0),
-      reason: "影片解鎖",
-      asset_slug: u.asset_slug
+    result.logs = txRows.map(t => ({
+      created_at: t.created_at,
+      amount: Number(t.change || 0),
+      reason: t.note || "金幣變動",
+      asset_slug: t.ref_slug || ""
     }));
 
-    result.spent = result.logs.reduce((sum, r) => sum + Math.abs(Number(r.amount || 0)), 0);
+    result.spent = txRows
+      .filter(t => Number(t.change || 0) < 0)
+      .reduce((sum, t) => sum + Math.abs(Number(t.change || 0)), 0);
   }catch(err){
-    console.error("[wallet] unlock logs error", err);
+    console.error("[wallet] coin_transactions error", err);
   }
 
   try{
@@ -489,7 +475,6 @@ $("btnBack").onclick = () => {
   renderWalletSummary(walletInfo);
   renderCoinLogs(walletInfo.logs);
 
-  // ✅ 這裡多抓 total/subtotal
   const { data: orders, error: ordersErr } = await sb
     .from("orders")
     .select("id,status,paid_at,expire_at,buyer_id,user_id,referrer_id,referral_code,total,total_cents,subtotal,unit_price,quantity,items,period")
@@ -501,7 +486,7 @@ $("btnBack").onclick = () => {
     $status.className = "pill bad";
     $current.innerHTML = `<div style="color:var(--bad);font-weight:900;">讀取失敗：${ordersErr.message}</div>`;
     $history.innerHTML = `<tr><td colspan="3" style="color:var(--bad);font-weight:900;">${ordersErr.message}</td></tr>`;
-return;
+    return;
   }
 
   const list = Array.isArray(orders) ? orders : [];
@@ -510,8 +495,6 @@ return;
     $status.className = "pill neu";
     $current.innerHTML = `<div style="color:var(--bad);font-weight:900;">尚無訂閱紀錄</div>`;
     $history.innerHTML = `<tr><td colspan="3" class="muted">沒有任何訂單</td></tr>`;
-
-    // ✅ 未訂閱：直接導回你的成熟訂閱入口（pricing）
     setTimeout(()=>location.replace('../pricing.html'), 120);
     return;
   }
@@ -526,7 +509,6 @@ return;
   $status.className = "pill " + (active ? "ok" : "neu");
 
   if(!active){
-    // ✅ 沒有有效訂閱：回到 pricing（讓用戶完成你既有的 checkout/綠界流程）
     setTimeout(()=>location.replace('../pricing.html'), 120);
     return;
   }
@@ -553,7 +535,6 @@ return;
   if(active){
     const $nextStepBox = $("nextStepBox");
 
-    // ===== 簡化導流：訂閱後先去 profile，不再強制英文評測 =====
     let profileLevel = null;
     let profileWeek = null;
     let profileDomain = null;
@@ -631,7 +612,7 @@ return;
     $goPricing.style.display = "none";
     $locked.style.display = "inline-flex";
   } else {
-$goPricing.style.display = "inline-flex";
+    $goPricing.style.display = "inline-flex";
     $locked.style.display = "none";
     $avoidDup.style.display = "none";
   }
@@ -650,17 +631,3 @@ $goPricing.style.display = "inline-flex";
 </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
