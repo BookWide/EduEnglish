@@ -2148,11 +2148,7 @@ async function speakText(text, lang){
 
 function calcCoins(durationSec){
   const min = (Number(durationSec)||0) / 60;
-  if (min <= 5) return 1;
-  if (min <= 10) return 2;
-  if (min <= 20) return 3;
-  if (min <= 30) return 4;
-  return 5;
+  return Math.min(5, Math.max(1, Math.ceil(min / 10)));
 }
 
 async function loadWalletCoins(userId){
@@ -2228,9 +2224,10 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
 }
 
 async function setupCoinGate(user){
+  window.__BW_COIN_GATE_V2__ = true;
   const row = window.__ASSET_ROW__ || {};
-  const durationSec = Number(row.duration_sec || 0);
-  const coinCost = Number(row.coin_cost || calcCoins(durationSec));
+  const durationSec = Number(row.duration_sec || video.duration || 0);
+  const coinCost = calcCoins(durationSec);
   const durationBadge = document.getElementById('durationBadge');
   const coinBadge = document.getElementById('coinBadge');
   const walletBadge = document.getElementById('walletBadge');
@@ -2889,19 +2886,9 @@ async function initWallet(){
 }
 
 async function initCoinCost() {
-  let row = window.__ASSET_ROW__ || null;
-
-  if (!row || row.coin_cost == null) {
-    const { data, error } = await playerSupa
-      .from('assets')
-      .select('coin_cost')
-      .eq('slug', slug)
-      .maybeSingle();
-
-    if (!error && data) row = { ...(row || {}), ...data };
-  }
-
-  coinCost = Number(row?.coin_cost || 1) || 1;
+  const row = window.__ASSET_ROW__ || null;
+  const durationSec = Number(row?.duration_sec || video?.duration || 0);
+  coinCost = calcCoins(durationSec);
   const badge = document.getElementById('coinBadge');
   if (badge) badge.textContent = coinCost;
 }
@@ -2993,29 +2980,13 @@ async function unlockVideo() {
     return;
   }
 
-  const { data, error } = await playerSupa.rpc('unlock_asset', {
-    p_slug: slug
-  });
+  const result = await spendCoinsAndUnlock(currentUser.id, slug, coinCost);
 
-  if (error) {
-    console.error('[coin] unlock_asset rpc error', error);
-    alert('系統錯誤，請稍後再試');
-    return;
-  }
-
-  if (!data || !data.ok) {
-    const reason = data?.error || 'unknown';
-
-    if (reason === 'not_logged_in') {
-      await ensureAuth({ next: currentReturnUrl() });
-      return;
-    }
-
-    if (reason === 'not_enough') {
+  if (!result.ok) {
+    if (result.reason === 'insufficient') {
       goToPricing();
       return;
     }
-
     alert('解鎖失敗，請稍後再試');
     return;
   }
@@ -3023,13 +2994,14 @@ async function unlockVideo() {
   await refreshWallet();
   unlocked = true;
   coinPromptShown = false;
-  alert(data.already ? '✅ 已解鎖' : `✅ 解鎖成功${data.cost ? `（扣 ${data.cost} 金幣）` : ''}`);
+  alert(result.already ? '✅ 已解鎖' : `✅ 解鎖成功（扣 ${coinCost} 金幣）`);
   playActive();
 }
 
 document.getElementById('btnUnlockNow').onclick = unlockVideo;
 
 (async () => {
+  if (window.__BW_COIN_GATE_V2__) return;
   await initWallet();
   await initCoinCost();
   await checkUnlocked();
