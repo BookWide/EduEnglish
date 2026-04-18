@@ -447,17 +447,35 @@ tr.speaking{
   async function supaGetUser() {
     return await bwPlayerGetUser();
   }
+</script>
 
-  function bwPlayerGetDeviceId() {
-    let id = localStorage.getItem('bw_player_device_id');
+<script type="module">
+(async () => {
+  const PLAYER_BASE = (
+    location.pathname.startsWith('/EduEnglish') ||
+    location.hostname.includes('github.io')
+  ) ? '/EduEnglish' : '';
+
+  let BW = null;
+  try {
+    const mod = await import(`${PLAYER_BASE}/supa.js?v=20260418_player_guard`);
+    BW = mod.BW;
+    window.BW = window.BW || BW;
+  } catch (err) {
+    console.error('[BW-player] failed to import supa.js', err);
+    return;
+  }
+
+  function getDeviceId() {
+    let id = localStorage.getItem('bw_device_id');
     if (!id) {
-      id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('bw_' + Date.now() + '_' + Math.random().toString(16).slice(2));
-      localStorage.setItem('bw_player_device_id', id);
+      id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('bw_' + Date.now() + '_' + Math.random().toString(36).slice(2));
+      localStorage.setItem('bw_device_id', id);
     }
     return id;
   }
 
-  function bwPlayerGetDeviceType() {
+  function getDeviceType() {
     const ua = navigator.userAgent || '';
     const isMobile =
       /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
@@ -465,196 +483,151 @@ tr.speaking{
     return isMobile ? 'mobile' : 'desktop';
   }
 
-  async function bwPlayerIsAdmin(user) {
-    try {
-      if (!user) return false;
-      const r = await playerSupa
-        .from('profiles')
-        .select('is_admin')
-        .eq('id', user.id)
-        .maybeSingle();
-      return !!r.data?.is_admin;
-    } catch (err) {
-      console.warn('[player-guard] isAdmin error', err);
-      return false;
-    }
-  }
+  let guardRedirecting = false;
+  async function playerForceLogout(reason) {
+    if (guardRedirecting) return;
+    guardRedirecting = true;
 
-  async function bwPlayerReadProfileDevice(user) {
-    return await playerSupa
-      .from('profiles')
-      .select('current_mobile_device_id,current_desktop_device_id')
-      .eq('id', user.id)
-      .maybeSingle();
-  }
-
-  async function bwPlayerMarkCurrentDevice(user) {
-    try {
-      if (!user) return true;
-      if (await bwPlayerIsAdmin(user)) return true;
-
-      const deviceId = bwPlayerGetDeviceId();
-      const deviceType = bwPlayerGetDeviceType();
-      const payload = {
-        last_seen_at: new Date().toISOString(),
-      };
-
-      if (deviceType === 'mobile') {
-        payload.current_mobile_device_id = deviceId;
-      } else {
-        payload.current_desktop_device_id = deviceId;
-      }
-
-      const r = await playerSupa
-        .from('profiles')
-        .update(payload)
-        .eq('id', user.id);
-
-      if (r.error) {
-        console.warn('[player-guard] markCurrentDevice error', r.error);
-        return false;
-      }
-      return true;
-    } catch (err) {
-      console.warn('[player-guard] markCurrentDevice crash', err);
-      return false;
-    }
-  }
-
-  async function bwPlayerForcedLogout(reason) {
     try {
       if (reason === 'idle') {
-        alert('您已閒置 30 分鐘，系統將自動登出');
+        alert('您已閒置 30 分鐘，系統將自動登出。');
       } else {
-        alert('此帳號已在另一台同類型裝置登入，您已被強制登出');
+        alert('此帳號已在另一台同類型裝置登入，您已被強制登出。');
       }
     } catch (_) {}
 
     try {
-      await playerSupa.auth.signOut();
+      await BW.supa.auth.signOut();
     } catch (_) {}
 
     setTimeout(() => {
-      const qs = reason === 'idle' ? '?timeout=1' : '?kick=1';
-      location.href = '/login.html' + qs;
-    }, 350);
+      const target = reason === 'idle'
+        ? `${PLAYER_BASE}/login.html?timeout=1`
+        : `${PLAYER_BASE}/login.html?kick=1`;
+      location.href = target;
+    }, 500);
   }
 
-  async function bwPlayerGuardCurrentDeviceNow(user) {
-    try {
-      if (!user) return true;
-      if (await bwPlayerIsAdmin(user)) return true;
+  async function readProfileGuardState(userId) {
+    const { data, error } = await BW.supa
+      .from('profiles')
+      .select('is_admin,current_mobile_device_id,current_desktop_device_id,last_seen_at')
+      .eq('id', userId)
+      .maybeSingle();
 
-      const myDevice = bwPlayerGetDeviceId();
-      const deviceType = bwPlayerGetDeviceType();
-      const r = await bwPlayerReadProfileDevice(user);
+    if (error) {
+      console.warn('[BW-player] profiles read error', error);
+      return null;
+    }
+    return data || null;
+  }
 
-      if (r.error) {
-        console.warn('[player-guard] guard read error', r.error);
-        return true;
-      }
+  async function writeCurrentDevice(userId) {
+    const deviceId = getDeviceId();
+    const deviceType = getDeviceType();
+    const payload = {
+      last_seen_at: new Date().toISOString(),
+    };
+    if (deviceType === 'mobile') {
+      payload.current_mobile_device_id = deviceId;
+    } else {
+      payload.current_desktop_device_id = deviceId;
+    }
 
-      const currentId = deviceType === 'mobile'
-        ? r.data?.current_mobile_device_id
-        : r.data?.current_desktop_device_id;
+    const { error } = await BW.supa
+      .from('profiles')
+      .update(payload)
+      .eq('id', userId);
 
-      if (currentId && currentId !== myDevice) {
-        await bwPlayerForcedLogout('kick');
-        return false;
-      }
-      return true;
-    } catch (err) {
-      console.warn('[player-guard] guardCurrentDeviceNow crash', err);
-      return true;
+    if (error) {
+      console.warn('[BW-player] mark device error', error);
     }
   }
 
-  let __bwHeartbeatTimer = null;
-  function bwPlayerStartHeartbeat(minutes = 2) {
-    if (__bwHeartbeatTimer) clearInterval(__bwHeartbeatTimer);
+  async function guardCheckOnce() {
+    const user = await BW.getUser();
+    if (!user) return false;
 
-    let running = false;
-    const beat = async () => {
-      if (running) return;
-      running = true;
-      try {
-        const user = await bwPlayerGetUser();
-        if (!user) return;
-        if (await bwPlayerIsAdmin(user)) return;
+    const row = await readProfileGuardState(user.id);
+    if (!row) return true;
+    if (row.is_admin) return true;
 
-        const myDevice = bwPlayerGetDeviceId();
-        const deviceType = bwPlayerGetDeviceType();
-        const r = await bwPlayerReadProfileDevice(user);
+    const myDevice = getDeviceId();
+    const deviceType = getDeviceType();
+    const currentId = deviceType === 'mobile'
+      ? row.current_mobile_device_id
+      : row.current_desktop_device_id;
 
-        if (r.error) {
-          console.warn('[player-guard] heartbeat read error', r.error);
-          return;
-        }
+    if (currentId && currentId !== myDevice) {
+      await playerForceLogout('replaced');
+      return false;
+    }
 
-        const currentId = deviceType === 'mobile'
-          ? r.data?.current_mobile_device_id
-          : r.data?.current_desktop_device_id;
-
-        if (currentId && currentId !== myDevice) {
-          await bwPlayerForcedLogout('kick');
-          return;
-        }
-
-        const payload = { last_seen_at: new Date().toISOString() };
-        if (deviceType === 'mobile') {
-          payload.current_mobile_device_id = myDevice;
-        } else {
-          payload.current_desktop_device_id = myDevice;
-        }
-
-        const u = await playerSupa
-          .from('profiles')
-          .update(payload)
-          .eq('id', user.id);
-
-        if (u.error) {
-          console.warn('[player-guard] heartbeat update error', u.error);
-        }
-      } finally {
-        running = false;
-      }
-    };
-
-    beat();
-    __bwHeartbeatTimer = setInterval(beat, Math.max(1, minutes) * 60 * 1000);
-    return __bwHeartbeatTimer;
+    return true;
   }
 
-  let __bwIdleTimer = null;
-  function bwPlayerStartIdleLogout(minutes = 30) {
+  async function initPlayerGuard() {
+    try {
+      if (BW && typeof BW.popForcedLogoutHint === 'function') {
+        BW.popForcedLogoutHint();
+      }
+    } catch (_) {}
+
+    const user = await BW.getUser();
+    if (!user) return;
+
+    const row = await readProfileGuardState(user.id);
+    if (!row) return;
+    if (row.is_admin) return;
+
+    const myDevice = getDeviceId();
+    const deviceType = getDeviceType();
+    const currentId = deviceType === 'mobile'
+      ? row.current_mobile_device_id
+      : row.current_desktop_device_id;
+
+    if (currentId && currentId !== myDevice) {
+      await playerForceLogout('replaced');
+      return;
+    }
+
+    await writeCurrentDevice(user.id);
+
+    setInterval(async () => {
+      await guardCheckOnce();
+    }, 5000);
+
+    setInterval(async () => {
+      const ok = await guardCheckOnce();
+      if (!ok) return;
+      await writeCurrentDevice(user.id);
+    }, 20000);
+
+    startIdleLogoutPlayerOnly();
+  }
+
+  function startIdleLogoutPlayerOnly() {
+    const minutes = 30;
     const ms = minutes * 60 * 1000;
+    let timer = null;
 
     const reset = () => {
-      clearTimeout(__bwIdleTimer);
-      __bwIdleTimer = setTimeout(async () => {
-        await bwPlayerForcedLogout('idle');
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+        await playerForceLogout('idle');
       }, ms);
     };
 
-    ['click', 'mousemove', 'keydown', 'touchstart', 'scroll']
+    ['click', 'mousemove', 'keydown', 'touchstart', 'scroll', 'pointerdown']
       .forEach(evt => window.addEventListener(evt, reset, { passive: true }));
 
     reset();
   }
 
-  async function bwPlayerInitDeviceGuard() {
-    const user = await bwPlayerGetUser();
-    if (!user) return;
-
-    const okBeforeMark = await bwPlayerGuardCurrentDeviceNow(user);
-    if (!okBeforeMark) return;
-
-    await bwPlayerMarkCurrentDevice(user);
-    bwPlayerStartHeartbeat(2);
-    bwPlayerStartIdleLogout(30);
-  }
-
+  initPlayerGuard();
+})();
 </script>
+
 </head>
 <body>
 <header>
@@ -979,14 +952,6 @@ const homeLink = document.getElementById('homeLink');
 if(homeLink){
   homeLink.href = (ROOT_BASE || '') + '/account/learning-dashboard.html';
 }
-
-
-try{
-  bwPlayerInitDeviceGuard();
-}catch(err){
-  console.warn('[player-guard] init error', err);
-}
-
 
 const btnEnIndex = document.getElementById('btnEnIndex');
 const btnJpIndex = document.getElementById('btnJpIndex');
