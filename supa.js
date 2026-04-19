@@ -35,20 +35,7 @@ function getDeviceType() {
   return isMobile ? 'mobile' : 'desktop';
 }
 
-function getRootBase() {
-  return (
-    location.pathname.startsWith('/EduEnglish') ||
-    location.hostname.includes('github.io')
-  ) ? '/EduEnglish' : '';
-}
-
-function getLoginUrl(reason = 'kick') {
-  const root = getRootBase();
-  if (reason === 'timeout') return `${root}/index.html?timeout=1#login`;
-  return `${root}/index.html?kick=1#login`;
-}
-
-async function forceLogout(redirect = getLoginUrl('kick')) {
+async function forceLogout(redirect = '/login.html?kick=1') {
   try {
     localStorage.setItem('bw_forced_logout', '1');
   } catch (_) {}
@@ -176,7 +163,7 @@ export const BW = {
 
     if (currentId && currentId !== myDevice) {
       console.warn('[BW] device replaced -> force logout');
-      await forceLogout(getLoginUrl('kick'));
+      await forceLogout('/login.html?kick=1');
       return false;
     }
 
@@ -184,9 +171,6 @@ export const BW = {
   },
 
   startHeartbeat(minutes = 2) {
-    if (typeof window !== 'undefined' && window.__BW_HEARTBEAT__) {
-      clearInterval(window.__BW_HEARTBEAT__);
-    }
     let running = false;
     const myDevice = getDeviceId();
     const deviceType = getDeviceType();
@@ -220,7 +204,7 @@ export const BW = {
 
         if (currentId && currentId !== myDevice) {
           console.warn('[BW] device mismatch -> force logout');
-          await forceLogout(getLoginUrl('kick'));
+          await forceLogout('/login.html?kick=1');
           return;
         }
 
@@ -246,9 +230,7 @@ export const BW = {
     };
 
     beat();
-    const timer = setInterval(beat, Math.max(1, minutes) * 60 * 1000);
-    if (typeof window !== 'undefined') window.__BW_HEARTBEAT__ = timer;
-    return timer;
+    return setInterval(beat, Math.max(1, minutes) * 60 * 1000);
   },
 
   popForcedLogoutHint() {
@@ -258,37 +240,24 @@ export const BW = {
     }
   },
 
-  startIdleLogout(minutes = 30, redirect = getLoginUrl('timeout')) {
+  startIdleLogout(minutes = 30, redirect = '/login.html?timeout=1') {
     const ms = minutes * 60 * 1000;
-
-    if (typeof window !== 'undefined' && window.__BW_IDLE_RESET__) {
-      ['click', 'mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt =>
-        window.removeEventListener(evt, window.__BW_IDLE_RESET__)
-      );
-    }
-
-    if (typeof window !== 'undefined' && window.__BW_IDLE_TIMER__) {
-      clearTimeout(window.__BW_IDLE_TIMER__);
-    }
+    let timer;
 
     const reset = () => {
-      if (typeof window !== 'undefined' && window.__BW_IDLE_TIMER__) {
-        clearTimeout(window.__BW_IDLE_TIMER__);
-      }
-      const timer = setTimeout(async () => {
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
         try {
           await supabase.auth.signOut();
         } catch (_) {}
         location.href = redirect;
       }, ms);
-      if (typeof window !== 'undefined') window.__BW_IDLE_TIMER__ = timer;
     };
 
     ['click', 'mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt =>
       window.addEventListener(evt, reset, { passive: true })
     );
 
-    if (typeof window !== 'undefined') window.__BW_IDLE_RESET__ = reset;
     reset();
   },
 };
