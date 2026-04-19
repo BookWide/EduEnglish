@@ -752,10 +752,11 @@
 
     var supa = null;
     let VIDEO_ITEMS = [];
+    let ALL_VIDEO_ITEMS = [];
+    let CURRENT_UNLOCKED_SLUGS = new Set();
     let CURRENT_HAS_ACTIVE_PAID = false;
     let CURRENT_PROFILE_READY = false;
     let CURRENT_PROFILE = null;
-    let CURRENT_UNLOCKED_SLUGS = new Set();
 
     
 
@@ -1045,13 +1046,11 @@ async function loadHeroBanner() {
       return (items || []).slice(0, NON_ADMIN_VISIBLE_LIMIT);
     }
 
-
-    async function refreshUnlockedSlugs() {
+    async function loadUnlockedSlugs() {
       try {
         CURRENT_UNLOCKED_SLUGS = new Set();
         if (CURRENT_USER_IS_ADMIN || !supa) return;
-        const { data: authData } = await supa.auth.getUser();
-        const user = authData?.user || null;
+        const { data: { user } } = await supa.auth.getUser();
         if (!user) return;
         const { data, error } = await supa
           .from('asset_unlocks')
@@ -1060,15 +1059,32 @@ async function loadHeroBanner() {
         if (error) throw error;
         CURRENT_UNLOCKED_SLUGS = new Set((data || []).map(r => String(r.asset_slug || '').trim()).filter(Boolean));
       } catch (e) {
-        console.warn('[index] refreshUnlockedSlugs failed:', e);
+        console.warn('[index] loadUnlockedSlugs failed:', e);
         CURRENT_UNLOCKED_SLUGS = new Set();
       }
     }
 
-    function excludeUnlockedItems(items) {
-      if (CURRENT_USER_IS_ADMIN) return items || [];
-      if (!(CURRENT_UNLOCKED_SLUGS instanceof Set) || CURRENT_UNLOCKED_SLUGS.size === 0) return items || [];
+    function removeUnlockedItems(items) {
+      if (CURRENT_USER_IS_ADMIN || !CURRENT_UNLOCKED_SLUGS.size) return (items || []).slice();
       return (items || []).filter(v => !CURRENT_UNLOCKED_SLUGS.has(String(v.slug || '').trim()));
+    }
+
+    function buildViewerItems(items, reserveItems) {
+      if (CURRENT_USER_IS_ADMIN) return (items || []).slice();
+      const primary = removeUnlockedItems(items || []);
+      if (primary.length >= NON_ADMIN_VISIBLE_LIMIT) {
+        return primary.slice(0, NON_ADMIN_VISIBLE_LIMIT);
+      }
+
+      const seen = new Set(primary.map(v => `${v.category}::${v.slug}`));
+      const extra = removeUnlockedItems(reserveItems || []).filter(v => {
+        const key = `${v.category}::${v.slug}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+      return primary.concat(extra).slice(0, NON_ADMIN_VISIBLE_LIMIT);
     }
 
     
@@ -1235,8 +1251,8 @@ function getWeekIndex() {
       const kw = currentSearch.trim().toLowerCase();
       gridEl.innerHTML = "";
 
-      const sourceItems = applySelectedWorkFilter(VIDEO_ITEMS);
-      const filtered = sourceItems.filter(v => {
+      const roleFiltered = applySelectedWorkFilter(VIDEO_ITEMS);
+      const filterFn = (v) => {
         if (currentCategory !== "all" && v.category !== currentCategory) return false;
         if (currentLevel && Number(v.difficulty_level) !== Number(currentLevel)) return false;
         if (kw && !(
@@ -1244,12 +1260,12 @@ function getWeekIndex() {
           (v.slug  || "").toLowerCase().includes(kw)
         )) return false;
         return true;
-      });
+      };
 
-      const visibleCandidates = excludeUnlockedItems(filtered);
+      const primaryFiltered = roleFiltered.filter(filterFn);
+      const reserveFiltered = (VIDEO_ITEMS || []).filter(filterFn);
 
-      // admin 看全部；其他帳號排除已解鎖影片後，自動補滿 20 片
-      const limited = limitVisibleItemsForViewer(visibleCandidates);
+      const limited = buildViewerItems(primaryFiltered, reserveFiltered);
 
       if (!limited.length) {
         const msg = (CURRENT_HAS_ACTIVE_PAID && CURRENT_PROFILE_READY)
@@ -1261,7 +1277,6 @@ function getWeekIndex() {
       }
 
       for (const v of limited) {
-        // ✅ 使用你指定的封面命名：assets/{category}/{slug}.cover.jpg
         const cover = (v.cover_url || `${STORAGE_BASE}/assets/${v.category}/${v.slug}.jpg`);
         const domainPart = (String(v.category || '') === 'pro' && String(v.domain_code || '').trim())
           ? `&domain=${encodeURIComponent(String(v.domain_code || '').trim())}`
@@ -1358,8 +1373,11 @@ async function loadAllVideoItems() {
         };
       });
 
+      ALL_VIDEO_ITEMS = (VIDEO_ITEMS || []).slice();
+
       // 先嘗試載入 weekly-index.json（若不存在就忽略，退回預設輪播）
       await loadWeeklyIndex();
+      await loadUnlockedSlugs();
 
       renderGrid();
       return;
@@ -1391,8 +1409,11 @@ async function loadAllVideoItems() {
       lesson_type: item.lesson_type || ''
     }));
 
+    ALL_VIDEO_ITEMS = (VIDEO_ITEMS || []).slice();
     await applyPublishFilter();
+    ALL_VIDEO_ITEMS = (VIDEO_ITEMS || []).slice();
     await loadWeeklyIndex();
+    await loadUnlockedSlugs();
     renderGrid();
   } catch (err) {
     console.error(err);
@@ -1966,7 +1987,6 @@ if(data.current_device_id !== my){
 
 
         CURRENT_USER_IS_ADMIN = false;
-        CURRENT_UNLOCKED_SLUGS = new Set();
         if (user) {
           const { data: profile, error } = await supa
             .from('profiles')
@@ -2035,8 +2055,6 @@ if(data.current_device_id !== my){
               applyHomeHeroVariant(true, CURRENT_HAS_ACTIVE_PAID, CURRENT_PROFILE_READY);
               renderHomeWorkNotice();
             } catch(_) {}
-
-            await refreshUnlockedSlugs();
 
             // v20260117: Level Survey 改為「訂閱後再測」
             // - index.html 不再把 level-survey 當作訂閱前的強制門檻
