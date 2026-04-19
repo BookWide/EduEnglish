@@ -755,6 +755,7 @@
     let CURRENT_HAS_ACTIVE_PAID = false;
     let CURRENT_PROFILE_READY = false;
     let CURRENT_PROFILE = null;
+    let CURRENT_UNLOCKED_SLUGS = new Set();
 
     
 
@@ -1031,7 +1032,7 @@ async function loadHeroBanner() {
     let currentLevel = 0;
     let currentSearch = "";
 
-    const NON_ADMIN_VISIBLE_LIMIT = 12; // 非 admin 最多顯示 12 片
+    const NON_ADMIN_VISIBLE_LIMIT = 20; // 非 admin 最多顯示 20 片
     let CURRENT_USER_IS_ADMIN = false;   // 從 profiles.is_admin 讀取
     const ADMIN_EMAILS = ['pmktools@gmail.com'];
 
@@ -1042,6 +1043,32 @@ async function loadHeroBanner() {
     function limitVisibleItemsForViewer(items) {
       if (CURRENT_USER_IS_ADMIN) return items;
       return (items || []).slice(0, NON_ADMIN_VISIBLE_LIMIT);
+    }
+
+
+    async function refreshUnlockedSlugs() {
+      try {
+        CURRENT_UNLOCKED_SLUGS = new Set();
+        if (CURRENT_USER_IS_ADMIN || !supa) return;
+        const { data: authData } = await supa.auth.getUser();
+        const user = authData?.user || null;
+        if (!user) return;
+        const { data, error } = await supa
+          .from('asset_unlocks')
+          .select('asset_slug')
+          .eq('user_id', user.id);
+        if (error) throw error;
+        CURRENT_UNLOCKED_SLUGS = new Set((data || []).map(r => String(r.asset_slug || '').trim()).filter(Boolean));
+      } catch (e) {
+        console.warn('[index] refreshUnlockedSlugs failed:', e);
+        CURRENT_UNLOCKED_SLUGS = new Set();
+      }
+    }
+
+    function excludeUnlockedItems(items) {
+      if (CURRENT_USER_IS_ADMIN) return items || [];
+      if (!(CURRENT_UNLOCKED_SLUGS instanceof Set) || CURRENT_UNLOCKED_SLUGS.size === 0) return items || [];
+      return (items || []).filter(v => !CURRENT_UNLOCKED_SLUGS.has(String(v.slug || '').trim()));
     }
 
     
@@ -1219,8 +1246,10 @@ function getWeekIndex() {
         return true;
       });
 
-      // admin 看全部；其他帳號只顯示前 12 片，守門規則沿用前面的 filter
-      const limited = limitVisibleItemsForViewer(filtered);
+      const visibleCandidates = excludeUnlockedItems(filtered);
+
+      // admin 看全部；其他帳號排除已解鎖影片後，自動補滿 20 片
+      const limited = limitVisibleItemsForViewer(visibleCandidates);
 
       if (!limited.length) {
         const msg = (CURRENT_HAS_ACTIVE_PAID && CURRENT_PROFILE_READY)
@@ -1937,6 +1966,7 @@ if(data.current_device_id !== my){
 
 
         CURRENT_USER_IS_ADMIN = false;
+        CURRENT_UNLOCKED_SLUGS = new Set();
         if (user) {
           const { data: profile, error } = await supa
             .from('profiles')
@@ -2005,6 +2035,8 @@ if(data.current_device_id !== my){
               applyHomeHeroVariant(true, CURRENT_HAS_ACTIVE_PAID, CURRENT_PROFILE_READY);
               renderHomeWorkNotice();
             } catch(_) {}
+
+            await refreshUnlockedSlugs();
 
             // v20260117: Level Survey 改為「訂閱後再測」
             // - index.html 不再把 level-survey 當作訂閱前的強制門檻
