@@ -1034,9 +1034,8 @@ async function loadHeroBanner() {
     let currentSearch = "";
 
     const NON_ADMIN_VISIBLE_LIMIT = 20; // 非 admin 最多顯示 20 片
-    let CURRENT_USER_IS_ADMIN = false;   // 只從 profiles.is_admin 讀取
-
-    function limitVisibleItemsForViewer(items) {
+    let CURRENT_USER_IS_ADMIN = false;   // 從 profiles.is_admin 讀取
+function limitVisibleItemsForViewer(items) {
       if (CURRENT_USER_IS_ADMIN) return items;
       return (items || []).slice(0, NON_ADMIN_VISIBLE_LIMIT);
     }
@@ -1491,19 +1490,18 @@ if (btnTryHero) {
       document.addEventListener('keydown', (e)=>{ if(e.key === 'Escape') close(); });
       menu.addEventListener('click', (e)=>{ if(e.target.closest('a')) close(); });
     })();
-  </script>
+  </script> <!-- Supabase Auth（使用 supabase-js v2） --> <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
 <script type="module" src="./supa.js"></script>
-<!-- Supabase Auth（使用 supabase-js v2） --> <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script> <script>
+<script>
     const { createClient } = supabase;
 
-// === Auto logout + device guard (admin 只認 profiles.is_admin) ===
+// === Auto logout (via BW.startIdleLogout) ===
 const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     const SUPABASE_ANON_KEY =
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
     supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     window.supa = supa;
-    const BW_LEGACY_GUARD_DISABLED = true;
     // kick off initial loads (after supa is ready)
     try{
       if (window.__BW_NEED_INIT) {
@@ -1515,57 +1513,23 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     }catch(e){ console.warn('[index] init after supa failed:', e); }
 
 
-    async function BW_waitReady(ms = 6000){
-      const start = Date.now();
-      while(Date.now() - start < ms){
-        if(window.BW) return window.BW;
-        await new Promise(r => setTimeout(r, 50));
-      }
-      return null;
-    }
+    
+/* ========= BookWide 單核心守門：舊 current_device_id 守門已停用 ========= */
+async function BW_forceSignOut(){ return; }
+async function BW_enforceTakeover(){ return; }
+function BW_startDeviceGuard(){ return null; }
 
-    async function BW_forceSignOut(){
-      try{ localStorage.setItem('bw_forced_logout','1'); }catch(_){ }
-      try{ await supa.auth.signOut(); }catch(_){ }
-      location.href = './index.html?kick=1#login';
-    }
+// 被踢提示（跨頁保險）
 
-    async function BW_enforceTakeover(user){
+    (function BW_popForcedLogoutHint(){
       try{
-        if(!user || !user.id) return;
-        const api = await BW_waitReady();
-        if(!api) return;
-        const ok = await api.guardCurrentDeviceNow();
-        if(!ok) return;
-        await api.markCurrentDevice();
-      }catch(e){
-        console.warn('[BW] takeover bridge error:', e);
-      }
-    }
-
-    function BW_startDeviceGuard(user){
-      (async ()=>{
-        try{
-          if(!user || !user.id) return;
-          const api = await BW_waitReady();
-          if(!api) return;
-          api.startHeartbeat(2);
-          api.startIdleLogout(30, './index.html?timeout=1#login');
-        }catch(e){
-          console.warn('[BW] guard bridge error:', e);
+        if(localStorage.getItem('bw_forced_logout')==='1'){
+          localStorage.removeItem('bw_forced_logout');
+          BW_showKickedModal();
         }
-      })();
-      return null;
-    }
-
-    (async function BW_popForcedLogoutHint(){
-      const api = await BW_waitReady();
-      if(api && typeof api.popForcedLogoutHint === 'function'){
-        api.popForcedLogoutHint();
-      }
+      }catch(_){}
     })();
 /* ========= End single-device takeover ========= */
-
 
 
     // ✅ OAuth callback：如果網址帶 ?code=...，就兌換成 session（Google / 之後 FB/LINE/微信）
@@ -1876,10 +1840,9 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
           // 未登入：套用首頁 Hero（影片 + 右文案）
           if (!user) { try { applyHomeHeroVariant(false, false, false); renderHomeWorkNotice(); } catch(_) {} }
 
-        // [BW] 單一裝置接管 + 監控
-        if (user) {
-          await BW_enforceTakeover(user);
-          BW_startDeviceGuard(user);
+        // [BW] 單核心守門
+        if (user && window.BW && typeof BW.initPageGuard === 'function') {
+          await BW.initPageGuard({ idleMinutes: 30 });
         }
 
 
