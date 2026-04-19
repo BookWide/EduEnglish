@@ -97,6 +97,80 @@
     .play-link{color:#2563eb;font-weight:700;text-decoration:none}
     .play-link:hover{text-decoration:underline}
   </style>
+
+<script>
+function BW_getDeviceId(){
+  let id = localStorage.getItem("bw_device_id");
+  if(!id){
+    id = (crypto.randomUUID ? crypto.randomUUID() : ('bw-' + Date.now() + '-' + Math.random().toString(16).slice(2)));
+    localStorage.setItem("bw_device_id", id);
+  }
+  return id;
+}
+let BW_DEVICE_WATCH_TIMER = null;
+let BW_DEVICE_KICKING = false;
+
+async function BW_takeoverDevice(sb, userId){
+  const myDevice = BW_getDeviceId();
+  const { error } = await sb
+    .from('profiles')
+    .update({ current_device_id: myDevice })
+    .eq('id', userId);
+
+  if(error){
+    console.error('[BW_device] takeover failed', error);
+    throw error;
+  }
+  return myDevice;
+}
+
+async function BW_checkDeviceStillMine(sb, userId){
+  const myDevice = BW_getDeviceId();
+  const { data, error } = await sb
+    .from('profiles')
+    .select('current_device_id')
+    .eq('id', userId)
+    .single();
+
+  if(error){
+    console.error('[BW_device] check failed', error);
+    return true;
+  }
+  return String(data?.current_device_id || '') === myDevice;
+}
+
+async function BW_kickByOtherDevice(sb){
+  if(BW_DEVICE_KICKING) return;
+  BW_DEVICE_KICKING = true;
+  try{
+    alert("帳號已在另一台裝置登入，你已被登出");
+  }catch(_e){}
+  try{
+    await sb.auth.signOut();
+  }catch(_e){}
+  location.href = "../index.html?device_kicked=1";
+}
+
+function BW_startDeviceWatcher(sb, userId){
+  if(BW_DEVICE_WATCH_TIMER){
+    clearInterval(BW_DEVICE_WATCH_TIMER);
+    BW_DEVICE_WATCH_TIMER = null;
+  }
+  BW_DEVICE_WATCH_TIMER = setInterval(async ()=>{
+    try{
+      const ok = await BW_checkDeviceStillMine(sb, userId);
+      if(!ok){
+        clearInterval(BW_DEVICE_WATCH_TIMER);
+        BW_DEVICE_WATCH_TIMER = null;
+        await BW_kickByOtherDevice(sb);
+      }
+    }catch(err){
+      console.error('[BW_device] watcher error', err);
+    }
+  }, 4000);
+}
+</script>
+
 </head>
 
 <body>
@@ -520,6 +594,18 @@ $("btnBack").onclick = () => {
     renderWalletSummary({coins:0, granted:0, spent:0, latestGrant:0});
     renderCoinLogs([]);
     return;
+  }
+
+  try{
+    await BW_takeoverDevice(sb, user.id);
+    const stillMine = await BW_checkDeviceStillMine(sb, user.id);
+    if(!stillMine){
+      await BW_kickByOtherDevice(sb);
+      return;
+    }
+    BW_startDeviceWatcher(sb, user.id);
+  }catch(err){
+    console.error('[BW_device] setup error', err);
   }
 
   const email = user.email || "(no email)";
