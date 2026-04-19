@@ -382,29 +382,13 @@ tr.speaking{
 
 </style>
 
-<!-- Supabase JS（player 自己的 auth client） -->
+<!-- BW player cover guard: single local client + single-device + idle 30m -->
+<!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
+<!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-
-<!-- 載入共用守門：單手機 1 台 + 單桌機 1 台 + 閒置登出 -->
-<script type="module">
-  const ROOT_BASE_FOR_BW = (
-    location.pathname.startsWith('/EduEnglish') ||
-    location.hostname.includes('github.io')
-  ) ? '/EduEnglish' : '';
-
-  try {
-    const mod = await import(`${ROOT_BASE_FOR_BW}/supa.js`);
-    if (mod?.BW) {
-      window.BW = mod.BW;
-      window.__BW_GUARD_MODULE_OK__ = true;
-    } else {
-      console.warn('[BW-player] supa.js loaded but BW export missing');
-    }
-  } catch (err) {
-    console.warn('[BW-player] failed to import supa.js', err);
-  }
+<script>
+  // player 覆蓋版：不再吃 shared supa.js，避免守門與播放初始化互相打架
 </script>
-
 <script>
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
@@ -417,8 +401,14 @@ tr.speaking{
     location.hostname.includes('github.io')
   ) ? '/EduEnglish' : '';
 
-  // 僅供 player.html 使用的 Supabase Client
-  const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  // player.html 固定使用單一本地 client，避免 shared supa.js 與播放器初始化互相干擾
+  const playerSupa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+    },
+  });
 
   async function bwPlayerGetUser() {
     try {
@@ -436,6 +426,134 @@ tr.speaking{
       console.error('[player-auth] getUser error', err);
       return null;
     }
+  }
+
+  function bwGetDeviceId() {
+    let id = localStorage.getItem('bw_device_id');
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem('bw_device_id', id);
+    }
+    return id;
+  }
+
+  function bwGetDeviceType() {
+    const ua = navigator.userAgent || '';
+    const isMobile =
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
+      window.innerWidth <= 900;
+    return isMobile ? 'mobile' : 'desktop';
+  }
+
+  async function bwReadProfileGuard(userId) {
+    return await playerSupa
+      .from('profiles')
+      .select('is_admin,current_mobile_device_id,current_desktop_device_id,last_seen_at')
+      .eq('id', userId)
+      .maybeSingle();
+  }
+
+  async function bwMarkCurrentDevice(user) {
+    if (!user?.id) return true;
+    const r = await bwReadProfileGuard(user.id);
+    if (r.error) {
+      console.warn('[BW-player] guard profile read error =', r.error);
+      return false;
+    }
+    if (r.data?.is_admin) return true;
+
+    const payload = { last_seen_at: new Date().toISOString() };
+    const myId = bwGetDeviceId();
+    const type = bwGetDeviceType();
+    if (type === 'mobile') payload.current_mobile_device_id = myId;
+    else payload.current_desktop_device_id = myId;
+
+    const u = await playerSupa.from('profiles').update(payload).eq('id', user.id);
+    if (u.error) {
+      console.warn('[BW-player] guard markCurrentDevice error =', u.error);
+      return false;
+    }
+    return true;
+  }
+
+  async function bwForceLogoutWithHint(reason = 'kick') {
+    try {
+      if (reason === 'idle') {
+        alert('您已閒置 30 分鐘，系統將自動登出。');
+      } else {
+        alert('此帳號已在另一台同類型裝置登入，您已被強制登出。');
+      }
+    } catch (_) {}
+
+    try {
+      await playerSupa.auth.signOut();
+    } catch (_) {}
+
+    setTimeout(() => {
+      const loginBase = (ROOT_BASE || '') + '/login.html';
+      const url = reason === 'idle' ? `${loginBase}?timeout=1` : `${loginBase}?kick=1`;
+      location.href = url;
+    }, 350);
+  }
+
+  async function bwGuardCurrentDeviceNow(user) {
+    if (!user?.id) return false;
+    const r = await bwReadProfileGuard(user.id);
+    if (r.error) {
+      console.warn('[BW-player] guardCurrentDeviceNow read error =', r.error);
+      return false;
+    }
+    if (r.data?.is_admin) return true;
+
+    const myId = bwGetDeviceId();
+    const type = bwGetDeviceType();
+    const currentId = type === 'mobile' ? r.data?.current_mobile_device_id : r.data?.current_desktop_device_id;
+
+    if (currentId && currentId !== myId) {
+      await bwForceLogoutWithHint('kick');
+      return false;
+    }
+    return true;
+  }
+
+  let __bwHeartbeatTimer = null;
+  function bwStartHeartbeat(user, minutes = 2) {
+    if (__bwHeartbeatTimer) clearInterval(__bwHeartbeatTimer);
+
+    let running = false;
+    const beat = async () => {
+      if (running) return;
+      running = true;
+      try {
+        const ok = await bwGuardCurrentDeviceNow(user);
+        if (!ok) return;
+        await bwMarkCurrentDevice(user);
+      } finally {
+        running = false;
+      }
+    };
+
+    beat();
+    __bwHeartbeatTimer = setInterval(beat, Math.max(1, minutes) * 60 * 1000);
+    return __bwHeartbeatTimer;
+  }
+
+  let __bwIdleTimer = null;
+  function bwStartIdleLogout(minutes = 30) {
+    const ms = minutes * 60 * 1000;
+
+    const reset = () => {
+      clearTimeout(__bwIdleTimer);
+      __bwIdleTimer = setTimeout(async () => {
+        await bwForceLogoutWithHint('idle');
+      }, ms);
+    };
+
+    ['click', 'mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt => {
+      window.addEventListener(evt, reset, { passive: true });
+    });
+
+    reset();
   }
 
   // 提供給舊程式使用的守門 / 取 user 函式
@@ -510,7 +628,6 @@ tr.speaking{
             <span class="chip">金幣 <span id="coinBadge">1</span></span>
             <span class="chip">餘額 <span id="walletBadge">0</span></span>
             <span class="chip">試看前 60 秒</span>
-            <span class="chip" id="coinRuleHint">規則：1-10→1 / 11-20→2 / 21-30→3 / 31-40→4 / 41+→5</span>
             <button class="btn sm blue" id="btnUnlockNow" type="button">立即解鎖</button>
           </div>
         </div>
@@ -2164,29 +2281,11 @@ async function speakText(text, lang){
 
 function calcCoins(durationSec){
   const min = (Number(durationSec)||0) / 60;
-  if (min <= 10) return 1;
-  if (min <= 20) return 2;
-  if (min <= 30) return 3;
-  if (min <= 40) return 4;
+  if (min <= 5) return 1;
+  if (min <= 10) return 2;
+  if (min <= 20) return 3;
+  if (min <= 30) return 4;
   return 5;
-}
-
-async function waitForActualDurationSec(maxMs = 12000){
-  const start = Date.now();
-  while ((Date.now() - start) < maxMs){
-    let d = 0;
-    try{
-      if (isUsingYouTube() && ytPlayer && typeof ytPlayer.getDuration === 'function'){
-        d = Number(ytPlayer.getDuration()) || 0;
-      }else if (video){
-        d = Number(video.duration) || 0;
-      }
-    }catch(_e){ d = 0; }
-
-    if (d > 1) return d;
-    await new Promise(r => setTimeout(r, 300));
-  }
-  return 0;
 }
 
 async function loadWalletCoins(userId){
@@ -2232,69 +2331,28 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
     return { ok:true, wallet, already:true };
   }
 
-  const newBalance = wallet - coinCost;
-  let walletUpdated = false;
-  let ledgerInserted = false;
-  let unlockInserted = false;
-
   try{
     const { error: walletErr } = await playerSupa
       .from('profiles')
-      .update({ wallet_coins: newBalance })
+      .update({ wallet_coins: wallet - coinCost })
       .eq('id', userId);
     if (walletErr) throw walletErr;
-    walletUpdated = true;
-
-    const { error: ledgerErr } = await playerSupa
-      .from('coin_transactions')
-      .insert({
-        user_id: userId,
-        change: -coinCost,
-        balance_after: newBalance,
-        ref_slug: lessonSlug,
-        note: `影片解鎖: ${lessonSlug}`
-      });
-    if (ledgerErr) throw ledgerErr;
-    ledgerInserted = true;
 
     const { error: unlockErr } = await playerSupa
       .from('asset_unlocks')
       .insert({ user_id: userId, asset_slug: lessonSlug });
     if (unlockErr) throw unlockErr;
-    unlockInserted = true;
 
-    return { ok:true, wallet: newBalance };
+    return { ok:true, wallet: wallet - coinCost };
   }catch(e){
     console.warn('[BW-player] spendCoinsAndUnlock failed', e);
 
-    // 若解鎖已成功寫入，視為成功，避免重複扣
+    // 已經成功寫入解鎖時，視為成功，避免假失敗提示
     try{
       const unlockedNow = await hasUnlocked(userId, lessonSlug);
       if (unlockedNow) {
         const walletNow = await loadWalletCoins(userId);
         return { ok:true, wallet: walletNow, already:true };
-      }
-    }catch(_e){}
-
-    // rollback：若未完成解鎖，盡量把先前步驟回復
-    try{
-      if (!unlockInserted && ledgerInserted) {
-        await playerSupa
-          .from('coin_transactions')
-          .delete()
-          .eq('user_id', userId)
-          .eq('ref_slug', lessonSlug)
-          .eq('change', -coinCost)
-          .eq('balance_after', newBalance);
-      }
-    }catch(_e){}
-
-    try{
-      if (!unlockInserted && walletUpdated) {
-        await playerSupa
-          .from('profiles')
-          .update({ wallet_coins: wallet })
-          .eq('id', userId);
       }
     }catch(_e){}
 
@@ -2304,49 +2362,20 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
 
 async function setupCoinGate(user){
   const row = window.__ASSET_ROW__ || {};
+  const durationSec = Number(row.duration_sec || 0);
+  const coinCost = Number(row.coin_cost || calcCoins(durationSec));
   const durationBadge = document.getElementById('durationBadge');
   const coinBadge = document.getElementById('coinBadge');
   const walletBadge = document.getElementById('walletBadge');
   const btnUnlockNow = document.getElementById('btnUnlockNow');
 
-  let resolvedDurationSec = 0;
-  let resolvedCoinCost = null;
-  let durationReady = false;
-  let durationWarnShown = false;
-
-  const setDurationPending = () => {
-    if (durationBadge) durationBadge.textContent = '--:--';
-    if (coinBadge) coinBadge.textContent = '?';
-    if (btnUnlockNow) btnUnlockNow.disabled = true;
-  };
-
-  const applyResolvedDuration = (sec) => {
-    const d = Number(sec) || 0;
-    if (d <= 1) return false;
-    resolvedDurationSec = d;
-    resolvedCoinCost = calcCoins(d);
-    durationReady = true;
-    if (durationBadge) durationBadge.textContent = fmt(d);
-    if (coinBadge) coinBadge.textContent = String(resolvedCoinCost);
-    const coinRuleHint = document.getElementById('coinRuleHint');
-    if (coinRuleHint) coinRuleHint.textContent = `規則：${Math.ceil(d/60)} 分鐘 → ${resolvedCoinCost} 金幣`; 
-    if (btnUnlockNow) btnUnlockNow.disabled = false;
-    return true;
-  };
-
-  setDurationPending();
+  if (durationBadge) durationBadge.textContent = fmt(durationSec || 0);
+  if (coinBadge) coinBadge.textContent = String(coinCost || 1);
 
   const unlocked = await hasUnlocked(user.id, slug);
   let wallet = await loadWalletCoins(user.id);
   if (walletBadge) walletBadge.textContent = String(wallet);
   if (btnUnlockNow) btnUnlockNow.style.display = unlocked ? 'none' : 'inline-flex';
-
-  if (!unlocked){
-    const actualDuration = await waitForActualDurationSec(12000);
-    if (!applyResolvedDuration(actualDuration)) {
-      setDurationPending();
-    }
-  }
 
   if (unlocked) return;
 
@@ -2357,17 +2386,8 @@ async function setupCoinGate(user){
     if (gatePassed) return true;
     if (gateInFlight) return gateInFlight;
 
-    if (!durationReady || !resolvedCoinCost){
-      pauseActive();
-      if (!durationWarnShown){
-        durationWarnShown = true;
-        alert('影片時長尚未取得，暫時不能解鎖。');
-      }
-      return false;
-    }
-
     gateInFlight = (async () => {
-      const result = await spendCoinsAndUnlock(user.id, slug, resolvedCoinCost);
+      const result = await spendCoinsAndUnlock(user.id, slug, coinCost);
 
       if (!result.ok){
         if (result.reason === 'insufficient'){
@@ -2376,9 +2396,9 @@ async function setupCoinGate(user){
           q.set('from', 'player');
           q.set('slug', slug);
           q.set('cat', cat);
-          q.set('return', location.pathname + location.search);
           if (domainParam) q.set('domain', domainParam);
-          location.href = `${ROOT_BASE || ''}/pricing.html?` + q.toString();
+          q.set('return', location.pathname + location.search);
+          location.href = (ROOT_BASE || '') + '/pricing.html?' + q.toString();
           return false;
         }
         alert('解鎖失敗，請稍後再試。');
@@ -2389,13 +2409,14 @@ async function setupCoinGate(user){
       wallet = Number(result.wallet || 0);
       if (walletBadge) walletBadge.textContent = String(wallet);
       if (btnUnlockNow) btnUnlockNow.style.display = 'none';
-      alert(result.already ? '✅ 已解鎖' : `✅ 解鎖成功（扣 ${resolvedCoinCost} 金幣）`);
       return true;
     })();
 
-    const ok = await gateInFlight;
-    gateInFlight = null;
-    return ok;
+    try{
+      return await gateInFlight;
+    }finally{
+      gateInFlight = null;
+    }
   };
 
   if (btnUnlockNow){
@@ -2414,6 +2435,7 @@ async function setupCoinGate(user){
     if (ok) playActive();
   };
 
+  // V25 minimal fix: 不只綁 html5 video，也輪詢目前實際播放來源（YouTube / Cloudflare 都會扣金幣）
   if (window.__BW_COIN_GATE_TIMER__) {
     clearInterval(window.__BW_COIN_GATE_TIMER__);
   }
@@ -2475,23 +2497,6 @@ async function waitUser(maxMs = 1500, stepMs = 250){
 
 user = await waitUser(1500, 250);
 
-// 1.5️⃣ 單機守門 + 閒置 30 分鐘登出
-if (user && window.BW) {
-  try {
-    const ok = await BW.guardCurrentDeviceNow();
-    if (!ok) return;
-
-    await BW.markCurrentDevice();
-
-    if (!window.__BW_IDLE_STARTED__) {
-      window.__BW_IDLE_STARTED__ = true;
-      BW.startIdleLogout(30, '/login.html?timeout=1');
-    }
-  } catch (e) {
-    console.warn('[BW-player] guard bootstrap error', e);
-  }
-}
-
 // 2️⃣ 若未登入：一律導回首頁（試看也必須先登入）
   if (!user) {
     const next = location.pathname + location.search;
@@ -2508,6 +2513,15 @@ if (user && window.BW) {
       if (badge) badge.textContent = email;
     }
   }
+// 2.5️⃣ player 專用守門：同類型裝置只允許一台，並啟用 30 分鐘閒置登出
+if (user) {
+  const okGuard = await bwGuardCurrentDeviceNow(user);
+  if (!okGuard) return;
+  await bwMarkCurrentDevice(user);
+  bwStartHeartbeat(user, 2);
+  bwStartIdleLogout(30);
+}
+
 // 3️⃣ 已登入且非 preview：
 //    先以 profiles.expires_at 作為權威；若缺值但 orders 有有效訂單 → 放行並回填 profiles.expires_at（修正『已訂閱仍被彈去 pricing』）
 //    同時：訂閱通過後若尚未完成 Level Survey → 只導一次到 /account/level-survey.html
@@ -2965,7 +2979,206 @@ async function loadProOutline(){
   }
 }
 
+<script>
 
+let unlocked = false;
+let coinCost = 1;
+let trialSeconds = 60;
+let currentUser = null;
+let walletCoins = 0;
+let coinLockBound = false;
+let coinLockTimer = null;
+let coinLockBusy = false;
+let coinPromptShown = false;
+
+function currentReturnUrl(){
+  return location.pathname + location.search;
+}
+
+function goToPricing(){
+  const p = new URLSearchParams();
+  p.set('from', 'player');
+  p.set('slug', slug);
+  p.set('cat', cat);
+  p.set('return', currentReturnUrl());
+  if (domainParam) p.set('domain', domainParam);
+  location.href = `${ROOT_BASE || ''}/pricing.html?` + p.toString();
+}
+
+async function refreshWallet(){
+  currentUser = await bwPlayerGetUser();
+  if (!currentUser) return 0;
+
+  const { data, error } = await playerSupa
+    .from('profiles')
+    .select('wallet_coins')
+    .eq('id', currentUser.id)
+    .single();
+
+  if (error) {
+    console.error('[coin] refreshWallet error', error);
+    return 0;
+  }
+
+  walletCoins = data?.wallet_coins || 0;
+  const badge = document.getElementById('walletBadge');
+  if (badge) badge.textContent = walletCoins;
+  return walletCoins;
+}
+
+async function initWallet(){
+  await refreshWallet();
+}
+
+async function initCoinCost() {
+  let row = window.__ASSET_ROW__ || null;
+
+  if (!row || row.coin_cost == null) {
+    const { data, error } = await playerSupa
+      .from('assets')
+      .select('coin_cost')
+      .eq('slug', slug)
+      .maybeSingle();
+
+    if (!error && data) row = { ...(row || {}), ...data };
+  }
+
+  coinCost = Number(row?.coin_cost || 1) || 1;
+  const badge = document.getElementById('coinBadge');
+  if (badge) badge.textContent = coinCost;
+}
+
+async function checkUnlocked() {
+  currentUser = await bwPlayerGetUser();
+  if (!currentUser) return false;
+
+  const { data, error } = await playerSupa
+    .from('asset_unlocks')
+    .select('id')
+    .eq('user_id', currentUser.id)
+    .eq('asset_slug', slug)
+    .maybeSingle();
+
+  if (error) {
+    console.error('[coin] checkUnlocked error', error);
+    return false;
+  }
+
+  unlocked = !!data;
+  return unlocked;
+}
+
+function unlockPlayerUI() {
+  unlocked = true;
+}
+
+function setupCoinLock() {
+  if (coinLockBound) return;
+  coinLockBound = true;
+
+  if (coinLockTimer) clearInterval(coinLockTimer);
+  coinLockTimer = setInterval(async () => {
+    if (unlocked || coinLockBusy) return;
+
+    const nowTime = getCurrentPlaybackTime();
+    if (nowTime < trialSeconds) return;
+
+    coinLockBusy = true;
+    pauseActive();
+
+    try {
+      const already = await checkUnlocked();
+      if (already) {
+        unlockPlayerUI();
+        coinPromptShown = false;
+        playActive();
+        return;
+      }
+
+      await refreshWallet();
+      if (coinPromptShown) return;
+      coinPromptShown = true;
+
+      const ok = confirm(
+        `🔒 此影片需 ${coinCost} 金幣
+你目前有 ${walletCoins} 金幣
+
+是否立即解鎖？`
+      );
+
+      if (!ok) {
+        setCurrentPlaybackTime(Math.max(0, trialSeconds - 1));
+        return;
+      }
+
+      await unlockVideo();
+    } finally {
+      coinLockBusy = false;
+    }
+  }, 500);
+}
+
+async function unlockVideo() {
+  currentUser = await bwPlayerGetUser();
+  if (!currentUser) {
+    await ensureAuth({ next: currentReturnUrl() });
+    return;
+  }
+
+  await refreshWallet();
+
+  const already = await checkUnlocked();
+  if (already) {
+    unlockPlayerUI();
+    coinPromptShown = false;
+    playActive();
+    return;
+  }
+
+  const { data, error } = await playerSupa.rpc('unlock_asset', {
+    p_slug: slug
+  });
+
+  if (error) {
+    console.error('[coin] unlock_asset rpc error', error);
+    alert('系統錯誤，請稍後再試');
+    return;
+  }
+
+  if (!data || !data.ok) {
+    const reason = data?.error || 'unknown';
+
+    if (reason === 'not_logged_in') {
+      await ensureAuth({ next: currentReturnUrl() });
+      return;
+    }
+
+    if (reason === 'not_enough') {
+      goToPricing();
+      return;
+    }
+
+    alert('解鎖失敗，請稍後再試');
+    return;
+  }
+
+  await refreshWallet();
+  unlocked = true;
+  coinPromptShown = false;
+  alert(data.already ? '✅ 已解鎖' : `✅ 解鎖成功${data.cost ? `（扣 ${data.cost} 金幣）` : ''}`);
+  playActive();
+}
+
+document.getElementById('btnUnlockNow').onclick = unlockVideo;
+
+(async () => {
+  await initWallet();
+  await initCoinCost();
+  await checkUnlocked();
+  setupCoinLock();
+})();
+
+</script>
 
 </body>
 </html>
