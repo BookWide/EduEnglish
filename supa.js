@@ -1,6 +1,7 @@
-// ====== BookWide Supabase Helper (single mobile + single desktop) ======
-// 手機 1 台 + 桌機 1 台
+// ====== BookWide Supabase Helper (final guard) ======
+// 一般會員：手機 1 台 + 桌機 1 台
 // 同類型新登入 -> 舊裝置強制登出
+// admin：完全不受單裝置限制
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
@@ -35,7 +36,44 @@ function getDeviceType() {
   return isMobile ? 'mobile' : 'desktop';
 }
 
-async function forceLogout(redirect = '/login.html?kick=1') {
+function getRootBase() {
+  return (
+    location.pathname.startsWith('/EduEnglish') ||
+    location.hostname.includes('github.io')
+  ) ? '/EduEnglish' : '';
+}
+
+function getLoginUrl(reason = 'kick') {
+  const root = getRootBase();
+  if (reason === 'timeout') return `${root}/index.html?timeout=1#login`;
+  return `${root}/index.html?kick=1#login`;
+}
+
+const BW_ADMIN_CACHE_TTL = 30 * 1000;
+const bwAdminCache = new Map();
+
+async function readIsAdmin(userId) {
+  const now = Date.now();
+  const hit = bwAdminCache.get(userId);
+  if (hit && (now - hit.at) < BW_ADMIN_CACHE_TTL) return hit.value;
+
+  const r = await supabase
+    .from('profiles')
+    .select('is_admin')
+    .eq('id', userId)
+    .maybeSingle();
+
+  const value = !!r.data?.is_admin;
+  bwAdminCache.set(userId, { value, at: now });
+
+  if (r.error) {
+    console.warn('readIsAdmin error', r.error);
+  }
+
+  return value;
+}
+
+async function forceLogout(redirect = getLoginUrl('kick')) {
   try {
     localStorage.setItem('bw_forced_logout', '1');
   } catch (_) {}
@@ -90,14 +128,7 @@ export const BW = {
   async isAdmin() {
     const user = await this.getUser();
     if (!user) return false;
-
-    const r = await supabase
-      .from('profiles')
-      .select('is_admin')
-      .eq('id', user.id)
-      .maybeSingle();
-
-    return !!r.data?.is_admin;
+    return await readIsAdmin(user.id);
   },
 
   isOnlineWithin(ts, minutes = 10) {
@@ -163,7 +194,7 @@ export const BW = {
 
     if (currentId && currentId !== myDevice) {
       console.warn('[BW] device replaced -> force logout');
-      await forceLogout('/login.html?kick=1');
+      await forceLogout(getLoginUrl('kick'));
       return false;
     }
 
@@ -171,6 +202,9 @@ export const BW = {
   },
 
   startHeartbeat(minutes = 2) {
+    if (typeof window !== 'undefined' && window.__BW_HEARTBEAT__) {
+      clearInterval(window.__BW_HEARTBEAT__);
+    }
     let running = false;
     const myDevice = getDeviceId();
     const deviceType = getDeviceType();
@@ -204,7 +238,7 @@ export const BW = {
 
         if (currentId && currentId !== myDevice) {
           console.warn('[BW] device mismatch -> force logout');
-          await forceLogout('/login.html?kick=1');
+          await forceLogout(getLoginUrl('kick'));
           return;
         }
 
@@ -230,7 +264,9 @@ export const BW = {
     };
 
     beat();
-    return setInterval(beat, Math.max(1, minutes) * 60 * 1000);
+    const timer = setInterval(beat, Math.max(1, minutes) * 60 * 1000);
+    if (typeof window !== 'undefined') window.__BW_HEARTBEAT__ = timer;
+    return timer;
   },
 
   popForcedLogoutHint() {
@@ -240,24 +276,37 @@ export const BW = {
     }
   },
 
-  startIdleLogout(minutes = 30, redirect = '/login.html?timeout=1') {
+  startIdleLogout(minutes = 30, redirect = getLoginUrl('timeout')) {
     const ms = minutes * 60 * 1000;
-    let timer;
+
+    if (typeof window !== 'undefined' && window.__BW_IDLE_RESET__) {
+      ['click', 'mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt =>
+        window.removeEventListener(evt, window.__BW_IDLE_RESET__)
+      );
+    }
+
+    if (typeof window !== 'undefined' && window.__BW_IDLE_TIMER__) {
+      clearTimeout(window.__BW_IDLE_TIMER__);
+    }
 
     const reset = () => {
-      clearTimeout(timer);
-      timer = setTimeout(async () => {
+      if (typeof window !== 'undefined' && window.__BW_IDLE_TIMER__) {
+        clearTimeout(window.__BW_IDLE_TIMER__);
+      }
+      const timer = setTimeout(async () => {
         try {
           await supabase.auth.signOut();
         } catch (_) {}
         location.href = redirect;
       }, ms);
+      if (typeof window !== 'undefined') window.__BW_IDLE_TIMER__ = timer;
     };
 
     ['click', 'mousemove', 'keydown', 'touchstart', 'scroll'].forEach(evt =>
       window.addEventListener(evt, reset, { passive: true })
     );
 
+    if (typeof window !== 'undefined') window.__BW_IDLE_RESET__ = reset;
     reset();
   },
 };
@@ -266,30 +315,51 @@ if (typeof window !== 'undefined') {
   window.BW = window.BW || BW;
 }
 
-supabase.auth.onAuthStateChange(async (event, session) => {
-  if (event === 'SIGNED_IN' && session?.user) {
+let bwBootstrapping = null;
+
+async function BW_bootstrapSession(sessionUser = null) {
+  if (bwBootstrapping) return bwBootstrapping;
+
+  bwBootstrapping = (async () => {
+    const user = sessionUser || await BW.getUser();
+    if (!user) return false;
+
+    const isAdmin = await readIsAdmin(user.id);
+    if (isAdmin) {
+      return true;
+    }
+
+    const ok = await BW.guardCurrentDeviceNow();
+    if (!ok) return false;
+
     await BW.markCurrentDevice();
-    await BW.guardCurrentDeviceNow();
     BW.startHeartbeat(2);
+    return true;
+  })();
+
+  try {
+    return await bwBootstrapping;
+  } finally {
+    bwBootstrapping = null;
+  }
+}
+
+supabase.auth.onAuthStateChange(async (event, session) => {
+  if ((event === 'SIGNED_IN' || event === 'INITIAL_SESSION') && session?.user) {
+    await BW_bootstrapSession(session.user);
   }
 
-  if (event === 'INITIAL_SESSION' && session?.user) {
-    await BW.guardCurrentDeviceNow();
-    BW.startHeartbeat(2);
+  if (event === 'SIGNED_OUT') {
+    if (typeof window !== 'undefined' && window.__BW_HEARTBEAT__) {
+      clearInterval(window.__BW_HEARTBEAT__);
+      window.__BW_HEARTBEAT__ = null;
+    }
   }
 });
 
 (async () => {
   BW.popForcedLogoutHint();
-
-  const user = await BW.getUser();
-  if (user) {
-    const ok = await BW.guardCurrentDeviceNow();
-    if (ok) {
-      await BW.markCurrentDevice();
-      BW.startHeartbeat(2);
-    }
-  }
+  await BW_bootstrapSession();
 })();
 
 
