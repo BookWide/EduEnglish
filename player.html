@@ -2211,33 +2211,35 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
     return { ok:false, reason:'insufficient', wallet };
   }
 
-  const already = await hasUnlocked(userId, lessonSlug);
-  if (already) {
-    return { ok:true, wallet, already:true };
-  }
-
   try{
-    const { error: walletErr } = await playerSupa
-      .from('profiles')
-      .update({ wallet_coins: wallet - coinCost })
-      .eq('id', userId);
-    if (walletErr) throw walletErr;
+    const { data, error } = await playerSupa.rpc('unlock_asset', {
+      p_slug: lessonSlug
+    });
+    if (error) throw error;
 
-    const { error: unlockErr } = await playerSupa
-      .from('asset_unlocks')
-      .insert({ user_id: userId, asset_slug: lessonSlug });
-    if (unlockErr) throw unlockErr;
+    const balanceAfter = Number(data?.balance_after);
+    const alreadyUnlocked = !!data?.already_unlocked;
+    const returnedCost = Number(data?.cost ?? coinCost);
 
-    return { ok:true, wallet: wallet - coinCost };
+    return {
+      ok: true,
+      wallet: Number.isFinite(balanceAfter) ? balanceAfter : Math.max(0, wallet - returnedCost),
+      already: alreadyUnlocked,
+      cost: returnedCost
+    };
   }catch(e){
     console.warn('[BW-player] spendCoinsAndUnlock failed', e);
 
-    // 已經成功寫入解鎖時，視為成功，避免假失敗提示
+    const msg = String(e?.message || e || '');
+    if (msg.includes('INSUFFICIENT_COINS')) {
+      return { ok:false, reason:'insufficient', wallet };
+    }
+
     try{
       const unlockedNow = await hasUnlocked(userId, lessonSlug);
       if (unlockedNow) {
         const walletNow = await loadWalletCoins(userId);
-        return { ok:true, wallet: walletNow, already:true };
+        return { ok:true, wallet: walletNow, already:true, cost: 0 };
       }
     }catch(_e){}
 
