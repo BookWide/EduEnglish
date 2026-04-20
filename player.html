@@ -2338,7 +2338,7 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
       cost: returnedCost
     };
   }catch(e){
-    console.warn('[BW-player] spendCoinsAndUnlock failed', e);
+    console.warn('[BW-player] unlock_asset rpc failed, try client fallback', e);
 
     const msg = String(e?.message || e || '');
     if (msg.includes('INSUFFICIENT_COINS')) {
@@ -2353,7 +2353,80 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
       }
     }catch(_e){}
 
-    return { ok:false, reason:'db_error', wallet };
+    let inserted = false;
+    let insertErr = null;
+
+    try{
+      const { error } = await playerSupa
+        .from('asset_unlocks')
+        .insert({
+          user_id: userId,
+          asset_slug: lessonSlug,
+          created_at: new Date().toISOString()
+        });
+      if (error) throw error;
+      inserted = true;
+    }catch(err1){
+      insertErr = err1;
+      const msg1 = String(err1?.message || err1 || '').toLowerCase();
+
+      if (msg1.includes('created_at')) {
+        try{
+          const { error } = await playerSupa
+            .from('asset_unlocks')
+            .insert({
+              user_id: userId,
+              asset_slug: lessonSlug
+            });
+          if (error) throw error;
+          inserted = true;
+          insertErr = null;
+        }catch(err2){
+          insertErr = err2;
+        }
+      }
+    }
+
+    if (!inserted) {
+      console.warn('[BW-player] asset_unlocks insert failed', insertErr);
+      return { ok:false, reason:'db_error', wallet };
+    }
+
+    const nextWallet = Math.max(0, wallet - Number(coinCost || 0));
+
+    try{
+      const { error } = await playerSupa
+        .from('profiles')
+        .update({ wallet_coins: nextWallet })
+        .eq('id', userId);
+
+      if (error) throw error;
+    }catch(errWallet){
+      console.warn('[BW-player] wallet_coins update failed after unlock insert', errWallet);
+      return { ok:true, wallet, already:false, cost: Number(coinCost || 0) };
+    }
+
+    try{
+      await playerSupa
+        .from('coin_transactions')
+        .insert({
+          user_id: userId,
+          change: -Number(coinCost || 0),
+          note: '影片解鎖',
+          ref_slug: lessonSlug,
+          balance_after: nextWallet,
+          created_at: new Date().toISOString()
+        });
+    }catch(errTx){
+      console.warn('[BW-player] coin_transactions insert skipped', errTx);
+    }
+
+    return {
+      ok: true,
+      wallet: nextWallet,
+      already: false,
+      cost: Number(coinCost || 0)
+    };
   }
 }
 
@@ -2434,7 +2507,7 @@ async function setupCoinGate(user){
           location.href = `${ROOT_BASE || ''}/pricing.html?` + q.toString();
           return false;
         }
-        alert('解鎖失敗，請稍後再試。');
+        alert('解鎖失敗，請稍後再試。若持續失敗，請先確認 asset_unlocks / wallet 欄位是否已建好。');
         return false;
       }
 
