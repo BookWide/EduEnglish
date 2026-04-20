@@ -141,6 +141,53 @@
           </div>
           <textarea id="importPreview" class="textarea" placeholder='貼上 JSON（可選）：{"title":"...","category":"...","slug":"...","video":"...","cover":"...","is_public":true}'></textarea>
         </div>
+      
+    </div>
+
+    <div class="card" style="margin-bottom:14px;">
+      <div class="header" style="align-items:flex-start;">
+        <div>
+          <h2 class="h1" style="font-size:18px;">分類遷移工具（story → movie 等）</h2>
+          <div class="sub">
+            這是 <b>邏輯遷移工具</b>：先預覽新舊路徑，再更新 <b>assets.category / mp4_url / cover_url</b>。<br>
+            ⚠️ 這頁目前 <b>不會直接搬 GitHub / Cloudflare 實體檔案</b>；會產生一份待搬移清單，讓你後續交給搬檔腳本或人工處理。
+          </div>
+        </div>
+        <div class="tools" style="justify-content:flex-end; margin-left:auto;">
+          <button class="btn" id="migPreviewBtn" type="button">預覽</button>
+          <button class="btn" id="migRunBtn" type="button" style="background:#111827;">執行邏輯遷移</button>
+          <button class="btn ghost" id="migExportBtn" type="button" style="color:#0f172a;border-color:#cbd5e1;background:#fff;">匯出清單</button>
+        </div>
+      </div>
+
+      <div style="padding:0 16px 16px;">
+        <div class="grid2">
+          <div class="card" style="box-shadow:none; border:1px dashed var(--line); padding:12px; border-radius:14px;">
+            <div style="font-weight:900; margin-bottom:8px;">來源 / 目標</div>
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+              <select id="migFromCat" class="input">
+                <option value="">來源分類（可留空）</option>
+              </select>
+              <select id="migToCat" class="input">
+                <option value="">目標分類</option>
+              </select>
+            </div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
+              <input id="migSlugInput" class="input" placeholder="單一 slug（例：mid-autumn）" style="flex:1; min-width:220px;">
+              <input id="migYoutubeIdInput" class="input" placeholder="或 youtube_id（批量）" style="flex:1; min-width:220px;">
+            </div>
+            <div class="small" style="margin-top:8px;">優先用 slug；若留空且輸入 youtube_id，會一次抓同影片的多角色資料。</div>
+          </div>
+
+          <div class="card" style="box-shadow:none; border:1px dashed var(--line); padding:12px; border-radius:14px;">
+            <div style="font-weight:900; margin-bottom:8px;">預覽結果</div>
+            <div id="migSummary" class="small">尚未預覽。</div>
+            <div style="margin-top:10px;">
+              <label class="small" style="display:block;margin-bottom:6px;">待搬移清單（Cloudflare / GitHub 參考）</label>
+              <textarea id="migManifest" class="textarea" style="min-height:160px;"></textarea>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -274,6 +321,24 @@
   };
 
   // ===== Import index-*.json -> assets upsert =====
+
+  const migState = {
+    rows: [],
+    preview: []
+  };
+
+  const migEls = {
+    fromCat: document.getElementById('migFromCat'),
+    toCat: document.getElementById('migToCat'),
+    slugInput: document.getElementById('migSlugInput'),
+    youtubeIdInput: document.getElementById('migYoutubeIdInput'),
+    previewBtn: document.getElementById('migPreviewBtn'),
+    runBtn: document.getElementById('migRunBtn'),
+    exportBtn: document.getElementById('migExportBtn'),
+    summary: document.getElementById('migSummary'),
+    manifest: document.getElementById('migManifest'),
+  };
+
   const importEls = {
     file: document.getElementById('importFile'),
     url: document.getElementById('importUrl'),
@@ -882,6 +947,7 @@ async function hardDeleteOne(slug){
     }
 
     applyFilters();
+    fillMigrationCategoryOptions();
   }
 
   async function bulkSet(val) {
@@ -913,6 +979,130 @@ async function hardDeleteOne(slug){
     } finally {
       setBusy(false);
     }
+  }
+
+
+  function replaceCategoryInUrl(url, fromCat, toCat){
+    const s = String(url || '').trim();
+    if (!s) return '';
+    const patterns = [
+      `/videos/${fromCat}/`,
+      `/assets/${fromCat}/`,
+      `/EduEnglish/${fromCat}/`,
+      `/${fromCat}/`
+    ];
+    for (const p of patterns){
+      if (s.includes(p)) return s.replace(p, p.replace(`/${fromCat}/`, `/${toCat}/`));
+    }
+    return s;
+  }
+
+  function buildMigrationPreviewRow(row, toCat){
+    const fromCat = String(row.category || '').trim();
+    const slug = String(row.slug || '').trim();
+    return {
+      slug,
+      title: String(row.title || '').trim(),
+      youtube_id: String(row.youtube_id || '').trim(),
+      from_category: fromCat,
+      to_category: toCat,
+      old_mp4_url: String(row.mp4_url || '').trim(),
+      new_mp4_url: replaceCategoryInUrl(String(row.mp4_url || '').trim(), fromCat, toCat),
+      old_cover_url: String(row.cover_url || '').trim(),
+      new_cover_url: replaceCategoryInUrl(String(row.cover_url || '').trim(), fromCat, toCat),
+      old_category: fromCat,
+      new_category: toCat,
+    };
+  }
+
+  function renderMigrationPreview(rows){
+    migState.preview = rows || [];
+    if (!migEls.summary || !migEls.manifest) return;
+
+    if (!rows.length){
+      migEls.summary.textContent = '找不到符合條件的資料。';
+      migEls.manifest.value = '';
+      return;
+    }
+
+    migEls.summary.innerHTML = `共 <b>${rows.length}</b> 筆，已產生待搬移清單。先確認 Cloudflare / GitHub 是否也要跟著搬。`;
+    migEls.manifest.value = JSON.stringify(rows, null, 2);
+  }
+
+  function fillMigrationCategoryOptions(){
+    if (!migEls.fromCat || !migEls.toCat) return;
+    const cats = Array.from(new Set((state.rows || []).map(r => String(r.category || '').trim()).filter(Boolean))).sort();
+    const html = ['<option value="">來源分類（可留空）</option>'].concat(cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`)).join('');
+    migEls.fromCat.innerHTML = html;
+    migEls.toCat.innerHTML = '<option value="">目標分類</option>' + cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+  }
+
+  function getRowsForMigration(){
+    const slug = String(migEls.slugInput?.value || '').trim();
+    const youtubeId = String(migEls.youtubeIdInput?.value || '').trim();
+    const fromCat = String(migEls.fromCat?.value || '').trim();
+    const toCat = String(migEls.toCat?.value || '').trim();
+
+    if (!toCat) throw new Error('請先選目標分類');
+    let rows = state.rows || [];
+
+    if (slug) {
+      rows = rows.filter(r => String(r.slug || '').trim() === slug);
+    } else if (youtubeId) {
+      rows = rows.filter(r => String(r.youtube_id || '').trim() === youtubeId);
+    } else {
+      throw new Error('請輸入 slug 或 youtube_id');
+    }
+
+    if (fromCat) rows = rows.filter(r => String(r.category || '').trim() === fromCat);
+    rows = rows.filter(r => String(r.category || '').trim() !== toCat);
+    return rows.map(r => buildMigrationPreviewRow(r, toCat));
+  }
+
+  async function previewMigration(){
+    const rows = getRowsForMigration();
+    renderMigrationPreview(rows);
+    if (!rows.length) toast('沒有資料', '沒有找到需要遷移的影片。');
+    else toast('已預覽', `共 ${rows.length} 筆待遷移`);
+  }
+
+  async function runLogicalMigration(){
+    const rows = getRowsForMigration();
+    renderMigrationPreview(rows);
+    if (!rows.length) return toast('沒有資料', '沒有找到需要遷移的影片。');
+
+    if (!confirm(`確定要執行邏輯遷移？\n共 ${rows.length} 筆\n\n只會更新 assets.category / mp4_url / cover_url，不會搬 GitHub / Cloudflare 實體檔案。`)) return;
+
+    setBusy(true, `執行邏輯遷移：共 ${rows.length} 筆`);
+    try{
+      for (const row of rows){
+        const payload = {
+          category: row.to_category,
+          mp4_url: row.new_mp4_url || row.old_mp4_url || null,
+          cover_url: row.new_cover_url || row.old_cover_url || null,
+        };
+        const { error } = await supa.from('assets').update(payload).eq('slug', row.slug);
+        if (error) throw error;
+      }
+      toast('邏輯遷移完成', `已更新 ${rows.length} 筆 assets`);
+      await loadVideos(true);
+      renderMigrationPreview(rows);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function exportMigrationManifest(){
+    const txt = String(migEls.manifest?.value || '').trim();
+    if (!txt) return toast('沒有資料', '請先預覽遷移清單。');
+    const blob = new Blob([txt], { type: 'application/json;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'migration-manifest.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }
 
   (async function init() {
@@ -961,6 +1151,10 @@ async function hardDeleteOne(slug){
       els.reloadBtn.onclick = ()=>loadVideos().catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOnBtn.onclick = ()=>bulkSet(true).catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOffBtn.onclick = ()=>bulkSet(false).catch(err=>{console.error(err); alert(err?.message||err);});
+
+      if (migEls.previewBtn) migEls.previewBtn.onclick = ()=>previewMigration().catch(err=>{console.error(err); alert(err?.message||err);});
+      if (migEls.runBtn) migEls.runBtn.onclick = ()=>runLogicalMigration().catch(err=>{console.error(err); alert(err?.message||err);});
+      if (migEls.exportBtn) migEls.exportBtn.onclick = ()=>exportMigrationManifest();
 
 
 els.tbody.addEventListener('click', async (ev)=>{
