@@ -386,9 +386,119 @@ tr.speaking{
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-  // 這裡只呼叫你共用的 BW.startIdleLogout，時間改成 60 分鐘
-  if (window.BW && typeof BW.startIdleLogout === 'function') {
+function BW_getDeviceId(){
+  let id = localStorage.getItem("bw_device_id");
+  if(!id){
+    id = (crypto.randomUUID ? crypto.randomUUID() : ('bw-' + Date.now() + '-' + Math.random().toString(16).slice(2)));
+    localStorage.setItem("bw_device_id", id);
   }
+  return id;
+}
+let BW_PLAYER_DEVICE_WATCH_TIMER = null;
+let BW_PLAYER_IDLE_TIMER = null;
+let BW_PLAYER_IDLE_STARTED = false;
+let BW_PLAYER_KICKING = false;
+const BW_PLAYER_IDLE_LIMIT_MS = 30 * 60 * 1000;
+
+async function BW_playerTakeoverDevice(userId){
+  const myDevice = BW_getDeviceId();
+  const { error } = await playerSupa
+    .from('profiles')
+    .update({ current_device_id: myDevice, last_seen_at: new Date().toISOString() })
+    .eq('id', userId);
+
+  if(error){
+    console.error('[BW-player] takeover failed', error);
+    throw error;
+  }
+  return myDevice;
+}
+
+async function BW_playerCheckDeviceStillMine(userId){
+  const myDevice = BW_getDeviceId();
+  const { data, error } = await playerSupa
+    .from('profiles')
+    .select('current_device_id')
+    .eq('id', userId)
+    .single();
+
+  if(error){
+    console.error('[BW-player] check failed', error);
+    return true;
+  }
+  return String(data?.current_device_id || '') === myDevice;
+}
+
+async function BW_playerKickOut(){
+  if(BW_PLAYER_KICKING) return;
+  BW_PLAYER_KICKING = true;
+  try{ pauseActive && pauseActive(); }catch(_e){}
+  try{ alert("帳號已在另一台裝置登入，你已被登出"); }catch(_e){}
+  try{ BW_playerStopIdleLogout();
+  try{ if (BW_PLAYER_DEVICE_WATCH_TIMER) clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER); }catch(_e){}
+  await playerSupa.auth.signOut(); }catch(_e){}
+  location.href = (ROOT_BASE || '') + '/index.html?device_kicked=1';
+}
+
+function BW_playerStartDeviceWatcher(userId){
+  if(BW_PLAYER_DEVICE_WATCH_TIMER){
+    clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER);
+    BW_PLAYER_DEVICE_WATCH_TIMER = null;
+  }
+  BW_PLAYER_DEVICE_WATCH_TIMER = setInterval(async ()=>{
+    try{
+      const ok = await BW_playerCheckDeviceStillMine(userId);
+      if(!ok){
+        clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER);
+        BW_PLAYER_DEVICE_WATCH_TIMER = null;
+        await BW_playerKickOut();
+      }else{
+        await playerSupa
+          .from('profiles')
+          .update({ last_seen_at: new Date().toISOString() })
+          .eq('id', userId);
+      }
+    }catch(err){
+      console.error('[BW-player] watcher error', err);
+    }
+  }, 4000);
+}
+
+async function BW_playerIdleLogoutNow(){
+  if(BW_PLAYER_KICKING) return;
+  BW_PLAYER_KICKING = true;
+  try{ pauseActive && pauseActive(); }catch(_e){}
+  try{ alert('閒置超過 30 分鐘，系統已自動登出'); }catch(_e){}
+  try{ BW_playerStopIdleLogout();
+  try{ if (BW_PLAYER_DEVICE_WATCH_TIMER) clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER); }catch(_e){}
+  await playerSupa.auth.signOut(); }catch(_e){}
+  location.href = (ROOT_BASE || '') + '/index.html?idle=1';
+}
+
+function BW_playerResetIdleTimer(){
+  if(BW_PLAYER_IDLE_TIMER) clearTimeout(BW_PLAYER_IDLE_TIMER);
+  BW_PLAYER_IDLE_TIMER = setTimeout(BW_playerIdleLogoutNow, BW_PLAYER_IDLE_LIMIT_MS);
+}
+
+function BW_playerStartIdleLogout(){
+  if(BW_PLAYER_IDLE_STARTED) return;
+  BW_PLAYER_IDLE_STARTED = true;
+  ['mousemove','mousedown','keydown','scroll','touchstart','click'].forEach(evt=>{
+    window.addEventListener(evt, BW_playerResetIdleTimer, { passive:true });
+  });
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState === 'visible') BW_playerResetIdleTimer();
+  });
+  BW_playerResetIdleTimer();
+}
+
+function BW_playerStopIdleLogout(){
+  if(BW_PLAYER_IDLE_TIMER){
+    clearTimeout(BW_PLAYER_IDLE_TIMER);
+    BW_PLAYER_IDLE_TIMER = null;
+  }
+  BW_PLAYER_IDLE_STARTED = false;
+}
 </script>
 <script>
   const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
@@ -2427,6 +2537,19 @@ user = await waitUser(1500, 250);
     location.href = url.toString();
     return;
   } else {
+    try{
+      await BW_playerTakeoverDevice(user.id);
+      const stillMine = await BW_playerCheckDeviceStillMine(user.id);
+      if(!stillMine){
+        await BW_playerKickOut();
+        return;
+      }
+      BW_playerStartDeviceWatcher(user.id);
+      BW_playerStartIdleLogout();
+    }catch(err){
+      console.error('[BW-player] guard setup error', err);
+    }
+
     // 顯示登入者 Email
     const email = user.email || (user.user && user.user.email) || '';
     if (email) {
