@@ -231,6 +231,17 @@ function BW_startDeviceWatcher(userId){
         <div id="progressText" class="muted">0%</div>
       </div>
       <div class="lesson-list" id="lessonList"></div>
+
+      <div class="card" style="margin-top:12px;padding:10px 12px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div>
+            <h2 style="margin:0;font-size:15px">已解鎖教材（可重看）</h2>
+            <div class="muted">只顯示，不改排課。預設收合，避免左下拉太長。</div>
+          </div>
+          <button id="unlockToggleBtn" type="button" class="btn" style="font-size:12px">展開</button>
+        </div>
+        <div id="unlockBox" style="display:none;margin-top:8px;"></div>
+      </div>
     </section>
 
     <section class="card route-card">
@@ -730,11 +741,104 @@ async function loadAssets(){
   if(error) throw error;
   return (data||[]).map(normalizeAsset).filter(x=>x.slug);
 }
-const state={profile:{...DEFAULT_PROFILE},workRoadmap:[],relaxRoadmap:[],allAssets:[],progress:getSaved(),selectedDay:1,schedule:[]};
+
+async function loadUnlockedAssets(){
+  try{
+    const { data:{ user } } = await supabaseClient.auth.getUser();
+    if(!user) return [];
+
+    const { data: unlocks, error } = await supabaseClient
+      .from('asset_unlocks')
+      .select('asset_slug, created_at')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending:false });
+
+    if(error){
+      console.error('loadUnlockedAssets failed', error);
+      return [];
+    }
+
+    const rows = Array.isArray(unlocks) ? unlocks : [];
+    const bySlug = new Map((state.allAssets || []).map(x => [String(x.slug || ''), x]));
+    const out = [];
+
+    rows.forEach(row=>{
+      const slug = String(row.asset_slug || '').trim();
+      const item = bySlug.get(slug);
+      if(item){
+        out.push({
+          ...item,
+          unlocked_at: row.created_at || null
+        });
+      }
+    });
+
+    return out;
+  }catch(err){
+    console.error('loadUnlockedAssets exception', err);
+    return [];
+  }
+}
+
+function renderUnlocked(){
+  const box = document.getElementById('unlockBox');
+  if(!box) return;
+  box.innerHTML = '';
+
+  const list = Array.isArray(state.unlockedList) ? state.unlockedList : [];
+  if(!list.length){
+    box.innerHTML = '<div class="muted" style="padding:4px 0">尚未解鎖任何教材</div>';
+    return;
+  }
+
+  list.slice(0, 12).forEach(item=>{
+    const el = document.createElement('div');
+    el.className = 'lesson';
+    el.style.marginTop = '8px';
+    el.innerHTML = `
+      <div class="thumb" style="background-image:url('${item.cover || ''}')"></div>
+      <div>
+        <div class="title">${item.title}</div>
+        <div class="meta">已解鎖 · 可重看${item.unlocked_at ? ' · ' + new Date(item.unlocked_at).toLocaleDateString('zh-TW') : ''}</div>
+        <div class="tiny">
+          <span>${item.category || 'story'}</span>
+          <span>${item.level_code || 'beginner'}</span>
+          ${item.domain_code ? `<span>${item.domain_code}</span>` : ''}
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <a class="btn primary" href="${playerHref(item)}">播放</a>
+      </div>
+    `;
+    box.appendChild(el);
+  });
+
+  if(list.length > 12){
+    const more = document.createElement('div');
+    more.className = 'muted';
+    more.style.marginTop = '8px';
+    more.textContent = `其餘 ${list.length - 12} 筆已收起，避免左下過長。`;
+    box.appendChild(more);
+  }
+}
+
+function initUnlockToggle(){
+  const btn = document.getElementById('unlockToggleBtn');
+  const box = document.getElementById('unlockBox');
+  if(!btn || !box) return;
+
+  btn.addEventListener('click', ()=>{
+    const open = box.style.display !== 'none';
+    box.style.display = open ? 'none' : 'block';
+    btn.textContent = open ? '展開' : '收合';
+  });
+}
+
+const state={profile:{...DEFAULT_PROFILE},workRoadmap:[],relaxRoadmap:[],allAssets:[],unlockedList:[],progress:getSaved(),selectedDay:1,schedule:[]};
 function renderAll(){
   const unlockedDay=getUnlockedDay(state.progress); if(state.selectedDay>unlockedDay) state.selectedDay=unlockedDay;
   const selected=state.schedule.find(x=>x.day===state.selectedDay)||state.schedule[0];
-  renderTimeline(state.workRoadmap, state.relaxRoadmap);renderCurve(state.schedule,state.progress,state.selectedDay);renderCalendar(state.schedule,state.progress,state.selectedDay);renderLessonDay(selected,state.progress)
+  renderTimeline(state.workRoadmap, state.relaxRoadmap);renderCurve(state.schedule,state.progress,state.selectedDay);renderCalendar(state.schedule,state.progress,state.selectedDay);renderLessonDay(selected,state.progress);renderUnlocked()
 }
 function renderProfileExplain(profile, filterInfo){
   const sub = document.querySelector('.hero .sub');
@@ -763,6 +867,7 @@ async function bootstrap(){
     updateProfileUI(state.profile);
     const assets = await loadAssets();
     state.allAssets = assets;
+    state.unlockedList = await loadUnlockedAssets();
 
     const filterInfo = hardFilterRoleItems(assets, state.profile);
     renderProfileExplain(state.profile, filterInfo);
@@ -783,6 +888,7 @@ async function bootstrap(){
   }
 }
 initCurveToggle();
+initUnlockToggle();
 bootstrap();
 </script>
 
