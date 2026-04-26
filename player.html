@@ -122,6 +122,8 @@ header h1{margin:0;font-size:20px;}
   border:1px solid #1c314f;
   font-size:13px;
 }
+.chip.ok{background:#063b2a;border-color:#0b6b4a;color:#d1fae5;}
+.chip.warn{background:#3b2a06;border-color:#7c5c10;color:#fef3c7;}
 
 /* 右側四分頁整體：可內部捲動 */
 .right{
@@ -602,9 +604,9 @@ function BW_playerStopIdleLogout(){
           </div>
           <div class="row" style="gap:10px">
             <span class="chip">時長 <span id="durationBadge">0:00</span></span>
-            <span class="chip">金幣 <span id="coinBadge">1</span></span>
-            <span class="chip">餘額 <span id="walletBadge">0</span></span>
-            <span class="chip">試看前 60 秒</span>
+            <span class="chip" id="coinCostChip">金幣 <span id="coinBadge">讀取</span></span>
+            <span class="chip" id="walletChip">餘額 <span id="walletBadge">0</span></span>
+            <span class="chip" id="trialBadge">試看前 60 秒</span>
             <button class="btn sm blue" id="btnUnlockNow" type="button">立即解鎖</button>
           </div>
         </div>
@@ -2325,12 +2327,38 @@ async function speakText(text, lang){
 
 
 function calcCoins(durationSec){
-  const min = (Number(durationSec)||0) / 60;
-  if (min <= 10) return 1;
-  if (min <= 20) return 2;
-  if (min <= 30) return 3;
-  if (min <= 40) return 4;
+  // BookWide 最終規則：1–10 / 11–20 / 21–30 / 31–40 / 41+ 分鐘 = 1 / 2 / 3 / 4 / 5 金幣
+  const sec = Number(durationSec) || 0;
+  const minutes = Math.max(1, Math.ceil(sec / 60));
+  if (minutes <= 10) return 1;
+  if (minutes <= 20) return 2;
+  if (minutes <= 30) return 3;
+  if (minutes <= 40) return 4;
   return 5;
+}
+
+function getAssetDurationSec(row = {}){
+  const keys = ['duration_sec','duration_seconds','video_duration_sec','seconds'];
+  for (const k of keys){
+    const n = Number(row && row[k]);
+    if (Number.isFinite(n) && n > 1) return n;
+  }
+
+  const minKeys = ['duration_min','duration_minutes','minutes'];
+  for (const k of minKeys){
+    const n = Number(row && row[k]);
+    if (Number.isFinite(n) && n > 0) return n * 60;
+  }
+
+  const textKeys = ['duration','duration_text','length','length_text'];
+  for (const k of textKeys){
+    const v = row && row[k];
+    if (v != null && String(v).trim()){
+      const n = toSec(String(v).trim());
+      if (n > 1) return n;
+    }
+  }
+  return 0;
 }
 
 async function waitForActualDurationSec(maxMs = 12000){
@@ -2383,21 +2411,24 @@ async function hasUnlocked(userId, lessonSlug){
 }
 
 async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
+  const safeCost = Math.max(1, Number(coinCost || 0));
   const wallet = await loadWalletCoins(userId);
 
-  if (wallet < coinCost) {
+  if (wallet < safeCost) {
     return { ok:false, reason:'insufficient', wallet };
   }
 
+  // 優先呼叫新版 RPC：可接收 p_coin_cost。若資料庫尚未更新，會自動退回前端備援流程。
   try{
     const { data, error } = await playerSupa.rpc('unlock_asset', {
-      p_slug: lessonSlug
+      p_slug: lessonSlug,
+      p_coin_cost: safeCost
     });
     if (error) throw error;
 
     const balanceAfter = Number(data?.balance_after);
     const alreadyUnlocked = !!data?.already_unlocked;
-    const returnedCost = Number(data?.cost ?? coinCost);
+    const returnedCost = Number(data?.cost ?? (alreadyUnlocked ? 0 : safeCost));
 
     return {
       ok: true,
@@ -2460,7 +2491,7 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
       return { ok:false, reason:'db_error', wallet };
     }
 
-    const nextWallet = Math.max(0, wallet - Number(coinCost || 0));
+    const nextWallet = Math.max(0, wallet - safeCost);
 
     try{
       const { error } = await playerSupa
@@ -2471,7 +2502,7 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
       if (error) throw error;
     }catch(errWallet){
       console.warn('[BW-player] wallet_coins update failed after unlock insert', errWallet);
-      return { ok:true, wallet, already:false, cost: Number(coinCost || 0) };
+      return { ok:true, wallet, already:false, cost: safeCost };
     }
 
     try{
@@ -2479,8 +2510,8 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
         .from('coin_transactions')
         .insert({
           user_id: userId,
-          change: -Number(coinCost || 0),
-          note: '影片解鎖',
+          change: -safeCost,
+          note: `影片解鎖（${safeCost} 金幣）`,
           ref_slug: lessonSlug,
           balance_after: nextWallet,
           created_at: new Date().toISOString()
@@ -2493,7 +2524,7 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
       ok: true,
       wallet: nextWallet,
       already: false,
-      cost: Number(coinCost || 0)
+      cost: safeCost
     };
   }
 }
@@ -2503,6 +2534,8 @@ async function setupCoinGate(user){
   const durationBadge = document.getElementById('durationBadge');
   const coinBadge = document.getElementById('coinBadge');
   const walletBadge = document.getElementById('walletBadge');
+  const trialBadge = document.getElementById('trialBadge');
+  const coinCostChip = document.getElementById('coinCostChip');
   const btnUnlockNow = document.getElementById('btnUnlockNow');
 
   let resolvedDurationSec = 0;
@@ -2513,6 +2546,8 @@ async function setupCoinGate(user){
   const setDurationPending = () => {
     if (durationBadge) durationBadge.textContent = '--:--';
     if (coinBadge) coinBadge.textContent = '?';
+    if (trialBadge) trialBadge.textContent = '讀取影片時長中';
+    if (coinCostChip) coinCostChip.classList.remove('ok','warn');
     if (btnUnlockNow) btnUnlockNow.disabled = true;
   };
 
@@ -2524,25 +2559,43 @@ async function setupCoinGate(user){
     durationReady = true;
     if (durationBadge) durationBadge.textContent = fmt(d);
     if (coinBadge) coinBadge.textContent = String(resolvedCoinCost);
+    if (trialBadge) trialBadge.textContent = '試看前 60 秒';
+    if (coinCostChip) coinCostChip.classList.remove('ok','warn');
     if (btnUnlockNow) btnUnlockNow.disabled = false;
     return true;
   };
 
+  const showUnlockedState = () => {
+    if (coinBadge) coinBadge.textContent = '已解鎖';
+    if (trialBadge) trialBadge.textContent = '本期重看不扣幣';
+    if (coinCostChip) {
+      coinCostChip.classList.remove('warn');
+      coinCostChip.classList.add('ok');
+    }
+    if (btnUnlockNow) btnUnlockNow.style.display = 'none';
+  };
+
   setDurationPending();
 
-  const unlocked = await hasUnlocked(user.id, slug);
   let wallet = await loadWalletCoins(user.id);
   if (walletBadge) walletBadge.textContent = String(wallet);
-  if (btnUnlockNow) btnUnlockNow.style.display = unlocked ? 'none' : 'inline-flex';
 
-  if (!unlocked){
+  const unlocked = await hasUnlocked(user.id, slug);
+
+  // 先用 assets.duration_sec；沒有才等播放器實際時長。這樣 YouTube / MP4 都能顯示金幣級距。
+  const rowDuration = getAssetDurationSec(row);
+  if (!applyResolvedDuration(rowDuration)) {
     const actualDuration = await waitForActualDurationSec(12000);
-    if (!applyResolvedDuration(actualDuration)) {
-      setDurationPending();
-    }
+    applyResolvedDuration(actualDuration);
   }
 
-  if (unlocked) return;
+  if (unlocked){
+    showUnlockedState();
+    return;
+  }
+
+  if (btnUnlockNow) btnUnlockNow.style.display = 'inline-flex';
+  if (!durationReady) setDurationPending();
 
   let gatePassed = false;
   let gateInFlight = null;
@@ -2582,8 +2635,9 @@ async function setupCoinGate(user){
       gatePassed = true;
       wallet = Number(result.wallet || 0);
       if (walletBadge) walletBadge.textContent = String(wallet);
-      if (btnUnlockNow) btnUnlockNow.style.display = 'none';
-      alert(result.already ? '✅ 已解鎖' : `✅ 解鎖成功（扣 ${resolvedCoinCost} 金幣）`);
+      showUnlockedState();
+      const usedCost = Number(result.cost || resolvedCoinCost || 0);
+      alert(result.already ? '✅ 已解鎖，本期重看不扣幣' : `✅ 解鎖成功（扣 ${usedCost} 金幣，本期重看不扣幣）`);
       return true;
     })();
 
