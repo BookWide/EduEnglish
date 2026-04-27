@@ -89,7 +89,7 @@
       分享你的專屬連結給朋友／家人。<br>
       對方透過你的推薦連結完成訂閱後，你可累積 <b>訂單金額 10% 等值金幣獎勵</b>。<br>
       <b>被推薦人不享折扣</b>，付款金額與一般訂閱相同；訂閱金幣也依方案固定發放，不因推薦碼改變。<br>
-      （自推：不計獎勵）
+      （自推：不計分潤）
     </div>
 
     <div class="grid">
@@ -153,7 +153,7 @@
           <li>先按「<b>複製連結</b>」</li>
           <li>貼到 LINE／WeChat／Email／任何聊天軟體</li>
           <li>對方打開後會自動帶入推薦碼</li>
-          <li>付款成功後，你的金幣獎勵會自動累積</li>
+          <li>付款成功後，你的金幣獎勵會累積，可手動兌換到錢包</li>
         </ol>
         <div style="height:1px;background:var(--line);margin:14px 0"></div>
         <div style="color:#64748b;line-height:1.7">
@@ -169,7 +169,7 @@
       </div>
     </div>
 
-    <footer>BookWide · account/referral.html · v20260427-referrer-id-orders-stats</footer>
+    <footer>BookWide · account/referral.html · v20251227-referral-no-discount+stats</footer>
   </div>
 
   <div id="toast">已複製</div>
@@ -217,7 +217,6 @@
       return String(n);
     }
     function fmtTwdFromCents(c){ return Math.round((Number(c)||0)/100).toLocaleString('zh-Hant-TW'); }
-    function rewardCoinsFromCents(c){ return Math.floor(Math.round((Number(c)||0)/100) / 20); }
     function fmtDate(ts){ if(!ts) return '—'; try{ return new Date(ts).toLocaleString('zh-Hant-TW',{hour12:false}); }catch(_e){ return String(ts); } }
     function shortId(id){ const s=String(id||''); return s.length>14 ? s.slice(0,8)+'…'+s.slice(-4) : s; }
 
@@ -235,44 +234,29 @@
       return { email:'', code:'' };
     }
 
-    async function fetchSummaryByReferrer(sb, userId){
+    function rewardCoinsFromCents(cents){
+      return Math.floor((Number(cents || 0) / 100) / 20);
+    }
+
+    async function fetchDirectOrders(sb, userId){
       const { data, error } = await sb
         .from('orders')
-        .select('id,total,total_cents,subtotal,unit_price,quantity,status,period,paid_at,created_at,updated_at,expire_at,referral_code,referrer_id,commission_cents')
+        .select('id,total,status,period,paid_at,expire_at,referral_code,referrer_id,commission_cents')
         .eq('referrer_id', userId)
         .eq('status', 'paid')
-        .order('paid_at', { ascending: false });
+        .order('paid_at', { ascending:false });
+      if(error) throw error;
+      return data || [];
+    }
 
-      if (error) throw error;
-
-      const rows = Array.isArray(data) ? data : [];
-      const orders = rows.map(o => {
-        let baseCents = 0;
-        if (Number(o.total_cents || 0) > 0) baseCents = Number(o.total_cents || 0);
-        else if (Number(o.total || 0) > 0) baseCents = Math.round(Number(o.total || 0) * 100);
-        else if (Number(o.subtotal || 0) > 0) baseCents = Math.round(Number(o.subtotal || 0) * 100);
-        else if (Number(o.unit_price || 0) > 0) baseCents = Math.round(Number(o.unit_price || 0) * Number(o.quantity || 1));
-
-        let commissionCents = Number(o.commission_cents || 0);
-        if (!commissionCents && baseCents > 0) commissionCents = Math.round(baseCents * 0.10);
-
-        return {
-          ...o,
-          base_cents: baseCents,
-          commission_cents: commissionCents,
-          reward_coins: rewardCoinsFromCents(commissionCents)
-        };
-      });
-
-      const sumCents = orders.reduce((sum, o) => sum + Number(o.commission_cents || 0), 0);
-      const sumCoins = orders.reduce((sum, o) => sum + Number(o.reward_coins || 0), 0);
-      return {
-        ok: true,
-        count: orders.length,
-        sum_twd: Math.round(sumCents / 100),
-        sum_coins: sumCoins,
-        orders
-      };
+    async function fetchRedeemedCoins(sb, userId){
+      const { data, error } = await sb
+        .from('coin_transactions')
+        .select('change,note,ref_slug,created_at')
+        .eq('user_id', userId)
+        .ilike('note', '%推薦獎勵%');
+      if(error) throw error;
+      return (data || []).reduce((sum, r)=> sum + Math.max(0, Number(r.change || 0)), 0);
     }
 
     function renderOrders(items){
@@ -281,19 +265,21 @@
         return;
       }
       elRows.innerHTML = items.map(o=>{
-        const base = o.base_cents ?? o.total_cents ?? 0;
-        const com  = o.commission_cents ?? 0;
-        const coins = o.reward_coins ?? rewardCoinsFromCents(com);
+        const total = Number(o.total || 0);
+        const comCents  = Number(o.commission_cents || 0);
+        const rewardCoins = rewardCoinsFromCents(comCents);
         return `
           <tr>
             <td class="mono" title="${o.id||''}">${shortId(o.id||'')}</td>
             <td>${fmtDate(o.paid_at || o.created_at || o.updated_at)}</td>
-            <td class="right">${fmtTwdFromCents(base)}</td>
-            <td class="right">${coins.toLocaleString('zh-Hant-TW')} 金幣</td>
+            <td class="right">${Number(total).toLocaleString('zh-Hant-TW')}</td>
+            <td class="right">${rewardCoins} 金幣</td>
           </tr>`;
       }).join('');
     }
 
+    let currentUserId = '';
+    let currentAvailableCoins = 0;
     let SB;
 
     async function boot(){
@@ -330,17 +316,27 @@
       elCode.textContent = code;
       elLink.value = makeRefLink(code);
 
-      // ✅ 直接用目前登入 user.id 對 orders.referrer_id 讀統計
-      // 不再依賴 referral-summary，避免 ref_code / referral_code 舊邏輯造成 0 筆。
+      // ✅ 直接讀 orders.referrer_id = 目前登入 user.id，不再依賴 referral-summary
       try{
+        currentUserId = session.user.id;
         statusBox.innerHTML = '⏳ 讀取統計中…';
-        const s = await fetchSummaryByReferrer(SB, session.user.id);
-        elOk.innerHTML = String(s.count || 0) + '<span class="unit">筆</span>';
-        elSum.textContent = String((s.sum_coins || 0).toLocaleString('zh-Hant-TW'));
-        renderOrders(s.orders || []);
-        statusBox.innerHTML = `✅ 已更新：成功推薦 <b>${s.count||0}</b>，累積獎勵 <b>${(s.sum_coins||0).toLocaleString('zh-Hant-TW')}</b> 金幣（等值 NT$${(s.sum_twd||0).toLocaleString('zh-Hant-TW')}）。`;
+        const rows = await fetchDirectOrders(SB, session.user.id);
+        const totalRewardCoins = rows.reduce((sum, r)=> sum + rewardCoinsFromCents(r.commission_cents), 0);
+        const redeemedCoins = await fetchRedeemedCoins(SB, session.user.id);
+        currentAvailableCoins = Math.max(0, totalRewardCoins - redeemedCoins);
+
+        elOk.innerHTML = String(rows.length || 0) + '<span class="unit">筆</span>';
+        elSum.textContent = String(totalRewardCoins.toLocaleString('zh-Hant-TW'));
+        const av = document.getElementById('availableCoins');
+        if(av) av.textContent = String(currentAvailableCoins.toLocaleString('zh-Hant-TW'));
+        const input = document.getElementById('redeemAmount');
+        const btn = document.getElementById('redeemBtn');
+        if(input) input.value = currentAvailableCoins > 0 ? String(currentAvailableCoins) : '';
+        if(btn) btn.disabled = currentAvailableCoins <= 0;
+        renderOrders(rows);
+        statusBox.innerHTML = `✅ 已更新：成功推薦 <b>${rows.length||0}</b>，累積獎勵 <b>${totalRewardCoins.toLocaleString('zh-Hant-TW')}</b> 金幣；可兌換 <b>${currentAvailableCoins.toLocaleString('zh-Hant-TW')}</b> 金幣。`;
       }catch(e){
-        statusBox.innerHTML = `❌ 無法讀取統計：<br><span class="muted">${String(e.message||e)}</span><br><span class="muted">請確認 orders 允許登入者讀取 referrer_id = 自己的推薦訂單，或補 RLS policy。</span>`;
+        statusBox.innerHTML = `❌ 無法讀取統計：<br><span class="muted">${String(e.message||e)}</span><br><span class="muted">請確認 orders / coin_transactions 的 RLS 允許讀取自己的推薦資料。</span>`;
       }
     }
 
@@ -348,7 +344,32 @@
     btnCopyCode.addEventListener('click', ()=>{ const c=(elCode.textContent||'').trim(); if(!c||c==='—') return toast('請先登入'); copyText(c); });
     btnRefresh.addEventListener('click', ()=> boot());
     document.getElementById('how').addEventListener('click', ()=>{
-      alert('分享方法\n\n1) 複製連結\n2) 貼給朋友\n3) 對方在 pricing 會自動帶入推薦碼\n4) 付款成功後累積金幣獎勵\n\n自推：不給折扣，也不計獎勵。');
+      alert('分享方法\n\n1) 複製連結\n2) 貼給朋友\n3) 對方在 pricing 會自動帶入推薦碼\n4) 付款成功後累積獎勵\n\n自推：不給折扣，也不計分潤。');
+    });
+
+    document.getElementById('redeemBtn')?.addEventListener('click', async ()=>{
+      const raw = (document.getElementById('redeemAmount')?.value || '').trim();
+      const amount = Math.floor(Number(raw));
+      if(!amount || amount <= 0) return alert('請輸入要兌換的金幣數量');
+      if(amount > currentAvailableCoins) return alert('兌換數量不可超過可兌換金幣');
+      const { data: { session } } = await SB.auth.getSession();
+      if(!session) return alert('請先登入');
+      const res = await fetch(`${SUPABASE_URL}/functions/v1/referral-redeem-reward`, {
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({ amount })
+      });
+      const j = await res.json().catch(()=>({}));
+      if(!res.ok || !j.ok){
+        alert(j.message || j.error || '兌換失敗');
+        return;
+      }
+      toast('已兌換到錢包');
+      await boot();
     });
 
     boot();
