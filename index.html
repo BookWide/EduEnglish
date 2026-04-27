@@ -2179,190 +2179,23 @@ if(data.current_device_id !== my){
 
   const LOOKBACK_DAYS = 7;
   const MAX_ROWS = 5;
+  const QUERY_TIMEOUT_MS = 3500;
+  const TOTAL_TIMEOUT_MS = 9000;
 
-  // 方案 B：首頁排行榜不再讀 ./data/leaderboard-public.json，也不再使用假 fallbackRows。
-  // 只讀 Supabase 真資料；顯示名稱只用 profiles.display_name，沒有填就顯示「學員」。
-  const RANK_SOURCE_TABLES = [
-    // 你資料庫實際存在的最近 7 天觀看統計 view，優先使用。
-    'v_watch_sec_last7',
-    'v_watch_events_last7',
-
-    // 你資料庫實際存在的原始紀錄表。
-    'watch_events',
-    'watch_logs',
-    'quiz_results',
-    'quiz_logs',
-
-    // 兼容舊版/其他命名，存在才會讀；不存在會自動略過。
-    'learning_progress',
-    'user_learning_progress',
-    'video_progress',
-    'user_video_progress',
-    'watch_progress',
-    'player_progress',
-    'study_progress',
-    'learning_events',
-    'study_logs',
-    'video_watch_logs',
-    'test_results'
+  const SOURCES = [
+    { table:'v_watch_sec_last7', label:'最近7天觀看秒數' },
+    { table:'v_watch_events_last7', label:'最近7天觀看事件' },
+    { table:'user_30day_leaderboard', label:'30天排行榜備援' },
+    { table:'watch_events', label:'觀看事件原始表' },
+    { table:'watch_logs', label:'觀看紀錄原始表' },
+    { table:'quiz_results', label:'測驗結果' },
+    { table:'quiz_logs', label:'測驗紀錄' }
   ];
 
   function escHtml(v){
     return String(v ?? '').replace(/[&<>'"]/g, ch => ({
       '&':'&amp;', '<':'&lt;', '>':'&gt;', "'":'&#39;', '"':'&quot;'
     }[ch]));
-  }
-
-  function fmtSeconds(sec){
-    const s = Math.max(0, Math.floor(Number(sec || 0)));
-    const min = Math.floor(s / 60);
-    return `觀看 ${s} 秒（${min} 分）`;
-  }
-
-  function getFirst(row, keys, fallback = null){
-    for(const key of keys){
-      if(row && row[key] !== undefined && row[key] !== null && row[key] !== '') return row[key];
-    }
-    return fallback;
-  }
-
-  function getUserId(row){
-    return String(getFirst(row, [
-      'user_id', 'profile_id', 'student_id', 'member_id', 'buyer_id', 'uid', 'account_id', 'learner_id', 'id'
-    ], '') || '').trim();
-  }
-
-  function getTimeValue(row){
-    const raw = getFirst(row, [
-      'created_at', 'updated_at', 'inserted_at', 'completed_at', 'watched_at', 'played_at', 'finished_at', 'last_seen_at', 'event_at', 'event_time', 'day', 'date'
-    ], null);
-    if(!raw) return null;
-    const t = new Date(raw).getTime();
-    return Number.isFinite(t) ? t : null;
-  }
-
-  function isInsideRecent7Days(row, sinceMs){
-    const t = getTimeValue(row);
-    // 沒有日期欄位時不硬擋，避免舊表無 created_at 導致真資料全空。
-    return t === null ? true : t >= sinceMs;
-  }
-
-  function toNum(v){
-    const n = Number(v || 0);
-    return Number.isFinite(n) ? n : 0;
-  }
-
-  function scoreFromRow(row){
-    return toNum(getFirst(row, [
-      'score', 'points', 'total_points', 'rank_score', 'learning_score', 'total_score', 'rank_points', 'coins', 'coin_amount'
-    ], 0));
-  }
-
-  function watchedSecondsFromRow(row){
-    return toNum(getFirst(row, [
-      'watched_seconds', 'watch_seconds', 'watch_sec', 'watch_secs', 'total_watch_seconds', 'total_seconds', 'total_sec', 'duration_watched', 'played_seconds',
-      'progress_seconds', 'seconds', 'sec', 'duration_sec', 'watch_time', 'study_seconds', 'watch_duration'
-    ], 0));
-  }
-
-  function testScoreFromRow(row){
-    return toNum(getFirst(row, [
-      'test_score', 'quiz_score', 'test_points', 'quiz_points', 'correct_count', 'correct', 'correct_answers', 'score_percent', 'percent'
-    ], 0));
-  }
-
-  function buildComputedScore(item){
-    // 若資料表沒有明確 score，就用觀看分鐘 + 測驗分數，避免 0 分排行。
-    if(item.score > 0) return item.score;
-    return Math.floor(item.watched_seconds / 60) + item.test_score;
-  }
-
-  async function waitForSupa(){
-    for(let i = 0; i < 40; i++){
-      if(window.supa && typeof window.supa.from === 'function') return window.supa;
-      await new Promise(r => setTimeout(r, 150));
-    }
-    return null;
-  }
-
-  async function loadProfilesMap(client, userIds){
-    const ids = Array.from(new Set((userIds || []).map(v => String(v || '').trim()).filter(Boolean)));
-    const map = new Map();
-    if(!ids.length) return map;
-
-    try{
-      const { data, error } = await client
-        .from('profiles')
-        .select('id,display_name')
-        .in('id', ids)
-        .limit(5000);
-
-      if(error) throw error;
-      (data || []).forEach(p => {
-        const id = String(p.id || '').trim();
-        const displayName = String(p.display_name || '').trim();
-        if(id && displayName) map.set(id, displayName);
-      });
-    }catch(err){
-      console.warn('[leaderboard] profiles.display_name read failed:', err && (err.message || err));
-    }
-    return map;
-  }
-
-  async function fetchRowsFromTable(client, tableName){
-    try{
-      const { data, error } = await client
-        .from(tableName)
-        .select('*')
-        .limit(5000);
-
-      if(error) throw error;
-      return Array.isArray(data) ? data : [];
-    }catch(err){
-      // 表不存在、RLS 擋、欄位限制都不讓首頁掛掉；繼續試下一張表。
-      console.warn(`[leaderboard] skip ${tableName}:`, err && (err.message || err));
-      return [];
-    }
-  }
-
-  async function fetchLeaderboardRows(client){
-    const sinceMs = Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
-    const byUser = new Map();
-
-    for(const tableName of RANK_SOURCE_TABLES){
-      const rows = await fetchRowsFromTable(client, tableName);
-      for(const row of rows){
-        if(!isInsideRecent7Days(row, sinceMs)) continue;
-
-        const userId = getUserId(row);
-        if(!userId) continue;
-
-        const item = byUser.get(userId) || {
-          user_id: userId,
-          score: 0,
-          watched_seconds: 0,
-          test_score: 0
-        };
-
-        item.score += scoreFromRow(row);
-        item.watched_seconds += watchedSecondsFromRow(row);
-        item.test_score += testScoreFromRow(row);
-        byUser.set(userId, item);
-      }
-    }
-
-    const list = Array.from(byUser.values()).map(item => ({
-      ...item,
-      final_score: buildComputedScore(item)
-    }));
-
-    list.sort((a, b) =>
-      (b.final_score - a.final_score) ||
-      (b.watched_seconds - a.watched_seconds) ||
-      (b.test_score - a.test_score)
-    );
-
-    return list.slice(0, MAX_ROWS);
   }
 
   function renderEmpty(message){
@@ -2373,24 +2206,197 @@ if(data.current_device_id !== my){
     `;
   }
 
+  function renderDebug(message){
+    // 公開首頁不要顯示錯誤細節，只在 console 保留。
+    console.warn('[leaderboard]', message);
+  }
+
+  function toNum(v){
+    const n = Number(v || 0);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function getFirst(row, keys, fallback = null){
+    for(const key of keys){
+      if(row && row[key] !== undefined && row[key] !== null && row[key] !== '') return row[key];
+    }
+    return fallback;
+  }
+
+  function getUserId(row){
+    // 不把一般 id 當 user_id，避免把 watch_events.id 誤當會員 id。
+    return String(getFirst(row, [
+      'user_id','profile_id','student_id','member_id','buyer_id','learner_id','account_id','uid'
+    ], '') || '').trim();
+  }
+
+  function getInlineName(row){
+    return String(getFirst(row, [
+      'display_name','nickname','nickname_name','name','user_name','username','student_name','member_name'
+    ], '') || '').trim();
+  }
+
+  function getTimeMs(row){
+    const raw = getFirst(row, [
+      'created_at','updated_at','inserted_at','completed_at','watched_at','played_at','finished_at','last_seen_at','event_at','event_time','day','date'
+    ], null);
+    if(!raw) return null;
+    const t = new Date(raw).getTime();
+    return Number.isFinite(t) ? t : null;
+  }
+
+  function isRecent(row, sinceMs){
+    const t = getTimeMs(row);
+    return t === null ? true : t >= sinceMs;
+  }
+
+  function watchedSeconds(row){
+    return toNum(getFirst(row, [
+      'watched_seconds','watch_seconds','watch_sec','watch_secs','total_watch_seconds','total_seconds','total_sec','duration_watched','played_seconds','progress_seconds','seconds','sec','duration_sec','watch_time','study_seconds','watch_duration','total_watch_sec'
+    ], 0));
+  }
+
+  function testScore(row){
+    return toNum(getFirst(row, [
+      'test_score','quiz_score','test_points','quiz_points','correct_count','correct','correct_answers','score_percent','percent'
+    ], 0));
+  }
+
+  function scoreValue(row){
+    return toNum(getFirst(row, [
+      'score','points','total_points','rank_score','learning_score','total_score','rank_points','coins','coin_amount','event_count','watch_count','count'
+    ], 0));
+  }
+
+  function computedScore(item){
+    if(item.score > 0) return item.score;
+    if(item.watched_seconds > 0) return Math.floor(item.watched_seconds / 60) + item.test_score;
+    return item.test_score;
+  }
+
+  function fmtSeconds(sec){
+    const s = Math.max(0, Math.floor(Number(sec || 0)));
+    const min = Math.floor(s / 60);
+    return `觀看 ${s} 秒（${min} 分）`;
+  }
+
+  function withTimeout(promise, ms, label){
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(label + ' timeout')), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => {
+      if(timer) clearTimeout(timer);
+    });
+  }
+
+  async function waitForSupa(){
+    const started = Date.now();
+    while(Date.now() - started < 3000){
+      if(window.supa && typeof window.supa.from === 'function') return window.supa;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return null;
+  }
+
+  async function readTable(client, table){
+    try{
+      const query = client.from(table).select('*').limit(1000);
+      const { data, error } = await withTimeout(query, QUERY_TIMEOUT_MS, table);
+      if(error) throw error;
+      return Array.isArray(data) ? data : [];
+    }catch(err){
+      renderDebug(`${table} skipped: ${err && (err.message || err)}`);
+      return [];
+    }
+  }
+
+  async function loadProfilesMap(client, ids){
+    const userIds = Array.from(new Set((ids || []).map(v => String(v || '').trim()).filter(Boolean)));
+    const map = new Map();
+    if(!userIds.length) return map;
+    try{
+      const { data, error } = await withTimeout(
+        client.from('profiles').select('id,display_name').in('id', userIds).limit(1000),
+        QUERY_TIMEOUT_MS,
+        'profiles'
+      );
+      if(error) throw error;
+      (data || []).forEach(p => {
+        const id = String(p.id || '').trim();
+        const name = String(p.display_name || '').trim();
+        if(id && name) map.set(id, name);
+      });
+    }catch(err){
+      renderDebug(`profiles skipped: ${err && (err.message || err)}`);
+    }
+    return map;
+  }
+
+  async function fetchRank(client){
+    const sinceMs = Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+    const byUser = new Map();
+    const started = Date.now();
+
+    for(const src of SOURCES){
+      if(Date.now() - started > TOTAL_TIMEOUT_MS) break;
+      const rows = await readTable(client, src.table);
+      for(const row of rows){
+        if(!isRecent(row, sinceMs)) continue;
+        const userId = getUserId(row);
+        if(!userId) continue;
+
+        const item = byUser.get(userId) || {
+          user_id:userId,
+          inline_name:'',
+          score:0,
+          watched_seconds:0,
+          test_score:0
+        };
+
+        if(!item.inline_name) item.inline_name = getInlineName(row);
+        item.score += scoreValue(row);
+        item.watched_seconds += watchedSeconds(row);
+        item.test_score += testScore(row);
+        byUser.set(userId, item);
+      }
+
+      // 已經有真資料就先停，不再一直掃後面的大表，避免公開首頁卡住。
+      const current = Array.from(byUser.values()).filter(x => computedScore(x) > 0 || x.watched_seconds > 0 || x.test_score > 0);
+      if(current.length) break;
+    }
+
+    const list = Array.from(byUser.values()).map(item => ({
+      ...item,
+      final_score: computedScore(item)
+    })).filter(item => item.final_score > 0 || item.watched_seconds > 0 || item.test_score > 0);
+
+    list.sort((a,b) =>
+      (b.final_score - a.final_score) ||
+      (b.watched_seconds - a.watched_seconds) ||
+      (b.test_score - a.test_score)
+    );
+
+    return list.slice(0, MAX_ROWS);
+  }
+
   function renderRows(rows, profilesMap){
-    const list = Array.isArray(rows) ? rows : [];
-    if(!list.length){
+    if(!rows || !rows.length){
       renderEmpty('目前尚無排行資料');
       return;
     }
 
-    rankList.innerHTML = list.map((row, idx) => {
-      const displayName = String(profilesMap.get(row.user_id) || '').trim() || `學員 ${idx + 1}`;
-      const score = Math.floor(Number(row.final_score || row.score || 0));
+    rankList.innerHTML = rows.map((row, idx) => {
+      const name = String(profilesMap.get(row.user_id) || row.inline_name || '').trim() || `學員 ${idx + 1}`;
+      const score = Math.floor(Number(row.final_score || 0));
       const watched = Math.floor(Number(row.watched_seconds || 0));
-      const testScore = Math.floor(Number(row.test_score || 0));
+      const quiz = Math.floor(Number(row.test_score || 0));
       return `
         <li class="hero-rank-item">
           <div class="hero-rank-no">${idx + 1}</div>
-          <div class="hero-rank-name">${escHtml(displayName)}</div>
+          <div class="hero-rank-name">${escHtml(name)}</div>
           <div class="hero-rank-score">${score} 分</div>
-          <div class="hero-rank-meta">${fmtSeconds(watched)} · 測驗 ${testScore} 分</div>
+          <div class="hero-rank-meta">${fmtSeconds(watched)} · 測驗 ${quiz} 分</div>
         </li>
       `;
     }).join('');
@@ -2398,19 +2404,17 @@ if(data.current_device_id !== my){
 
   async function loadPublicRank(){
     renderEmpty('正在載入排行資料…');
-
-    const client = await waitForSupa();
-    if(!client){
-      renderEmpty('目前尚無排行資料');
-      return;
-    }
-
     try{
-      const rows = await fetchLeaderboardRows(client);
+      const client = await waitForSupa();
+      if(!client){
+        renderEmpty('目前尚無排行資料');
+        return;
+      }
+      const rows = await withTimeout(fetchRank(client), TOTAL_TIMEOUT_MS + 1500, 'leaderboard total');
       const profilesMap = await loadProfilesMap(client, rows.map(r => r.user_id));
       renderRows(rows, profilesMap);
     }catch(err){
-      console.warn('[leaderboard] load failed:', err && (err.message || err));
+      renderDebug(`load failed: ${err && (err.message || err)}`);
       renderEmpty('目前尚無排行資料');
     }
   }
@@ -2433,5 +2437,5 @@ if(data.current_device_id !== my){
 </script>
 
 
-</body></html> > > > >
+</body></html>
 
