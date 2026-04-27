@@ -2194,11 +2194,62 @@ if(data.current_device_id !== my){
   function normalizeRows(rows){
     return (Array.isArray(rows) ? rows : []).map((row, idx) => ({
       no: idx + 1,
-      name: String(row.display_name || row.name || row.username || row.user_name || row.display_name || row.email_masked || '匿名用戶'),
+      name: String(row.display_name || row.name || row.username || row.user_name || row.email_masked || '匿名用戶'),
       score: Number(row.score || row.points || row.total_points || 0),
       watched_seconds: Number(row.watched_seconds || row.watch_seconds || row.total_watch_seconds || 0),
       test_score: Number(row.test_score || row.quiz_score || row.test_points || 0)
     })).slice(0,5);
+  }
+
+  async function enrichLeaderboardDisplayNames(rows){
+    const list = Array.isArray(rows) ? rows : [];
+    if(!list.length || !window.supa) return list;
+
+    try{
+      const { data: profiles, error } = await window.supa
+        .from('profiles')
+        .select('email,display_name')
+        .limit(5000);
+
+      if(error || !Array.isArray(profiles)) return list;
+
+      const byEmail = new Map();
+      const byPrefix = new Map();
+
+      profiles.forEach(p => {
+        const email = String(p.email || '').trim().toLowerCase();
+        const displayName = String(p.display_name || '').trim();
+        if(!email || !displayName) return;
+
+        byEmail.set(email, displayName);
+
+        const prefix = email.split('@')[0];
+        const old = byPrefix.get(prefix);
+        if(!old || old === prefix){
+          byPrefix.set(prefix, displayName);
+        }
+      });
+
+      list.forEach(row => {
+        if(row.display_name && String(row.display_name).trim()) return;
+
+        const email = String(row.email || '').trim().toLowerCase();
+        const nameKey = String(row.name || row.username || row.user_name || row.email_masked || '').trim().toLowerCase();
+
+        const displayName =
+          (email && byEmail.get(email)) ||
+          (nameKey && byPrefix.get(nameKey)) ||
+          '';
+
+        if(displayName){
+          row.display_name = displayName;
+        }
+      });
+    }catch(err){
+      console.warn('[leaderboard] display_name sync failed:', err);
+    }
+
+    return list;
   }
 
   function renderRows(rows){
@@ -2206,7 +2257,7 @@ if(data.current_device_id !== my){
     rankList.innerHTML = items.map(row => `
       <li class="hero-rank-item">
         <div class="hero-rank-no">${row.no}</div>
-        <div class="hero-rank-name">${row.display_name || row.name}</div>
+        <div class="hero-rank-name">${row.name}</div>
         <div class="hero-rank-score">${row.score} 分</div>
         <div class="hero-rank-meta">${fmtSeconds(row.watched_seconds)} · 測驗 ${row.test_score} 分</div>
       </li>
@@ -2220,9 +2271,9 @@ if(data.current_device_id !== my){
       const data = await res.json();
       const rows = Array.isArray(data) ? data : (data.rows || data.items || data.top10 || []);
       if(!rows.length) throw new Error('empty leaderboard');
-      renderRows(rows);
+      renderRows(await enrichLeaderboardDisplayNames(rows));
     }catch(err){
-      renderRows(fallbackRows);
+      renderRows(await enrichLeaderboardDisplayNames(fallbackRows));
     }
   }
 
