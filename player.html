@@ -2924,24 +2924,33 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
 })();
 </script>
 
-  <!-- 播放進度寫入 watch_logs（供學習控制台 / 金榜排行使用） --> <!-- V20260427-score-write-fix -->
+  <!-- 播放進度寫入 watch_logs（供學習控制台 / 金榜排行使用） --> <!-- V20260427-score-write-writefix3 -->
 <script>
 (function(){
-  // 只修寫入資料，不改播放器畫面與原本結構
-  if (typeof playerSupa === 'undefined') return;
-  if (typeof slug === 'undefined') return;
+  // V20260427-score-write-writefix3
+  // 只修 watch_logs 寫入：不動畫面、不動字幕、不動 Talk、不動金幣。
+  // 修正重點：開播立即寫、每 3 秒寫、YouTube/MP4 都寫、update 失敗自動 insert、新增 console 訊息。
+
+  if (typeof playerSupa === 'undefined') {
+    console.warn('[BW-WATCH] playerSupa missing');
+    return;
+  }
+  if (typeof slug === 'undefined') {
+    console.warn('[BW-WATCH] slug missing');
+    return;
+  }
 
   const videoEl = document.getElementById('player');
-  const urlParams = new URLSearchParams(location.search);
-  const needResume = urlParams.get('resume') === '1';
+  const SAVE_GAP_MS = 3000;
+  const INIT_RETRY_MAX = 30;
 
   let userEmail = null;
   let userId = null;
   let currentLogId = null;
-  let resumePct = 0;
   let lastSaveTs = 0;
   let watchTimer = null;
-  const SAVE_GAP_MS = 5000;
+  let initTries = 0;
+  let started = false;
 
   function lessonCategory(){
     return String(typeof cat !== 'undefined' ? cat : 'unknown').trim().toLowerCase() || 'unknown';
@@ -2949,7 +2958,7 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
 
   function activeDuration(){
     try{
-      if (typeof isUsingYouTube === 'function' && isUsingYouTube() && ytPlayer && typeof ytPlayer.getDuration === 'function'){
+      if (typeof isUsingYouTube === 'function' && isUsingYouTube() && typeof ytPlayer !== 'undefined' && ytPlayer && typeof ytPlayer.getDuration === 'function'){
         const d = Number(ytPlayer.getDuration()) || 0;
         if (d > 0 && isFinite(d)) return d;
       }
@@ -2975,67 +2984,15 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     return 0;
   }
 
-  async function initWatchLog(){
-    try{
-      const user = (typeof bwPlayerGetUser === 'function')
-        ? await bwPlayerGetUser()
-        : (await playerSupa.auth.getUser())?.data?.user;
-      if (!user) return;
-
-      userEmail = user.email || '';
-      userId = user.id;
-      if (!userId) return;
-
-      const { data: rows, error: logErr } = await playerSupa
-        .from('watch_logs')
-        .select('id, progress_pct, updated_at')
-        .eq('user_id', userId)
-        .eq('video_slug', slug)
-        .order('updated_at', { ascending: false })
-        .limit(1);
-
-      if (!logErr && rows && rows.length){
-        currentLogId = rows[0].id || null;
-        resumePct = rows[0].progress_pct || 0;
-      }
-
-      if (needResume && resumePct > 0 && videoEl){
-        const seekByPct = function(){
-          const dur = activeDuration();
-          if (!dur) return;
-          const pct = Math.max(0, Math.min(99, resumePct));
-          const t = dur * pct / 100;
-          if (t > 3){
-            try { if (typeof setCurrentPlaybackTime === 'function') setCurrentPlaybackTime(t); else videoEl.currentTime = t; } catch(_e){}
-          }
-          videoEl.removeEventListener('loadedmetadata', seekByPct);
-        };
-        videoEl.addEventListener('loadedmetadata', seekByPct);
-      }
-
-      if (videoEl) {
-        videoEl.addEventListener('timeupdate', handleTimeUpdate);
-        videoEl.addEventListener('ended', function(){ saveProgress(100); });
-      }
-      if (watchTimer) clearInterval(watchTimer);
-      watchTimer = setInterval(handleTimeUpdate, SAVE_GAP_MS);
-
-      document.addEventListener('visibilitychange', function(){
-        if (document.visibilityState === 'hidden') handleTimeUpdate(true);
-      });
-      window.addEventListener('beforeunload', function(){ handleTimeUpdate(true); });
-    }catch(e){
-      console.error('watch_logs init error', e);
-    }
-  }
-
-  async function saveProgress(pct){
-    if (!userId) return;
-
+  function calcPayload(forcePct){
     const dur = activeDuration();
     const cur = activeCurrentTime();
-    pct = Math.round(Math.max(0, Math.min(100, Number(pct) || 0)));
-    const watchedSeconds = Math.max(0, Math.round(dur ? (dur * pct / 100) : cur));
+    let pct = dur ? Math.round(Math.max(0, Math.min(100, (cur / dur) * 100))) : 0;
+    if (typeof forcePct === 'number') pct = Math.round(Math.max(0, Math.min(100, forcePct)));
+
+    // 這裡不是處理金榜累加；重點是「實際播放到的秒數」要寫進 DB。
+    // 已播到 90 秒就寫 90；片尾或 ended 才會寫 duration。
+    const watchedSeconds = Math.max(0, Math.round(cur || (dur ? (dur * pct / 100) : 0)));
 
     const payload = {
       user_id: userId,
@@ -3043,58 +3000,146 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
       video_slug: slug,
       category: lessonCategory(),
       progress_pct: pct,
+      duration_sec: dur ? Math.round(dur) : null,
       watched_seconds: watchedSeconds,
       updated_at: new Date().toISOString()
     };
+    return payload;
+  }
 
-    if (dur) payload.duration_sec = Math.round(dur);
-
+  async function getUserForWatch(){
     try{
-      if (currentLogId){
-        const { error } = await playerSupa
-          .from('watch_logs')
-          .update(payload)
-          .eq('id', currentLogId);
-        if (error) console.error('watch_logs update error', error);
-      }else{
-        const { data, error } = await playerSupa
-          .from('watch_logs')
-          .insert(payload)
-          .select('id')
-          .single();
-
-        if (!error && data && data.id){
-          currentLogId = data.id;
-        }else if (error){
-          console.error('watch_logs insert error', error);
-        }
-      }
-    }catch(e){
-      console.error('watch_logs saveProgress exception', e);
+      const user = (typeof bwPlayerGetUser === 'function')
+        ? await bwPlayerGetUser()
+        : (await playerSupa.auth.getUser())?.data?.user;
+      return user || null;
+    }catch(err){
+      console.error('[BW-WATCH] get user error', err);
+      return null;
     }
   }
 
-  function handleTimeUpdate(force){
-    const dur = activeDuration();
-    const cur = activeCurrentTime();
-    if (!dur && !cur) return;
+  async function ensureLogId(){
+    if (!userId) return null;
+    if (currentLogId) return currentLogId;
 
+    const { data: rows, error } = await playerSupa
+      .from('watch_logs')
+      .select('id, progress_pct, watched_seconds, updated_at')
+      .eq('user_id', userId)
+      .eq('video_slug', slug)
+      .order('updated_at', { ascending:false })
+      .limit(1);
+
+    if (error) {
+      console.warn('[BW-WATCH] select old log failed', error);
+      return null;
+    }
+    if (rows && rows.length && rows[0].id) {
+      currentLogId = rows[0].id;
+      return currentLogId;
+    }
+    return null;
+  }
+
+  async function saveWatch(forcePct){
+    if (!userId) return;
+
+    const payload = calcPayload(forcePct);
+    if (!payload.video_slug) return;
+
+    // 沒有 currentTime 也先寫一筆 0 秒，至少確認 DB 可寫；播放後會更新。
+    try{
+      const id = await ensureLogId();
+
+      if (id) {
+        const { data, error } = await playerSupa
+          .from('watch_logs')
+          .update(payload)
+          .eq('id', id)
+          .select('id, watched_seconds, updated_at')
+          .maybeSingle();
+
+        if (!error && data && data.id) {
+          console.log('[BW-WATCH] updated', data);
+          return;
+        }
+        console.warn('[BW-WATCH] update failed or no row, will insert', error || data);
+        currentLogId = null;
+      }
+
+      const { data: inserted, error: insertErr } = await playerSupa
+        .from('watch_logs')
+        .insert(payload)
+        .select('id, watched_seconds, updated_at')
+        .maybeSingle();
+
+      if (insertErr) {
+        console.error('[BW-WATCH] insert failed', insertErr, payload);
+        return;
+      }
+      if (inserted && inserted.id) currentLogId = inserted.id;
+      console.log('[BW-WATCH] inserted', inserted);
+    }catch(err){
+      console.error('[BW-WATCH] save exception', err, payload);
+    }
+  }
+
+  function tick(force){
     const now = Date.now();
     if (!force && now - lastSaveTs < SAVE_GAP_MS) return;
     lastSaveTs = now;
+    saveWatch();
+  }
 
-    const pct = dur ? (cur / dur) * 100 : 0;
-    saveProgress(pct);
+  async function initWatch(){
+    if (started) return;
+    initTries++;
+
+    const user = await getUserForWatch();
+    if (!user || !user.id) {
+      if (initTries <= INIT_RETRY_MAX) {
+        console.warn('[BW-WATCH] no user yet, retry', initTries);
+        setTimeout(initWatch, 1000);
+      } else {
+        console.error('[BW-WATCH] stop: no authenticated user');
+      }
+      return;
+    }
+
+    userId = user.id;
+    userEmail = user.email || '';
+    started = true;
+    console.log('[BW-WATCH] init ok', { userId, userEmail, slug, category: lessonCategory() });
+
+    await ensureLogId();
+    await saveWatch(); // 進播放器先寫一筆，確認可寫
+
+    if (videoEl) {
+      videoEl.addEventListener('play', function(){ tick(true); });
+      videoEl.addEventListener('timeupdate', function(){ tick(false); });
+      videoEl.addEventListener('pause', function(){ tick(true); });
+      videoEl.addEventListener('ended', function(){ saveWatch(100); });
+    }
+
+    if (watchTimer) clearInterval(watchTimer);
+    watchTimer = setInterval(function(){ tick(false); }, SAVE_GAP_MS);
+
+    document.addEventListener('visibilitychange', function(){
+      if (document.visibilityState === 'hidden') tick(true);
+    });
+    window.addEventListener('beforeunload', function(){ tick(true); });
   }
 
   if (document.readyState === 'complete' || document.readyState === 'interactive'){
-    setTimeout(initWatchLog, 600);
-  }else{
-    document.addEventListener('DOMContentLoaded', function(){
-      setTimeout(initWatchLog, 600);
-    });
+    setTimeout(initWatch, 800);
+  } else {
+    document.addEventListener('DOMContentLoaded', function(){ setTimeout(initWatch, 800); });
   }
 })();
+</script>
+
+<script>
 // PRO 模式：讀取 index-pro.json，並在「字幕」分頁顯示完整課程章節清單
 
 // JP 模式：讀取 index-jp.json，並在「字幕」分頁顯示日文文法清單
@@ -3252,5 +3297,6 @@ async function loadProOutline(){
 
 
 
+</script>
 </body>
 </html>
