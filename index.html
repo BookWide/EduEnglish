@@ -2177,149 +2177,77 @@ if(data.current_device_id !== my){
   const rankList = document.getElementById('homeRankList');
   if(!rankWrap || !rankList) return;
 
-  // ⚠️ 保留你原本可顯示的排行資料來源。
-  // 這裡只處理「顯示名稱」：用 profiles.display_name 取代 email 前綴 / 原始 ID。
-  const fallbackRows = [
-    { name:'pmktools', score:160, watched_seconds:4821, test_score:0 },
-    { name:'pmktools', score:17, watched_seconds:533, test_score:0 },
-    { name:'384246452', score:0, watched_seconds:0, test_score:0 },
-    { name:'udrills', score:0, watched_seconds:0, test_score:0 },
-    { name:'mane123g', score:0, watched_seconds:0, test_score:0 }
-  ];
-
-  function esc(v){
-    return String(v ?? '').replace(/[&<>'"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[ch]));
-  }
-
-  function cleanKey(v){
-    return String(v || '')
-      .trim()
-      .toLowerCase()
-      .replace(/^mailto:/, '')
-      .replace(/s+/g, '');
-  }
-
-  function emailPrefix(email){
-    const e = cleanKey(email);
-    return e.includes('@') ? e.split('@')[0] : e;
+  function escapeHtml(v){
+    return String(v ?? '')
+      .replaceAll('&','&amp;')
+      .replaceAll('<','&lt;')
+      .replaceAll('>','&gt;')
+      .replaceAll('"','&quot;')
+      .replaceAll("'",'&#39;');
   }
 
   function fmtSeconds(sec){
-    const s = Number(sec||0);
-    const min = Math.floor(s/60);
+    const s = Math.max(0, Number(sec || 0));
+    const min = Math.floor(s / 60);
     return `觀看 ${s} 秒（${min} 分）`;
   }
 
+  function showEmpty(){
+    rankList.innerHTML = '<li style="list-style:none;padding:20px 0;color:#64748b;font-size:14px;">目前尚無排行資料</li>';
+  }
+
   function normalizeRows(rows){
-    return (Array.isArray(rows) ? rows : []).map((row, idx) => {
-      const rawName = String(row.name || row.username || row.user_name || row.email_masked || row.email || row.user_email || '匿名用戶');
-      return {
-        no: idx + 1,
-        raw_name: rawName,
-        user_id: row.user_id || row.profile_id || row.id || null,
-        email: row.email || row.user_email || null,
-        display_name: row.display_name || row.nickname || row.full_name || null,
-        score: Number(row.score || row.points || row.total_points || 0),
-        watched_seconds: Number(row.watched_seconds || row.watch_seconds || row.total_watch_seconds || 0),
-        test_score: Number(row.test_score || row.quiz_score || row.test_points || 0)
-      };
-    }).slice(0,5);
+    return (Array.isArray(rows) ? rows : []).map((row, idx) => ({
+      no: idx + 1,
+      name: String(row.display_name || row.name || '學員'),
+      score: Number(row.score || 0),
+      watched_seconds: Number(row.watched_seconds || 0),
+      test_score: Number(row.test_score || 0)
+    })).slice(0, 5);
   }
 
-  async function loadProfileNameMaps(){
-    const maps = {
-      byId: new Map(),
-      byEmail: new Map(),
-      byPrefix: new Map()
-    };
-
-    try{
-      const client = window.supa || window.supabaseClient || null;
-      if(!client || !client.from) return maps;
-
-      // 只拿顯示名稱需要的欄位。
-      // id 用於未來真正排行帶 user_id 時精準對齊；email 前綴用於你目前 pmktools 這種舊排行列。
-      const { data, error } = await client
-        .from('profiles')
-        .select('id,email,display_name')
-        .not('display_name', 'is', null);
-
-      if(error) throw error;
-
-      (data || []).forEach(p => {
-        const display = String(p.display_name || '').trim();
-        if(!display) return;
-
-        const id = String(p.id || '').trim();
-        const email = cleanKey(p.email || '');
-        const prefix = emailPrefix(email);
-
-        if(id) maps.byId.set(id, display);
-        if(email) maps.byEmail.set(email, display);
-        if(prefix) maps.byPrefix.set(prefix, display);
-      });
-    }catch(err){
-      console.warn('[leaderboard] profiles.display_name 讀取失敗，保留原排行榜名稱：', err && (err.message || err));
-    }
-
-    return maps;
-  }
-
-  function resolveDisplayName(row, maps){
-    const direct = String(row.display_name || '').trim();
-    if(direct) return direct;
-
-    const id = String(row.user_id || '').trim();
-    if(id && maps.byId.has(id)) return maps.byId.get(id);
-
-    const email = cleanKey(row.email || '');
-    if(email && maps.byEmail.has(email)) return maps.byEmail.get(email);
-
-    const raw = cleanKey(row.raw_name || '');
-    if(raw && maps.byEmail.has(raw)) return maps.byEmail.get(raw);
-    if(raw && maps.byPrefix.has(raw)) return maps.byPrefix.get(raw);
-
-    // 支援 email_masked 類似 pmktools***@gmail.com，只取 @ 前面第一段非星號
-    const maskedPrefix = raw.split('@')[0].replace(/*/g, '');
-    if(maskedPrefix && maps.byPrefix.has(maskedPrefix)) return maps.byPrefix.get(maskedPrefix);
-
-    return row.raw_name || '匿名用戶';
-  }
-
-  async function renderRows(rows){
-    const items = normalizeRows(rows);
+  function renderRows(rows){
+    const items = normalizeRows(rows).filter(row => row.score > 0 || row.watched_seconds > 0 || row.test_score > 0);
     if(!items.length){
-      rankList.innerHTML = '<li style="padding:16px 0;color:#64748b;list-style:none;">目前尚無排行資料</li>';
+      showEmpty();
       return;
     }
+    rankList.innerHTML = items.map(row => `
+      <li class="hero-rank-item">
+        <div class="hero-rank-no">${row.no}</div>
+        <div class="hero-rank-name">${escapeHtml(row.name)}</div>
+        <div class="hero-rank-score">${row.score} 分</div>
+        <div class="hero-rank-meta">${fmtSeconds(row.watched_seconds)} · 測驗 ${row.test_score} 分</div>
+      </li>
+    `).join('');
+  }
 
-    const maps = await loadProfileNameMaps();
-
-    rankList.innerHTML = items.map(row => {
-      const name = resolveDisplayName(row, maps);
-      return `
-        <li class="hero-rank-item">
-          <div class="hero-rank-no">${row.no}</div>
-          <div class="hero-rank-name">${esc(name)}</div>
-          <div class="hero-rank-score">${row.score} 分</div>
-          <div class="hero-rank-meta">${fmtSeconds(row.watched_seconds)} · 測驗 ${row.test_score} 分</div>
-        </li>
-      `;
-    }).join('');
+  async function waitForSupa(){
+    for(let i = 0; i < 30; i++){
+      if(window.supa && typeof window.supa.from === 'function') return window.supa;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    return null;
   }
 
   async function loadPublicRank(){
     try{
-      const res = await fetch('./data/leaderboard-public.json', { cache:'no-store' });
-      if(!res.ok) throw new Error('no public leaderboard');
-      const data = await res.json();
-      const rows = Array.isArray(data) ? data : (data.rows || data.items || data.top10 || []);
-      if(!rows.length) throw new Error('empty leaderboard');
-      await renderRows(rows);
+      rankList.innerHTML = '<li style="list-style:none;padding:20px 0;color:#64748b;font-size:14px;">正在載入排行資料...</li>';
+      const client = await waitForSupa();
+      if(!client) throw new Error('Supabase client not ready');
+
+      const { data, error } = await client
+        .from('v_public_leaderboard_last7')
+        .select('user_id,display_name,watched_seconds,test_score,score,last_activity_at')
+        .order('score', { ascending:false })
+        .order('watched_seconds', { ascending:false })
+        .limit(5);
+
+      if(error) throw error;
+      renderRows(data || []);
     }catch(err){
-      // 你現在沒有 leaderboard-public.json，先保留原本可顯示的排行資料，
-      // 但名稱會嘗試換成 profiles.display_name。
-      await renderRows(fallbackRows);
+      console.warn('[leaderboard] load failed:', err && (err.message || err));
+      showEmpty();
     }
   }
 
