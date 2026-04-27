@@ -81,6 +81,10 @@
     .curve-toggle{border:1px solid var(--line);background:#fff;border-radius:999px;padding:.28rem .7rem;cursor:pointer;font-size:12px}
     .curve-card.compact #curveStrip,.curve-card.compact .curve-chart-wrap,.curve-card.compact .curve-legend .left{display:none}
     .curve-card.compact{padding-bottom:10px}
+    .curve-cat-filters{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 4px}
+    .curve-cat-btn{border:1px solid var(--line);background:#fff;border-radius:999px;padding:.28rem .68rem;cursor:pointer;font-size:12px;font-weight:800;color:#334155}
+    .curve-cat-btn.active{background:#eff6ff;border-color:#93c5fd;color:#1d4ed8}
+    .curve-cat-dot{display:inline-block;width:9px;height:9px;border-radius:999px;margin-right:5px;vertical-align:-1px}
 
 
     @media (max-width:980px){.hero-grid,.grid{grid-template-columns:1fr}.stats{grid-template-columns:repeat(3,1fr)} .route-card{position:static;max-height:none}}
@@ -195,24 +199,25 @@ function BW_startDeviceWatcher(userId){
   <section class="card curve-card compact" id="curveCard">
     <div class="curve-head">
       <div>
-        <h2>學習曲線（最近 30 天）</h2>
-        <div class="muted">預設收合，避免吃版面；需要時再展開。</div>
+        <h2>學習曲線（最近 30 天｜五大分類）</h2>
+        <div class="muted">故事 / 音樂 / 電影 / 實況 / 語法分別記錄；可同時顯示五條曲線，也可單獨查看。</div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <div class="curve-tip">工作日 / 週末分流版</div>
+        <div class="curve-tip">五大分類曲線</div>
         <button type="button" class="curve-toggle" id="curveToggleBtn">展開曲線</button>
       </div>
     </div>
     <div class="curve-summary">
-      <div class="mini">保留焦點：今天 / 當前 Day / 完成度。曲線已縮小，避免整頁被往下擠。</div>
+      <div class="mini">資料來源：排課日完成紀錄 + 已解鎖教材日期；不再只看 pro / 角色路線。</div>
       <div class="right" id="curveFocusTextBottom">目前焦點：Day 1</div>
     </div>
+    <div id="curveCategoryFilters" class="curve-cat-filters"></div>
     <div id="curveStrip" class="curve-strip"></div>
     <div class="curve-chart-wrap">
       <svg id="curveSvg" class="curve-svg" viewBox="0 0 900 230" preserveAspectRatio="none" aria-label="學習曲線圖"></svg>
     </div>
     <div class="curve-legend">
-      <div class="left">藍色：未完成日；綠色：已完成日；灰色：無課或尚未開始。</div>
+      <div class="left">五條曲線：故事 / 音樂 / 電影 / 實況 / 語法；點上方分類可切換全部或單獨顯示。</div>
       <div class="right" id="curveFocusText">目前焦點：Day 1</div>
     </div>
   </section>
@@ -245,8 +250,8 @@ function BW_startDeviceWatcher(userId){
     </section>
 
     <section class="card route-card">
-      <h2>角色進度路線</h2>
-      <div class="muted">這裡只看主線順序與目前進度，不再重複顯示一排 Day。每天學什麼請看左邊 14 天行事曆。</div>
+      <h2>五大分類進度路線</h2>
+      <div class="muted">故事 / 音樂 / 電影 / 實況 / 語法一起排進路線；每天學什麼請看左邊 14 天行事曆。</div>
       <div class="timeline" id="timeline"></div>
     </section>
   </div>
@@ -345,6 +350,15 @@ async function checkDashboardAccess(){
 
 const DEFAULT_PROFILE = {domain_code:"healthcare", role_code:"nurse", level_code:"beginner", scene_priority:["medical","daily"], daily_minutes:10};
 const STORAGE_KEY = "BW_DASH_V3_ASSETS_PROGRESS";
+const CATEGORY_KEYS = ['story','music','movie','news','pro'];
+const CATEGORY_META = {
+  story:{label:'故事', color:'#2563eb'},
+  music:{label:'音樂', color:'#16a34a'},
+  movie:{label:'電影', color:'#f97316'},
+  news:{label:'實況', color:'#7c3aed'},
+  pro:{label:'語法', color:'#dc2626'}
+};
+let curveCategoryMode = 'all';
 
 function playerHref(item){return `../player.html?cat=${encodeURIComponent(item.category||'story')}&slug=${encodeURIComponent(item.slug)}`;}
 function getSaved(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}")}catch(e){return {}}}
@@ -506,31 +520,63 @@ function pickFromPool(pool, used){
   return pool[used.size % pool.length] || pool[0] || null;
 }
 function cloneLesson(item, extra={}){ return {...item, ...extra}; }
-function buildSchedule(workRoadmap, relaxRoadmap, totalDays=14){
+function buildCategoryRoadmaps(items, profile){
+  const pools={};
+  CATEGORY_KEYS.forEach(cat=>{
+    pools[cat]=(items||[])
+      .filter(x=>String(x.category||'').trim()===cat)
+      .map(x=>({...x,_cat_score:scoreLesson(x, profile)+scoreRelaxItem(x, profile)}))
+      .sort((a,b)=>b._cat_score-a._cat_score||(a.order||999)-(b.order||999)||String(a.slug).localeCompare(String(b.slug)));
+  });
+  return pools;
+}
+function buildFiveCategoryRoadmap(categoryRoadmaps){
   const out=[];
-  const usedWork=new Set();
-  const usedRelax=new Set();
-  let recentWork=[];
+  CATEGORY_KEYS.forEach(cat=>{
+    (categoryRoadmaps[cat]||[]).slice(0,8).forEach((item,i)=>{
+      out.push({...item, category_group:cat, category_order:i+1});
+    });
+  });
+  return out.sort((a,b)=>(a.category_order||999)-(b.category_order||999)||CATEGORY_KEYS.indexOf(a.category)-CATEGORY_KEYS.indexOf(b.category));
+}
+function buildSchedule(workRoadmap, relaxRoadmap, totalDays=14){
+  // V5：五大分類排課。每天從 story/music/movie/news/pro 各挑 1 支，
+  // 不再只用 role/pro 當主資料來源。workRoadmap 可傳 categoryRoadmaps。
+  const categoryRoadmaps = (workRoadmap && !Array.isArray(workRoadmap)) ? workRoadmap : null;
+  if(!categoryRoadmaps){
+    const out=[];
+    const usedWork=new Set();
+    const usedRelax=new Set();
+    for(let day=1;day<=totalDays;day++){
+      const weekday=(day-1)%7;
+      const isWeekend=weekday>=5;
+      const isReview=(!isWeekend && weekday===3);
+      let lessons=[];
+      if(isWeekend){
+        const a=pickFromPool(relaxRoadmap, usedRelax);
+        const b=pickFromPool(relaxRoadmap, usedRelax);
+        lessons=[a,b].filter(Boolean).map(x=>cloneLesson(x,{track:'weekend'}));
+      }else{
+        const a=pickFromPool(workRoadmap, usedWork);
+        const b=pickFromPool(workRoadmap, usedWork);
+        lessons=[a,b].filter(Boolean).map(x=>cloneLesson(x,{track:isReview?'review':'work'}));
+      }
+      out.push({day, review:isReview, weekend:isWeekend, lessons});
+    }
+    return out;
+  }
+  const out=[];
+  const used={};
+  CATEGORY_KEYS.forEach(cat=>used[cat]=new Set());
   for(let day=1;day<=totalDays;day++){
     const weekday=(day-1)%7;
     const isWeekend=weekday>=5;
     const isReview=(!isWeekend && weekday===3);
-    let lessons=[];
-    if(isWeekend){
-      const a=pickFromPool(relaxRoadmap, usedRelax);
-      const b=pickFromPool(relaxRoadmap, usedRelax);
-      lessons=[a,b].filter(Boolean).map(x=>cloneLesson(x,{track:'weekend'}));
-    }else if(isReview){
-      const a=recentWork[recentWork.length-2] || recentWork[0] || null;
-      const b=recentWork[recentWork.length-1] || recentWork[0] || null;
-      lessons=[a,b].filter(Boolean).map(x=>cloneLesson(x,{track:'review'}));
-    }else{
-      const a=pickFromPool(workRoadmap, usedWork);
-      const b=pickFromPool(workRoadmap, usedWork);
-      lessons=[a,b].filter(Boolean).map(x=>cloneLesson(x,{track:'work'}));
-      recentWork.push(...lessons);
-      if(recentWork.length>6) recentWork=recentWork.slice(-6);
-    }
+    const lessons=[];
+    CATEGORY_KEYS.forEach(cat=>{
+      const item=pickFromPool(categoryRoadmaps[cat]||[], used[cat]);
+      if(item) lessons.push(cloneLesson(item,{track:isReview?'review':(isWeekend?'weekend':'category'), category_group:cat}));
+    });
     out.push({day, review:isReview, weekend:isWeekend, lessons});
   }
   return out;
@@ -539,21 +585,48 @@ function getUnlockedDay(progress){const done=Object.keys(progress).filter(k=>pro
 function dayScore(dayObj, progress){if(!dayObj) return 0; if(progress[dayObj.day]) return dayObj.weekend ? 61 : (dayObj.review ? 49 : 91); return dayObj.weekend ? 28 : (dayObj.review ? 18 : 43);}
 function dayCompletion(dayObj, progress){if(!dayObj) return 0; if(progress[dayObj.day]) return 100; return dayObj.weekend ? 22 : (dayObj.review ? 35 : 12);}
 function formatShortDate(d){return `${d.getMonth()+1}/${d.getDate()}`}
-function buildCurveData(schedule, progress){
+function buildCategoryCurveData(schedule, progress, unlockedList){
   const out=[]; const today=new Date();
   const start=new Date(today); start.setDate(today.getDate()-29);
   const total=schedule.length;
   const scheduleStartOffset=Math.max(0, 30-total);
+  const unlockByDateCat={};
+  (unlockedList||[]).forEach(item=>{
+    if(!item.unlocked_at) return;
+    const d=new Date(item.unlocked_at);
+    if(Number.isNaN(d.getTime())) return;
+    const key=d.toISOString().slice(0,10);
+    const cat=String(item.category||'').trim();
+    if(!CATEGORY_KEYS.includes(cat)) return;
+    unlockByDateCat[key]=unlockByDateCat[key]||{};
+    unlockByDateCat[key][cat]=(unlockByDateCat[key][cat]||0)+1;
+  });
   for(let i=0;i<30;i++){
     const date=new Date(start); date.setDate(start.getDate()+i);
+    const dateKey=date.toISOString().slice(0,10);
     const dayNo=i-scheduleStartOffset+1;
     const dayObj=(dayNo>=1 && dayNo<=total)?schedule[dayNo-1]:null;
-    const score=dayObj?dayScore(dayObj, progress):0;
-    const completion=dayObj?dayCompletion(dayObj, progress):0;
     const locked=dayObj ? dayNo>getUnlockedDay(progress) : false;
-    out.push({index:i,date,label:i===29?'今天':(i===28?'昨天':formatShortDate(date)), score, completion, dayNo:dayObj?dayObj.day:null, locked, done:dayObj?!!progress[dayObj.day]:false});
+    const cats={};
+    CATEGORY_KEYS.forEach(cat=>{
+      const hasScheduled=!!(dayObj && (dayObj.lessons||[]).some(x=>String(x.category||'')===cat));
+      const unlockedCount=(unlockByDateCat[dateKey]&&unlockByDateCat[dateKey][cat])||0;
+      let completion=0;
+      if(unlockedCount>0) completion=Math.min(100, 35 + unlockedCount*25);
+      if(hasScheduled){
+        if(progress[dayObj.day]) completion=100;
+        else if(!locked) completion=Math.max(completion, dayObj.weekend ? 28 : (dayObj.review ? 35 : 18));
+      }
+      cats[cat]={completion, score:completion, hasScheduled, unlockedCount};
+    });
+    const avg = Math.round(CATEGORY_KEYS.reduce((sum,cat)=>sum+(cats[cat]?.completion||0),0)/CATEGORY_KEYS.length);
+    out.push({index:i,date,label:i===29?'今天':(i===28?'昨天':formatShortDate(date)), dayNo:dayObj?dayObj.day:null, locked, done:dayObj?!!progress[dayObj.day]:false, cats, completion:avg, score:avg});
   }
   return out;
+}
+function buildCurveData(schedule, progress){
+  // 相容舊呼叫：回傳五大分類平均，不再只看單一路線。
+  return buildCategoryCurveData(schedule, progress, state.unlockedList || []);
 }
 function focusDay(dayNo){
   if(!dayNo) return;
@@ -641,7 +714,7 @@ function renderTimeline(workRoadmap, relaxRoadmap){
       <div class="ord">${rowData.idx}</div>
       <div>
         <div class="route-head">
-          <span class="route-kind">主線</span>
+          <span class="route-kind">${CATEGORY_META[rowData.item.category]?.label || '分類'}</span>
           <div class="route-title">${rowData.item.title}</div>
         </div>
         <div class="route-sub">${(rowData.item.role_codes||[]).join(" / ") || 'general'} · ${rowData.item.domain_code || ''}</div>
@@ -680,24 +753,53 @@ function renderCalendar(schedule, progress, selectedDay){
   });
   const doneCount=Object.keys(progress).filter(k=>progress[k]===true).length;document.getElementById("doneDays").textContent=String(doneCount);document.getElementById("unlockCount").textContent=String(unlockedDay);const percent=schedule.length?Math.round((doneCount/schedule.length)*100):0;document.getElementById("progressBar").style.width=percent+"%";document.getElementById("progressText").textContent=percent+"%"
 }
+function renderCurveCategoryFilters(){
+  const root=document.getElementById('curveCategoryFilters');
+  if(!root) return;
+  const items=[{key:'all', label:'全部', color:'#0f172a'}, ...CATEGORY_KEYS.map(k=>({key:k, ...CATEGORY_META[k]}))];
+  root.innerHTML='';
+  items.forEach(item=>{
+    const btn=document.createElement('button');
+    btn.type='button';
+    btn.className='curve-cat-btn '+(curveCategoryMode===item.key?'active':'');
+    btn.innerHTML=`${item.key==='all'?'':'<span class="curve-cat-dot" style="background:'+item.color+'"></span>'}${item.label}`;
+    btn.onclick=()=>{curveCategoryMode=item.key; renderAll();};
+    root.appendChild(btn);
+  });
+}
 function renderCurve(schedule, progress, selectedDay){
+  renderCurveCategoryFilters();
   const strip=document.getElementById('curveStrip');
   const svg=document.getElementById('curveSvg');
-  const data=buildCurveData(schedule, progress);
+  const data=buildCategoryCurveData(schedule, progress, state.unlockedList || []);
+  const visibleCats = curveCategoryMode==='all' ? CATEGORY_KEYS : [curveCategoryMode];
   strip.innerHTML='';
-  data.forEach(d=>{const item=document.createElement('div');item.className=`curve-day ${d.dayNo===selectedDay?'active':''} ${d.locked?'locked':''}`;item.innerHTML=`<div class="curve-score ${d.done?'done':''} ${d.score===0?'zero':''}">${d.score}</div><div class="curve-label">${d.label}</div><div class="curve-date">${d.dayNo?`Day ${d.dayNo}`:'—'}</div>`;item.onclick=()=>focusDay(d.dayNo);strip.appendChild(item);});
+  data.forEach(d=>{
+    const visibleScore=Math.round(visibleCats.reduce((sum,cat)=>sum+(d.cats[cat]?.completion||0),0)/visibleCats.length);
+    const item=document.createElement('div');
+    item.className=`curve-day ${d.dayNo===selectedDay?'active':''} ${d.locked?'locked':''}`;
+    item.innerHTML=`<div class="curve-score ${d.done?'done':''} ${visibleScore===0?'zero':''}">${visibleScore}</div><div class="curve-label">${d.label}</div><div class="curve-date">${d.dayNo?`Day ${d.dayNo}`:'—'}</div>`;
+    item.onclick=()=>focusDay(d.dayNo);
+    strip.appendChild(item);
+  });
   const W=900,H=230, left=42,right=12,top=10,bottom=30; const innerW=W-left-right, innerH=H-top-bottom;
-  const points=data.map((d,i)=>{const x=left + (innerW*(i/(data.length-1)));const y=top + innerH - (innerH*(d.completion/100));return {...d,x,y};});
   const gridY=[0,20,40,60,80,100];
   const gridLines=gridY.map(v=>{const y=top + innerH - (innerH*(v/100));return `<line x1="${left}" y1="${y}" x2="${W-right}" y2="${y}"></line><text class="curve-axis" x="6" y="${y+4}">${v}%</text>`;}).join('');
-  const linePath=points.map((p,i)=>`${i===0?'M':'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
-  const areaPath=`M ${points[0].x.toFixed(1)} ${top+innerH} ${points.map(p=>`L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')} L ${points[points.length-1].x.toFixed(1)} ${top+innerH} Z`;
-  const xLabels=points.filter((_,i)=>i%4===0 || i===points.length-1).map(p=>`<text class="curve-axis" x="${p.x}" y="${H-8}" text-anchor="middle">${p.label}</text>`).join('');
-  const circles=points.map(p=>`<circle class="curve-point ${p.done?'done':''} ${p.completion===0?'zero':''}" cx="${p.x}" cy="${p.y}" r="${p.dayNo===selectedDay?6:4}" data-day="${p.dayNo||''}"></circle>`).join('');
-  svg.innerHTML=`<g class="curve-grid">${gridLines}</g><path class="curve-area" d="${areaPath}"></path><path class="curve-line" d="${linePath}"></path>${circles}${xLabels}`;
+  const xLabels=data.map((d,i)=>{const x=left + (innerW*(i/(data.length-1))); return (i%4===0 || i===data.length-1)?`<text class="curve-axis" x="${x}" y="${H-8}" text-anchor="middle">${d.label}</text>`:'';}).join('');
+  const lineParts=[];
+  visibleCats.forEach(cat=>{
+    const meta=CATEGORY_META[cat] || {label:cat,color:'#3b82f6'};
+    const points=data.map((d,i)=>{const val=d.cats[cat]?.completion||0; const x=left + (innerW*(i/(data.length-1))); const y=top + innerH - (innerH*(val/100)); return {...d,x,y,val};});
+    const linePath=points.map((p,i)=>`${i===0?'M':'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
+    const circles=points.map(p=>`<circle class="curve-point" cx="${p.x}" cy="${p.y}" r="${p.dayNo===selectedDay?5:3.5}" data-day="${p.dayNo||''}" fill="${meta.color}" opacity="${p.val===0?0.45:1}"></circle>`).join('');
+    lineParts.push(`<path class="curve-line" d="${linePath}" style="stroke:${meta.color};stroke-width:${visibleCats.length===1?4:3};opacity:${visibleCats.length===1?1:.92}"></path>${circles}`);
+  });
+  const legend = visibleCats.map(cat=>{const meta=CATEGORY_META[cat]; return `<tspan fill="${meta.color}">● ${meta.label}</tspan>`;}).join('  ');
+  svg.innerHTML=`<g class="curve-grid">${gridLines}</g>${lineParts.join('')}${xLabels}<text class="curve-axis" x="${left}" y="18">${legend}</text>`;
   svg.querySelectorAll('.curve-point').forEach(el=>{el.addEventListener('click', ()=>focusDay(Number(el.dataset.day||0)));});
-  const topFocus=document.getElementById('curveFocusText'); if(topFocus) topFocus.textContent=`目前焦點：Day ${selectedDay}`;
-  const bottomFocus=document.getElementById('curveFocusTextBottom'); if(bottomFocus) bottomFocus.textContent=`目前焦點：Day ${selectedDay}`;
+  const labelText = curveCategoryMode==='all' ? '全部五大分類' : CATEGORY_META[curveCategoryMode].label;
+  const topFocus=document.getElementById('curveFocusText'); if(topFocus) topFocus.textContent=`目前焦點：Day ${selectedDay}｜${labelText}`;
+  const bottomFocus=document.getElementById('curveFocusTextBottom'); if(bottomFocus) bottomFocus.textContent=`目前焦點：Day ${selectedDay}｜${labelText}`;
 }
 function markDone(day){state.progress[day]=true;saveSaved(state.progress);if(day < state.schedule.length && state.selectedDay===day) state.selectedDay=day+1; renderAll()}
 function updateProfileUI(profile){
@@ -834,7 +936,7 @@ function initUnlockToggle(){
   });
 }
 
-const state={profile:{...DEFAULT_PROFILE},workRoadmap:[],relaxRoadmap:[],allAssets:[],unlockedList:[],progress:getSaved(),selectedDay:1,schedule:[]};
+const state={profile:{...DEFAULT_PROFILE},workRoadmap:[],relaxRoadmap:[],categoryRoadmaps:{},allAssets:[],unlockedList:[],progress:getSaved(),selectedDay:1,schedule:[]};
 function renderAll(){
   const unlockedDay=getUnlockedDay(state.progress); if(state.selectedDay>unlockedDay) state.selectedDay=unlockedDay;
   const selected=state.schedule.find(x=>x.day===state.selectedDay)||state.schedule[0];
@@ -843,7 +945,7 @@ function renderAll(){
 function renderProfileExplain(profile, filterInfo){
   const sub = document.querySelector('.hero .sub');
   if(!sub) return;
-  sub.textContent = `右邊角色路線 = 教材來源順序；左邊 14 天行事曆 = 把這些教材分配到每天。先抓 domain+role，若不足再放寬。exact=${filterInfo.exactCount}，role=${filterInfo.roleCount}。`;
+  sub.textContent = `五大分類模式：story / music / movie / news / pro 都會進入曲線與排課；不再只抓單一 role/pro。exact=${filterInfo.exactCount}，role=${filterInfo.roleCount}。`;
 }
 
 
@@ -872,12 +974,13 @@ async function bootstrap(){
     const filterInfo = hardFilterRoleItems(assets, state.profile);
     renderProfileExplain(state.profile, filterInfo);
 
-    state.workRoadmap = buildRoleRoadmap(filterInfo.items, state.profile);
+    state.categoryRoadmaps = buildCategoryRoadmaps(assets, state.profile);
+    state.workRoadmap = buildFiveCategoryRoadmap(state.categoryRoadmaps);
     state.relaxRoadmap = buildRelaxRoadmap(assets, state.profile);
-    state.schedule = buildSchedule(state.workRoadmap, state.relaxRoadmap, 14);
+    state.schedule = buildSchedule(state.categoryRoadmaps, state.relaxRoadmap, 14);
 
     if(!state.workRoadmap.length){
-      document.getElementById('timeline').innerHTML='<div class="muted" style="padding:10px 0">目前沒有符合此角色的已上架教材。請先補齊該角色教材。</div>';
+      document.getElementById('timeline').innerHTML='<div class="muted" style="padding:10px 0">目前沒有已上架教材。請先補齊 story / music / movie / news / pro 內容。</div>';
     }
 
     renderAll();
