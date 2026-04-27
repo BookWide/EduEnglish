@@ -1500,13 +1500,18 @@ function setupQuizButtons(){
       try{
         const user = await bwPlayerGetUser();
         if (user && user.email){
+          const lessonCategory = String(typeof cat !== 'undefined' ? cat : 'unknown').trim().toLowerCase() || 'unknown';
           await playerSupa
             .from('quiz_logs')
             .insert({
+              user_id: user.id,
               email: user.email,
               slug,
-              category: 'all',
-              score: s
+              category: lessonCategory,
+              score: s,
+              total_questions: t,
+              score_pct: t ? Math.round((s / t) * 100) : 0,
+              created_at: new Date().toISOString()
             });
         }
       }catch(err){
@@ -2919,15 +2924,14 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
 })();
 </script>
 
-  <!-- 播放進度寫入 watch_logs（供學習控制台使用） --> <!-- V20251124-fixed by ChatGPT -->
+  <!-- 播放進度寫入 watch_logs（供學習控制台 / 金榜排行使用） --> <!-- V20260427-score-write-fix -->
 <script>
 (function(){
-  // 需要前面已經建立好的 playerSupa / slug / <video id="player">
+  // 只修寫入資料，不改播放器畫面與原本結構
   if (typeof playerSupa === 'undefined') return;
   if (typeof slug === 'undefined') return;
-  const videoEl = document.getElementById('player');
-  if (!videoEl) return;
 
+  const videoEl = document.getElementById('player');
   const urlParams = new URLSearchParams(location.search);
   const needResume = urlParams.get('resume') === '1';
 
@@ -2936,23 +2940,56 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
   let currentLogId = null;
   let resumePct = 0;
   let lastSaveTs = 0;
-  const SAVE_GAP_MS = 5000; // 至多約 5 秒寫一次 DB
+  let watchTimer = null;
+  const SAVE_GAP_MS = 5000;
+
+  function lessonCategory(){
+    return String(typeof cat !== 'undefined' ? cat : 'unknown').trim().toLowerCase() || 'unknown';
+  }
+
+  function activeDuration(){
+    try{
+      if (typeof isUsingYouTube === 'function' && isUsingYouTube() && ytPlayer && typeof ytPlayer.getDuration === 'function'){
+        const d = Number(ytPlayer.getDuration()) || 0;
+        if (d > 0 && isFinite(d)) return d;
+      }
+    }catch(_e){}
+    try{
+      const d = Number(videoEl && videoEl.duration) || 0;
+      if (d > 0 && isFinite(d)) return d;
+    }catch(_e){}
+    return 0;
+  }
+
+  function activeCurrentTime(){
+    try{
+      if (typeof getCurrentPlaybackTime === 'function'){
+        const t = Number(getCurrentPlaybackTime()) || 0;
+        if (t >= 0 && isFinite(t)) return t;
+      }
+    }catch(_e){}
+    try{
+      const t = Number(videoEl && videoEl.currentTime) || 0;
+      if (t >= 0 && isFinite(t)) return t;
+    }catch(_e){}
+    return 0;
+  }
 
   async function initWatchLog(){
     try{
-      // 取得登入使用者
-      const { data: userData, error: userErr } = await playerSupa.auth.getUser();
-      if (userErr || !userData || !userData.user) return;
+      const user = (typeof bwPlayerGetUser === 'function')
+        ? await bwPlayerGetUser()
+        : (await playerSupa.auth.getUser())?.data?.user;
+      if (!user) return;
 
-      const user = userData.user;
       userEmail = user.email || '';
       userId = user.id;
+      if (!userId) return;
 
-      // 找這個人 + 這支影片，最後一筆觀看紀錄
       const { data: rows, error: logErr } = await playerSupa
         .from('watch_logs')
         .select('id, progress_pct, updated_at')
-        .eq('email', userEmail)
+        .eq('user_id', userId)
         .eq('video_slug', slug)
         .order('updated_at', { ascending: false })
         .limit(1);
@@ -2962,63 +2999,67 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
         resumePct = rows[0].progress_pct || 0;
       }
 
-      // 如果網址有 ?resume=1，而且有舊進度，就幫他跳到大約的位置
-      if (needResume && resumePct > 0){
+      if (needResume && resumePct > 0 && videoEl){
         const seekByPct = function(){
-          if (!videoEl.duration || !isFinite(videoEl.duration)) return;
+          const dur = activeDuration();
+          if (!dur) return;
           const pct = Math.max(0, Math.min(99, resumePct));
-          const t = videoEl.duration * pct / 100;
+          const t = dur * pct / 100;
           if (t > 3){
-            try { videoEl.currentTime = t; } catch(e){}
+            try { if (typeof setCurrentPlaybackTime === 'function') setCurrentPlaybackTime(t); else videoEl.currentTime = t; } catch(_e){}
           }
           videoEl.removeEventListener('loadedmetadata', seekByPct);
         };
         videoEl.addEventListener('loadedmetadata', seekByPct);
       }
 
-      // 看片過程中定期寫進度
-      videoEl.addEventListener('timeupdate', handleTimeUpdate);
-      // 播完一律寫 100%
-      videoEl.addEventListener('ended', function(){ saveProgress(100); });
+      if (videoEl) {
+        videoEl.addEventListener('timeupdate', handleTimeUpdate);
+        videoEl.addEventListener('ended', function(){ saveProgress(100); });
+      }
+      if (watchTimer) clearInterval(watchTimer);
+      watchTimer = setInterval(handleTimeUpdate, SAVE_GAP_MS);
 
+      document.addEventListener('visibilitychange', function(){
+        if (document.visibilityState === 'hidden') handleTimeUpdate(true);
+      });
+      window.addEventListener('beforeunload', function(){ handleTimeUpdate(true); });
     }catch(e){
       console.error('watch_logs init error', e);
     }
   }
 
   async function saveProgress(pct){
-    if (!userEmail) return;
+    if (!userId) return;
 
-    pct = Math.round(Math.max(0, Math.min(100, pct)));
+    const dur = activeDuration();
+    const cur = activeCurrentTime();
+    pct = Math.round(Math.max(0, Math.min(100, Number(pct) || 0)));
+    const watchedSeconds = Math.max(0, Math.round(dur ? (dur * pct / 100) : cur));
+
     const payload = {
+      user_id: userId,
+      email: userEmail || null,
+      video_slug: slug,
+      category: lessonCategory(),
       progress_pct: pct,
+      watched_seconds: watchedSeconds,
       updated_at: new Date().toISOString()
     };
 
-    const dur = videoEl && videoEl.duration && isFinite(videoEl.duration)
-      ? Math.round(videoEl.duration)
-      : null;
-    if (dur != null) payload.duration_sec = dur;
+    if (dur) payload.duration_sec = Math.round(dur);
 
     try{
       if (currentLogId){
-        // 已有一筆紀錄 → update 那一筆
         const { error } = await playerSupa
           .from('watch_logs')
           .update(payload)
           .eq('id', currentLogId);
         if (error) console.error('watch_logs update error', error);
       }else{
-        // 第一次看片 → insert 新的一筆
-        const insertPayload = Object.assign({
-          email: userEmail,
-          user_id: userId,
-          video_slug: slug
-        }, payload);
-
         const { data, error } = await playerSupa
           .from('watch_logs')
-          .insert(insertPayload)
+          .insert(payload)
           .select('id')
           .single();
 
@@ -3033,19 +3074,19 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     }
   }
 
-  function handleTimeUpdate(){
-    if (!videoEl || !videoEl.duration || !isFinite(videoEl.duration)) return;
+  function handleTimeUpdate(force){
+    const dur = activeDuration();
+    const cur = activeCurrentTime();
+    if (!dur && !cur) return;
 
     const now = Date.now();
-    if (now - lastSaveTs < SAVE_GAP_MS) return; // 間隔太短就先略過
+    if (!force && now - lastSaveTs < SAVE_GAP_MS) return;
     lastSaveTs = now;
 
-    const cur = videoEl.currentTime || 0;
-    const pct = (cur / videoEl.duration) * 100;
+    const pct = dur ? (cur / dur) * 100 : 0;
     saveProgress(pct);
   }
 
-  // 稍微延遲一下，讓前面的守門 / 其它程式先跑完
   if (document.readyState === 'complete' || document.readyState === 'interactive'){
     setTimeout(initWatchLog, 600);
   }else{
