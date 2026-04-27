@@ -169,7 +169,7 @@
       </div>
     </div>
 
-    <footer>BookWide · account/referral.html · v20251227-referral-no-discount+stats</footer>
+    <footer>BookWide · account/referral.html · v20260427-referrer-id-orders-stats</footer>
   </div>
 
   <div id="toast">已複製</div>
@@ -234,19 +234,41 @@
       return { email:'', code:'' };
     }
 
-    async function fetchSummary(jwt, code){
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/referral-summary`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': `Bearer ${jwt || SUPABASE_ANON_KEY}`
-        },
-        body: JSON.stringify({ referral_code: code, include_orders: true })
+    async function fetchSummaryByReferrer(sb, userId){
+      const { data, error } = await sb
+        .from('orders')
+        .select('id,total,total_cents,subtotal,unit_price,quantity,status,period,paid_at,created_at,updated_at,expire_at,referral_code,referrer_id,commission_cents')
+        .eq('referrer_id', userId)
+        .eq('status', 'paid')
+        .order('paid_at', { ascending: false });
+
+      if (error) throw error;
+
+      const rows = Array.isArray(data) ? data : [];
+      const orders = rows.map(o => {
+        let baseCents = 0;
+        if (Number(o.total_cents || 0) > 0) baseCents = Number(o.total_cents || 0);
+        else if (Number(o.total || 0) > 0) baseCents = Math.round(Number(o.total || 0) * 100);
+        else if (Number(o.subtotal || 0) > 0) baseCents = Math.round(Number(o.subtotal || 0) * 100);
+        else if (Number(o.unit_price || 0) > 0) baseCents = Math.round(Number(o.unit_price || 0) * Number(o.quantity || 1));
+
+        let commissionCents = Number(o.commission_cents || 0);
+        if (!commissionCents && baseCents > 0) commissionCents = Math.round(baseCents * 0.10);
+
+        return {
+          ...o,
+          base_cents: baseCents,
+          commission_cents: commissionCents
+        };
       });
-      const j = await res.json().catch(()=> ({}));
-      if (!res.ok || !j.ok) throw new Error(j.message || `referral-summary ${res.status}`);
-      return j;
+
+      const sumCents = orders.reduce((sum, o) => sum + Number(o.commission_cents || 0), 0);
+      return {
+        ok: true,
+        count: orders.length,
+        sum_twd: Math.round(sumCents / 100),
+        orders
+      };
     }
 
     function renderOrders(items){
@@ -303,17 +325,17 @@
       elCode.textContent = code;
       elLink.value = makeRefLink(code);
 
-      // ✅ 這裡開始統計（用後端；你現在看到 0 的主因是後端用錯欄：ref_code vs referral_code）
+      // ✅ 直接用目前登入 user.id 對 orders.referrer_id 讀統計
+      // 不再依賴 referral-summary，避免 ref_code / referral_code 舊邏輯造成 0 筆。
       try{
         statusBox.innerHTML = '⏳ 讀取統計中…';
-        const s = await fetchSummary(session.access_token, code);
-        // okCount 是含 unit 的 div，所以只改 firstChild 文字比較安全：直接整段重設
+        const s = await fetchSummaryByReferrer(SB, session.user.id);
         elOk.innerHTML = String(s.count || 0) + '<span class="unit">筆</span>';
         elSum.textContent = String((s.sum_twd || 0).toLocaleString('zh-Hant-TW'));
         renderOrders(s.orders || []);
         statusBox.innerHTML = `✅ 已更新：成功推薦 <b>${s.count||0}</b>，累積分潤 <b>${(s.sum_twd||0).toLocaleString('zh-Hant-TW')}</b> 元。`;
       }catch(e){
-        statusBox.innerHTML = `❌ 無法讀取統計：<br><span class="muted">${String(e.message||e)}</span><br><span class="muted">請確認後端 referral-summary 已支援 <code>ref_code</code> / <code>referral_code</code> 欄位。</span>`;
+        statusBox.innerHTML = `❌ 無法讀取統計：<br><span class="muted">${String(e.message||e)}</span><br><span class="muted">請確認 orders 允許登入者讀取 referrer_id = 自己的推薦訂單，或補 RLS policy。</span>`;
       }
     }
 
