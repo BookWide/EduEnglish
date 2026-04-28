@@ -215,6 +215,47 @@ tr.active{background:#173a6e;}
 .cue-en{line-height:1.6;word-break:break-word;position:relative;}
 .zh-line,.ja-line{margin-top:4px;opacity:.96;}
 
+/* === MUSIC KTV 模式：只在 cat=music 或 ?ktv=1 時啟用，不改原本結構 === */
+.ktv-line{
+  display:block;
+  font-size:18px;
+  line-height:1.75;
+  letter-spacing:.01em;
+}
+.ktv-word{
+  display:inline-block;
+  opacity:.34;
+  color:#b9c7df;
+  transition:color .12s linear, opacity .12s linear, transform .12s linear, text-shadow .12s linear;
+}
+.ktv-word.past{
+  opacity:.86;
+  color:#d8e5ff;
+}
+.ktv-word.active{
+  opacity:1;
+  color:#67e8f9;
+  transform:translateY(-1px);
+  text-shadow:0 0 10px rgba(103,232,249,.65);
+}
+tr.ktv-current{
+  background:rgba(20,83,45,.22)!important;
+  box-shadow:inset 3px 0 0 0 rgba(103,232,249,.75)!important;
+}
+.ktv-badge{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  margin-left:8px;
+  padding:2px 8px;
+  border-radius:999px;
+  background:#064e3b;
+  border:1px solid #10b981;
+  color:#d1fae5;
+  font-size:12px;
+  font-weight:700;
+}
+
 /* 去掉喇叭，只留左側高亮 */
 tr.speaking::before{content:none!important;}
 tr.speaking{
@@ -765,11 +806,98 @@ const esc=s=>String(s??'')
   .replaceAll('&','&amp;').replaceAll('<','&lt;')
   .replaceAll('>','&gt;').replaceAll('"','&quot;');
 
+/* === MUSIC KTV helpers（支援逐字 timing JSON；沒有 timing 時自動平均分配） ===
+   cues-xxx.json 可維持舊格式：{ time, en, zh, ja }
+   也可升級為：
+   {
+     "time": "00:10",
+     "en": "I love you",
+     "words": [
+       { "w": "I", "t": 0.0 },
+       { "w": "love", "t": 0.4 },
+       { "w": "you", "t": 0.8 }
+     ]
+   }
+   t/start = 句內相對秒數；若給 0~1 小數也可當比例處理。
+*/
+function BW_normalizeKtvWords(cue){
+  const raw = cue?.words || cue?.word_timings || cue?.wordTiming || cue?.ktv || cue?.lyrics_words || null;
+  if(Array.isArray(raw) && raw.length){
+    return raw.map((x, idx) => {
+      if(typeof x === 'string') return { text:x, t:null, i:idx };
+      const text = x.w ?? x.word ?? x.text ?? x.en ?? '';
+      const tRaw = x.t ?? x.start ?? x.time ?? x.offset ?? null;
+      const t = (tRaw === null || tRaw === undefined || tRaw === '') ? null : Number(tRaw);
+      return { text:String(text || ''), t:Number.isFinite(t) ? t : null, i:idx };
+    }).filter(x => x.text);
+  }
+  return String(cue?.en || '').trim().split(/(\s+)/).filter(Boolean).map((w, idx) => ({ text:w, t:null, i:idx }));
+}
+function BW_renderKtvLine(cue){
+  if(!BW_KTV_ENABLED) return esc(cue?.en || '');
+  const words = BW_normalizeKtvWords(cue);
+  if(!words.length) return esc(cue?.en || '');
+  return '<span class="ktv-line">' + words.map((w, idx) => {
+    const attrs = [
+      'class="ktv-word"',
+      'data-i="' + idx + '"'
+    ];
+    if(w.t !== null && Number.isFinite(w.t)) attrs.push('data-t="' + String(w.t) + '"');
+    return '<span ' + attrs.join(' ') + '>' + esc(w.text) + '</span>';
+  }).join('') + '</span>';
+}
+function BW_updateKtvHighlight(i){
+  if(!BW_KTV_ENABLED || !cuesBody || !cues?.length) return;
+  const row = cuesBody.querySelector(`tr[data-i="${i}"]`);
+  if(!row) return;
+  const words = row.querySelectorAll('.ktv-word');
+  if(!words.length) return;
+
+  // 清掉其他行的 KTV 高亮，保留既有字幕 active 邏輯
+  cuesBody.querySelectorAll('tr.ktv-current').forEach(tr => { if(tr !== row) tr.classList.remove('ktv-current'); });
+  cuesBody.querySelectorAll('.ktv-word.active,.ktv-word.past').forEach(w => {
+    if(!row.contains(w)){ w.classList.remove('active','past'); }
+  });
+  row.classList.add('ktv-current');
+
+  const [s,e] = sentenceRange(i);
+  const now = getCurrentPlaybackTime() + offset;
+  const duration = Math.max(0.2, e - s);
+  const elapsed = Math.max(0, now - s);
+  const ratio = Math.max(0, Math.min(1, elapsed / duration));
+  let activeIndex = -1;
+
+  words.forEach((w, idx) => {
+    const raw = w.dataset.t;
+    let trigger;
+    if(raw !== undefined && raw !== ''){
+      const n = Number(raw);
+      // 0~1 可當比例；大於 1 當句內秒數
+      trigger = n;
+    }else{
+      trigger = (idx / Math.max(1, words.length)) * duration;
+    }
+    if(elapsed + 0.03 >= trigger) activeIndex = idx;
+  });
+
+  words.forEach((w, idx) => {
+    w.classList.toggle('past', idx < activeIndex);
+    w.classList.toggle('active', idx === activeIndex);
+  });
+}
+function BW_clearKtvHighlight(){
+  if(!cuesBody) return;
+  cuesBody.querySelectorAll('tr.ktv-current').forEach(tr => tr.classList.remove('ktv-current'));
+  cuesBody.querySelectorAll('.ktv-word.active,.ktv-word.past').forEach(w => w.classList.remove('active','past'));
+}
+
 const params=new URLSearchParams(location.search);
 const paramBase=params.get('base');
 // BASE：若網址帶 ?base= 則優先，其次依 ROOT_BASE（/EduEnglish 或空字串）
 const BASE = (paramBase!=null ? paramBase : ROOT_BASE);
 const cat =(params.get('cat')||'story').toLowerCase();
+// MUSIC 專用 KTV：預設 cat=music 開啟；其他類別可用 ?ktv=1 測試。
+const BW_KTV_ENABLED = (cat === 'music') || ['1','true','yes','on'].includes(String(params.get('ktv') || '').toLowerCase());
 function normalizeSlug(v=''){
   return String(v || '').trim().toLowerCase().replaceAll('_','-');
 }
@@ -1040,6 +1168,7 @@ function handlePlaybackTick(){
 
   const i = currentIndex();
   highlightRow(i, chkFollow && chkFollow.checked);
+  BW_updateKtvHighlight(i);
 
   // 跟隨：勾選後，自動在句尾跳到下一句並持續播放
   if(chkFollow && chkFollow.checked && !loopSentence){
@@ -1250,12 +1379,19 @@ async function loadCues(){
     const url = hit.url;
     const data = hit.data;
     cues=(Array.isArray(data)?data:(data.cues||[]))
-      .map(x=>({t:toSec(x.time),en:x.en||'',zh:x.zh||'',ja:x.ja||'',source_url:x.source_url||''}));
+      .map(x=>({
+        t:toSec(x.time),
+        en:x.en||'',
+        zh:x.zh||'',
+        ja:x.ja||'',
+        source_url:x.source_url||'',
+        words:x.words || x.word_timings || x.wordTiming || x.ktv || x.lyrics_words || null
+      }));
     cuesBody.innerHTML=cues.map((c,i)=>`
       <tr data-i="${i}" style="position:relative">
         <td class="cue-time">${c.t?fmt(c.t):''}</td>
         <td class="cue-en">
-          <span class="en-line">${esc(c.en)}</span>
+          <span class="en-line">${BW_renderKtvLine(c)}</span>
           ${c.zh?`<div class="zh-line">${esc(c.zh)}</div>`:''}
           ${c.ja?`<div class="ja-line">${esc(c.ja)}</div>`:''}
         </td>
@@ -1275,7 +1411,7 @@ async function loadCues(){
 <div style="display:flex;flex-direction:column;gap:4px;">
   
   <div style="display:flex;justify-content:space-between;">
-    <span>（json 已載入）</span>
+    <span>（json 已載入）${BW_KTV_ENABLED ? '<span class="ktv-badge">MUSIC KTV</span>' : ''}</span>
     <span>影片來源：<a href="${safe}" target="_blank" rel="noopener">YouTube 原始影片</a></span>
   </div>
 
@@ -1286,7 +1422,7 @@ async function loadCues(){
 </div>
 `;
     }else{
-      cuesStatus.textContent='（json 已載入）';
+      cuesStatus.textContent = BW_KTV_ENABLED ? '（json 已載入） MUSIC KTV 模式' : '（json 已載入）';
     }
   }catch(e){
     console.warn(e);
