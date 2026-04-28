@@ -1092,6 +1092,23 @@ const talkAutoNext=$('#talkAutoNext'), talkAutoSlow=$('#talkAutoSlow'), talkRate
 if(talkRateRange) talkRateRange.value = String(TALK_RATE);
 if(talkRateVal) talkRateVal.textContent = TALK_RATE.toFixed(1) + 'x';
 
+let BW_MUSIC_SINGALONG_PLAYING = false;
+function BW_setSingalongButtonState(isOn){
+  BW_MUSIC_SINGALONG_PLAYING = !!isOn;
+  const btn = document.getElementById('btnTalkStartTurn');
+  if(btn && cat === 'music'){
+    btn.textContent = BW_MUSIC_SINGALONG_PLAYING ? '⏸ 停止跟唱' : '▶ 開始跟唱';
+    btn.classList.toggle('blue', BW_MUSIC_SINGALONG_PLAYING);
+  }
+}
+function BW_stopAllTalkAndMedia(){
+  try{ stopTalkRecognition(); }catch(_e){}
+  try{ window.speechSynthesis && window.speechSynthesis.cancel(); }catch(_e){}
+  try{ pauseActive(); }catch(_e){}
+  BW_setSingalongButtonState(false);
+  try{ BW_updateTalkKtvHighlight(); }catch(_e){}
+}
+
 // MUSIC：Talk 分頁改成跟唱語氣；沒有 dialogue.json 也會用 cues 自動生成。
 try{
   if(cat === 'music'){
@@ -1243,7 +1260,14 @@ function handlePlaybackTick(){
   }
 }
 
-async function loadVideo(){
+async 
+try{
+  video.addEventListener('play', ()=>{ if(cat === 'music') BW_setSingalongButtonState(true); });
+  video.addEventListener('pause', ()=>{ if(cat === 'music') BW_setSingalongButtonState(false); });
+  video.addEventListener('ended', ()=>{ if(cat === 'music') BW_setSingalongButtonState(false); });
+}catch(_e){}
+
+function loadVideo(){
   const SUPA_PUBLIC_BASE = 'https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public';
   const SUPA_VIDEOS_BASE = SUPA_PUBLIC_BASE + '/videos';
 
@@ -1367,10 +1391,14 @@ async function loadVideo(){
           onStateChange: (ev) => {
             if (window.YT && ev.data === YT.PlayerState.PLAYING) {
               ytStarted = true;
+              if (cat === 'music') BW_setSingalongButtonState(true);
               if (ytStartTimer) {
                 clearTimeout(ytStartTimer);
                 ytStartTimer = null;
               }
+            }
+            if (window.YT && (ev.data === YT.PlayerState.PAUSED || ev.data === YT.PlayerState.ENDED)) {
+              if (cat === 'music') BW_setSingalongButtonState(false);
             }
           },
           onError: () => {
@@ -2202,26 +2230,38 @@ function startTalkRecognition(){
 function stopTalkRecognition(){
   if(talkRecognition){
     try{ talkRecognition.stop(); }catch(_e){}
+    try{ talkRecognition.abort && talkRecognition.abort(); }catch(_e){}
   }
+  talkRecognition = null;
 }
 function startTalkTurn(){
   const item = talkData[talkCurrentIdx];
   if(!item) return;
 
-  // MUSIC 跟唱：按「開始跟唱」時，左側影片同步播放，右側目前練習文字同步跳色，並開麥克風比對。
+  // MUSIC 跟唱：
+  // 1)「開始跟唱」只控制左側影片播放 / 暫停，不開麥克風。
+  // 2) 再按一次「開始跟唱」會停止左側影片。
+  // 3)「我來唱」才單獨啟動麥克風辨識打分，不會啟動左側影片。
   if(cat === 'music'){
     try{
+      if(!activePaused()){
+        pauseActive();
+        BW_setSingalongButtonState(false);
+        BW_updateTalkKtvHighlight();
+        return;
+      }
+
       const now = getCurrentPlaybackTime();
       const start = Number(item.sec) || 0;
       const next = talkData[talkCurrentIdx + 1];
       const end = next ? Number(next.sec || start + 5) : start + 8;
-      if(activePaused() || now < start - 0.5 || now > end + 0.5){
+      if(now < start - 0.5 || now > end + 0.5){
         setCurrentPlaybackTime(Math.max(0, start + 0.001));
       }
       playActive();
+      BW_setSingalongButtonState(true);
       BW_updateTalkKtvHighlight();
     }catch(_e){}
-    startTalkRecognition();
     return;
   }
 
@@ -2259,7 +2299,7 @@ function renderTalkCurrent(){
   const item = talkData[talkCurrentIdx] || talkData[0];
   const roleBadge = `<span class="chip" style="margin-left:8px">${esc(item.role)}</span>`;
   let helper = (cat === 'music')
-    ? '模式：跟唱。按「開始跟唱」或「我來唱」，瀏覽器會聽你的聲音並比對目前歌詞。'
+    ? '模式：跟唱。「開始跟唱」只播放/停止左側影片；「我來唱」只開麥克風辨識打分；「停止」會全部停止。'
     : '模式：跟讀。可用「跳句 / 朗讀 / 上一句 / 下一句」練習。';
   if(talkMode === 'roleplay'){
     if(talkSelectedRole){
@@ -2393,8 +2433,8 @@ talkModeShadowBtn?.addEventListener('click', ()=>setTalkMode('shadow'));
 talkModeRoleplayBtn?.addEventListener('click', ()=>setTalkMode('roleplay'));
 talkRoleSelect?.addEventListener('change', ()=>{ talkSelectedRole = talkRoleSelect.value || ''; renderTalkCurrent(); });
 btnTalkStartTurn?.addEventListener('click', ()=> startTalkTurn());
-btnTalkSpeakMic?.addEventListener('click', ()=>{ if(cat === 'music') startTalkTurn(); else startTalkRecognition(); });
-btnTalkStopMic?.addEventListener('click', ()=> stopTalkRecognition());
+btnTalkSpeakMic?.addEventListener('click', ()=>{ if(cat === 'music') startTalkRecognition(); else startTalkRecognition(); });
+btnTalkStopMic?.addEventListener('click', ()=>{ if(cat === 'music') BW_stopAllTalkAndMedia(); else stopTalkRecognition(); });
 btnTalkSpeakLine?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.text || '', 'en-US'); });
 btnTalkSpeakZh?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.zh || '', 'zh-TW'); });
 btnTalkSpeakJa?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.ja || '', 'ja-JP'); });
@@ -2403,6 +2443,23 @@ btnTalkNext?.addEventListener('click', ()=> setTalkCurrent(talkCurrentIdx + 1, t
 talkRateRange?.addEventListener('input', ()=>{
   TALK_RATE = Number(talkRateRange.value)||0.8;
   if(talkRateVal) talkRateVal.textContent = TALK_RATE.toFixed(1) + 'x';
+
+let BW_MUSIC_SINGALONG_PLAYING = false;
+function BW_setSingalongButtonState(isOn){
+  BW_MUSIC_SINGALONG_PLAYING = !!isOn;
+  const btn = document.getElementById('btnTalkStartTurn');
+  if(btn && cat === 'music'){
+    btn.textContent = BW_MUSIC_SINGALONG_PLAYING ? '⏸ 停止跟唱' : '▶ 開始跟唱';
+    btn.classList.toggle('blue', BW_MUSIC_SINGALONG_PLAYING);
+  }
+}
+function BW_stopAllTalkAndMedia(){
+  try{ stopTalkRecognition(); }catch(_e){}
+  try{ window.speechSynthesis && window.speechSynthesis.cancel(); }catch(_e){}
+  try{ pauseActive(); }catch(_e){}
+  BW_setSingalongButtonState(false);
+  try{ BW_updateTalkKtvHighlight(); }catch(_e){}
+}
   localStorage.setItem('BW_TALK_RATE', String(TALK_RATE));
 });
 
