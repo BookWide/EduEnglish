@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器（MUSIC KTV 間距修正版）</title>
+<title>BookWide 播放器（MUSIC KTV 跟唱同步版）</title>
 
 <style>
 :root{
@@ -244,6 +244,28 @@ tr.ktv-current{
   background:rgba(20,83,45,.22)!important;
   box-shadow:inset 3px 0 0 0 rgba(103,232,249,.75)!important;
 }
+
+/* MUSIC Talk 跟唱：目前練習卡片也跟影片同步跳字 */
+.talk-ktv-line{
+  display:inline;
+  line-height:1.65;
+}
+.talk-ktv-word{
+  opacity:.36;
+  margin-right:.32em;
+  transition:all .12s linear;
+}
+.talk-ktv-word:last-child{ margin-right:0; }
+.talk-ktv-word.past{
+  opacity:.70;
+  color:#9fb0c9;
+}
+.talk-ktv-word.active{
+  opacity:1;
+  color:#67e8f9;
+  text-shadow:0 0 9px rgba(103,232,249,.75);
+}
+
 .ktv-badge{
   display:inline-flex;
   align-items:center;
@@ -1192,6 +1214,7 @@ function handlePlaybackTick(){
   const i = currentIndex();
   highlightRow(i, chkFollow && chkFollow.checked);
   BW_updateKtvHighlight(i);
+  BW_updateTalkKtvHighlight();
 
   // 跟隨：勾選後，自動在句尾跳到下一句並持續播放
   if(chkFollow && chkFollow.checked && !loopSentence){
@@ -1987,11 +2010,62 @@ async function loadAI(){
 })();
 
 /* ==== Talk：右側分頁讀 dialogue.json ==== */
+
+function BW_findCueIndexBySec(sec){
+  if(!Array.isArray(cues) || !cues.length) return -1;
+  const t = Number(sec) || 0;
+  let idx = 0;
+  for(let i=0;i<cues.length;i++){
+    if(Number(cues[i].t || 0) <= t + 0.05) idx = i;
+    else break;
+  }
+  return idx;
+}
+function BW_renderTalkKtvLine(item){
+  if(cat !== 'music') return esc(item?.text || '');
+  let cue = null;
+  if(Number.isFinite(Number(item?.cueIndex)) && cues[Number(item.cueIndex)]) cue = cues[Number(item.cueIndex)];
+  if(!cue && Number.isFinite(Number(item?.idx)) && cues[Number(item.idx)]) cue = cues[Number(item.idx)];
+  if(!cue) cue = cues[BW_findCueIndexBySec(item?.sec)] || null;
+  const base = cue ? {...cue, en:(item?.text || cue.en || '')} : {en:(item?.text || '')};
+  const words = BW_normalizeKtvWords(base);
+  if(!words.length) return esc(item?.text || '');
+  return '<span class="talk-ktv-line">' + words.map((w, idx) => {
+    const attrs = ['class="talk-ktv-word"','data-i="' + idx + '"'];
+    if(w.t !== null && Number.isFinite(w.t)) attrs.push('data-t="' + String(w.t) + '"');
+    return '<span ' + attrs.join(' ') + '>' + esc(w.text) + '</span>';
+  }).join('') + '</span>';
+}
+function BW_updateTalkKtvHighlight(){
+  if(cat !== 'music' || !talkCurrentCard || !talkData?.length) return;
+  const words = talkCurrentCard.querySelectorAll('.talk-ktv-word');
+  if(!words.length) return;
+  const item = talkData[talkCurrentIdx] || talkData[0];
+  let i = Number.isFinite(Number(item?.cueIndex)) ? Number(item.cueIndex) : BW_findCueIndexBySec(item?.sec);
+  if(i < 0) i = currentIndex();
+  const [s,e] = sentenceRange(i);
+  const now = getCurrentPlaybackTime() + offset;
+  const duration = Math.max(0.2, e - s);
+  const elapsed = Math.max(0, now - s);
+  let activeIndex = -1;
+  words.forEach((w, idx) => {
+    const raw = w.dataset.t;
+    let trigger;
+    if(raw !== undefined && raw !== '') trigger = Number(raw);
+    else trigger = (idx / Math.max(1, words.length)) * duration;
+    if(elapsed + 0.03 >= trigger) activeIndex = idx;
+  });
+  words.forEach((w, idx) => {
+    w.classList.toggle('past', idx < activeIndex);
+    w.classList.toggle('active', idx === activeIndex);
+  });
+}
 function normalizeTalkItem(item, idx){
   const t = item.time || item.start || item.t0 || item.t || 0;
   const sec = typeof t === 'number' ? t : toSec(String(t).trim());
   return {
     idx,
+    cueIndex: Number.isFinite(Number(item.cueIndex)) ? Number(item.cueIndex) : idx,
     role: String(item.role || item.speaker || 'speaker').trim() || 'speaker',
     text: String(item.text || item.line_en || item.en || '').trim(),
     zh: String(item.zh || item.line_zh || item.cn || '').trim(),
@@ -2006,6 +2080,7 @@ function buildTalkItemsFromCuesForMusic(){
   if(cat !== 'music' || !Array.isArray(cues) || !cues.length) return [];
   return cues.map((c, idx) => ({
     idx,
+    cueIndex: idx,
     role: 'Singer',
     text: String(c.en || '').trim(),
     zh: String(c.zh || '').trim(),
@@ -2132,6 +2207,24 @@ function stopTalkRecognition(){
 function startTalkTurn(){
   const item = talkData[talkCurrentIdx];
   if(!item) return;
+
+  // MUSIC 跟唱：按「開始跟唱」時，左側影片同步播放，右側目前練習文字同步跳色，並開麥克風比對。
+  if(cat === 'music'){
+    try{
+      const now = getCurrentPlaybackTime();
+      const start = Number(item.sec) || 0;
+      const next = talkData[talkCurrentIdx + 1];
+      const end = next ? Number(next.sec || start + 5) : start + 8;
+      if(activePaused() || now < start - 0.5 || now > end + 0.5){
+        setCurrentPlaybackTime(Math.max(0, start + 0.001));
+      }
+      playActive();
+      BW_updateTalkKtvHighlight();
+    }catch(_e){}
+    startTalkRecognition();
+    return;
+  }
+
   if(talkMode === 'roleplay' && talkSelectedRole && item.role !== talkSelectedRole){
     speakText(item.text || '', 'en-US');
     if(talkAutoNext?.checked){
@@ -2182,12 +2275,13 @@ function renderTalkCurrent(){
       <div style="font-size:12px;color:var(--muted)">目前練習</div>
       <div style="font-size:12px;color:var(--muted)">${esc(item.time)} ${roleBadge}</div>
     </div>
-    <div style="font-size:20px;font-weight:700;margin-top:8px;line-height:1.55;">${esc(item.text) || '—'}</div>
+    <div style="font-size:20px;font-weight:700;margin-top:8px;line-height:1.55;">${BW_renderTalkKtvLine(item) || '—'}</div>
     <div style="margin-top:10px;color:#dce7ff;line-height:1.6;">${esc(item.zh) || '—'}</div>
     <div style="margin-top:6px;color:#c8d5ef;line-height:1.6;">${esc(item.ja) || '—'}</div>
     <div style="margin-top:12px;color:var(--muted)">${helper}</div>`;
   if(talkCounter) talkCounter.textContent = `第 ${talkCurrentIdx+1}/${talkData.length} 句`;
   updateTalkSpeechBox(talkSpeechText?.textContent?.replace(/^辨識文字：/,'').trim() === '—' ? '' : (talkSpeechText?.textContent||'').replace(/^辨識文字：/,'').trim(), (talkSpeechScore?.textContent||'').replace(/^相似度：/,'').trim() || '—');
+  BW_updateTalkKtvHighlight();
 }
 function renderTalkList(){
   if(!talkList) return;
@@ -2299,7 +2393,7 @@ talkModeShadowBtn?.addEventListener('click', ()=>setTalkMode('shadow'));
 talkModeRoleplayBtn?.addEventListener('click', ()=>setTalkMode('roleplay'));
 talkRoleSelect?.addEventListener('change', ()=>{ talkSelectedRole = talkRoleSelect.value || ''; renderTalkCurrent(); });
 btnTalkStartTurn?.addEventListener('click', ()=> startTalkTurn());
-btnTalkSpeakMic?.addEventListener('click', ()=> startTalkRecognition());
+btnTalkSpeakMic?.addEventListener('click', ()=>{ if(cat === 'music') startTalkTurn(); else startTalkRecognition(); });
 btnTalkStopMic?.addEventListener('click', ()=> stopTalkRecognition());
 btnTalkSpeakLine?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.text || '', 'en-US'); });
 btnTalkSpeakZh?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.zh || '', 'zh-TW'); });
