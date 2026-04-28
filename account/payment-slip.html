@@ -12,6 +12,7 @@
   @media(max-width:720px){.grid{grid-template-columns:1fr}.row{grid-template-columns:120px 1fr}.paper{padding:18px}.title{font-size:26px}}
   @media print{body{background:white}.wrap{max-width:none;margin:0;padding:0}.top,.hide-print{display:none!important}.paper{box-shadow:none;border:0;border-radius:0;padding:0}.print-only{display:block}.box{break-inside:avoid}.note{break-inside:avoid}a{color:inherit;text-decoration:none}}
 </style>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <div class="wrap">
@@ -21,6 +22,7 @@
       <a class="btn secondary" href="/pricing.html">返回方案頁</a>
       <button class="btn secondary" id="copySlip">複製付款資料</button>
       <button class="btn" onclick="window.print()">列印付款單</button>
+      <button class="btn" id="submitRequest" type="button">送出訂閱申請</button>
     </div>
   </div>
 
@@ -65,6 +67,16 @@
       </div>
     </div>
 
+
+    <div class="box hide-print" style="margin-top:14px">
+      <h3>送出訂閱申請</h3>
+      <p class="foot" style="margin-top:0">付款完成後，請填付款後五碼、截圖檔名或 LINE 訊息時間，再按「送出訂閱申請」。後台確認後會自動開通、發金幣並寄出通知信。</p>
+      <div class="row"><div class="k">付款方式</div><div class="v"><select id="paymentMethod" style="width:100%;padding:10px;border:1px solid #dbe3ef;border-radius:10px"><option value="銀行轉帳">銀行轉帳</option><option value="LINE Pay / LINE 轉帳">LINE Pay / LINE 轉帳</option><option value="其他人工付款">其他人工付款</option></select></div></div>
+      <div class="row"><div class="k">付款後五碼/截圖</div><div class="v"><input id="paymentRef" type="text" placeholder="例如：11500、截圖檔名、LINE 訊息時間" style="width:100%;padding:10px;border:1px solid #dbe3ef;border-radius:10px"></div></div>
+      <div class="row"><div class="k">補充備註</div><div class="v"><textarea id="customerNote" placeholder="可填入轉帳時間、付款人姓名、LINE 名稱等" style="width:100%;min-height:72px;padding:10px;border:1px solid #dbe3ef;border-radius:10px"></textarea></div></div>
+      <div id="submitStatus" class="note" style="margin-top:10px">尚未送出。送出後後台會看到你的申請。</div>
+    </div>
+
     <div class="note">
       <b>付款回報格式</b><br>
       <span id="reportText"></span>
@@ -74,6 +86,11 @@
   </section>
 </div>
 <script>
+const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+const REQUEST_FUNCTION_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/subscription-request';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
 const PLAN = {
   month: {label:'月繳 NT$1000 / 學習會員', amount:'NT$1000', days:'30 天', coins:'50 金幣'},
   half: {label:'半年 NT$5400 / 學習會員', amount:'NT$5400', days:'180 天', coins:'330 金幣'},
@@ -112,6 +129,59 @@ document.getElementById('copySlip').addEventListener('click', async ()=>{
   try{ await navigator.clipboard.writeText(buildReport()); alert('已複製付款資料'); }
   catch(e){ alert(buildReport()); }
 });
+
+async function fillLoginEmail(){
+  const { data } = await sb.auth.getUser();
+  const user = data?.user || null;
+  if(user?.email && !email){
+    document.getElementById('email').textContent = user.email;
+  }
+}
+
+function amountNumber(){ return Number(String(amount).replace(/[^0-9]/g,'')) || (planKey==='year'?9600:planKey==='half'?5400:1000); }
+function daysNumber(){ return Number(String(days).replace(/[^0-9]/g,'')) || (planKey==='year'?365:planKey==='half'?180:30); }
+function coinsNumber(){ return Number(String(coins).replace(/[^0-9]/g,'')) || (planKey==='year'?720:planKey==='half'?330:50); }
+
+document.getElementById('submitRequest')?.addEventListener('click', async ()=>{
+  const box = document.getElementById('submitStatus');
+  try{
+    const { data: sess } = await sb.auth.getSession();
+    const token = sess?.session?.access_token;
+    const loginEmail = sess?.session?.user?.email || email || '';
+    if(!token){ alert('請先登入後再送出訂閱申請。'); return; }
+    if(!loginEmail){ alert('找不到登入 Email。'); return; }
+    if(!document.getElementById('paymentRef').value.trim()){
+      if(!confirm('尚未填付款後五碼或截圖說明，仍要送出嗎？')) return;
+    }
+    box.textContent = '送出中…';
+    const res = await fetch(REQUEST_FUNCTION_URL, {
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`,'apikey':SUPABASE_ANON_KEY},
+      body: JSON.stringify({
+        action:'submit',
+        email: loginEmail,
+        plan: planKey,
+        planLabel: label,
+        amount: amountNumber(),
+        days: daysNumber(),
+        coins: coinsNumber(),
+        referralCode: ref && ref !== '無' ? ref : '',
+        paymentMethod: document.getElementById('paymentMethod').value,
+        paymentTime: new Date().toISOString(),
+        paymentRef: document.getElementById('paymentRef').value.trim(),
+        slipNo,
+        customerNote: document.getElementById('customerNote').value.trim(),
+      })
+    });
+    const j = await res.json().catch(()=>({}));
+    if(!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    box.innerHTML = `✅ 已送出訂閱申請。<br>申請編號：<span class="mono">${j.request_id}</span><br>後台確認入帳後會開通、發金幣並寄出通知信。`;
+    document.getElementById('submitRequest').disabled = true;
+  }catch(e){
+    box.innerHTML = `❌ 送出失敗：${String(e.message || e)}`;
+  }
+});
+fillLoginEmail();
 </script>
 </body>
 </html>
