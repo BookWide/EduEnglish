@@ -447,6 +447,24 @@ tr.speaking{
   display:block;
 }
 
+
+/* === MUSIC KTV 音訊切換：原唱 / KTV弱化 / 靜音（最小改動） === */
+#btnKtvAudioMode{
+  border-color:#2c5aa3;
+  background:#14335f;
+  min-width:92px;
+}
+#btnKtvAudioMode.ktv{
+  background:#064e3b;
+  border-color:#10b981;
+  color:#d1fae5;
+}
+#btnKtvAudioMode.mute{
+  background:#3b0a0a;
+  border-color:#ef4444;
+  color:#fee2e2;
+}
+
 </style>
 
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
@@ -661,6 +679,7 @@ function BW_playerStopIdleLogout(){
             <button class="btn" id="btnOffsetMinus">-0.5s</button>
             <button class="btn" id="btnOffsetPlus">+0.5s</button>
             <button class="btn" id="btnAutoSync">🧭 簡易校準</button>
+            <button class="btn" id="btnKtvAudioMode" type="button" title="原唱 / KTV弱化 / 靜音">🎤 原唱</button>
           </div>
           <div class="row" style="gap:10px">
             <span class="muted">速度</span>
@@ -1185,6 +1204,120 @@ function setPlaybackRateActive(rate){
   }
   video.playbackRate=r;
 }
+
+
+/* === MUSIC KTV 音訊切換：原唱 → KTV弱化 → 靜音 ===
+   注意：YouTube/已混音影片無法真正移除人聲；KTV 模式會盡量弱化人聲區/降低原唱感。
+   HTML5 MP4：使用 WebAudio bandstop 弱化中頻人聲。
+   YouTube：受瀏覽器限制，只能用音量切換近似處理。
+*/
+let BW_KTV_AUDIO_MODE = 0; // 0=原唱, 1=KTV弱化, 2=靜音
+let BW_KTV_AUDIO_CTX = null;
+let BW_KTV_AUDIO_SRC = null;
+let BW_KTV_AUDIO_FILTER = null;
+let BW_KTV_AUDIO_GAIN = null;
+let BW_KTV_AUDIO_READY = false;
+let BW_KTV_AUDIO_FAILED = false;
+
+function BW_initKtvAudioGraph(){
+  if(BW_KTV_AUDIO_READY || BW_KTV_AUDIO_FAILED) return BW_KTV_AUDIO_READY;
+  try{
+    if(!video) return false;
+    // 讓可跨域的 MP4 儘量可進 WebAudio；YouTube iframe 不適用。
+    try{ video.crossOrigin = video.crossOrigin || 'anonymous'; }catch(_e){}
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if(!AC) throw new Error('AudioContext unsupported');
+    BW_KTV_AUDIO_CTX = BW_KTV_AUDIO_CTX || new AC();
+    BW_KTV_AUDIO_SRC = BW_KTV_AUDIO_SRC || BW_KTV_AUDIO_CTX.createMediaElementSource(video);
+    BW_KTV_AUDIO_FILTER = BW_KTV_AUDIO_CTX.createBiquadFilter();
+    BW_KTV_AUDIO_FILTER.type = 'bandstop';
+    BW_KTV_AUDIO_FILTER.frequency.value = 1200;
+    BW_KTV_AUDIO_FILTER.Q.value = 1.2;
+    BW_KTV_AUDIO_GAIN = BW_KTV_AUDIO_CTX.createGain();
+    BW_KTV_AUDIO_SRC.connect(BW_KTV_AUDIO_FILTER);
+    BW_KTV_AUDIO_FILTER.connect(BW_KTV_AUDIO_GAIN);
+    BW_KTV_AUDIO_GAIN.connect(BW_KTV_AUDIO_CTX.destination);
+    BW_KTV_AUDIO_READY = true;
+    return true;
+  }catch(err){
+    console.warn('[KTV-AUDIO] WebAudio unavailable, fallback to volume only', err);
+    BW_KTV_AUDIO_FAILED = true;
+    return false;
+  }
+}
+
+function BW_setKtvAudioButtonLabel(){
+  const btn = document.getElementById('btnKtvAudioMode');
+  if(!btn) return;
+  btn.classList.remove('ktv','mute');
+  if(BW_KTV_AUDIO_MODE === 0){ btn.textContent = '🎤 原唱'; }
+  if(BW_KTV_AUDIO_MODE === 1){ btn.textContent = '🎛 KTV'; btn.classList.add('ktv'); }
+  if(BW_KTV_AUDIO_MODE === 2){ btn.textContent = '🔇 靜音'; btn.classList.add('mute'); }
+}
+
+function BW_applyKtvAudioMode(){
+  const mode = BW_KTV_AUDIO_MODE;
+  BW_setKtvAudioButtonLabel();
+
+  // YouTube iframe：不能抽出音軌做去人聲，只能調音量/靜音。
+  if(isUsingYouTube()){
+    try{
+      if(mode === 0){ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(100); }
+      if(mode === 1){ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(45); }
+      if(mode === 2){ ytPlayer.mute && ytPlayer.mute(); }
+    }catch(_e){}
+    return;
+  }
+
+  // HTML5 MP4：能用 WebAudio 時弱化中頻；不能用時退回音量模式。
+  try{
+    video.muted = (mode === 2);
+    if(mode === 0){
+      video.volume = 1;
+      if(BW_KTV_AUDIO_READY && BW_KTV_AUDIO_GAIN){
+        BW_KTV_AUDIO_GAIN.gain.value = 1;
+        BW_KTV_AUDIO_FILTER.frequency.value = 1200;
+        BW_KTV_AUDIO_FILTER.Q.value = 0.7;
+      }
+      return;
+    }
+    if(mode === 1){
+      video.volume = 1;
+      if(BW_initKtvAudioGraph() && BW_KTV_AUDIO_GAIN){
+        if(BW_KTV_AUDIO_CTX && BW_KTV_AUDIO_CTX.state === 'suspended') BW_KTV_AUDIO_CTX.resume().catch(()=>{});
+        BW_KTV_AUDIO_GAIN.gain.value = 1;
+        BW_KTV_AUDIO_FILTER.frequency.value = 1200;
+        BW_KTV_AUDIO_FILTER.Q.value = 1.8;
+      }else{
+        video.volume = 0.45;
+      }
+      return;
+    }
+    if(mode === 2){
+      video.muted = true;
+      if(BW_KTV_AUDIO_READY && BW_KTV_AUDIO_GAIN) BW_KTV_AUDIO_GAIN.gain.value = 0;
+    }
+  }catch(err){
+    console.warn('[KTV-AUDIO] apply failed', err);
+  }
+}
+
+function BW_cycleKtvAudioMode(){
+  BW_KTV_AUDIO_MODE = (BW_KTV_AUDIO_MODE + 1) % 3;
+  try{ localStorage.setItem('BW_KTV_AUDIO_MODE', String(BW_KTV_AUDIO_MODE)); }catch(_e){}
+  BW_applyKtvAudioMode();
+}
+
+document.addEventListener('DOMContentLoaded', ()=>{
+  const btn = document.getElementById('btnKtvAudioMode');
+  if(btn){
+    // 只在 music 類別顯示；其他類別保留原播放器乾淨。
+    if(cat !== 'music') btn.style.display = 'none';
+    try{ BW_KTV_AUDIO_MODE = Number(localStorage.getItem('BW_KTV_AUDIO_MODE') || '0') || 0; }catch(_e){ BW_KTV_AUDIO_MODE = 0; }
+    BW_setKtvAudioButtonLabel();
+    btn.addEventListener('click', BW_cycleKtvAudioMode);
+  }
+});
 function showHtml5(){
   activeSource='html5';
   if(ytStartTimer){ clearTimeout(ytStartTimer); ytStartTimer=null; }
@@ -1193,6 +1326,7 @@ function showHtml5(){
   if(ytWrap) ytWrap.style.display='none';
   video.style.display='block';
   video.controls=true;
+  try{ BW_applyKtvAudioMode && BW_applyKtvAudioMode(); }catch(_e){}
 }
 function showYouTube(){
   activeSource='youtube';
@@ -1202,6 +1336,7 @@ function showYouTube(){
   video.controls=false;
   if(ytTickTimer) clearInterval(ytTickTimer);
   ytTickTimer=setInterval(handlePlaybackTick, 250);
+  try{ BW_applyKtvAudioMode && BW_applyKtvAudioMode(); }catch(_e){}
 }
 function loadYouTubeApi(){
   return new Promise((resolve,reject)=>{
@@ -1385,6 +1520,7 @@ async function loadVideo(){
               const r = Number(speedRange?.value || 1) || 1;
               try { ev.target.setPlaybackRate(r); } catch(_e) {}
               ev.target.playVideo();
+              try{ BW_applyKtvAudioMode && BW_applyKtvAudioMode(); }catch(_e){}
             } catch(_e) {}
           },
           onStateChange: (ev) => {
