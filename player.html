@@ -1206,44 +1206,62 @@ function setPlaybackRateActive(rate){
 }
 
 
-/* === MUSIC KTV 音訊切換：原唱 → KTV弱化 → 靜音 ===
-   注意：YouTube/已混音影片無法真正移除人聲；KTV 模式會盡量弱化人聲區/降低原唱感。
-   HTML5 MP4：使用 WebAudio bandstop 弱化中頻人聲。
-   YouTube：受瀏覽器限制，只能用音量切換近似處理。
+/* === MUSIC KTV 音源切換：原唱 MP4 → 伴奏 MP4 → 靜音 ===
+   這版不是「弱化人聲」，而是真正切到 assets.karaoke_url / karaoke_video / karaoke。
+   若 DB 沒給 karaoke_url，會用 mp4_url 自動推導 xxx_karaoke.mp4。
 */
-let BW_KTV_AUDIO_MODE = 0; // 0=原唱, 1=KTV弱化, 2=靜音
-let BW_KTV_AUDIO_CTX = null;
-let BW_KTV_AUDIO_SRC = null;
-let BW_KTV_AUDIO_FILTER = null;
-let BW_KTV_AUDIO_GAIN = null;
-let BW_KTV_AUDIO_READY = false;
-let BW_KTV_AUDIO_FAILED = false;
+let BW_KTV_AUDIO_MODE = 0; // 0=原唱, 1=伴奏, 2=靜音
+let BW_ORIGINAL_MP4_URL = '';
+let BW_KARAOKE_MP4_URL = '';
+let BW_LAST_SOURCE_IS_KARAOKE = false;
 
-function BW_initKtvAudioGraph(){
-  if(BW_KTV_AUDIO_READY || BW_KTV_AUDIO_FAILED) return BW_KTV_AUDIO_READY;
+function BW_pickKaraokeUrl(row){
+  const r = row || window.__ASSET_ROW__ || {};
+  const direct = String(r.karaoke_url || r.karaoke_video || r.karaoke || '').trim();
+  if(direct) return direct;
+  const mp4 = String(r.mp4_url || '').trim();
+  if(mp4 && mp4.includes('.mp4')) return mp4.replace(/\.mp4(\?.*)?$/i, '_karaoke.mp4$1');
+  return '';
+}
+
+function BW_refreshKaraokeUrls(row){
+  const r = row || window.__ASSET_ROW__ || {};
+  BW_ORIGINAL_MP4_URL = String(r.mp4_url || BW_ORIGINAL_MP4_URL || '').trim();
+  BW_KARAOKE_MP4_URL = BW_pickKaraokeUrl(r) || BW_KARAOKE_MP4_URL;
+}
+
+function BW_destroyYouTubeForSourceSwitch(){
   try{
-    if(!video) return false;
-    // 讓可跨域的 MP4 儘量可進 WebAudio；YouTube iframe 不適用。
-    try{ video.crossOrigin = video.crossOrigin || 'anonymous'; }catch(_e){}
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if(!AC) throw new Error('AudioContext unsupported');
-    BW_KTV_AUDIO_CTX = BW_KTV_AUDIO_CTX || new AC();
-    BW_KTV_AUDIO_SRC = BW_KTV_AUDIO_SRC || BW_KTV_AUDIO_CTX.createMediaElementSource(video);
-    BW_KTV_AUDIO_FILTER = BW_KTV_AUDIO_CTX.createBiquadFilter();
-    BW_KTV_AUDIO_FILTER.type = 'bandstop';
-    BW_KTV_AUDIO_FILTER.frequency.value = 1200;
-    BW_KTV_AUDIO_FILTER.Q.value = 1.2;
-    BW_KTV_AUDIO_GAIN = BW_KTV_AUDIO_CTX.createGain();
-    BW_KTV_AUDIO_SRC.connect(BW_KTV_AUDIO_FILTER);
-    BW_KTV_AUDIO_FILTER.connect(BW_KTV_AUDIO_GAIN);
-    BW_KTV_AUDIO_GAIN.connect(BW_KTV_AUDIO_CTX.destination);
-    BW_KTV_AUDIO_READY = true;
-    return true;
-  }catch(err){
-    console.warn('[KTV-AUDIO] WebAudio unavailable, fallback to volume only', err);
-    BW_KTV_AUDIO_FAILED = true;
-    return false;
-  }
+    if(ytStartTimer){ clearTimeout(ytStartTimer); ytStartTimer = null; }
+    if(ytTickTimer){ clearInterval(ytTickTimer); ytTickTimer = null; }
+    if(ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+    if(ytPlayer && typeof ytPlayer.destroy === 'function') ytPlayer.destroy();
+  }catch(_e){}
+  ytPlayer = null;
+  activeSource = 'html5';
+  if(ytWrap) ytWrap.style.display = 'none';
+  video.style.display = 'block';
+  video.controls = true;
+}
+
+function BW_setVideoSourceKeepTime(url, shouldPlay){
+  const u = String(url || '').trim();
+  if(!u) return false;
+  const t = getCurrentPlaybackTime ? getCurrentPlaybackTime() : (video.currentTime || 0);
+  const rate = Number(speedRange?.value || video.playbackRate || 1) || 1;
+  const wasPlaying = shouldPlay || !activePaused();
+  BW_destroyYouTubeForSourceSwitch();
+  try{ video.crossOrigin = 'anonymous'; }catch(_e){}
+  video.muted = false;
+  video.src = u;
+  video.load();
+  video.onloadedmetadata = ()=>{
+    try{ video.currentTime = Math.max(0, Math.min(t, (video.duration || t))); }catch(_e){}
+    try{ video.playbackRate = rate; }catch(_e){}
+    if(wasPlaying) video.play().catch(()=>{});
+  };
+  console.log('[KTV-SOURCE] switch to', u);
+  return true;
 }
 
 function BW_setKtvAudioButtonLabel(){
@@ -1251,54 +1269,50 @@ function BW_setKtvAudioButtonLabel(){
   if(!btn) return;
   btn.classList.remove('ktv','mute');
   if(BW_KTV_AUDIO_MODE === 0){ btn.textContent = '🎤 原唱'; }
-  if(BW_KTV_AUDIO_MODE === 1){ btn.textContent = '🎛 KTV'; btn.classList.add('ktv'); }
+  if(BW_KTV_AUDIO_MODE === 1){ btn.textContent = '🎼 伴奏'; btn.classList.add('ktv'); }
   if(BW_KTV_AUDIO_MODE === 2){ btn.textContent = '🔇 靜音'; btn.classList.add('mute'); }
 }
 
 function BW_applyKtvAudioMode(){
-  const mode = BW_KTV_AUDIO_MODE;
+  BW_refreshKaraokeUrls();
   BW_setKtvAudioButtonLabel();
+  const mode = BW_KTV_AUDIO_MODE;
 
-  // YouTube iframe：不能抽出音軌做去人聲，只能調音量/靜音。
-  if(isUsingYouTube()){
-    try{
-      if(mode === 0){ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(100); }
-      if(mode === 1){ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(45); }
-      if(mode === 2){ ytPlayer.mute && ytPlayer.mute(); }
-    }catch(_e){}
+  if(mode === 0){
+    video.muted = false;
+    video.volume = 1;
+    if(BW_LAST_SOURCE_IS_KARAOKE && BW_ORIGINAL_MP4_URL){
+      BW_LAST_SOURCE_IS_KARAOKE = false;
+      BW_setVideoSourceKeepTime(BW_ORIGINAL_MP4_URL, true);
+    }else if(isUsingYouTube()){
+      try{ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(100); }catch(_e){}
+    }
     return;
   }
 
-  // HTML5 MP4：能用 WebAudio 時弱化中頻；不能用時退回音量模式。
-  try{
-    video.muted = (mode === 2);
-    if(mode === 0){
-      video.volume = 1;
-      if(BW_KTV_AUDIO_READY && BW_KTV_AUDIO_GAIN){
-        BW_KTV_AUDIO_GAIN.gain.value = 1;
-        BW_KTV_AUDIO_FILTER.frequency.value = 1200;
-        BW_KTV_AUDIO_FILTER.Q.value = 0.7;
-      }
-      return;
-    }
-    if(mode === 1){
-      video.volume = 1;
-      if(BW_initKtvAudioGraph() && BW_KTV_AUDIO_GAIN){
-        if(BW_KTV_AUDIO_CTX && BW_KTV_AUDIO_CTX.state === 'suspended') BW_KTV_AUDIO_CTX.resume().catch(()=>{});
-        BW_KTV_AUDIO_GAIN.gain.value = 1;
-        BW_KTV_AUDIO_FILTER.frequency.value = 1200;
-        BW_KTV_AUDIO_FILTER.Q.value = 1.8;
+  if(mode === 1){
+    video.muted = false;
+    video.volume = 1;
+    if(BW_KARAOKE_MP4_URL){
+      BW_LAST_SOURCE_IS_KARAOKE = true;
+      BW_setVideoSourceKeepTime(BW_KARAOKE_MP4_URL, true);
+    }else{
+      console.warn('[KTV-SOURCE] karaoke url missing; fallback volume only');
+      if(isUsingYouTube()){
+        try{ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(45); }catch(_e){}
       }else{
         video.volume = 0.45;
       }
-      return;
     }
-    if(mode === 2){
+    return;
+  }
+
+  if(mode === 2){
+    if(isUsingYouTube()){
+      try{ ytPlayer.mute && ytPlayer.mute(); }catch(_e){}
+    }else{
       video.muted = true;
-      if(BW_KTV_AUDIO_READY && BW_KTV_AUDIO_GAIN) BW_KTV_AUDIO_GAIN.gain.value = 0;
     }
-  }catch(err){
-    console.warn('[KTV-AUDIO] apply failed', err);
   }
 }
 
@@ -1311,13 +1325,15 @@ function BW_cycleKtvAudioMode(){
 document.addEventListener('DOMContentLoaded', ()=>{
   const btn = document.getElementById('btnKtvAudioMode');
   if(btn){
-    // 只在 music 類別顯示；其他類別保留原播放器乾淨。
     if(cat !== 'music') btn.style.display = 'none';
-    try{ BW_KTV_AUDIO_MODE = Number(localStorage.getItem('BW_KTV_AUDIO_MODE') || '0') || 0; }catch(_e){ BW_KTV_AUDIO_MODE = 0; }
+    // 重要：預設永遠原唱，避免上次停在 KTV 造成載入混亂。
+    BW_KTV_AUDIO_MODE = 0;
+    try{ localStorage.setItem('BW_KTV_AUDIO_MODE', '0'); }catch(_e){}
     BW_setKtvAudioButtonLabel();
     btn.addEventListener('click', BW_cycleKtvAudioMode);
   }
 });
+
 function showHtml5(){
   activeSource='html5';
   if(ytStartTimer){ clearTimeout(ytStartTimer); ytStartTimer=null; }
@@ -1410,6 +1426,7 @@ async function loadVideo(){
   const youtubeId = String(row.youtube_id || getYoutubeIdFromUrl(youtubeUrl) || '').trim();
   const preferredRaw = String(row.preferred_source || 'youtube').trim().toLowerCase();
   const preferred = (preferredRaw === 'cloudflare') ? 'mp4' : preferredRaw;
+  try{ BW_refreshKaraokeUrls(row); }catch(_e){}
 
   // cover / poster 對齊
   try{
@@ -3165,7 +3182,7 @@ async function setupCoinGate(user){
     try {
       const { data, error } = await playerSupa
         .from('assets')
-        .select('is_published, mp4_url, youtube_url, youtube_id, preferred_source, cover_url, duration_sec, difficulty_level, title, domain_code')
+        .select('is_published, mp4_url, youtube_url, youtube_id, preferred_source, cover_url, duration_sec, difficulty_level, title, domain_code, has_karaoke, karaoke_video, karaoke_url, karaoke')
         .eq('category', category)
         .eq('slug', slug)
         .maybeSingle();
