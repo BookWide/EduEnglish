@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V5（MUSIC KTV 完全體）</title>
+<title>BookWide 播放器 V5.2（MUSIC KTV fallback）</title>
 
 <style>
 :root{
@@ -1314,7 +1314,16 @@ function BW_setVideoSourceKeepTime(url, shouldPlay){
       video.currentTime = dur ? Math.max(0, Math.min(oldTime, dur - 0.1)) : Math.max(0, oldTime);
     }catch(_e){}
     try{ video.playbackRate = rate; }catch(_e){}
-    restoreLabel();
+    try{
+      if(BW_KTV_FALLBACK_LOW_VOLUME){
+        video.muted = false;
+        video.volume = 0.35;
+        BW_showKtvSoftNotice('伴奏不可用，已切回原唱降音量');
+      }else{
+        video.volume = 1;
+        restoreLabel();
+      }
+    }catch(_e){ restoreLabel(); }
     if(wasPlaying){
       const p = video.play();
       if(p && p.catch) p.catch(err => console.warn('[KTV-SOURCE] play blocked:', err));
@@ -1322,9 +1331,13 @@ function BW_setVideoSourceKeepTime(url, shouldPlay){
   };
   const onErr = () => {
     cleanup();
-    restoreLabel();
     console.warn('[KTV-SOURCE] video load error:', u, video.error);
-    alert('伴奏影片載入失敗：\n' + u + '\n\n請確認：1) R2 檔案可開 2) player 沒被舊快取 3) 若仍失敗，R2 CORS 需允許 bookwide.net');
+    // V5.2：伴奏失敗不要 alert 卡住，直接回原唱降音量。
+    if(BW_KTV_AUDIO_MODE === 1 || /_karaoke.mp4/i.test(u)){
+      BW_restoreOriginalLowVolume('伴奏影片載入失敗，已切回原唱降音量');
+      return;
+    }
+    restoreLabel();
   };
 
   video.addEventListener('loadedmetadata', onReady);
@@ -1378,8 +1391,11 @@ function BW_restoreYouTubeOriginalKeepTime(shouldPlay){
         onReady: (ev) => {
           try{ ev.target.seekTo(Math.max(0, oldTime || 0), true); }catch(_e){}
           try{ ev.target.setPlaybackRate(rate); }catch(_e){}
-          try{ ev.target.unMute && ev.target.unMute(); ev.target.setVolume && ev.target.setVolume(100); }catch(_e){}
-          try{ BW_setKtvAudioButtonLabel(); }catch(_e){}
+          try{
+            ev.target.unMute && ev.target.unMute();
+            ev.target.setVolume && ev.target.setVolume(BW_KTV_FALLBACK_LOW_VOLUME ? 35 : 100);
+          }catch(_e){}
+          try{ BW_KTV_FALLBACK_LOW_VOLUME ? BW_showKtvSoftNotice('伴奏不可用，已切回原唱降音量') : BW_setKtvAudioButtonLabel(); }catch(_e){}
           window.__BW_KTV_SOURCE_SWITCHING__ = false;
           if(wasPlaying){ try{ ev.target.playVideo(); }catch(_e){} }
         },
@@ -1413,14 +1429,62 @@ function BW_setKtvAudioButtonLabel(){
   if(BW_KTV_AUDIO_MODE === 2){ btn.textContent = '🔇 靜音'; btn.classList.add('mute'); }
 }
 
+// V5.2：伴奏檔不存在 / R2 CORS / 載入失敗時，不掛掉；自動回原唱並降音量。
+let BW_KTV_FALLBACK_LOW_VOLUME = false;
+function BW_showKtvSoftNotice(msg){
+  try{
+    const btn = document.getElementById('btnKtvAudioMode');
+    if(btn){
+      btn.textContent = '🎧 降音';
+      btn.classList.add('ktv');
+      btn.title = msg || '伴奏不可用，已切回原唱降音量';
+    }
+    const st = document.getElementById('cuesStatus');
+    if(st){
+      st.innerHTML = '（json 已載入） <span class="ktv-badge" style="background:#3b2a06;border-color:#7c5c10;color:#fef3c7">伴奏不可用，已切回原唱降音</span>';
+    }
+  }catch(_e){}
+}
+function BW_restoreOriginalLowVolume(reason){
+  BW_KTV_FALLBACK_LOW_VOLUME = true;
+  BW_LAST_SOURCE_IS_KARAOKE = false;
+  BW_KTV_AUDIO_MODE = 0;
+  try{ localStorage.setItem('BW_KTV_AUDIO_MODE','0'); }catch(_e){}
+  const msg = reason || '伴奏影片不可用，已自動切回原唱並降低音量';
+  console.warn('[KTV-FALLBACK]', msg);
+  BW_showKtvSoftNotice(msg);
+
+  // 優先回 YouTube；沒有 YouTube 就回原本 mp4。
+  if(BW_RETURN_ORIGINAL_PREFERS_YOUTUBE && BW_ORIGINAL_YOUTUBE_ID){
+    BW_restoreYouTubeOriginalKeepTime(true);
+  }else if(BW_ORIGINAL_MP4_FALLBACK_URL || BW_ORIGINAL_MP4_URL){
+    BW_setVideoSourceKeepTime(BW_ORIGINAL_MP4_FALLBACK_URL || BW_ORIGINAL_MP4_URL, true);
+  }
+
+  setTimeout(()=>{
+    try{
+      if(isUsingYouTube() && ytPlayer){
+        ytPlayer.unMute && ytPlayer.unMute();
+        ytPlayer.setVolume && ytPlayer.setVolume(35);
+      }else{
+        video.muted = false;
+        video.volume = 0.35;
+      }
+      BW_showKtvSoftNotice(msg);
+    }catch(_e){}
+  }, 900);
+}
+
 function BW_applyKtvAudioMode(){
   BW_refreshKaraokeUrls();
   BW_setKtvAudioButtonLabel();
   const mode = BW_KTV_AUDIO_MODE;
 
   if(mode === 0){
-    video.muted = false;
-    video.volume = 1;
+    if(!BW_KTV_FALLBACK_LOW_VOLUME){
+      video.muted = false;
+      video.volume = 1;
+    }
     if(BW_LAST_SOURCE_IS_KARAOKE){
       BW_LAST_SOURCE_IS_KARAOKE = false;
       // V5.1：從伴奏切回原唱時，優先回 YouTube；沒有 YouTube 才回 Cloudflare/R2 mp4。
@@ -1442,10 +1506,8 @@ function BW_applyKtvAudioMode(){
       BW_LAST_SOURCE_IS_KARAOKE = true;
       BW_setVideoSourceKeepTime(BW_KARAOKE_MP4_URL, true);
     }else{
-      console.warn('[KTV-SOURCE] karaoke url missing; keep original source');
-      BW_KTV_AUDIO_MODE = 0;
-      try{ localStorage.setItem('BW_KTV_AUDIO_MODE', '0'); }catch(_e){}
-      BW_setKtvAudioButtonLabel();
+      console.warn('[KTV-SOURCE] karaoke url missing; fallback low volume');
+      BW_restoreOriginalLowVolume('這支尚未產生伴奏，已切回原唱降音量');
     }
     return;
   }
@@ -1462,6 +1524,10 @@ function BW_applyKtvAudioMode(){
 function BW_cycleKtvAudioMode(){
   const btn = document.getElementById('btnKtvAudioMode');
   if(btn && btn.disabled) return;
+  if(BW_KTV_FALLBACK_LOW_VOLUME){
+    BW_KTV_FALLBACK_LOW_VOLUME = false;
+    try{ video.volume = 1; if(isUsingYouTube() && ytPlayer && ytPlayer.setVolume) ytPlayer.setVolume(100); }catch(_e){}
+  }
   BW_KTV_AUDIO_MODE = (BW_KTV_AUDIO_MODE + 1) % 3;
   try{ localStorage.setItem('BW_KTV_AUDIO_MODE', String(BW_KTV_AUDIO_MODE)); }catch(_e){}
   BW_applyKtvAudioMode();
