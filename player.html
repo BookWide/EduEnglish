@@ -1247,22 +1247,67 @@ function BW_destroyYouTubeForSourceSwitch(){
 function BW_setVideoSourceKeepTime(url, shouldPlay){
   const u = String(url || '').trim();
   if(!u) return false;
-  const t = getCurrentPlaybackTime ? getCurrentPlaybackTime() : (video.currentTime || 0);
+
+  const oldTime = (typeof getCurrentPlaybackTime === 'function') ? getCurrentPlaybackTime() : (video.currentTime || 0);
   const rate = Number(speedRange?.value || video.playbackRate || 1) || 1;
-  const wasPlaying = shouldPlay || !activePaused();
+  const wasPlaying = !!shouldPlay || !activePaused();
+  const btn = document.getElementById('btnKtvAudioMode');
+
+  // 強制離開 YouTube iframe，改用 HTML5 播 R2 mp4。
   BW_destroyYouTubeForSourceSwitch();
+
+  try{ video.pause(); }catch(_e){}
+  try{ video.removeAttribute('src'); video.load(); }catch(_e){}
   try{ video.crossOrigin = 'anonymous'; }catch(_e){}
   video.muted = false;
+  video.volume = 1;
+  video.preload = 'auto';
+  if(btn) btn.textContent = BW_KTV_AUDIO_MODE === 1 ? '⏳ 伴奏載入' : '⏳ 原唱載入';
+
+  let done = false;
+  const cleanup = () => {
+    video.removeEventListener('loadedmetadata', onReady);
+    video.removeEventListener('canplay', onReady);
+    video.removeEventListener('error', onErr);
+  };
+  const restoreLabel = () => { try{ BW_setKtvAudioButtonLabel(); }catch(_e){} };
+  const onReady = () => {
+    if(done) return;
+    done = true;
+    cleanup();
+    try{
+      const dur = Number(video.duration || 0);
+      video.currentTime = dur ? Math.max(0, Math.min(oldTime, dur - 0.1)) : Math.max(0, oldTime);
+    }catch(_e){}
+    try{ video.playbackRate = rate; }catch(_e){}
+    restoreLabel();
+    if(wasPlaying){
+      const p = video.play();
+      if(p && p.catch) p.catch(err => console.warn('[KTV-SOURCE] play blocked:', err));
+    }
+  };
+  const onErr = () => {
+    cleanup();
+    restoreLabel();
+    console.warn('[KTV-SOURCE] video load error:', u, video.error);
+    alert('伴奏影片載入失敗，請確認 R2 檔案可開：\n' + u);
+  };
+
+  video.addEventListener('loadedmetadata', onReady);
+  video.addEventListener('canplay', onReady);
+  video.addEventListener('error', onErr);
+
   video.src = u;
   video.load();
-  video.onloadedmetadata = ()=>{
-    try{ video.currentTime = Math.max(0, Math.min(t, (video.duration || t))); }catch(_e){}
-    try{ video.playbackRate = rate; }catch(_e){}
-    if(wasPlaying) video.play().catch(()=>{});
-  };
+
+  setTimeout(() => {
+    if(!done && video.readyState >= 1) onReady();
+  }, 1200);
+
   console.log('[KTV-SOURCE] switch to', u);
   return true;
 }
+
 
 function BW_setKtvAudioButtonLabel(){
   const btn = document.getElementById('btnKtvAudioMode');
