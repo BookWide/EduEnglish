@@ -2682,6 +2682,75 @@ function updateTalkSpeechBox(transcript='', scoreText='—'){
   if(talkSpeechText) talkSpeechText.textContent = '辨識文字：' + (transcript || '—');
   if(talkSpeechScore) talkSpeechScore.textContent = '相似度：' + scoreText;
 }
+function BW_getTalkLineStart(idx=talkCurrentIdx){
+  const item = talkData[idx];
+  if(!item) return 0;
+  return Math.max(0, Number(item.sec) || 0);
+}
+function BW_seekTalkLineStart(idx=talkCurrentIdx){
+  const start = BW_getTalkLineStart(idx);
+  try{ setCurrentPlaybackTime(start + 0.001); }catch(_e){}
+  try{ BW_updateTalkKtvHighlight && BW_updateTalkKtvHighlight(); }catch(_e){}
+  return start;
+}
+function BW_prepareTalkMicFromLineStart(){
+  const item = talkData[talkCurrentIdx];
+  if(!item) return false;
+  try{ pauseActive(); }catch(_e){}
+  try{ window.speechSynthesis && window.speechSynthesis.cancel(); }catch(_e){}
+  try{ BW_setSingalongButtonState(false); }catch(_e){}
+  BW_seekTalkLineStart(talkCurrentIdx);
+  renderTalkCurrent();
+  highlightTalkRow();
+  updateTalkSpeechBox('請從本句開頭開始唱 / 說…', '—');
+  return true;
+}
+function BW_startTalkMicPractice(){
+  if(cat === 'music'){
+    if(!BW_prepareTalkMicFromLineStart()) return;
+    // 先讓 YouTube / HTML5 完成 pause + seek，再啟動麥克風，避免錄到影片聲音。
+    setTimeout(() => startTalkRecognition(), 260);
+    return;
+  }
+  startTalkRecognition();
+}
+let BW_TALK_SPEAK_LINE_LAST = { idx:-1, ts:0, timer:null };
+function BW_estimateTalkSpeakMs(text, lang='en-US'){
+  const rate = Math.max(0.6, talkRateFor(lang) || 0.8);
+  const unitCount = lang.toLowerCase().startsWith('en')
+    ? String(text || '').trim().split(/\s+/).filter(Boolean).length
+    : String(text || '').trim().length;
+  return Math.max(1200, Math.min(9000, Math.round((unitCount * 430 / rate) + 650)));
+}
+function BW_clearTalkSpeakRepeatTimer(){
+  if(BW_TALK_SPEAK_LINE_LAST.timer){
+    clearTimeout(BW_TALK_SPEAK_LINE_LAST.timer);
+    BW_TALK_SPEAK_LINE_LAST.timer = null;
+  }
+}
+function BW_speakTextRepeated(text, lang='en-US', times=1){
+  if(!text) return;
+  BW_clearTalkSpeakRepeatTimer();
+  try{ window.speechSynthesis && window.speechSynthesis.cancel(); }catch(_e){}
+  const run = (left) => {
+    speakText(text, lang);
+    if(left > 1){
+      const delay = BW_estimateTalkSpeakMs(text, lang);
+      BW_TALK_SPEAK_LINE_LAST.timer = setTimeout(() => run(left - 1), delay);
+    }
+  };
+  run(Math.max(1, Number(times) || 1));
+}
+function BW_speakCurrentTalkLine(){
+  const item = talkData[talkCurrentIdx];
+  if(!item) return;
+  const now = Date.now();
+  const sameLineSecondClick = BW_TALK_SPEAK_LINE_LAST.idx === talkCurrentIdx && (now - BW_TALK_SPEAK_LINE_LAST.ts) <= 8000;
+  BW_TALK_SPEAK_LINE_LAST.idx = talkCurrentIdx;
+  BW_TALK_SPEAK_LINE_LAST.ts = now;
+  const times = sameLineSecondClick ? 2 : 1;
+  BW_speakTextRepeated(item.text || '', 'en-US', times);
+}
 function startTalkRecognition(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
   if(!SR){
@@ -2920,9 +2989,9 @@ talkModeShadowBtn?.addEventListener('click', ()=>setTalkMode('shadow'));
 talkModeRoleplayBtn?.addEventListener('click', ()=>setTalkMode('roleplay'));
 talkRoleSelect?.addEventListener('change', ()=>{ talkSelectedRole = talkRoleSelect.value || ''; renderTalkCurrent(); });
 btnTalkStartTurn?.addEventListener('click', ()=> startTalkTurn());
-btnTalkSpeakMic?.addEventListener('click', ()=>{ if(cat === 'music') startTalkRecognition(); else startTalkRecognition(); });
+btnTalkSpeakMic?.addEventListener('click', ()=> BW_startTalkMicPractice());
 btnTalkStopMic?.addEventListener('click', ()=>{ if(cat === 'music') BW_stopAllTalkAndMedia(); else stopTalkRecognition(); });
-btnTalkSpeakLine?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.text || '', 'en-US'); });
+btnTalkSpeakLine?.addEventListener('click', ()=> BW_speakCurrentTalkLine());
 btnTalkSpeakZh?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.zh || '', 'zh-TW'); });
 btnTalkSpeakJa?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.ja || '', 'ja-JP'); });
 btnTalkPrev?.addEventListener('click', ()=> setTalkCurrent(talkCurrentIdx - 1, true));
