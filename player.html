@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V5.2（MUSIC KTV fallback）</title>
+<title>BookWide 播放器 V5.3（多語 KTV V1）</title>
 
 <style>
 :root{
@@ -448,6 +448,44 @@ tr.speaking{
 }
 
 
+
+/* === 多語 KTV V1：EN / 中 / 日 跟唱字幕切換 === */
+.ktv-lang-switch{
+  display:inline-flex;
+  gap:6px;
+  align-items:center;
+}
+.ktv-lang-btn{
+  background:#13233f;
+  border:1px solid #24446f;
+  color:#dce7ff;
+  border-radius:10px;
+  padding:7px 10px;
+  cursor:pointer;
+  font-size:14px;
+  min-width:42px;
+}
+.ktv-lang-btn.active{
+  background:#064e3b;
+  border-color:#10b981;
+  color:#d1fae5;
+  font-weight:700;
+}
+.ktv-lang-line{
+  display:block;
+  font-size:18px;
+  line-height:1.75;
+  color:#d8e5ff;
+}
+tr.ktv-current .ktv-lang-line,
+tr.active .ktv-lang-line{
+  color:#67e8f9;
+  text-shadow:0 0 9px rgba(103,232,249,.35);
+}
+.ktv-subline-dim{
+  opacity:.45;
+}
+
 /* === MUSIC KTV 音訊切換：原唱 / KTV弱化 / 靜音（最小改動） === */
 #btnKtvAudioMode{
   border-color:#2c5aa3;
@@ -680,6 +718,11 @@ function BW_playerStopIdleLogout(){
             <button class="btn" id="btnOffsetPlus">+0.5s</button>
             <button class="btn" id="btnAutoSync">🧭 簡易校準</button>
             <button class="btn" id="btnKtvAudioMode" type="button" title="原唱 / KTV弱化 / 靜音">🎤 原唱</button>
+            <span id="ktvLangSwitch" class="ktv-lang-switch" title="跟唱字幕語言">
+              <button class="ktv-lang-btn active" type="button" data-ktv-lang="en">EN</button>
+              <button class="ktv-lang-btn" type="button" data-ktv-lang="zh">中</button>
+              <button class="ktv-lang-btn" type="button" data-ktv-lang="ja">日</button>
+            </span>
           </div>
           <div class="row" style="gap:10px">
             <span class="muted">速度</span>
@@ -883,7 +926,20 @@ function BW_normalizeKtvWords(cue){
     .filter(Boolean)
     .map((w, idx) => ({ text:w, t:null, i:idx }));
 }
+function BW_getKtvLang(){
+  try{return localStorage.getItem('BW_KTV_LANG') || 'en';}catch(_e){return 'en';}
+}
+function BW_getCueTextByLang(cue, lang){
+  const l = String(lang || 'en').toLowerCase();
+  if(l === 'zh') return cue?.zh || cue?.en || '';
+  if(l === 'ja' || l === 'jp') return cue?.ja || cue?.jp || cue?.en || '';
+  return cue?.en || '';
+}
 function BW_renderKtvLine(cue){
+  const lang = BW_getKtvLang();
+  if(lang !== 'en'){
+    return '<span class="ktv-lang-line" data-ktv-lang-line="' + esc(lang) + '">' + esc(BW_getCueTextByLang(cue, lang)) + '</span>';
+  }
   if(!BW_KTV_ENABLED) return esc(cue?.en || '');
   const words = BW_normalizeKtvWords(cue);
   if(!words.length) return esc(cue?.en || '');
@@ -940,6 +996,39 @@ function BW_clearKtvHighlight(){
   cuesBody.querySelectorAll('tr.ktv-current').forEach(tr => tr.classList.remove('ktv-current'));
   cuesBody.querySelectorAll('.ktv-word.active,.ktv-word.past').forEach(w => w.classList.remove('active','past'));
 }
+
+function BW_renderCuesRows(){
+  if(!cuesBody || !Array.isArray(cues)) return;
+  const lang = BW_getKtvLang();
+  cuesBody.innerHTML = cues.map((c,i)=>`
+      <tr data-i="${i}" style="position:relative">
+        <td class="cue-time">${c.t?fmt(c.t):''}</td>
+        <td class="cue-en">
+          <span class="en-line ${lang !== 'en' ? 'ktv-subline-dim' : ''}">${BW_renderKtvLine(c)}</span>
+          ${lang === 'en' && c.zh ? `<div class="zh-line">${esc(c.zh)}</div>` : ''}
+          ${lang === 'en' && c.ja ? `<div class="ja-line">${esc(c.ja)}</div>` : ''}
+          ${lang === 'zh' && c.en ? `<div class="zh-line ktv-subline-dim">${esc(c.en)}</div>` : ''}
+          ${lang === 'ja' && c.en ? `<div class="ja-line ktv-subline-dim">${esc(c.en)}</div>` : ''}
+        </td>
+      </tr>`).join('');
+  try{ highlightRow(currentIndex(), false); }catch(_e){}
+  try{ BW_updateKtvHighlight(currentIndex()); }catch(_e){}
+}
+function BW_setKtvLang(lang){
+  const l = (lang === 'zh' || lang === 'ja') ? lang : 'en';
+  try{ localStorage.setItem('BW_KTV_LANG', l); }catch(_e){}
+  document.querySelectorAll('.ktv-lang-btn').forEach(btn=>{
+    btn.classList.toggle('active', btn.dataset.ktvLang === l);
+  });
+  BW_renderCuesRows();
+}
+document.addEventListener('DOMContentLoaded', ()=>{
+  const current = BW_getKtvLang();
+  document.querySelectorAll('.ktv-lang-btn').forEach(btn=>{
+    btn.classList.toggle('active', btn.dataset.ktvLang === current);
+    btn.addEventListener('click', ()=>BW_setKtvLang(btn.dataset.ktvLang || 'en'));
+  });
+});
 
 const params=new URLSearchParams(location.search);
 const paramBase=params.get('base');
@@ -1536,7 +1625,11 @@ function BW_cycleKtvAudioMode(){
 document.addEventListener('DOMContentLoaded', ()=>{
   const btn = document.getElementById('btnKtvAudioMode');
   if(btn){
-    if(cat !== 'music') btn.style.display = 'none';
+    if(cat !== 'music') {
+      btn.style.display = 'none';
+      const sw = document.getElementById('ktvLangSwitch');
+      if(sw) sw.style.display = 'none';
+    }
     // 重要：預設永遠原唱，避免上次停在 KTV 造成載入混亂。
     BW_KTV_AUDIO_MODE = 0;
     try{ localStorage.setItem('BW_KTV_AUDIO_MODE', '0'); }catch(_e){}
@@ -1829,15 +1922,7 @@ async function loadCues(){
         source_url:x.source_url||'',
         words:x.words || x.word_timings || x.wordTiming || x.ktv || x.lyrics_words || null
       }));
-    cuesBody.innerHTML=cues.map((c,i)=>`
-      <tr data-i="${i}" style="position:relative">
-        <td class="cue-time">${c.t?fmt(c.t):''}</td>
-        <td class="cue-en">
-          <span class="en-line">${BW_renderKtvLine(c)}</span>
-          ${c.zh?`<div class="zh-line">${esc(c.zh)}</div>`:''}
-          ${c.ja?`<div class="ja-line">${esc(c.ja)}</div>`:''}
-        </td>
-      </tr>`).join('');
+    BW_renderCuesRows();
 
     // 讀出來源網址（若有）
     let srcUrl='';
