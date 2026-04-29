@@ -1214,6 +1214,9 @@ let BW_KTV_AUDIO_MODE = 0; // 0=原唱, 1=伴奏, 2=靜音
 let BW_ORIGINAL_MP4_URL = '';
 let BW_KARAOKE_MP4_URL = '';
 let BW_LAST_SOURCE_IS_KARAOKE = false;
+let BW_ORIGINAL_YOUTUBE_ID = '';
+let BW_ORIGINAL_MP4_FALLBACK_URL = '';
+let BW_RETURN_ORIGINAL_PREFERS_YOUTUBE = true; // V5.1: 伴奏切回原唱時，優先回 YouTube，不停在 Cloudflare MP4
 
 function BW_pickKaraokeUrl(row){
   const r = row || window.__ASSET_ROW__ || {};
@@ -1227,6 +1230,8 @@ function BW_pickKaraokeUrl(row){
 function BW_refreshKaraokeUrls(row){
   const r = row || window.__ASSET_ROW__ || {};
   BW_ORIGINAL_MP4_URL = String(r.mp4_url || BW_ORIGINAL_MP4_URL || '').trim();
+  BW_ORIGINAL_MP4_FALLBACK_URL = BW_ORIGINAL_MP4_URL;
+  BW_ORIGINAL_YOUTUBE_ID = String(r.youtube_id || getYoutubeIdFromUrl(String(r.youtube_url || '')) || BW_ORIGINAL_YOUTUBE_ID || '').trim();
   BW_KARAOKE_MP4_URL = BW_pickKaraokeUrl(r) || BW_KARAOKE_MP4_URL;
 }
 
@@ -1338,6 +1343,67 @@ function BW_setVideoSourceKeepTime(url, shouldPlay){
 }
 
 
+function BW_restoreYouTubeOriginalKeepTime(shouldPlay){
+  const youtubeId = String(BW_ORIGINAL_YOUTUBE_ID || '').trim();
+  if(!youtubeId) return false;
+
+  const oldTime = (typeof getCurrentPlaybackTime === 'function') ? getCurrentPlaybackTime() : (video.currentTime || 0);
+  const rate = Number(speedRange?.value || video.playbackRate || 1) || 1;
+  const wasPlaying = !!shouldPlay || !activePaused();
+  const btn = document.getElementById('btnKtvAudioMode');
+  if(btn) btn.textContent = '⏳ 原唱載入';
+
+  window.__BW_KTV_SOURCE_SWITCHING__ = true;
+
+  try{ video.pause(); }catch(_e){}
+  try{ video.removeAttribute('src'); video.load(); }catch(_e){}
+
+  loadYouTubeApi().then(()=>{
+    try{
+      if(ytStartTimer){ clearTimeout(ytStartTimer); ytStartTimer = null; }
+      if(ytTickTimer){ clearInterval(ytTickTimer); ytTickTimer = null; }
+      if(ytPlayer && typeof ytPlayer.destroy === 'function') ytPlayer.destroy();
+    }catch(_e){}
+    ytPlayer = null;
+    const mount = document.getElementById('ytPlayer');
+    if(mount) mount.innerHTML = '';
+
+    showYouTube();
+    ytStarted = false;
+
+    ytPlayer = new YT.Player('ytPlayer', {
+      videoId: youtubeId,
+      playerVars: { playsinline: 1, rel: 0, modestbranding: 1, enablejsapi: 1 },
+      events: {
+        onReady: (ev) => {
+          try{ ev.target.seekTo(Math.max(0, oldTime || 0), true); }catch(_e){}
+          try{ ev.target.setPlaybackRate(rate); }catch(_e){}
+          try{ ev.target.unMute && ev.target.unMute(); ev.target.setVolume && ev.target.setVolume(100); }catch(_e){}
+          try{ BW_setKtvAudioButtonLabel(); }catch(_e){}
+          window.__BW_KTV_SOURCE_SWITCHING__ = false;
+          if(wasPlaying){ try{ ev.target.playVideo(); }catch(_e){} }
+        },
+        onStateChange: (ev) => {
+          if(window.YT && ev.data === YT.PlayerState.PLAYING){ ytStarted = true; }
+        },
+        onError: () => {
+          window.__BW_KTV_SOURCE_SWITCHING__ = false;
+          console.warn('[KTV-SOURCE] youtube restore failed, fallback mp4', youtubeId);
+          if(BW_ORIGINAL_MP4_FALLBACK_URL) BW_setVideoSourceKeepTime(BW_ORIGINAL_MP4_FALLBACK_URL, true);
+        }
+      }
+    });
+    console.log('[KTV-SOURCE] restore original youtube', youtubeId);
+  }).catch(err=>{
+    window.__BW_KTV_SOURCE_SWITCHING__ = false;
+    console.warn('[KTV-SOURCE] youtube api restore failed:', err);
+    if(BW_ORIGINAL_MP4_FALLBACK_URL) BW_setVideoSourceKeepTime(BW_ORIGINAL_MP4_FALLBACK_URL, true);
+  });
+
+  return true;
+}
+
+
 function BW_setKtvAudioButtonLabel(){
   const btn = document.getElementById('btnKtvAudioMode');
   if(!btn) return;
@@ -1355,9 +1421,14 @@ function BW_applyKtvAudioMode(){
   if(mode === 0){
     video.muted = false;
     video.volume = 1;
-    if(BW_LAST_SOURCE_IS_KARAOKE && BW_ORIGINAL_MP4_URL){
+    if(BW_LAST_SOURCE_IS_KARAOKE){
       BW_LAST_SOURCE_IS_KARAOKE = false;
-      BW_setVideoSourceKeepTime(BW_ORIGINAL_MP4_URL, true);
+      // V5.1：從伴奏切回原唱時，優先回 YouTube；沒有 YouTube 才回 Cloudflare/R2 mp4。
+      if(BW_RETURN_ORIGINAL_PREFERS_YOUTUBE && BW_ORIGINAL_YOUTUBE_ID){
+        BW_restoreYouTubeOriginalKeepTime(true);
+      }else if(BW_ORIGINAL_MP4_URL){
+        BW_setVideoSourceKeepTime(BW_ORIGINAL_MP4_URL, true);
+      }
     }else if(isUsingYouTube()){
       try{ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(100); }catch(_e){}
     }
@@ -1501,7 +1572,7 @@ async function loadVideo(){
   const youtubeId = String(row.youtube_id || getYoutubeIdFromUrl(youtubeUrl) || '').trim();
   const preferredRaw = String(row.preferred_source || 'youtube').trim().toLowerCase();
   const preferred = (preferredRaw === 'cloudflare') ? 'mp4' : preferredRaw;
-  try{ BW_refreshKaraokeUrls(row); }catch(_e){}
+  try{ BW_ORIGINAL_YOUTUBE_ID = youtubeId || BW_ORIGINAL_YOUTUBE_ID; BW_refreshKaraokeUrls(row); }catch(_e){}
 
   // cover / poster 對齊
   try{
