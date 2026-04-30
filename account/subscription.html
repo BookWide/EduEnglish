@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>我的訂閱｜BookWide</title>
+  <title>我的訂閱｜BookWide V17-1</title>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
@@ -132,28 +132,100 @@ function BW_getDeviceId(){
   }
   return id;
 }
+
+function BW_getDeviceType(){
+  // V17-1：允許 1 桌機 + 1 手機。
+  // 可用 ?device=desktop / ?device=mobile 強制指定。
+  try{
+    const p = new URLSearchParams(location.search);
+    const forced = String(p.get('device') || p.get('bw_device') || '').toLowerCase();
+    if(forced === 'mobile' || forced === 'phone') return 'mobile';
+    if(forced === 'desktop' || forced === 'tv' || forced === 'pc') return 'desktop';
+  }catch(_e){}
+
+  const ua = navigator.userAgent || '';
+  const uaMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  const touchMobile =
+    (navigator.maxTouchPoints || 0) > 1 &&
+    window.matchMedia &&
+    window.matchMedia('(pointer: coarse)').matches &&
+    Math.min(window.screen.width || 9999, window.innerWidth || 9999) <= 1024;
+
+  return (uaMobile || touchMobile) ? 'mobile' : 'desktop';
+}
+
+function BW_deviceCols(){
+  const type = BW_getDeviceType();
+  if(type === 'mobile'){
+    return {
+      type,
+      idCol: 'current_mobile_device_id',
+      seenCol: 'mobile_last_seen_at'
+    };
+  }
+  return {
+    type,
+    idCol: 'current_desktop_device_id',
+    seenCol: 'desktop_last_seen_at'
+  };
+}
+
 let BW_DEVICE_WATCH_TIMER = null;
 let BW_DEVICE_KICKING = false;
 
+async function BW_isAdminUser(sb, userId){
+  try{
+    const { data, error } = await sb
+      .from('profiles')
+      .select('is_admin')
+      .eq('id', userId)
+      .single();
+    if(error) return false;
+    return !!data?.is_admin;
+  }catch(_e){
+    return false;
+  }
+}
+
 async function BW_takeoverDevice(sb, userId){
   const myDevice = BW_getDeviceId();
+  const cols = BW_deviceCols();
+  const now = new Date().toISOString();
+
+  try{
+    const isAdmin = await BW_isAdminUser(sb, userId);
+    if(isAdmin) return myDevice;
+  }catch(_e){}
+
+  const payload = { last_seen_at: now };
+  payload[cols.idCol] = myDevice;
+  payload[cols.seenCol] = now;
+
   const { error } = await sb
     .from('profiles')
-    .update({ current_device_id: myDevice })
+    .update(payload)
     .eq('id', userId);
 
   if(error){
     console.error('[BW_device] takeover failed', error);
     throw error;
   }
+  console.log('[BW_device] registered:', cols.type, myDevice);
   return myDevice;
 }
 
 async function BW_checkDeviceStillMine(sb, userId){
   const myDevice = BW_getDeviceId();
+  const cols = BW_deviceCols();
+
+  try{
+    const isAdmin = await BW_isAdminUser(sb, userId);
+    if(isAdmin) return true;
+  }catch(_e){}
+
   const { data, error } = await sb
     .from('profiles')
-    .select('current_device_id')
+    .select(cols.idCol)
     .eq('id', userId)
     .single();
 
@@ -161,14 +233,20 @@ async function BW_checkDeviceStillMine(sb, userId){
     console.error('[BW_device] check failed', error);
     return true;
   }
-  return String(data?.current_device_id || '') === myDevice;
+
+  const current = String((data && data[cols.idCol]) || '');
+  const ok = !current || current === myDevice;
+  if(!ok){
+    console.warn('[BW_device] replaced:', cols.type, { mine: myDevice, current });
+  }
+  return ok;
 }
 
 async function BW_kickByOtherDevice(sb){
   if(BW_DEVICE_KICKING) return;
   BW_DEVICE_KICKING = true;
   try{
-    alert("帳號已在另一台裝置登入，你已被登出");
+    alert("此帳號同類型裝置已在另一台登入，你已被登出");
   }catch(_e){}
   try{
     await sb.auth.signOut();
@@ -188,7 +266,17 @@ function BW_startDeviceWatcher(sb, userId){
         clearInterval(BW_DEVICE_WATCH_TIMER);
         BW_DEVICE_WATCH_TIMER = null;
         await BW_kickByOtherDevice(sb);
+        return;
       }
+
+      const cols = BW_deviceCols();
+      const now = new Date().toISOString();
+      const payload = { last_seen_at: now };
+      payload[cols.seenCol] = now;
+      await sb
+        .from('profiles')
+        .update(payload)
+        .eq('id', userId);
     }catch(err){
       console.error('[BW_device] watcher error', err);
     }
