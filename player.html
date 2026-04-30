@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V13（桌機KTV＋手機修正版）</title>
+<title>BookWide 播放器 V17-1（桌機＋手機守門版）</title>
 
 <style>
 :root{
@@ -837,44 +837,89 @@ let BW_PLAYER_IDLE_STARTED = false;
 let BW_PLAYER_KICKING = false;
 const BW_PLAYER_IDLE_LIMIT_MS = 30 * 60 * 1000;
 
+function BW_isMobileDevice(){
+  const ua = navigator.userAgent || '';
+  const byUA = /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua);
+  const byWidth = !!(window.matchMedia && window.matchMedia('(max-width: 860px)').matches);
+  const byTouch = (navigator.maxTouchPoints || 0) > 1;
+  return !!(byUA || (byWidth && byTouch));
+}
+
+function BW_playerDeviceType(){
+  // V17-1：雙螢幕 KTV 守門
+  // desktop/tv 共用 desktop 欄位；手機共用 mobile 欄位。
+  // 需要 Supabase profiles 已存在：
+  // current_desktop_device_id / current_mobile_device_id / desktop_last_seen_at / mobile_last_seen_at
+  return BW_isMobileDevice() ? 'mobile' : 'desktop';
+}
+
+function BW_playerDeviceColumns(){
+  const type = BW_playerDeviceType();
+  if(type === 'mobile'){
+    return {
+      type,
+      idCol: 'current_mobile_device_id',
+      seenCol: 'mobile_last_seen_at',
+      label: '手機'
+    };
+  }
+  return {
+    type,
+    idCol: 'current_desktop_device_id',
+    seenCol: 'desktop_last_seen_at',
+    label: '桌機'
+  };
+}
+
 async function BW_playerTakeoverDevice(userId){
   const myDevice = BW_getDeviceId();
+  const cols = BW_playerDeviceColumns();
+  const nowIso = new Date().toISOString();
+  const patch = {
+    last_seen_at: nowIso
+  };
+  patch[cols.idCol] = myDevice;
+  patch[cols.seenCol] = nowIso;
+
   const { error } = await playerSupa
     .from('profiles')
-    .update({ current_device_id: myDevice, last_seen_at: new Date().toISOString() })
+    .update(patch)
     .eq('id', userId);
 
   if(error){
-    console.error('[BW-player] takeover failed', error);
+    console.error('[BW-player] V17-1 takeover failed', cols, error);
     throw error;
   }
+  console.log('[BW-player] V17-1 takeover ok', { deviceType: cols.type, deviceId: myDevice });
   return myDevice;
 }
 
 async function BW_playerCheckDeviceStillMine(userId){
   const myDevice = BW_getDeviceId();
+  const cols = BW_playerDeviceColumns();
   const { data, error } = await playerSupa
     .from('profiles')
-    .select('current_device_id')
+    .select(cols.idCol)
     .eq('id', userId)
     .single();
 
   if(error){
-    console.error('[BW-player] check failed', error);
+    console.error('[BW-player] V17-1 check failed', cols, error);
     return true;
   }
-  return String(data?.current_device_id || '') === myDevice;
+  return String(data?.[cols.idCol] || '') === myDevice;
 }
 
 async function BW_playerKickOut(){
   if(BW_PLAYER_KICKING) return;
   BW_PLAYER_KICKING = true;
+  const cols = BW_playerDeviceColumns();
   try{ pauseActive && pauseActive(); }catch(_e){}
-  try{ alert("帳號已在另一台裝置登入，你已被登出"); }catch(_e){}
+  try{ alert('同帳號已有另一台' + cols.label + '開啟播放器，你已被登出'); }catch(_e){}
   try{ BW_playerStopIdleLogout();
   try{ if (BW_PLAYER_DEVICE_WATCH_TIMER) clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER); }catch(_e){}
   await playerSupa.auth.signOut(); }catch(_e){}
-  location.href = (ROOT_BASE || '') + '/index.html?device_kicked=1';
+  location.href = (ROOT_BASE || '') + '/index.html?device_kicked=1&type=' + encodeURIComponent(cols.type);
 }
 
 function BW_playerStartDeviceWatcher(userId){
@@ -890,13 +935,17 @@ function BW_playerStartDeviceWatcher(userId){
         BW_PLAYER_DEVICE_WATCH_TIMER = null;
         await BW_playerKickOut();
       }else{
+        const cols = BW_playerDeviceColumns();
+        const nowIso = new Date().toISOString();
+        const patch = { last_seen_at: nowIso };
+        patch[cols.seenCol] = nowIso;
         await playerSupa
           .from('profiles')
-          .update({ last_seen_at: new Date().toISOString() })
+          .update(patch)
           .eq('id', userId);
       }
     }catch(err){
-      console.error('[BW-player] watcher error', err);
+      console.error('[BW-player] V17-1 watcher error', err);
     }
   }, 4000);
 }
