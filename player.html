@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V7 手機最終版</title>
+<title>BookWide 播放器 V10（手機精簡 + Vocab 跟隨）</title>
 
 <style>
 :root{
@@ -647,6 +647,47 @@ tr.speaking{
   }
 }
 
+
+
+/* === V10 MOBILE FINAL：桌機不動，手機精簡 / 控制可展開 / vocab 跟隨 === */
+.mobile-control-head{display:none;}
+.vocab-item.bw-vocab-active{
+  outline:2px solid #67e8f9;
+  box-shadow:0 0 0 4px rgba(103,232,249,.12);
+  background:#10294a !important;
+}
+@media (max-width:860px){
+  #btnKtvAudioMode,
+  #ktvGuideSwitch,
+  #btnAutoSync,
+  #coinCostChip,
+  #walletChip,
+  #trialBadge,
+  #btnUnlockNow,
+  #btnEnIndex,
+  #btnJpIndex,
+  #homeLink,
+  #userNameBadge{
+    display:none !important;
+  }
+  .mobile-control-head{
+    display:flex !important;
+    align-items:center;
+    justify-content:space-between;
+    gap:8px;
+    margin:2px 0 4px;
+  }
+  .controls .row{display:none !important;}
+  .controls.show .row{display:flex !important;}
+  .controls.show .btn{padding:5px 8px !important;font-size:12px !important;}
+  .controls.show .chip{padding:4px 7px !important;font-size:12px !important;}
+  .controls.show #speedRange{max-width:110px !important;}
+  #vocabBox .vocab-item{
+    margin:7px 0 !important;
+    padding:9px 10px !important;
+  }
+}
+
 </style>
 
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
@@ -849,7 +890,10 @@ function BW_playerStopIdleLogout(){
           <video id="player" playsinline controls></video>
           <div id="mobileSubtitle" aria-live="polite"></div>
         </div>
-        <div class="controls">
+        <div class="controls" id="bwMobileControls">
+          <div class="mobile-control-head">
+            <button class="btn" id="btnMobileToggleControls" type="button">⚙ 控制</button>
+          </div>
           <div class="row">
             <button class="btn" id="btnPrev">⏮ 上一句</button>
             <button class="btn" id="btnPlay">▶️ 播放 / 暫停</button>
@@ -2398,7 +2442,7 @@ async function loadVocab(){
         </div>` : '';
 
       return `
-      <div style="border:1px solid #223048;border-radius:10px;padding:10px 12px;margin:10px 0">
+      <div class="vocab-item" data-word="${esc(v.word||'')}" style="border:1px solid #223048;border-radius:10px;padding:10px 12px;margin:10px 0">
         <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:4px;">
           <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
             <span style="font-weight:800;font-size:18px;">${esc(v.word||'')}</span>
@@ -4320,6 +4364,92 @@ async function loadProOutline(){
     var v = document.getElementById('player');
     if(v) v.addEventListener('timeupdate', bwMobileUpdateSubtitle);
     setInterval(bwMobileUpdateSubtitle, 350);
+  });
+})();
+</script>
+
+
+<script>
+/* === V10 MOBILE FINAL：控制展開 + vocab 跟隨高亮（只加功能，不動桌機核心） === */
+(function(){
+  function initMobileControls(){
+    var btn=document.getElementById('btnMobileToggleControls');
+    var box=document.getElementById('bwMobileControls') || document.querySelector('.controls');
+    if(!btn || !box || btn.__bwBound) return;
+    btn.__bwBound=true;
+    btn.addEventListener('click', function(){
+      box.classList.toggle('show');
+      btn.textContent = box.classList.contains('show') ? '收起控制' : '⚙ 控制';
+    });
+  }
+  function normalize(s){
+    return String(s||'').toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff\u3040-\u30ff]+/g,' ').trim();
+  }
+  function cueText(c){
+    return normalize([c && (c.en||c.english||c.text||''), c && (c.zh||c.cn||''), c && (c.ja||c.jp||'')].join(' '));
+  }
+  window.BW_V10_indexVocabItems = function(){
+    try{
+      var items=[].slice.call(document.querySelectorAll('#vocabBox .vocab-item'));
+      if(!items.length || !window.cues || !cues.length) return;
+      items.forEach(function(el, idx){
+        var first = el.querySelector('span');
+        var word=normalize(el.dataset.word || (first ? first.textContent : ''));
+        var found=-1;
+        if(word){
+          for(var i=0;i<cues.length;i++){
+            var txt=cueText(cues[i]);
+            if(txt && txt.indexOf(word) >= 0){ found=i; break; }
+          }
+        }
+        if(found < 0){ found=Math.min(cues.length-1, Math.floor(idx * cues.length / Math.max(1, items.length))); }
+        var s = Number((cues[found] && (cues[found].t ?? cues[found].start)) || 0) || 0;
+        var e = Number((cues[found+1] && (cues[found+1].t ?? cues[found+1].start)) || (cues[found] && cues[found].end) || (s+3)) || (s+3);
+        el.dataset.start=String(s);
+        el.dataset.end=String(e);
+      });
+    }catch(e){ console.warn('[V10 vocab index]', e); }
+  };
+  window.BW_V10_followVocabByTime = function(t){
+    try{
+      var chk=document.getElementById('chkFollow');
+      if(!chk || !chk.checked) return;
+      var pane=document.getElementById('pane-vocab');
+      if(!pane || pane.style.display === 'none') return;
+      var items=[].slice.call(document.querySelectorAll('#vocabBox .vocab-item'));
+      if(!items.length) return;
+      if(!items[0].dataset.start) BW_V10_indexVocabItems();
+      var hit=null;
+      for(var i=0;i<items.length;i++){
+        var s=parseFloat(items[i].dataset.start || '0');
+        var e=parseFloat(items[i].dataset.end || (s+3));
+        if(t >= s && t < e){ hit=items[i]; break; }
+      }
+      if(!hit) return;
+      items.forEach(function(el){ el.classList.toggle('bw-vocab-active', el===hit); });
+      if(hit.__lastScroll && Date.now()-hit.__lastScroll < 1200) return;
+      hit.__lastScroll=Date.now();
+      hit.scrollIntoView({behavior:'smooth', block:'center'});
+    }catch(e){ console.warn('[V10 vocab follow]', e); }
+  };
+  function attach(){
+    initMobileControls();
+    var v=document.getElementById('player');
+    if(v && !v.__bwV10VocabFollow){
+      v.__bwV10VocabFollow=true;
+      v.addEventListener('timeupdate', function(){
+        var t = (typeof getCurrentPlaybackTime === 'function') ? getCurrentPlaybackTime() : (v.currentTime||0);
+        BW_V10_followVocabByTime(t);
+      });
+    }
+    setTimeout(function(){ try{ BW_V10_indexVocabItems(); }catch(_e){} }, 800);
+    setTimeout(function(){ try{ BW_V10_indexVocabItems(); }catch(_e){} }, 2000);
+  }
+  document.addEventListener('DOMContentLoaded', attach);
+  window.addEventListener('load', attach);
+  document.addEventListener('click', function(e){
+    var tab=e.target && e.target.closest && e.target.closest('.tab[data-tab="vocab"]');
+    if(tab) setTimeout(function(){ BW_V10_indexVocabItems(); }, 350);
   });
 })();
 </script>
