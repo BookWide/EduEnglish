@@ -1304,7 +1304,7 @@ function getWeekIndex() {
         const domainPart = (String(v.category || '') === 'pro' && String(v.domain_code || '').trim())
           ? `&domain=${encodeURIComponent(String(v.domain_code || '').trim())}`
           : '';
-        const href = `player.html?cat=${encodeURIComponent(v.category)}&slug=${encodeURIComponent(v.slug)}${domainPart}`;
+        const href = `player.html?cat=${encodeURIComponent(v.category)}&slug=${encodeURIComponent(v.slug)}${domainPart}&device=${encodeURIComponent(BW_getDeviceType())}`;
 
         const card = document.createElement("a");
         card.href = href;
@@ -1589,20 +1589,18 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     }catch(e){ console.warn('[index] init after supa failed:', e); }
 
 
-    /* ========= BookWide 單裝置接管（index 主控） =========
-       - 新裝置登入：接管（寫入 profiles.current_device_id）
-       - 舊裝置：偵測到被接管 → 提示 + global signOut
-       - 若 profiles 欄位不存在 / RLS 擋：自動略過（不影響登入）
+    /* ========= BookWide V17-1：首頁裝置守門（1 桌機 + 1 手機） =========
+       - 不再使用 profiles.current_device_id 做全域互踢
+       - 桌機寫 current_desktop_device_id / desktop_last_seen_at
+       - 手機寫 current_mobile_device_id / mobile_last_seen_at
+       - 同類型新登入 -> 舊同類型踢出
     ====================================================== */
     function BW_getDeviceId(){
       try{
         let id = localStorage.getItem('bw_device_id');
         if(!id){
           id = (crypto && crypto.randomUUID) ? crypto.randomUUID()
-            : ('xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c=>{
-                const r = Math.random()*16|0, v = c==='x'?r:(r&0x3|0x8);
-                return v.toString(16);
-              }));
+            : ('bw-' + Date.now() + '-' + Math.random().toString(16).slice(2));
           localStorage.setItem('bw_device_id', id);
         }
         return id;
@@ -1611,27 +1609,48 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       }
     }
 
-    function BW_showKickedModal(){
-      // 用最保守的提示：不依賴外部元件
+    function BW_getDeviceType(){
       try{
-        alert('此帳號已在另一個裝置登入，您已被登出');
+        const p = new URLSearchParams(location.search);
+        const forced = String(p.get('device') || p.get('bw_device') || '').toLowerCase();
+        if(forced === 'mobile' || forced === 'phone') return 'mobile';
+        if(forced === 'desktop' || forced === 'tv' || forced === 'pc') return 'desktop';
+      }catch(_e){}
+
+      const ua = navigator.userAgent || '';
+      const uaMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+      const touchMobile =
+        (navigator.maxTouchPoints || 0) > 1 &&
+        window.matchMedia &&
+        window.matchMedia('(pointer: coarse)').matches &&
+        Math.min(window.screen.width || 9999, window.innerWidth || 9999) <= 1024;
+
+      return (uaMobile || touchMobile) ? 'mobile' : 'desktop';
+    }
+
+    function BW_deviceCols(){
+      const type = BW_getDeviceType();
+      if(type === 'mobile'){
+        return { type, idCol:'current_mobile_device_id', seenCol:'mobile_last_seen_at' };
+      }
+      return { type, idCol:'current_desktop_device_id', seenCol:'desktop_last_seen_at' };
+    }
+
+    function BW_showKickedModal(){
+      try{
+        alert('此帳號同類型裝置已在另一台登入，您已被登出');
       }catch(_){}
     }
 
     async function BW_forceSignOut(){
-      if (BW_ALLOW_MULTI_DEVICE) {
-        console.info('[BW] multi-device mode enabled: skip forced sign out');
-        return;
-      }
       try{ localStorage.setItem('bw_forced_logout','1'); }catch(_){}
-      try{ BW_stopIdleLogout();
-          await supa.auth.signOut({ scope:'global' }); }
-       catch(_){ try{ try{ BW_stopIdleLogout();
-          await supa.auth.signOut({ scope:'global' }); }
-     catch(_){ try{ BW_stopIdleLogout();
-          await supa.auth.signOut(); }catch(__){} } }catch(__){} }
+      try{
+        BW_stopIdleLogout();
+        await supa.auth.signOut({ scope:'global' });
+      }catch(_){
+        try{ await supa.auth.signOut(); }catch(__){}
+      }
       BW_showKickedModal();
-      // 回首頁（帶參數方便你 debug）
       try{
         const url = new URL(location.href);
         url.searchParams.set('denied','kicked');
@@ -1641,27 +1660,43 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       }
     }
 
-    async function BW_enforceTakeover(user){
+    async function BW_isAdminDeviceUser(user){
       try{
-        if(!user || !user.id) return;
-        if (BW_ALLOW_MULTI_DEVICE) {
-          const up = await supa.from('profiles')
-            .update({ last_seen_at: new Date().toISOString() })
-            .eq('id', user.id);
-          if(up.error){
-            console.warn('[BW] heartbeat-only update blocked:', up.error.message||up.error);
-          }
+        if(!user) return false;
+        if(typeof isAdminEmail === 'function' && isAdminEmail(user.email)) return true;
+        const { data, error } = await supa
+          .from('profiles')
+          .select('is_admin')
+          .eq('id', user.id)
+          .maybeSingle();
+        if(error) return false;
+        return !!data?.is_admin;
+      }catch(_e){
+        return false;
+      }
+    }
+
+    async function BW_takeoverCurrentDevice(user){
+      try{
+        if(!user?.id) return;
+        if(await BW_isAdminDeviceUser(user)) return;
+
+        const cols = BW_deviceCols();
+        const deviceId = BW_getDeviceId();
+        const now = new Date().toISOString();
+        const payload = { last_seen_at: now };
+        payload[cols.idCol] = deviceId;
+        payload[cols.seenCol] = now;
+
+        const up = await supa.from('profiles')
+          .update(payload)
+          .eq('id', user.id);
+
+        if(up.error){
+          console.warn('[BW] per-type device update blocked:', up.error.message || up.error);
           return;
         }
-        const deviceId = BW_getDeviceId();
-        // 單裝置模式：直接覆寫 profiles.current_device_id（新裝置接管）
-        const up = await supa.from('profiles')
-          .update({ current_device_id: deviceId, last_seen_at: new Date().toISOString() })
-          .eq('id', user.id);
-        if(up.error){
-          console.warn('[BW] profiles update blocked:', up.error.message||up.error);
-          return; // RLS 擋就略過，不影響登入
-        }
+        console.log('[BW] device registered:', cols.type, deviceId);
       }catch(e){
         console.warn('[BW] takeover error:', e);
       }
@@ -1669,67 +1704,54 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
     function BW_startDeviceGuard(user){
       let running = false;
-      const my = BW_getDeviceId();
       const uid = user && user.id;
       if(!uid) return null;
-      if (BW_ALLOW_MULTI_DEVICE) {
-        const tick = async ()=>{
-          if(running) return;
-          running = true;
-          try{
-            const up = await supa.from('profiles')
-              .update({ last_seen_at: new Date().toISOString() })
-              .eq('id', uid);
-            if(up.error){
-              console.warn('[BW] multi-device heartbeat blocked:', up.error.message||up.error);
-            }
-          }finally{
-            running = false;
-          }
-        };
-        tick();
-        return setInterval(tick, 30*1000);
-      }
 
       const tick = async ()=>{
         if(running) return;
         running = true;
         try{
+          if(await BW_isAdminDeviceUser(user)){
+            return;
+          }
+
+          const cols = BW_deviceCols();
+          const my = BW_getDeviceId();
+
           const { data, error } = await supa.from('profiles')
-            .select('current_device_id')
+            .select(cols.idCol)
             .eq('id', uid)
             .maybeSingle();
+
           if(error){
-            console.warn('[BW] guard select blocked:', error.message||error);
-            return; // 被擋就不做，避免影響使用
+            console.warn('[BW] guard select blocked:', error.message || error);
+            return;
           }
-          // ✅ current_device_id 為空 → 立刻寫成自己（補洞：避免兩台都不踢）
-if(!data?.current_device_id){
-  const up = await supa.from('profiles')
-    .update({ current_device_id: my, last_seen_at: new Date().toISOString() })
-    .eq('id', uid);
-  if(up.error){
-    console.warn('[BW] guard takeover blocked:', up.error.message||up.error);
-  }
-  return;
-}
 
-// ✅ 有值但不是我 → 踢下線
-if(data.current_device_id !== my){
-  await BW_forceSignOut();
-}
+          const currentId = String((data && data[cols.idCol]) || '');
+          if(currentId && currentId !== my){
+            await BW_forceSignOut();
+            return;
+          }
 
+          const now = new Date().toISOString();
+          const payload = { last_seen_at: now };
+          payload[cols.seenCol] = now;
 
+          const up = await supa.from('profiles')
+            .update(payload)
+            .eq('id', uid);
 
-
-
+          if(up.error){
+            console.warn('[BW] heartbeat update blocked:', up.error.message || up.error);
+          }
         }finally{
           running = false;
         }
       };
 
       tick();
-      return setInterval(tick, 30*1000); // 每 30 秒檢查一次，踢得夠快
+      return setInterval(tick, 30*1000);
     }
 
     // 被踢提示（跨頁保險）
@@ -1741,7 +1763,7 @@ if(data.current_device_id !== my){
         }
       }catch(_){}
     })();
-/* ========= End single-device takeover ========= */
+    /* ========= End V17-1 per-type device takeover ========= */
 
 
     // ✅ OAuth callback：如果網址帶 ?code=...，就兌換成 session（Google / 之後 FB/LINE/微信）
