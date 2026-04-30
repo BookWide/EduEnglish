@@ -28,11 +28,26 @@ function getDeviceId() {
 }
 
 function getDeviceType() {
+  // V17-1 修正版：
+  // 1) 允許網址強制指定：?device=desktop 或 ?device=mobile
+  // 2) 不再只用 window.innerWidth <= 900 判斷，避免桌機開 DevTools/窄視窗被誤判成 mobile
+  // 3) 手機主要看 UA / touch / coarse pointer
+  try {
+    const p = new URLSearchParams(location.search);
+    const forced = String(p.get('device') || p.get('bw_device') || '').toLowerCase();
+    if (forced === 'mobile' || forced === 'phone') return 'mobile';
+    if (forced === 'desktop' || forced === 'tv' || forced === 'pc') return 'desktop';
+  } catch (_) {}
+
   const ua = navigator.userAgent || '';
-  const isMobile =
-    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) ||
-    window.innerWidth <= 900;
-  return isMobile ? 'mobile' : 'desktop';
+  const uaMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  const touchMobile =
+    (navigator.maxTouchPoints || 0) > 1 &&
+    window.matchMedia &&
+    window.matchMedia('(pointer: coarse)').matches &&
+    Math.min(window.screen.width || 9999, window.innerWidth || 9999) <= 1024;
+
+  return (uaMobile || touchMobile) ? 'mobile' : 'desktop';
 }
 
 async function forceLogout(redirect = '/login.html?kick=1') {
@@ -51,6 +66,8 @@ async function forceLogout(redirect = '/login.html?kick=1') {
 try {
   localStorage.removeItem('bw_kick_detected');
 } catch (_) {}
+
+let BW_HEARTBEAT_TIMER = null;
 
 export const BW = {
   supa: supabase,
@@ -123,8 +140,10 @@ export const BW = {
 
     if (deviceType === 'mobile') {
       payload.current_mobile_device_id = deviceId;
+      payload.mobile_last_seen_at = payload.last_seen_at;
     } else {
       payload.current_desktop_device_id = deviceId;
+      payload.desktop_last_seen_at = payload.last_seen_at;
     }
 
     const r = await supabase
@@ -171,6 +190,8 @@ export const BW = {
   },
 
   startHeartbeat(minutes = 2) {
+    if (BW_HEARTBEAT_TIMER) return BW_HEARTBEAT_TIMER;
+
     let running = false;
     const myDevice = getDeviceId();
     const deviceType = getDeviceType();
@@ -214,8 +235,10 @@ export const BW = {
 
         if (deviceType === 'mobile') {
           updatePayload.current_mobile_device_id = myDevice;
+          updatePayload.mobile_last_seen_at = updatePayload.last_seen_at;
         } else {
           updatePayload.current_desktop_device_id = myDevice;
+          updatePayload.desktop_last_seen_at = updatePayload.last_seen_at;
         }
 
         const u = await supabase
@@ -230,7 +253,8 @@ export const BW = {
     };
 
     beat();
-    return setInterval(beat, Math.max(1, minutes) * 60 * 1000);
+    BW_HEARTBEAT_TIMER = setInterval(beat, Math.max(1, minutes) * 60 * 1000);
+    return BW_HEARTBEAT_TIMER;
   },
 
   popForcedLogoutHint() {
