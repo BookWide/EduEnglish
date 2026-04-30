@@ -797,6 +797,26 @@ tr.speaking{
   #pane-sub .zh-line,
   #pane-sub .ja-line{line-height:1.42 !important;}
 }
+
+
+/* === V15 MOBILE ONLY：字幕區固定在圖二位置；跟隨只捲字幕清單，不捲整頁；桌機不動 === */
+@media (max-width:860px){
+  body.bw-mobile-sub-lock #pane-sub{
+    overflow-y:auto !important;
+    -webkit-overflow-scrolling:touch !important;
+    overscroll-behavior:contain !important;
+    padding-bottom:0 !important;
+    border-top:1px solid #162a48;
+  }
+  body.bw-mobile-sub-lock #pane-sub thead th{
+    top:0 !important;
+    z-index:5 !important;
+  }
+  body.bw-mobile-sub-lock #pane-sub .cues-table{
+    margin-top:0 !important;
+  }
+}
+
 </style>
 
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
@@ -4675,11 +4695,20 @@ async function loadProOutline(){
 
 
 <script>
-/* === V14 MOBILE ONLY：字幕跟隨捲到最上一列；不改桌機 === */
+/* === V15 MOBILE ONLY：手機字幕跟隨固定在字幕區第一列；只捲字幕清單；桌機不動 === */
 (function(){
   var lastMobileTopIndex = -1;
   var mobileTopTimer = null;
-  function isMobile(){ return !!(window.matchMedia && window.matchMedia('(max-width:860px)').matches); }
+
+  function isMobile(){
+    return !!(window.matchMedia && window.matchMedia('(max-width:860px)').matches);
+  }
+  function getPane(){
+    return document.getElementById('pane-sub');
+  }
+  function getFollow(){
+    return document.getElementById('chkFollow');
+  }
   function getMobileCurrentIndex(){
     try{ if(typeof currentIndex === 'function') return currentIndex(); }catch(e){}
     try{
@@ -4694,53 +4723,124 @@ async function loadProOutline(){
       return idx;
     }catch(e){ return -1; }
   }
+  function ensureMobileSubtitleBox(){
+    var pane = getPane();
+    if(!pane) return null;
+    if(!isMobile()){
+      pane.style.maxHeight = '';
+      pane.style.overflowY = '';
+      pane.style.webkitOverflowScrolling = '';
+      pane.style.overscrollBehavior = '';
+      document.body.classList.remove('bw-mobile-sub-lock');
+      return null;
+    }
+    if(window.getComputedStyle(pane).display === 'none') return pane;
+    var rect = pane.getBoundingClientRect();
+    var vh = (window.visualViewport && window.visualViewport.height) || window.innerHeight || document.documentElement.clientHeight || 0;
+    var available = Math.floor(vh - rect.top - 10);
+    if(!Number.isFinite(available) || available < 220){
+      available = Math.max(220, Math.floor(vh * 0.42));
+    }
+    pane.style.maxHeight = available + 'px';
+    pane.style.overflowY = 'auto';
+    pane.style.webkitOverflowScrolling = 'touch';
+    pane.style.overscrollBehavior = 'contain';
+    document.body.classList.add('bw-mobile-sub-lock');
+    return pane;
+  }
   function mobileSubtitleTopOffset(){
-    var tabs = document.querySelector('.tabs');
     var head = document.querySelector('#pane-sub thead');
-    var offset = 0;
-    if(tabs) offset += Math.ceil(tabs.getBoundingClientRect().height || 0);
-    if(head) offset += Math.ceil(head.getBoundingClientRect().height || 0);
-    return Math.max(78, offset + 8);
+    var h = head ? Math.ceil(head.getBoundingClientRect().height || 0) : 0;
+    return Math.max(6, h + 4);
   }
   function scrollMobileSubtitleToTop(force){
     if(!isMobile()) return;
-    var follow = document.getElementById('chkFollow');
+    var follow = getFollow();
     if(follow && !follow.checked) return;
+    var pane = ensureMobileSubtitleBox();
     var idx = getMobileCurrentIndex();
     if(idx < 0) return;
     if(!force && idx === lastMobileTopIndex) return;
     var row = document.querySelector('#cuesBody tr[data-i="' + idx + '"]');
     if(!row) return;
     lastMobileTopIndex = idx;
-    var y = window.scrollY + row.getBoundingClientRect().top - mobileSubtitleTopOffset();
+
+    if(pane && window.getComputedStyle(pane).display !== 'none'){
+      var rowRect = row.getBoundingClientRect();
+      var paneRect = pane.getBoundingClientRect();
+      var target = pane.scrollTop + (rowRect.top - paneRect.top) - mobileSubtitleTopOffset();
+      pane.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+      return;
+    }
+
+    var y = window.scrollY + row.getBoundingClientRect().top - 96;
     window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
   }
   function scheduleMobileSubtitleTop(force){
     if(!isMobile()) return;
     if(mobileTopTimer) clearTimeout(mobileTopTimer);
-    mobileTopTimer = setTimeout(function(){ scrollMobileSubtitleToTop(!!force); }, 80);
+    mobileTopTimer = setTimeout(function(){
+      ensureMobileSubtitleBox();
+      scrollMobileSubtitleToTop(!!force);
+    }, 90);
   }
-  function init(){
-    var follow = document.getElementById('chkFollow');
-    if(isMobile() && follow) follow.checked = true;
+  function bindVideo(){
     var v = document.getElementById('player');
-    if(v && !v.dataset.v14MobileTopBound){
-      v.dataset.v14MobileTopBound = '1';
+    if(v && !v.dataset.v15MobileTopBound){
+      v.dataset.v15MobileTopBound = '1';
       v.addEventListener('timeupdate', function(){ scheduleMobileSubtitleTop(false); });
       v.addEventListener('seeked', function(){ scheduleMobileSubtitleTop(true); });
       v.addEventListener('play', function(){ scheduleMobileSubtitleTop(true); });
     }
-    if(follow && !follow.dataset.v14MobileTopBound){
-      follow.dataset.v14MobileTopBound = '1';
-      follow.addEventListener('change', function(){ lastMobileTopIndex = -1; scheduleMobileSubtitleTop(true); });
+  }
+  function init(){
+    var follow = getFollow();
+    if(isMobile() && follow) follow.checked = true;
+    ensureMobileSubtitleBox();
+    bindVideo();
+
+    if(follow && !follow.dataset.v15MobileTopBound){
+      follow.dataset.v15MobileTopBound = '1';
+      follow.addEventListener('change', function(){
+        lastMobileTopIndex = -1;
+        ensureMobileSubtitleBox();
+        scheduleMobileSubtitleTop(true);
+      });
     }
+
     document.addEventListener('click', function(e){
       if(!isMobile()) return;
       var cueRow = e.target && e.target.closest ? e.target.closest('#cuesBody tr') : null;
-      if(cueRow){ lastMobileTopIndex = -1; scheduleMobileSubtitleTop(true); }
+      var tabBtn = e.target && e.target.closest ? e.target.closest('.tabs .tab') : null;
+      if(cueRow || tabBtn){
+        lastMobileTopIndex = -1;
+        setTimeout(function(){ ensureMobileSubtitleBox(); scheduleMobileSubtitleTop(true); }, 120);
+      }
     }, true);
-    setInterval(function(){ scheduleMobileSubtitleTop(false); }, 700);
+
+    window.addEventListener('resize', function(){
+      ensureMobileSubtitleBox();
+      scheduleMobileSubtitleTop(true);
+    }, { passive:true });
+
+    window.addEventListener('orientationchange', function(){
+      setTimeout(function(){ ensureMobileSubtitleBox(); scheduleMobileSubtitleTop(true); }, 180);
+    }, { passive:true });
+
+    if(window.visualViewport && !window.visualViewport.__bwV15Bound){
+      window.visualViewport.__bwV15Bound = true;
+      window.visualViewport.addEventListener('resize', function(){
+        ensureMobileSubtitleBox();
+        scheduleMobileSubtitleTop(true);
+      }, { passive:true });
+    }
+
+    setInterval(function(){
+      ensureMobileSubtitleBox();
+      scheduleMobileSubtitleTop(false);
+    }, 900);
   }
+
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
   else init();
 })();
