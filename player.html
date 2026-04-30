@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V17-1（桌機＋手機守門版）</title>
+<title>BookWide 播放器 V17-1（1桌機+1手機守門版）</title>
 
 <style>
 :root{
@@ -831,72 +831,105 @@ function BW_getDeviceId(){
   }
   return id;
 }
+
+function BW_getDeviceType(){
+  // V17-1：允許桌機 + 手機各 1 台
+  // 測試時可強制指定：?device=desktop 或 ?device=mobile
+  try{
+    const p = new URLSearchParams(location.search);
+    const forced = String(p.get('device') || p.get('bw_device') || '').toLowerCase();
+    if(forced === 'mobile' || forced === 'phone') return 'mobile';
+    if(forced === 'desktop' || forced === 'tv' || forced === 'pc') return 'desktop';
+  }catch(_e){}
+
+  const ua = navigator.userAgent || '';
+  const uaMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  const touchMobile =
+    (navigator.maxTouchPoints || 0) > 1 &&
+    window.matchMedia &&
+    window.matchMedia('(pointer: coarse)').matches &&
+    Math.min(window.screen.width || 9999, window.innerWidth || 9999) <= 1024;
+
+  return (uaMobile || touchMobile) ? 'mobile' : 'desktop';
+}
+
+function BW_playerDeviceColumns(){
+  const type = BW_getDeviceType();
+  if(type === 'mobile'){
+    return {
+      type,
+      idCol:'current_mobile_device_id',
+      seenCol:'mobile_last_seen_at'
+    };
+  }
+  return {
+    type,
+    idCol:'current_desktop_device_id',
+    seenCol:'desktop_last_seen_at'
+  };
+}
+
 let BW_PLAYER_DEVICE_WATCH_TIMER = null;
 let BW_PLAYER_IDLE_TIMER = null;
 let BW_PLAYER_IDLE_STARTED = false;
 let BW_PLAYER_KICKING = false;
 const BW_PLAYER_IDLE_LIMIT_MS = 30 * 60 * 1000;
 
-function BW_isMobileDevice(){
-  const ua = navigator.userAgent || '';
-  const byUA = /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test(ua);
-  const byWidth = !!(window.matchMedia && window.matchMedia('(max-width: 860px)').matches);
-  const byTouch = (navigator.maxTouchPoints || 0) > 1;
-  return !!(byUA || (byWidth && byTouch));
-}
-
-function BW_playerDeviceType(){
-  // V17-1：雙螢幕 KTV 守門
-  // desktop/tv 共用 desktop 欄位；手機共用 mobile 欄位。
-  // 需要 Supabase profiles 已存在：
-  // current_desktop_device_id / current_mobile_device_id / desktop_last_seen_at / mobile_last_seen_at
-  return BW_isMobileDevice() ? 'mobile' : 'desktop';
-}
-
-function BW_playerDeviceColumns(){
-  const type = BW_playerDeviceType();
-  if(type === 'mobile'){
-    return {
-      type,
-      idCol: 'current_mobile_device_id',
-      seenCol: 'mobile_last_seen_at',
-      label: '手機'
-    };
+async function BW_playerIsAdmin(userId){
+  try{
+    const { data, error } = await playerSupa
+      .from('profiles')
+      .select('is_admin')
+      .eq('id', userId)
+      .single();
+    if(error) return false;
+    return !!data?.is_admin;
+  }catch(_e){
+    return false;
   }
-  return {
-    type,
-    idCol: 'current_desktop_device_id',
-    seenCol: 'desktop_last_seen_at',
-    label: '桌機'
-  };
 }
 
 async function BW_playerTakeoverDevice(userId){
   const myDevice = BW_getDeviceId();
   const cols = BW_playerDeviceColumns();
-  const nowIso = new Date().toISOString();
-  const patch = {
-    last_seen_at: nowIso
+  const now = new Date().toISOString();
+
+  // admin 不受裝置限制
+  try{
+    const isAdmin = await BW_playerIsAdmin(userId);
+    if(isAdmin) return myDevice;
+  }catch(_e){}
+
+  const payload = {
+    last_seen_at: now
   };
-  patch[cols.idCol] = myDevice;
-  patch[cols.seenCol] = nowIso;
+  payload[cols.idCol] = myDevice;
+  payload[cols.seenCol] = now;
 
   const { error } = await playerSupa
     .from('profiles')
-    .update(patch)
+    .update(payload)
     .eq('id', userId);
 
   if(error){
-    console.error('[BW-player] V17-1 takeover failed', cols, error);
+    console.error('[BW-player] takeover failed', error);
     throw error;
   }
-  console.log('[BW-player] V17-1 takeover ok', { deviceType: cols.type, deviceId: myDevice });
+
+  console.log('[BW-player] device registered:', cols.type, myDevice);
   return myDevice;
 }
 
 async function BW_playerCheckDeviceStillMine(userId){
   const myDevice = BW_getDeviceId();
   const cols = BW_playerDeviceColumns();
+
+  // admin 不受裝置限制
+  try{
+    const isAdmin = await BW_playerIsAdmin(userId);
+    if(isAdmin) return true;
+  }catch(_e){}
+
   const { data, error } = await playerSupa
     .from('profiles')
     .select(cols.idCol)
@@ -904,22 +937,29 @@ async function BW_playerCheckDeviceStillMine(userId){
     .single();
 
   if(error){
-    console.error('[BW-player] V17-1 check failed', cols, error);
+    console.error('[BW-player] check failed', error);
     return true;
   }
-  return String(data?.[cols.idCol] || '') === myDevice;
+
+  const current = String((data && data[cols.idCol]) || '');
+  const ok = !current || current === myDevice;
+  if(!ok){
+    console.warn('[BW-player] device replaced:', cols.type, { mine: myDevice, current });
+  }
+  return ok;
 }
 
 async function BW_playerKickOut(){
   if(BW_PLAYER_KICKING) return;
   BW_PLAYER_KICKING = true;
-  const cols = BW_playerDeviceColumns();
   try{ pauseActive && pauseActive(); }catch(_e){}
-  try{ alert('同帳號已有另一台' + cols.label + '開啟播放器，你已被登出'); }catch(_e){}
-  try{ BW_playerStopIdleLogout();
-  try{ if (BW_PLAYER_DEVICE_WATCH_TIMER) clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER); }catch(_e){}
-  await playerSupa.auth.signOut(); }catch(_e){}
-  location.href = (ROOT_BASE || '') + '/index.html?device_kicked=1&type=' + encodeURIComponent(cols.type);
+  try{ alert("此帳號同類型裝置已在另一台登入，你已被登出"); }catch(_e){}
+  try{
+    BW_playerStopIdleLogout();
+    try{ if (BW_PLAYER_DEVICE_WATCH_TIMER) clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER); }catch(_e){}
+    await playerSupa.auth.signOut();
+  }catch(_e){}
+  location.href = (ROOT_BASE || '') + '/index.html?device_kicked=1';
 }
 
 function BW_playerStartDeviceWatcher(userId){
@@ -927,6 +967,7 @@ function BW_playerStartDeviceWatcher(userId){
     clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER);
     BW_PLAYER_DEVICE_WATCH_TIMER = null;
   }
+
   BW_PLAYER_DEVICE_WATCH_TIMER = setInterval(async ()=>{
     try{
       const ok = await BW_playerCheckDeviceStillMine(userId);
@@ -936,16 +977,16 @@ function BW_playerStartDeviceWatcher(userId){
         await BW_playerKickOut();
       }else{
         const cols = BW_playerDeviceColumns();
-        const nowIso = new Date().toISOString();
-        const patch = { last_seen_at: nowIso };
-        patch[cols.seenCol] = nowIso;
+        const now = new Date().toISOString();
+        const payload = { last_seen_at: now };
+        payload[cols.seenCol] = now;
         await playerSupa
           .from('profiles')
-          .update(patch)
+          .update(payload)
           .eq('id', userId);
       }
     }catch(err){
-      console.error('[BW-player] V17-1 watcher error', err);
+      console.error('[BW-player] watcher error', err);
     }
   }, 4000);
 }
@@ -955,9 +996,11 @@ async function BW_playerIdleLogoutNow(){
   BW_PLAYER_KICKING = true;
   try{ pauseActive && pauseActive(); }catch(_e){}
   try{ alert('閒置超過 30 分鐘，系統已自動登出'); }catch(_e){}
-  try{ BW_playerStopIdleLogout();
-  try{ if (BW_PLAYER_DEVICE_WATCH_TIMER) clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER); }catch(_e){}
-  await playerSupa.auth.signOut(); }catch(_e){}
+  try{
+    BW_playerStopIdleLogout();
+    try{ if (BW_PLAYER_DEVICE_WATCH_TIMER) clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER); }catch(_e){}
+    await playerSupa.auth.signOut();
+  }catch(_e){}
   location.href = (ROOT_BASE || '') + '/index.html?idle=1';
 }
 
