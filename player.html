@@ -1458,29 +1458,75 @@ let slug=normalizeSlug(params.get('slug')||'houyi');
 const domainParam = (params.get('domain') || '').trim().toLowerCase();
 
 
-/* === 8088 本機相容模式：只改媒體路徑，不跳過守門/金幣/watch_logs/YouTube/R2 容錯 === */
+/* === 雙模來源：正式站走 Supabase/Cloudflare；大陸/本機主機走本機 mp4 / cover / data ===
+   本機模式判斷：localhost / 127.0.0.1 / 192.168.* / 10.* / 172.16~31.* / 220.132.44.11 / ?local=1
+   本機模式會跳過 Supabase 守門、訂閱、金幣、watch_logs，避免中國端卡在外網 API。
+*/
 const BW_LOCAL_MEDIA_HOSTS = new Set(['220.132.44.11', '127.0.0.1', 'localhost']);
-const BW_IS_LOCAL_8088_MODE = BW_LOCAL_MEDIA_HOSTS.has(location.hostname);
+function BW_isPrivateHost(host){
+  const h = String(host || '').toLowerCase();
+  if(BW_LOCAL_MEDIA_HOSTS.has(h)) return true;
+  if(h.startsWith('192.168.') || h.startsWith('10.')) return true;
+  const m = h.match(/^172\.(\d+)\./);
+  if(m){ const n = Number(m[1]); if(n >= 16 && n <= 31) return true; }
+  return false;
+}
+const BW_IS_LOCAL_8088_MODE = BW_isPrivateHost(location.hostname) || ['1','true','yes','on'].includes(String(params.get('local') || '').toLowerCase());
+function BW_localFileNameFromUrl(raw){
+  try{
+    const u = new URL(String(raw || ''), location.href);
+    const p = decodeURIComponent(u.pathname || '');
+    return (p.split('/').filter(Boolean).pop() || '').split('?')[0];
+  }catch(_e){
+    const p = String(raw || '').split('?')[0];
+    return (p.split('/').filter(Boolean).pop() || '').trim();
+  }
+}
 function BW_toLocalMediaUrl(url){
   const raw = String(url || '').trim();
   if(!raw || !BW_IS_LOCAL_8088_MODE) return raw;
+  if(raw.startsWith('/mp4/') || raw.startsWith('/cover/') || raw.startsWith('/data/')) return raw;
+
+  const file = BW_localFileNameFromUrl(raw);
+  if(/\.mp4$/i.test(file)) return `${BASE}/mp4/${file}`;
+  if(/\.(jpg|jpeg|png|webp)$/i.test(file)) return `${BASE}/cover/${file}`;
+
+  // 舊資料若已是 /videos/category/xxx.mp4 或 /assets/xxx.jpg，也轉成本機 mp4/cover。
   try{
     const u = new URL(raw, location.href);
-    let p = u.pathname || '';
-    // R2 /一般 CDN：/videos/... 或 /assets/...
-    if(p.startsWith('/videos/') || p.startsWith('/assets/') || p.startsWith('/ads/')) return p;
-    // Supabase public storage：/storage/v1/object/public/videos/... 或 assets/...
+    const p = u.pathname || '';
+    if(p.startsWith('/videos/') || p.startsWith('/assets/') || p.startsWith('/ads/')){
+      const f = BW_localFileNameFromUrl(p);
+      if(/\.mp4$/i.test(f)) return `${BASE}/mp4/${f}`;
+      if(/\.(jpg|jpeg|png|webp)$/i.test(f)) return `${BASE}/cover/${f}`;
+    }
     const marker = '/storage/v1/object/public/';
     const idx = p.indexOf(marker);
     if(idx >= 0){
-      const rest = p.slice(idx + marker.length);
-      if(rest.startsWith('videos/') || rest.startsWith('assets/') || rest.startsWith('ads/')) return '/' + rest;
+      const f = BW_localFileNameFromUrl(p.slice(idx + marker.length));
+      if(/\.mp4$/i.test(f)) return `${BASE}/mp4/${f}`;
+      if(/\.(jpg|jpeg|png|webp)$/i.test(f)) return `${BASE}/cover/${f}`;
     }
-  }catch(_e){
-    // 相對路徑照舊；若已經是 /videos 或 /assets 直接回傳
-    if(raw.startsWith('/videos/') || raw.startsWith('/assets/') || raw.startsWith('/ads/')) return raw;
-  }
+  }catch(_e){}
   return raw;
+}
+function BW_makeLocalAssetRow(){
+  return {
+    is_published:true,
+    preferred_source:'mp4',
+    mp4_url:`${BASE}/mp4/${slug}.mp4`,
+    cover_url:`${BASE}/cover/${slug}.jpg`,
+    youtube_url:'',
+    youtube_id:'',
+    duration_sec:0,
+    difficulty_level:null,
+    title:slug,
+    domain_code:domainParam || '',
+    has_karaoke:(cat === 'music'),
+    karaoke_url:`${BASE}/mp4/${slug}_karaoke.mp4`,
+    karaoke_video:`${BASE}/mp4/${slug}_karaoke.mp4`,
+    karaoke:`${BASE}/mp4/${slug}_karaoke.mp4`
+  };
 }
 
 function inferProDomainFromSlug(slugText=''){
@@ -4047,6 +4093,13 @@ async function setupCoinGate(user){
 
 /* ==== 初始化 + 守門程序（登入 + 訂閱 + preview） ==== */
   async function ensureVideoPublished(category, slug, isAdmin) {
+    if (BW_IS_LOCAL_8088_MODE) {
+      const localRow = BW_makeLocalAssetRow();
+      window.__ASSET_ROW__ = localRow;
+      try{ BW_refreshKaraokeUrls(localRow); BW_updateKtvButtonAvailability(localRow); }catch(_e){}
+      console.log('[BW-player] LOCAL MODE: skip Supabase assets, use local mp4/cover/data', localRow);
+      return true;
+    }
     try {
       const { data, error } = await playerSupa
         .from('assets')
@@ -4097,6 +4150,23 @@ async function waitUser(maxMs = 1500, stepMs = 250){
 
 user = await waitUser(1500, 250);
 
+// 🇨🇳 本機模式：大陸電腦/區網播放時，不打 Supabase auth / 訂閱 / 金幣，全部讀本機檔案。
+// 正式站 bookwide.net 不受影響。若本機仍想測正式守門，可在網址加 ?auth=1。
+if (BW_IS_LOCAL_8088_MODE && params.get('auth') !== '1') {
+  user = { id:'local-mode-user', email:'本機模式' };
+  CURRENT_USER_IS_ADMIN = true;
+  window.__ASSET_ROW__ = BW_makeLocalAssetRow();
+  try{ BW_refreshKaraokeUrls(window.__ASSET_ROW__); BW_updateKtvButtonAvailability(window.__ASSET_ROW__); }catch(_e){}
+  try{
+    const badge = $('#userNameBadge');
+    if (badge) badge.textContent = '本機模式';
+    ['coinCostChip','walletChip','trialBadge','btnUnlockNow'].forEach(id => {
+      const el = document.getElementById(id);
+      if(el) el.style.display = 'none';
+    });
+  }catch(_e){}
+}
+
 // 2️⃣ 若未登入：一律導回首頁（試看也必須先登入）
   if (!user) {
     const next = location.pathname + location.search;
@@ -4106,17 +4176,19 @@ user = await waitUser(1500, 250);
     location.href = url.toString();
     return;
   } else {
-    try{
-      await BW_playerTakeoverDevice(user.id);
-      const stillMine = await BW_playerCheckDeviceStillMine(user.id);
-      if(!stillMine){
-        await BW_playerKickOut();
-        return;
+    if (!(BW_IS_LOCAL_8088_MODE && params.get('auth') !== '1')) {
+      try{
+        await BW_playerTakeoverDevice(user.id);
+        const stillMine = await BW_playerCheckDeviceStillMine(user.id);
+        if(!stillMine){
+          await BW_playerKickOut();
+          return;
+        }
+        BW_playerStartDeviceWatcher(user.id);
+        BW_playerStartIdleLogout();
+      }catch(err){
+        console.error('[BW-player] guard setup error', err);
       }
-      BW_playerStartDeviceWatcher(user.id);
-      BW_playerStartIdleLogout();
-    }catch(err){
-      console.error('[BW-player] guard setup error', err);
     }
 
     // 顯示登入者 Email
@@ -4129,7 +4201,7 @@ user = await waitUser(1500, 250);
 // 3️⃣ 已登入且非 preview：
 //    先以 profiles.expires_at 作為權威；若缺值但 orders 有有效訂單 → 放行並回填 profiles.expires_at（修正『已訂閱仍被彈去 pricing』）
 //    同時：訂閱通過後若尚未完成 Level Survey → 只導一次到 /account/level-survey.html
-if (!isPreview && user) {
+if (!isPreview && user && !(BW_IS_LOCAL_8088_MODE && params.get('auth') !== '1')) {
   try{
     const now = new Date();
     const nowMs = now.getTime();
@@ -4280,7 +4352,9 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     speedVal.textContent = `${r.toFixed(2)}x`;
 
     await loadVideo();
-    await setupCoinGate(user);
+    if (!(BW_IS_LOCAL_8088_MODE && params.get('auth') !== '1')) {
+      await setupCoinGate(user);
+    }
     await loadCues();
     await loadQuiz();
     await loadVocab();
@@ -4306,6 +4380,10 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
   }
   if (typeof slug === 'undefined') {
     console.warn('[BW-WATCH] slug missing');
+    return;
+  }
+  if (typeof BW_IS_LOCAL_8088_MODE !== 'undefined' && BW_IS_LOCAL_8088_MODE && !(new URLSearchParams(location.search).get('auth') === '1')) {
+    console.log('[BW-WATCH] LOCAL MODE: skip Supabase watch_logs');
     return;
   }
 
