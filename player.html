@@ -1457,6 +1457,32 @@ function normalizeSlug(v=''){
 let slug=normalizeSlug(params.get('slug')||'houyi');
 const domainParam = (params.get('domain') || '').trim().toLowerCase();
 
+
+/* === 8088 本機相容模式：只改媒體路徑，不跳過守門/金幣/watch_logs/YouTube/R2 容錯 === */
+const BW_LOCAL_MEDIA_HOSTS = new Set(['220.132.44.11', '127.0.0.1', 'localhost']);
+const BW_IS_LOCAL_8088_MODE = BW_LOCAL_MEDIA_HOSTS.has(location.hostname);
+function BW_toLocalMediaUrl(url){
+  const raw = String(url || '').trim();
+  if(!raw || !BW_IS_LOCAL_8088_MODE) return raw;
+  try{
+    const u = new URL(raw, location.href);
+    let p = u.pathname || '';
+    // R2 /一般 CDN：/videos/... 或 /assets/...
+    if(p.startsWith('/videos/') || p.startsWith('/assets/') || p.startsWith('/ads/')) return p;
+    // Supabase public storage：/storage/v1/object/public/videos/... 或 assets/...
+    const marker = '/storage/v1/object/public/';
+    const idx = p.indexOf(marker);
+    if(idx >= 0){
+      const rest = p.slice(idx + marker.length);
+      if(rest.startsWith('videos/') || rest.startsWith('assets/') || rest.startsWith('ads/')) return '/' + rest;
+    }
+  }catch(_e){
+    // 相對路徑照舊；若已經是 /videos 或 /assets 直接回傳
+    if(raw.startsWith('/videos/') || raw.startsWith('/assets/') || raw.startsWith('/ads/')) return raw;
+  }
+  return raw;
+}
+
 function inferProDomainFromSlug(slugText=''){
   const s = String(slugText || '').trim().toLowerCase();
   if (!s) return '';
@@ -1726,8 +1752,8 @@ let BW_RETURN_ORIGINAL_PREFERS_YOUTUBE = true; // V5.1: 伴奏切回原唱時，
 function BW_pickKaraokeUrl(row){
   const r = row || window.__ASSET_ROW__ || {};
   const direct = String(r.karaoke_url || r.karaoke_video || r.karaoke || '').trim();
-  if(direct) return direct;
-  const mp4 = String(r.mp4_url || '').trim();
+  if(direct) return BW_toLocalMediaUrl(direct);
+  const mp4 = BW_toLocalMediaUrl(String(r.mp4_url || '').trim());
   if(mp4 && mp4.includes('.mp4')) return mp4.replace(/\.mp4(\?.*)?$/i, '_karaoke.mp4$1');
   return '';
 }
@@ -2261,14 +2287,14 @@ async function loadVideo(){
 
   // cover / poster 對齊
   try{
-    if (row && row.cover_url) video.poster = row.cover_url;
+    if (row && row.cover_url) video.poster = BW_toLocalMediaUrl(row.cover_url);
   }catch(_e){}
 
   const sources = [];
   const seen = new Set();
 
   function add(url){
-    const u = String(url || '').trim();
+    const u = BW_toLocalMediaUrl(String(url || '').trim());
     if (!u || seen.has(u)) return;
     seen.add(u);
     sources.push(u);

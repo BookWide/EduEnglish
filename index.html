@@ -749,6 +749,85 @@
     // Supabase public storage base URL
     const STORAGE_BASE = "https://pub-578e9e060a104f24b6865e26eb941648.r2.dev";
 
+    // ===== BookWide Local 8088 相容模式 =====
+    // 正式站 bookwide.net 不動；只有台灣本機 / 大陸連回台灣 IP 時，
+    // 把 R2 / Supabase Storage 的 assets/videos/ads 路徑改成本機靜態路徑。
+    function BW_isLocalStaticMode() {
+      const h = String(location.hostname || '').toLowerCase();
+      return h === '220.132.44.11' || h === '127.0.0.1' || h === 'localhost';
+    }
+
+    function BW_toLocalStaticUrl(url) {
+      if (!BW_isLocalStaticMode() || !url) return url;
+      const raw = String(url || '').trim();
+      if (!raw) return raw;
+
+      // 已經是正確根目錄路徑
+      if (raw.startsWith('/assets/') || raw.startsWith('/videos/') || raw.startsWith('/ads/')) return raw;
+
+      // 避免相對路徑在 /EduEnglish/ 底下變成 /EduEnglish/assets/...
+      if (raw.startsWith('assets/')) return '/' + raw;
+      if (raw.startsWith('videos/')) return '/' + raw;
+      if (raw.startsWith('ads/')) return '/' + raw;
+
+      try {
+        const u = new URL(raw, location.href);
+        const path = u.pathname.replace(/\/+/g, '/');
+
+        // Cloudflare R2: https://...r2.dev/assets/movie/a.jpg
+        let m = path.match(/\/(assets|videos|ads)\/(.+)$/);
+        if (m) return '/' + m[1] + '/' + m[2];
+
+        // Supabase Storage: /storage/v1/object/public/assets/movie/a.jpg
+        m = path.match(/\/storage\/v1\/object\/public\/(assets|videos|ads)\/(.+)$/);
+        if (m) return '/' + m[1] + '/' + m[2];
+      } catch (_e) {}
+
+      return raw;
+    }
+
+    function BW_coverUrlForItem(v) {
+      const category = String(v && v.category || '').trim();
+      const slug = String(v && v.slug || '').trim();
+      const url = (v && (v.cover_url || v.cover)) || `${STORAGE_BASE}/assets/${category}/${slug}.jpg`;
+      return BW_toLocalStaticUrl(url);
+    }
+
+    function BW_videoUrlForItem(v) {
+      const category = String(v && v.category || '').trim();
+      const slug = String(v && v.slug || '').trim();
+      const url = (v && (v.mp4_url || v.video)) || `${STORAGE_BASE}/videos/${category}/${slug}.mp4`;
+      return BW_toLocalStaticUrl(url);
+    }
+
+    function BW_applyLocalStaticDomFix() {
+      if (!BW_isLocalStaticMode()) return;
+      try {
+        document.querySelectorAll('img').forEach(img => {
+          const src = img.getAttribute('src');
+          const fixed = BW_toLocalStaticUrl(src);
+          if (fixed && fixed !== src) img.setAttribute('src', fixed);
+        });
+        document.querySelectorAll('video').forEach(video => {
+          const poster = video.getAttribute('poster');
+          const fixedPoster = BW_toLocalStaticUrl(poster);
+          if (fixedPoster && fixedPoster !== poster) video.setAttribute('poster', fixedPoster);
+          video.querySelectorAll('source').forEach(source => {
+            const src = source.getAttribute('src');
+            const fixed = BW_toLocalStaticUrl(src);
+            if (fixed && fixed !== src) source.setAttribute('src', fixed);
+          });
+        });
+      } catch (_e) {}
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', BW_applyLocalStaticDomFix);
+    } else {
+      BW_applyLocalStaticDomFix();
+    }
+
+
+
     // 統一總清單 JSON（用相對路徑，不寫死網域）
     const INDEX_JSON_URL = "./data/index-all.json?v=" + Date.now();
 
@@ -915,9 +994,9 @@ function applyHomeHeroVariant(loggedIn, hasActivePaid, profileReady=false){
   }catch(_e){}
 
   // 影片（你指定的三支）
-  const V1 = STORAGE_BASE + '/ads/home/Teacher_Emma.mp4';
-  const V2 = STORAGE_BASE + '/ads/home/Teacher_Diana.mp4';
-  const V3 = STORAGE_BASE + '/ads/home/bookwide.mp4';
+  const V1 = BW_toLocalStaticUrl(STORAGE_BASE + '/ads/home/Teacher_Emma.mp4');
+  const V2 = BW_toLocalStaticUrl(STORAGE_BASE + '/ads/home/Teacher_Diana.mp4');
+  const V3 = BW_toLocalStaticUrl(STORAGE_BASE + '/ads/home/bookwide.mp4');
 
   // 三套：AI老師口語 + 右文字區
   const variants = {
@@ -1300,7 +1379,7 @@ function getWeekIndex() {
       }
 
       for (const v of limited) {
-        const cover = (v.cover_url || `${STORAGE_BASE}/assets/${v.category}/${v.slug}.jpg`);
+        const cover = BW_coverUrlForItem(v);
         const domainPart = (String(v.category || '') === 'pro' && String(v.domain_code || '').trim())
           ? `&domain=${encodeURIComponent(String(v.domain_code || '').trim())}`
           : '';
