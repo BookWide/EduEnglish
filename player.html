@@ -5070,8 +5070,8 @@ async function loadProOutline(){
 <script>
 /* === V17-5 TRUE KTV FINAL：兩條音軌混音，只改 MUSIC，不動其它分類 ===
    需要檔案：
-   1) /relay_data/music/{slug}/audio/no_vocals.mp3  伴奏
-   2) /relay_data/music/{slug}/audio/vocals.mp3     人聲
+   1) 本機：/relay_data/music/{slug}/audio/no_vocals.mp3 / vocals.mp3
+   2) 正式站 R2：由 assets.mp4_url 推導 videos/music/{slug}/audio/no_vocals.mp3 / vocals.mp3
    也相容：/data/music/{slug}/audio/...
 */
 (function(){
@@ -5098,13 +5098,32 @@ async function loadProOutline(){
   function getKtvAudioBaseCandidates(){
     const b = (typeof BASE !== 'undefined' ? BASE : '') || '';
     const s = (typeof slug !== 'undefined' ? slug : '').trim();
-    return [
-      `${b}/relay_data/music/${s}/audio/`,
-      `/relay_data/music/${s}/audio/`,
-      `${b}/data/music/${s}/audio/`,
-      `/data/music/${s}/audio/`,
-      `./audio/`
-    ].filter((x, i, arr) => x && arr.indexOf(x) === i);
+    const row = window.__ASSET_ROW__ || {};
+    const out = [];
+    const add = (x) => { if(x && !out.includes(x)) out.push(x); };
+
+    // 1) DB 若有 TRUE KTV 欄位，直接用
+    const directNoVocals = String(row.true_ktv_no_vocals_url || row.no_vocals_url || '').trim();
+    if(directNoVocals && /no_vocals\.mp3(\?|$)/i.test(directNoVocals)){
+      add(directNoVocals.replace(/no_vocals\.mp3(\?.*)?$/i, ''));
+    }
+
+    // 2) 正式站 R2：由 mp4_url 推導
+    //    videos/music/<slug>.mp4 -> videos/music/<slug>/audio/no_vocals.mp3
+    const mp4 = String(row.mp4_url || '').trim();
+    if(mp4 && /\/videos\/music\/[^/]+\.mp4(\?|$)/i.test(mp4)){
+      add(mp4.replace(/\/videos\/music\/([^/?#]+)\.mp4(.*)$/i, '/videos/music/$1/audio/'));
+    }
+
+    // 3) 本機 / 大陸主機
+    add(`${b}/relay_data/music/${s}/audio/`);
+    add(`/relay_data/music/${s}/audio/`);
+
+    // 4) 舊 data 路徑相容
+    add(`${b}/data/music/${s}/audio/`);
+    add(`/data/music/${s}/audio/`);
+    add(`./audio/`);
+    return out;
   }
   async function urlExists(url){
     try{
@@ -5210,7 +5229,13 @@ async function loadProOutline(){
     try{ video.muted = true; }catch(_e){}
     try{ if(typeof isUsingYouTube === 'function' && isUsingYouTube() && ytPlayer){ ytPlayer.mute && ytPlayer.mute(); } }catch(_e){}
     BW_setKtvAudioButtonLabel();
-    await BW_trueKtvPlayTracks();
+    const ok = await BW_trueKtvPlayTracks();
+    if(!ok){
+      BW_TRUE_KTV_MODE = 0;
+      try{ video.muted = false; video.volume = 1; }catch(_e){}
+      try{ if(typeof isUsingYouTube === 'function' && isUsingYouTube() && ytPlayer){ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(100); } }catch(_e){}
+      BW_setKtvAudioButtonLabel();
+    }
   }
 
   // 覆蓋舊 KTV：取消「靜音 / 中導唱 / 日導唱 / 切 MP4」邏輯，只保留原唱 ↔ 伴唱混音。
