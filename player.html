@@ -1723,6 +1723,92 @@ let BW_ORIGINAL_YOUTUBE_ID = '';
 let BW_ORIGINAL_MP4_FALLBACK_URL = '';
 let BW_RETURN_ORIGINAL_PREFERS_YOUTUBE = true; // V5.1: 伴奏切回原唱時，優先回 YouTube，不停在 Cloudflare MP4
 
+
+/* === V23 MUSIC MP3 語音模式：取代 KTV 伴奏/導唱 MP4，降低容量 ===
+   mode 0 = 原唱影片聲音
+   mode 1 = 英文 MP3（影片靜音）
+   mode 2 = 中文 MP3（影片靜音）
+   mode 3 = 靜音（只看字幕）
+   檔案路徑：/data/music/<slug>/audio/en/0000.mp3、/audio/zh/0000.mp3
+*/
+const BW_MUSIC_MP3_ENABLED = true;
+let BW_MUSIC_MP3_LAST_INDEX = -1;
+let BW_MUSIC_MP3_LAST_LANG = '';
+let BW_MUSIC_MP3_AUDIO = null;
+function BW_getMusicMp3Audio(){
+  if(!BW_MUSIC_MP3_AUDIO){
+    BW_MUSIC_MP3_AUDIO = new Audio();
+    BW_MUSIC_MP3_AUDIO.preload = 'auto';
+  }
+  return BW_MUSIC_MP3_AUDIO;
+}
+function BW_stopMusicMp3(){
+  try{
+    const a = BW_getMusicMp3Audio();
+    a.pause();
+    a.removeAttribute('src');
+    a.load();
+  }catch(_e){}
+  BW_MUSIC_MP3_LAST_INDEX = -1;
+  BW_MUSIC_MP3_LAST_LANG = '';
+}
+function BW_musicMp3Lang(){
+  if(BW_KTV_AUDIO_MODE === 1) return 'en';
+  if(BW_KTV_AUDIO_MODE === 2) return 'zh';
+  return '';
+}
+function BW_musicMp3Url(lang, idx){
+  const n = String(Math.max(0, Number(idx)||0)).padStart(4,'0');
+  // 與 02 v23 輸出的資料夾一致：data/music/<slug>/audio/<lang>/0000.mp3
+  return `${BASE}/data/${cat}/${slug}/audio/${lang}/${n}.mp3`;
+}
+function BW_playMusicMp3Line(idx){
+  if(cat !== 'music' || !BW_MUSIC_MP3_ENABLED) return;
+  const lang = BW_musicMp3Lang();
+  if(!lang) return;
+  if(idx === BW_MUSIC_MP3_LAST_INDEX && lang === BW_MUSIC_MP3_LAST_LANG) return;
+  BW_MUSIC_MP3_LAST_INDEX = idx;
+  BW_MUSIC_MP3_LAST_LANG = lang;
+  try{
+    const a = BW_getMusicMp3Audio();
+    a.pause();
+    a.src = BW_musicMp3Url(lang, idx);
+    a.currentTime = 0;
+    a.volume = 1;
+    const p = a.play();
+    if(p && p.catch) p.catch(err => console.warn('[MUSIC-MP3] play blocked/missing:', a.src, err));
+    console.log('[MUSIC-MP3]', lang, idx, a.src);
+  }catch(e){ console.warn('[MUSIC-MP3] play failed', e); }
+}
+function BW_musicMp3Tick(idx){
+  if(cat !== 'music') return;
+  if(BW_KTV_AUDIO_MODE === 1 || BW_KTV_AUDIO_MODE === 2){
+    // 只讓 MP3 出聲，背景影片靜音，達成「取消背景音」
+    try{ video.muted = true; }catch(_e){}
+    BW_playMusicMp3Line(idx);
+  }
+}
+function BW_applyMusicMp3AudioMode(){
+  if(cat !== 'music') return false;
+  // 保持目前影片來源，不再切 _karaoke/_zh/_ja MP4。
+  if(BW_KTV_AUDIO_MODE === 0){
+    BW_stopMusicMp3();
+    try{ video.muted = false; video.volume = 1; }catch(_e){}
+    if(isUsingYouTube()) try{ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(100); }catch(_e){}
+  }else if(BW_KTV_AUDIO_MODE === 1 || BW_KTV_AUDIO_MODE === 2){
+    try{ video.muted = true; }catch(_e){}
+    BW_MUSIC_MP3_LAST_INDEX = -1;
+    BW_MUSIC_MP3_LAST_LANG = '';
+    BW_playMusicMp3Line(currentIndex());
+  }else{
+    BW_stopMusicMp3();
+    try{ video.muted = true; }catch(_e){}
+    if(isUsingYouTube()) try{ ytPlayer.mute && ytPlayer.mute(); }catch(_e){}
+  }
+  BW_setKtvAudioButtonLabel();
+  return true;
+}
+
 function BW_pickKaraokeUrl(row){
   const r = row || window.__ASSET_ROW__ || {};
   const direct = String(r.karaoke_url || r.karaoke_video || r.karaoke || '').trim();
@@ -1752,6 +1838,7 @@ function BW_updateGuideButtons(){
   try{
     const wrap = document.getElementById('ktvGuideSwitch');
     if(!wrap) return;
+    if(cat === 'music' && BW_MUSIC_MP3_ENABLED){ wrap.style.display = 'none'; return; }
     const show = cat === 'music';
     wrap.style.display = show ? 'inline-flex' : 'none';
     const hasBase = !!String(BW_KARAOKE_BASE_MP4_URL || BW_KARAOKE_MP4_URL || '').trim();
@@ -1806,6 +1893,16 @@ function BW_updateKtvButtonAvailability(row){
 
   if(cat !== 'music'){
     btns.forEach(btn => btn.style.display = 'none');
+    return;
+  }
+
+  // V23：MUSIC 改用逐句 MP3，不再依賴 _karaoke/_zh/_ja MP4，所以永遠可按。
+  if(BW_MUSIC_MP3_ENABLED){
+    btns.forEach(btn => {
+      btn.disabled = false;
+      btn.title = '原唱 / 英文MP3 / 中文MP3 / 靜音';
+    });
+    BW_setKtvAudioButtonLabel();
     return;
   }
 
@@ -2015,19 +2112,25 @@ function BW_setKtvAudioButtonLabel(){
 
   let label = '🎤 原唱';
   let cls = '';
-  if(BW_KTV_AUDIO_MODE === 1){
-    label = BW_KTV_GUIDE_MODE === 'zh' ? '中導唱' : (BW_KTV_GUIDE_MODE === 'ja' ? '日導唱' : '🎼 伴唱');
-    cls = 'ktv';
-  }
-  if(BW_KTV_AUDIO_MODE === 2){
-    label = '🔇 靜音';
-    cls = 'mute';
+  let title = '原唱 / 英文MP3 / 中文MP3 / 靜音';
+
+  if(cat === 'music' && BW_MUSIC_MP3_ENABLED){
+    if(BW_KTV_AUDIO_MODE === 1){ label = '🔊 英文MP3'; cls = 'ktv'; }
+    else if(BW_KTV_AUDIO_MODE === 2){ label = '🔊 中文MP3'; cls = 'ktv'; }
+    else if(BW_KTV_AUDIO_MODE === 3){ label = '🔇 靜音'; cls = 'mute'; }
+  }else{
+    title = '原唱 / 伴唱 / 靜音';
+    if(BW_KTV_AUDIO_MODE === 1){
+      label = BW_KTV_GUIDE_MODE === 'zh' ? '中導唱' : (BW_KTV_GUIDE_MODE === 'ja' ? '日導唱' : '🎼 伴唱');
+      cls = 'ktv';
+    }
+    if(BW_KTV_AUDIO_MODE === 2){ label = '🔇 靜音'; cls = 'mute'; }
   }
 
   btns.forEach(btn => {
     btn.classList.remove('ktv','mute');
     btn.textContent = label;
-    btn.title = '原唱 / 伴唱 / 靜音';
+    btn.title = title;
     if(cls) btn.classList.add(cls);
   });
 
@@ -2084,6 +2187,10 @@ function BW_restoreOriginalLowVolume(reason){
 }
 
 function BW_applyKtvAudioMode(){
+  if(cat === 'music' && BW_MUSIC_MP3_ENABLED){
+    BW_applyMusicMp3AudioMode();
+    return;
+  }
   BW_refreshKaraokeUrls();
   BW_setKtvAudioButtonLabel();
   const mode = BW_KTV_AUDIO_MODE;
@@ -2136,7 +2243,9 @@ function BW_cycleKtvAudioMode(){
     BW_KTV_FALLBACK_LOW_VOLUME = false;
     try{ video.volume = 1; if(isUsingYouTube() && ytPlayer && ytPlayer.setVolume) ytPlayer.setVolume(100); }catch(_e){}
   }
-  BW_KTV_AUDIO_MODE = (BW_KTV_AUDIO_MODE + 1) % 3;
+  // MUSIC 改成 4 段：原唱 → 英文MP3 → 中文MP3 → 靜音
+  const maxMode = (cat === 'music' && BW_MUSIC_MP3_ENABLED) ? 4 : 3;
+  BW_KTV_AUDIO_MODE = (BW_KTV_AUDIO_MODE + 1) % maxMode;
   try{ localStorage.setItem('BW_KTV_AUDIO_MODE', String(BW_KTV_AUDIO_MODE)); }catch(_e){}
   BW_applyKtvAudioMode();
 }
@@ -2213,6 +2322,7 @@ function handlePlaybackTick(){
   const i = currentIndex();
   highlightRow(i, chkFollow && chkFollow.checked);
   BW_updateKtvHighlight(i);
+  BW_musicMp3Tick(i);
   BW_updateTalkKtvHighlight();
 
   // 跟隨：勾選後，自動在句尾跳到下一句並持續播放
