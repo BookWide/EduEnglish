@@ -5068,7 +5068,7 @@ async function loadProOutline(){
 </script>
 
 <script>
-/* === V17-5 TRUE KTV FINAL：兩條音軌混音，只改 MUSIC，不動其它分類 ===
+/* === V17-6 TRUE KTV FINAL：兩條音軌混音，取消 fetch 檢查避免 R2 CORS ===
    需要檔案：
    1) 本機：/relay_data/music/{slug}/audio/no_vocals.mp3 / vocals.mp3
    2) 正式站 R2：由 assets.mp4_url 推導 videos/music/{slug}/audio/no_vocals.mp3 / vocals.mp3
@@ -5125,27 +5125,18 @@ async function loadProOutline(){
     add(`./audio/`);
     return out;
   }
-  async function urlExists(url){
-    try{
-      let r = await fetch(url, { method:'HEAD', cache:'no-store' });
-      if(r.ok) return true;
-    }catch(_e){}
-    try{
-      let r = await fetch(url, { method:'GET', cache:'no-store', headers:{'Range':'bytes=0-1'} });
-      return !!(r && (r.ok || r.status === 206));
-    }catch(_e){ return false; }
-  }
+  // V17-6：不要用 fetch / HEAD 檢查 R2 MP3。
+  // R2 沒有 CORS 時，fetch 會被擋；但 <audio src="...mp3"> 可以直接播放。
+  // 所以這裡只選第一個候選路徑，實際失敗交給 audio.onerror fallback。
   async function BW_trueKtvResolveBase(){
     if(BW_TRUE_KTV_BASE) return BW_TRUE_KTV_BASE;
-    for(const base of getKtvAudioBaseCandidates()){
-      const testUrl = base + 'no_vocals.mp3';
-      if(await urlExists(testUrl)){
-        BW_TRUE_KTV_BASE = base;
-        console.log('[TRUE-KTV] audio base =', base);
-        return base;
-      }
+    const candidates = getKtvAudioBaseCandidates();
+    BW_TRUE_KTV_BASE = candidates[0] || '';
+    if(BW_TRUE_KTV_BASE){
+      console.log('[TRUE-KTV] audio base =', BW_TRUE_KTV_BASE);
+      return BW_TRUE_KTV_BASE;
     }
-    console.warn('[TRUE-KTV] 找不到 no_vocals.mp3，已保留原唱。候選：', getKtvAudioBaseCandidates());
+    console.warn('[TRUE-KTV] 找不到 no_vocals.mp3 候選，已保留原唱。候選：', candidates);
     return '';
   }
   async function BW_trueKtvInit(){
@@ -5157,6 +5148,18 @@ async function loadProOutline(){
     if(!BW_TRUE_KTV_READY || !String(bgm.src || '').includes('no_vocals.mp3')){
       bgm.src = base + 'no_vocals.mp3';
       vocal.src = base + 'vocals.mp3';
+      bgm.onerror = function(){
+        console.warn('[TRUE-KTV] no_vocals.mp3 載入失敗，切回原唱：', bgm.src);
+        BW_TRUE_KTV_MODE = 0;
+        try{ video.muted = false; video.volume = 1; }catch(_e){}
+        try{ if(typeof isUsingYouTube === 'function' && isUsingYouTube() && ytPlayer){ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(100); } }catch(_e){}
+        try{ BW_trueKtvPauseTracks(); }catch(_e){}
+        try{ BW_setKtvAudioButtonLabel(); }catch(_e){}
+      };
+      vocal.onerror = function(){
+        console.warn('[TRUE-KTV] vocals.mp3 載入失敗，保留伴奏：', vocal.src);
+        try{ vocal.volume = 0; }catch(_e){}
+      };
       bgm.preload = 'auto';
       vocal.preload = 'auto';
       bgm.loop = false;
