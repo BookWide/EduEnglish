@@ -5068,7 +5068,7 @@ async function loadProOutline(){
 </script>
 
 <script>
-/* === V17-6 TRUE KTV FINAL：兩條音軌混音，取消 fetch 檢查避免 R2 CORS ===
+/* === V17-5 TRUE KTV FINAL：兩條音軌混音，只改 MUSIC，不動其它分類 ===
    需要檔案：
    1) 本機：/relay_data/music/{slug}/audio/no_vocals.mp3 / vocals.mp3
    2) 正式站 R2：由 assets.mp4_url 推導 videos/music/{slug}/audio/no_vocals.mp3 / vocals.mp3
@@ -5125,19 +5125,14 @@ async function loadProOutline(){
     add(`./audio/`);
     return out;
   }
-  // V17-6：不要用 fetch / HEAD 檢查 R2 MP3。
-  // R2 沒有 CORS 時，fetch 會被擋；但 <audio src="...mp3"> 可以直接播放。
-  // 所以這裡只選第一個候選路徑，實際失敗交給 audio.onerror fallback。
+  // V17-7：R2 沒有 CORS 時，不能用 fetch/HEAD 檢查 mp3。
+  // 直接交給 <audio> 播放；若真的載入失敗，audio.onerror 會 fallback 回原唱。
   async function BW_trueKtvResolveBase(){
     if(BW_TRUE_KTV_BASE) return BW_TRUE_KTV_BASE;
     const candidates = getKtvAudioBaseCandidates();
     BW_TRUE_KTV_BASE = candidates[0] || '';
-    if(BW_TRUE_KTV_BASE){
-      console.log('[TRUE-KTV] audio base =', BW_TRUE_KTV_BASE);
-      return BW_TRUE_KTV_BASE;
-    }
-    console.warn('[TRUE-KTV] 找不到 no_vocals.mp3 候選，已保留原唱。候選：', candidates);
-    return '';
+    console.log('[TRUE-KTV] audio base =', BW_TRUE_KTV_BASE);
+    return BW_TRUE_KTV_BASE;
   }
   async function BW_trueKtvInit(){
     const bgm = getBgm();
@@ -5148,24 +5143,17 @@ async function loadProOutline(){
     if(!BW_TRUE_KTV_READY || !String(bgm.src || '').includes('no_vocals.mp3')){
       bgm.src = base + 'no_vocals.mp3';
       vocal.src = base + 'vocals.mp3';
-      bgm.onerror = function(){
-        console.warn('[TRUE-KTV] no_vocals.mp3 載入失敗，切回原唱：', bgm.src);
-        BW_TRUE_KTV_MODE = 0;
-        try{ video.muted = false; video.volume = 1; }catch(_e){}
-        try{ if(typeof isUsingYouTube === 'function' && isUsingYouTube() && ytPlayer){ ytPlayer.unMute && ytPlayer.unMute(); ytPlayer.setVolume && ytPlayer.setVolume(100); } }catch(_e){}
-        try{ BW_trueKtvPauseTracks(); }catch(_e){}
-        try{ BW_setKtvAudioButtonLabel(); }catch(_e){}
-      };
-      vocal.onerror = function(){
-        console.warn('[TRUE-KTV] vocals.mp3 載入失敗，保留伴奏：', vocal.src);
-        try{ vocal.volume = 0; }catch(_e){}
-      };
       bgm.preload = 'auto';
       vocal.preload = 'auto';
       bgm.loop = false;
       vocal.loop = false;
       bgm.volume = 1;
       vocal.volume = getVocalVolume();
+      bgm.onerror = () => {
+        console.warn('[TRUE-KTV] no_vocals.mp3 load error:', bgm.src);
+        BW_trueKtvSetOriginal();
+      };
+      vocal.onerror = () => console.warn('[TRUE-KTV] vocals.mp3 load error:', vocal.src);
       BW_TRUE_KTV_READY = true;
     }
     return true;
@@ -5205,13 +5193,17 @@ async function loadProOutline(){
     BW_trueKtvSync(true);
     try{ bgm.playbackRate = Number(video.playbackRate || 1) || 1; }catch(_e){}
     try{ vocal.playbackRate = Number(video.playbackRate || 1) || 1; }catch(_e){}
-    try{ bgm.volume = 1; vocal.volume = getVocalVolume(); }catch(_e){}
-    if(video && !video.paused){
-      try{ await bgm.play(); }catch(e){ console.warn('[TRUE-KTV] bgm play blocked:', e); }
-      try{ await vocal.play(); }catch(e){ console.warn('[TRUE-KTV] vocal play blocked:', e); }
-    }
+    try{ bgm.muted = false; vocal.muted = false; bgm.volume = 1; vocal.volume = getVocalVolume(); }catch(_e){}
+
+    // V17-7：YouTube 模式時 hidden <video> 永遠是 paused，不能用 video.paused 判斷。
+    // 按下「伴唱」本身就是使用者手勢，這裡必須直接啟動兩條 mp3。
+    try{ await bgm.play(); console.log('[TRUE-KTV] bgm playing', bgm.src); }
+    catch(e){ console.warn('[TRUE-KTV] bgm play failed:', e); }
+    try{ await vocal.play(); console.log('[TRUE-KTV] vocal playing', vocal.src, 'vol=', vocal.volume); }
+    catch(e){ console.warn('[TRUE-KTV] vocal play failed:', e); }
+
     BW_trueKtvStartSyncTimer();
-    return true;
+    return !(bgm.paused && vocal.paused);
   }
   function BW_trueKtvPauseTracks(){
     try{ getBgm()?.pause(); }catch(_e){}
