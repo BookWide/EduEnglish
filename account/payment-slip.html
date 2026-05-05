@@ -20,6 +20,7 @@
     <div class="brand">BookWide 付款單</div>
     <div class="actions">
       <a class="btn secondary" href="/pricing.html">返回方案頁</a>
+      <a class="btn secondary" id="loginBtn" href="/index.html#login">登入 / 註冊</a>
       <button class="btn secondary" id="copySlip">複製付款資料</button>
       <button class="btn" onclick="window.print()">列印付款單</button>
       <button class="btn" id="submitRequest" type="button">送出訂閱申請</button>
@@ -93,21 +94,34 @@
 const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 const REQUEST_FUNCTION_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/subscription-request';
-const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
+});
 
 const PLAN = {
   month: {label:'月繳 NT$1000 / 學習會員', amount:'NT$1000', days:'30 天', coins:'50 金幣'},
-  half: {label:'半年 NT$5400 / 學習會員', amount:'NT$5400', days:'180 天', coins:'330 金幣'},
-  year: {label:'年繳 NT$9600 / 學習會員', amount:'NT$9600', days:'365 天', coins:'720 金幣'}
+  half:  {label:'半年 NT$5400 / 學習會員', amount:'NT$5400', days:'180 天', coins:'330 金幣'},
+  year:  {label:'年繳 NT$9600 / 學習會員', amount:'NT$9600', days:'365 天', coins:'720 金幣'}
 };
+
 const qs = new URLSearchParams(location.search);
+let authUser = null;
+let finalEmail = '';
+
 function taipeiNow(){
-  return new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date()).replace(/\//g,'/');
+  return new Intl.DateTimeFormat('zh-TW',{
+    timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',
+    hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false
+  }).format(new Date()).replace(/\//g,'/');
 }
 function safe(v, fallback=''){ return (v == null || v === '') ? fallback : String(v); }
+function $(id){ return document.getElementById(id); }
+
 const planKey = qs.get('plan') || 'month';
 const p = PLAN[planKey] || PLAN.month;
-const email = safe(qs.get('email'));
+
+// ✅ URL email 只當舊版備援，不顯示、不送出；真正 Email 一律由 Supabase 登入帳號決定
+const urlEmailFallback = safe(qs.get('email'));
 const ref = safe(qs.get('ref'), '無');
 const label = safe(qs.get('label'), p.label);
 const amount = safe(qs.get('amount'), p.amount);
@@ -116,40 +130,35 @@ const coins = safe(qs.get('coins'), p.coins);
 const time = safe(qs.get('time'), taipeiNow());
 const slipNo = 'BW-' + new Date().toISOString().slice(0,10).replaceAll('-','') + '-' + Math.random().toString(36).slice(2,8).toUpperCase();
 
-document.getElementById('slipNo').textContent = slipNo;
-document.getElementById('email').textContent = email || '請填登入 Email';
-document.getElementById('ref').textContent = ref || '無';
-document.getElementById('label').textContent = label;
-document.getElementById('amount').textContent = amount;
-document.getElementById('days').textContent = days;
-document.getElementById('coins').textContent = coins;
-document.getElementById('time').textContent = time;
+$('slipNo').textContent = slipNo;
+$('email').textContent = '檢查登入中…';
+$('ref').textContent = ref || '無';
+$('label').textContent = label;
+$('amount').textContent = amount;
+$('days').textContent = days;
+$('coins').textContent = coins;
+$('time').textContent = time;
+
+function currentEmailText(){
+  return finalEmail || '尚未登入';
+}
 
 function buildReport(){
-  return `BookWide 人工付款回報\n登入 Email：${email || ''}\n推薦碼：${ref || '無'}\n付款單號：${slipNo}\n選擇方案：${label}\n付款金額：${amount}\n付款方式：LINE Pay / 銀行轉帳（街口申請中）\n付款時間：${time}\n付款後五碼或交易截圖：\n備註：請協助開通 ${days}，發放 ${coins}`;
-}
-document.getElementById('reportText').textContent = buildReport();
-document.getElementById('copySlip').addEventListener('click', async ()=>{
-  try{ await navigator.clipboard.writeText(buildReport()); alert('已複製付款資料'); }
-  catch(e){ alert(buildReport()); }
-});
-
-async function fillLoginEmail(){
-  const { data } = await sb.auth.getUser();
-  const user = data?.user || null;
-  if(user?.email && !email){
-    document.getElementById('email').textContent = user.email;
-  }
+  return `BookWide 人工付款回報\n登入 Email：${currentEmailText()}\n推薦碼：${ref || '無'}\n付款單號：${slipNo}\n選擇方案：${label}\n付款金額：${amount}\n付款方式：LINE Pay / 銀行轉帳（街口申請中）\n付款時間：${time}\n付款後五碼或交易截圖：\n備註：請協助開通 ${days}，發放 ${coins}`;
 }
 
-function amountNumber(){ return Number(String(amount).replace(/[^0-9]/g,'')) || (planKey==='year'?9600:planKey==='half'?5400:1000); }
-function daysNumber(){ return Number(String(days).replace(/[^0-9]/g,'')) || (planKey==='year'?365:planKey==='half'?180:30); }
-function coinsNumber(){ return Number(String(coins).replace(/[^0-9]/g,'')) || (planKey==='year'?720:planKey==='half'?330:50); }
+function refreshReport(){
+  $('reportText').textContent = buildReport();
+}
 
+function loginUrl(){
+  // 回登入頁；你的 index.html 登入完成後若有原站邏輯會保留 session，再回付款單即可自動抓 email
+  return '/index.html#login';
+}
 
 function setSubmitStatus(html, isError=false){
-  const box = document.getElementById('submitStatus');
-  const top = document.getElementById('topSubmitStatus');
+  const box = $('submitStatus');
+  const top = $('topSubmitStatus');
   if(box) box.innerHTML = html;
   if(top){
     top.style.display = 'block';
@@ -159,46 +168,110 @@ function setSubmitStatus(html, isError=false){
   }
 }
 
-document.getElementById('submitRequest')?.addEventListener('click', async ()=>{
-  const box = document.getElementById('submitStatus');
+function amountNumber(){ return Number(String(amount).replace(/[^0-9]/g,'')) || (planKey==='year'?9600:planKey==='half'?5400:1000); }
+function daysNumber(){ return Number(String(days).replace(/[^0-9]/g,'')) || (planKey==='year'?365:planKey==='half'?180:30); }
+function coinsNumber(){ return Number(String(coins).replace(/[^0-9]/g,'')) || (planKey==='year'?720:planKey==='half'?330:50); }
+
+async function initAuthEmail(showMessage=true){
+  const { data: sess } = await sb.auth.getSession();
+  const session = sess?.session || null;
+  authUser = session?.user || null;
+  const token = session?.access_token || '';
+
+  const loginBtn = $('loginBtn');
+  const submitBtn = $('submitRequest');
+
+  if(authUser?.email && token){
+    finalEmail = authUser.email;
+    $('email').textContent = finalEmail;
+    if(loginBtn){
+      loginBtn.textContent = `已登入：${finalEmail}`;
+      loginBtn.href = '/account/subscription.html';
+      loginBtn.classList.add('secondary');
+    }
+    if(submitBtn) submitBtn.disabled = false;
+    if(showMessage){
+      const top = $('topSubmitStatus');
+      if(top) top.style.display = 'none';
+      const box = $('submitStatus');
+      if(box) box.innerHTML = '尚未送出。送出後後台會看到你的申請。';
+    }
+    refreshReport();
+    return { ok:true, token, email:finalEmail };
+  }
+
+  finalEmail = '';
+  $('email').textContent = '尚未登入';
+  if(loginBtn){
+    loginBtn.textContent = '登入 / 註冊';
+    loginBtn.href = loginUrl();
+  }
+  if(submitBtn) submitBtn.disabled = false; // 不鎖死，按下時會提示登入
+  if(showMessage){
+    setSubmitStatus(`❌ 請先登入後再送出訂閱申請。<br><a class="btn" href="${loginUrl()}" style="display:inline-flex;margin-top:10px">前往登入 / 註冊</a>`, true);
+  }
+  refreshReport();
+  return { ok:false, token:'', email:'' };
+}
+
+$('copySlip').addEventListener('click', async ()=>{
+  refreshReport();
+  try{ await navigator.clipboard.writeText(buildReport()); alert('已複製付款資料'); }
+  catch(e){ alert(buildReport()); }
+});
+
+$('submitRequest')?.addEventListener('click', async ()=>{
   try{
-    const { data: sess } = await sb.auth.getSession();
-    const token = sess?.session?.access_token;
-    const loginEmail = sess?.session?.user?.email || email || '';
-    if(!token){ setSubmitStatus('❌ 請先登入後再送出訂閱申請。', true); return; }
-    if(!loginEmail){ setSubmitStatus('❌ 找不到登入 Email。', true); return; }
-    if(!document.getElementById('paymentRef').value.trim()){
+    // ✅ 每次送出前重新抓登入狀態，不能使用 URL email
+    const auth = await initAuthEmail(false);
+    if(!auth.ok || !auth.token || !auth.email){
+      setSubmitStatus(`❌ 請先登入後再送出訂閱申請。<br><a class="btn" href="${loginUrl()}" style="display:inline-flex;margin-top:10px">前往登入 / 註冊</a>`, true);
+      return;
+    }
+
+    if(!$('paymentRef').value.trim()){
       if(!confirm('尚未填付款後五碼或截圖說明，仍要送出嗎？')) return;
     }
+
     setSubmitStatus('⏳ 送出中…');
     const res = await fetch(REQUEST_FUNCTION_URL, {
       method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`,'apikey':SUPABASE_ANON_KEY},
+      headers:{
+        'Content-Type':'application/json',
+        'Authorization':`Bearer ${auth.token}`,
+        'apikey':SUPABASE_ANON_KEY
+      },
       body: JSON.stringify({
         action:'submit',
-        email: loginEmail,
+        // ✅ 固定用 Supabase session email
+        email: auth.email,
         plan: planKey,
         planLabel: label,
         amount: amountNumber(),
         days: daysNumber(),
         coins: coinsNumber(),
         referralCode: ref && ref !== '無' ? ref : '',
-        paymentMethod: document.getElementById('paymentMethod').value,
+        paymentMethod: $('paymentMethod').value,
         paymentTime: new Date().toISOString(),
-        paymentRef: document.getElementById('paymentRef').value.trim(),
+        paymentRef: $('paymentRef').value.trim(),
         slipNo,
-        customerNote: document.getElementById('customerNote').value.trim(),
+        customerNote: $('customerNote').value.trim(),
+        // 只留下備查，不參與開通
+        urlEmailFallback
       })
     });
+
     const j = await res.json().catch(()=>({}));
     if(!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
     setSubmitStatus(`✅ 已送出訂閱申請。<br>申請編號：<span class="mono">${j.request_id}</span><br>後台確認入帳後會開通、發金幣並寄出通知信。`);
-    document.getElementById('submitRequest').disabled = true;
+    $('submitRequest').disabled = true;
   }catch(e){
     setSubmitStatus(`❌ 送出失敗：${String(e.message || e)}`, true);
   }
 });
-fillLoginEmail();
+
+// 初始化：載入頁面就自動抓登入帳號，覆蓋 URL email
+initAuthEmail(true);
 </script>
 </body>
 </html>
