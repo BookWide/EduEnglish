@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V17-9（KTV正常 + 本機V3 MP4）</title>
+<title>BookWide 播放器 V17-3（手機投屏KTV音源鍵版）</title>
 
 <style>
 :root{
@@ -1495,25 +1495,26 @@ let slug=normalizeSlug(params.get('slug')||'houyi');
 const domainParam = (params.get('domain') || '').trim().toLowerCase();
 
 
-/* === V18 LOCAL V3 MP4 ONLY：本機 / 大陸筆電優先讀 output_v3/relay_data；不改 KTV 音訊邏輯 === */
+/* === V17-10 LOCAL V3 MP4 ONLY：本機/大陸 127.0.0.1 優先讀 output_v3，不動 KTV 聲音邏輯 === */
 function BW_isLocalV3Mode(){
   try{
     const p = new URLSearchParams(location.search);
     const forced = String(p.get('localv3') || p.get('local') || '').toLowerCase();
     if(['1','true','yes','on'].includes(forced)) return true;
-    const h = location.hostname || '';
+    const h = String(location.hostname || '').toLowerCase();
     return h === '127.0.0.1' || h === 'localhost' || h === '0.0.0.0' || h === '';
   }catch(_e){ return false; }
 }
-function BW_v3LessonBase(category, lessonSlug){
+function BW_localV3Base(){
   const b = (typeof BASE !== 'undefined' ? BASE : '') || '';
-  return `${b}/output_v3/relay_data/${category}/${lessonSlug}`;
+  return `${b}/output_v3/relay_data/${cat}/${slug}`;
 }
-function BW_v3MainMp4(category, lessonSlug){
-  return `${BW_v3LessonBase(category, lessonSlug)}/${lessonSlug}.mp4`;
-}
-function BW_v3MusicVariant(lessonSlug, variant){
-  return `${BW_v3LessonBase('music', lessonSlug)}/${lessonSlug}_${variant}.mp4`;
+function BW_localV3MainMp4(){ return `${BW_localV3Base()}/${slug}.mp4`; }
+function BW_localV3KaraokeMp4(){ return `${BW_localV3Base()}/${slug}_karaoke.mp4`; }
+function BW_localV3GuideMp4(mode){
+  if(mode === 'zh') return `${BW_localV3Base()}/${slug}_zh.mp4`;
+  if(mode === 'ja') return `${BW_localV3Base()}/${slug}_ja.mp4`;
+  return BW_localV3KaraokeMp4();
 }
 
 function inferProDomainFromSlug(slugText=''){
@@ -1783,13 +1784,8 @@ let BW_ORIGINAL_MP4_FALLBACK_URL = '';
 let BW_RETURN_ORIGINAL_PREFERS_YOUTUBE = true; // V5.1: 伴奏切回原唱時，優先回 YouTube，不停在 Cloudflare MP4
 
 function BW_pickKaraokeUrl(row){
+  if(cat === 'music' && BW_isLocalV3Mode()) return BW_localV3KaraokeMp4();
   const r = row || window.__ASSET_ROW__ || {};
-  // 本機 / 大陸筆電：伴奏影片優先走 output_v3/relay_data，不動 TRUE KTV 音軌程式
-  try{
-    if(cat === 'music' && typeof BW_isLocalV3Mode === 'function' && BW_isLocalV3Mode()){
-      return BW_v3MusicVariant(slug, 'karaoke');
-    }
-  }catch(_e){}
   const direct = String(r.karaoke_url || r.karaoke_video || r.karaoke || '').trim();
   if(direct) return direct;
   const mp4 = String(r.mp4_url || '').trim();
@@ -1798,6 +1794,7 @@ function BW_pickKaraokeUrl(row){
 }
 
 function BW_pickGuideUrl(baseUrl, mode){
+  if(cat === 'music' && BW_isLocalV3Mode()) return BW_localV3GuideMp4(mode);
   const base = String(baseUrl || '').trim();
   if(!base) return '';
   // V13：桌機版正確規則。R2 實際檔名是：xxx_karaoke.mp4 / xxx_zh.mp4 / xxx_ja.mp4
@@ -1851,8 +1848,11 @@ function BW_setKtvGuideMode(mode){
 
 function BW_refreshKaraokeUrls(row){
   const r = row || window.__ASSET_ROW__ || {};
-  const localMain = (typeof BW_isLocalV3Mode === 'function' && BW_isLocalV3Mode()) ? BW_v3MainMp4(cat, slug) : '';
-  BW_ORIGINAL_MP4_URL = String(localMain || r.mp4_url || BW_ORIGINAL_MP4_URL || '').trim();
+  if(BW_isLocalV3Mode()){
+    BW_ORIGINAL_MP4_URL = BW_localV3MainMp4();
+  }else{
+    BW_ORIGINAL_MP4_URL = String(r.mp4_url || BW_ORIGINAL_MP4_URL || '').trim();
+  }
   BW_ORIGINAL_MP4_FALLBACK_URL = BW_ORIGINAL_MP4_URL;
   BW_ORIGINAL_YOUTUBE_ID = String(r.youtube_id || getYoutubeIdFromUrl(String(r.youtube_url || '')) || BW_ORIGINAL_YOUTUBE_ID || '').trim();
   BW_KARAOKE_BASE_MP4_URL = BW_pickKaraokeUrl(r) || BW_KARAOKE_BASE_MP4_URL;
@@ -2322,7 +2322,8 @@ async function loadVideo(){
   const youtubeUrl = String(row.youtube_url || '').trim();
   const youtubeId = String(row.youtube_id || getYoutubeIdFromUrl(youtubeUrl) || '').trim();
   const preferredRaw = String(row.preferred_source || 'youtube').trim().toLowerCase();
-  const preferred = (preferredRaw === 'cloudflare') ? 'mp4' : preferredRaw;
+  let preferred = (preferredRaw === 'cloudflare') ? 'mp4' : preferredRaw;
+  if(BW_isLocalV3Mode()) preferred = 'mp4';
   try{ BW_ORIGINAL_YOUTUBE_ID = youtubeId || BW_ORIGINAL_YOUTUBE_ID; BW_refreshKaraokeUrls(row); }catch(_e){}
 
   // cover / poster 對齊
@@ -2349,14 +2350,12 @@ async function loadVideo(){
     if (mount) mount.innerHTML = '';
   }
 
-  // 0) 本機 / 大陸筆電：優先讀 output_v3/relay_data/<cat>/<slug>/<slug>.mp4
+  // 0) 本機 / 大陸筆電：優先讀 output_v3/relay_data，不動原 KTV 聲音邏輯
   try{
-    if (typeof BW_isLocalV3Mode === 'function' && BW_isLocalV3Mode()) {
-      add(BW_v3MainMp4(cat, slug));
-    }
+    if(BW_isLocalV3Mode()) add(BW_localV3MainMp4());
   }catch(_e){}
 
-  // 1) assets.mp4_url（正式站 R2 / Cloudflare）
+  // 1) assets.mp4_url
   try{
     if (row && row.mp4_url) add(row.mp4_url);
   }catch(_e){}
