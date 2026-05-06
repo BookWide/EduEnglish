@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V17-3（手機投屏KTV音源鍵版）</title>
+<title>BookWide 播放器 V17-9（KTV正常 + 本機V3 MP4）</title>
 
 <style>
 :root{
@@ -1495,31 +1495,25 @@ let slug=normalizeSlug(params.get('slug')||'houyi');
 const domainParam = (params.get('domain') || '').trim().toLowerCase();
 
 
-/* === V18 LOCAL RELAY MODE：本機 / 大陸筆電直接讀 output_v3/relay_data，04 可取消 === */
-function BW_isLocalRelayMode(){
+/* === V18 LOCAL V3 MP4 ONLY：本機 / 大陸筆電優先讀 output_v3/relay_data；不改 KTV 音訊邏輯 === */
+function BW_isLocalV3Mode(){
   try{
     const p = new URLSearchParams(location.search);
     const forced = String(p.get('localv3') || p.get('local') || '').toLowerCase();
     if(['1','true','yes','on'].includes(forced)) return true;
     const h = location.hostname || '';
     return h === '127.0.0.1' || h === 'localhost' || h === '0.0.0.0' || h === '';
-  }catch(_e){
-    return false;
-  }
+  }catch(_e){ return false; }
 }
-function BW_relayBase(){
+function BW_v3LessonBase(category, lessonSlug){
   const b = (typeof BASE !== 'undefined' ? BASE : '') || '';
-  return `${b}/output_v3/relay_data`;
+  return `${b}/output_v3/relay_data/${category}/${lessonSlug}`;
 }
-function BW_relayLessonBase(category, lessonSlug){
-  return `${BW_relayBase()}/${category}/${lessonSlug}`;
+function BW_v3MainMp4(category, lessonSlug){
+  return `${BW_v3LessonBase(category, lessonSlug)}/${lessonSlug}.mp4`;
 }
-function BW_relayMediaUrl(category, lessonSlug, suffix='mp4'){
-  const ext = String(suffix || 'mp4').replace(/^\./,'');
-  return `${BW_relayLessonBase(category, lessonSlug)}/${lessonSlug}.${ext}`;
-}
-function BW_relayMusicVariantUrl(lessonSlug, variant){
-  return `${BW_relayLessonBase('music', lessonSlug)}/${lessonSlug}_${variant}.mp4`;
+function BW_v3MusicVariant(lessonSlug, variant){
+  return `${BW_v3LessonBase('music', lessonSlug)}/${lessonSlug}_${variant}.mp4`;
 }
 
 function inferProDomainFromSlug(slugText=''){
@@ -1574,18 +1568,6 @@ function buildLessonDataUrls(fileName){
     urls.push(u);
   };
 
-  // V18：本機 / 大陸筆電優先讀 output_v3/relay_data，讓 04 不必再複製 videos/assets。
-  if (BW_isLocalRelayMode()) {
-    if(cat === 'pro'){
-      const domains = getLessonDomainCandidates();
-      domains.forEach(d => add(`${BW_relayBase()}/pro/${d}/${slug}/${fileName}?v=${vnow}`));
-      add(`${BW_relayBase()}/pro/${slug}/${fileName}?v=${vnow}`);
-    } else {
-      add(`${BW_relayBase()}/${cat}/${slug}/${fileName}?v=${vnow}`);
-    }
-  }
-
-  // 原本 GitHub / 正式站 data 路徑保留
   if(cat === 'pro'){
     const domains = getLessonDomainCandidates();
     domains.forEach(d => {
@@ -1802,9 +1784,12 @@ let BW_RETURN_ORIGINAL_PREFERS_YOUTUBE = true; // V5.1: 伴奏切回原唱時，
 
 function BW_pickKaraokeUrl(row){
   const r = row || window.__ASSET_ROW__ || {};
-  if (BW_isLocalRelayMode() && cat === 'music') {
-    return BW_relayMusicVariantUrl(slug, 'karaoke');
-  }
+  // 本機 / 大陸筆電：伴奏影片優先走 output_v3/relay_data，不動 TRUE KTV 音軌程式
+  try{
+    if(cat === 'music' && typeof BW_isLocalV3Mode === 'function' && BW_isLocalV3Mode()){
+      return BW_v3MusicVariant(slug, 'karaoke');
+    }
+  }catch(_e){}
   const direct = String(r.karaoke_url || r.karaoke_video || r.karaoke || '').trim();
   if(direct) return direct;
   const mp4 = String(r.mp4_url || '').trim();
@@ -1866,11 +1851,8 @@ function BW_setKtvGuideMode(mode){
 
 function BW_refreshKaraokeUrls(row){
   const r = row || window.__ASSET_ROW__ || {};
-  if (BW_isLocalRelayMode()) {
-    BW_ORIGINAL_MP4_URL = BW_relayMediaUrl(cat, slug, 'mp4');
-  } else {
-    BW_ORIGINAL_MP4_URL = String(r.mp4_url || BW_ORIGINAL_MP4_URL || '').trim();
-  }
+  const localMain = (typeof BW_isLocalV3Mode === 'function' && BW_isLocalV3Mode()) ? BW_v3MainMp4(cat, slug) : '';
+  BW_ORIGINAL_MP4_URL = String(localMain || r.mp4_url || BW_ORIGINAL_MP4_URL || '').trim();
   BW_ORIGINAL_MP4_FALLBACK_URL = BW_ORIGINAL_MP4_URL;
   BW_ORIGINAL_YOUTUBE_ID = String(r.youtube_id || getYoutubeIdFromUrl(String(r.youtube_url || '')) || BW_ORIGINAL_YOUTUBE_ID || '').trim();
   BW_KARAOKE_BASE_MP4_URL = BW_pickKaraokeUrl(r) || BW_KARAOKE_BASE_MP4_URL;
@@ -2367,24 +2349,24 @@ async function loadVideo(){
     if (mount) mount.innerHTML = '';
   }
 
-  // 1) 本機 / 大陸筆電：優先讀 output_v3/relay_data，不再依賴 04 複製出的 videos/assets
+  // 0) 本機 / 大陸筆電：優先讀 output_v3/relay_data/<cat>/<slug>/<slug>.mp4
+  try{
+    if (typeof BW_isLocalV3Mode === 'function' && BW_isLocalV3Mode()) {
+      add(BW_v3MainMp4(cat, slug));
+    }
+  }catch(_e){}
+
+  // 1) assets.mp4_url（正式站 R2 / Cloudflare）
+  try{
+    if (row && row.mp4_url) add(row.mp4_url);
+  }catch(_e){}
+
+  // 2) 保留舊版 fallback，讓大部分舊片仍可播
   const slugMain = slug;
   const slugNoPro = slug.replace(/^pro-/, '');
   const slugCandidates = [slugMain];
   if (cat === 'pro' && slugNoPro !== slugMain) slugCandidates.push(slugNoPro);
 
-  if (BW_isLocalRelayMode()) {
-    slugCandidates.forEach(s => {
-      add(BW_relayMediaUrl(cat, s, 'mp4'));
-    });
-  }
-
-  // 2) assets.mp4_url：正式站 / R2 來源
-  try{
-    if (row && row.mp4_url) add(row.mp4_url);
-  }catch(_e){}
-
-  // 3) 保留舊版 fallback，讓大部分舊片仍可播
   slugCandidates.forEach(s => {
     add(`${SUPA_VIDEOS_BASE}/${cat}/${s}.mp4`);
     add(`${SUPA_VIDEOS_BASE}/${s}.mp4`);
@@ -5156,28 +5138,24 @@ async function loadProOutline(){
     const out = [];
     const add = (x) => { if(x && !out.includes(x)) out.push(x); };
 
-    // 1) 本機 / 大陸筆電：優先讀 output_v3/relay_data/music/<slug>/audio/
-    if (BW_isLocalRelayMode()) {
-      add(`${b}/output_v3/relay_data/music/${s}/audio/`);
-      add(`/output_v3/relay_data/music/${s}/audio/`);
-    }
-
-    // 2) DB 若有 TRUE KTV 欄位，正式站直接用
+    // 1) DB 若有 TRUE KTV 欄位，直接用
     const directNoVocals = String(row.true_ktv_no_vocals_url || row.no_vocals_url || '').trim();
     if(directNoVocals && /no_vocals\.mp3(\?|$)/i.test(directNoVocals)){
       add(directNoVocals.replace(/no_vocals\.mp3(\?.*)?$/i, ''));
     }
 
-    // 3) 正式站 R2：由 mp4_url 推導
+    // 2) 正式站 R2：由 mp4_url 推導
     //    videos/music/<slug>.mp4 -> videos/music/<slug>/audio/no_vocals.mp3
     const mp4 = String(row.mp4_url || '').trim();
     if(mp4 && /\/videos\/music\/[^/]+\.mp4(\?|$)/i.test(mp4)){
       add(mp4.replace(/\/videos\/music\/([^/?#]+)\.mp4(.*)$/i, '/videos/music/$1/audio/'));
     }
 
-    // 4) 舊路徑相容
+    // 3) 本機 / 大陸主機
     add(`${b}/relay_data/music/${s}/audio/`);
     add(`/relay_data/music/${s}/audio/`);
+
+    // 4) 舊 data 路徑相容
     add(`${b}/data/music/${s}/audio/`);
     add(`/data/music/${s}/audio/`);
     add(`./audio/`);
