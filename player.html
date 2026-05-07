@@ -4715,10 +4715,10 @@ async function loadProOutline(){
 </script>
 
 <script>
-/* === MOBILE FINAL：影片下方英文字幕 + 播完重複切換（只取代原「大字幕」按鍵位置） === */
+/* === MOBILE FINAL：影片下方英文字幕 + 原「大字幕」位置改成「播完重複」 === */
 (function(){
   var bwRepeatAll = false;
-  var bwRepeatWatcher = null;
+  var bwRepeatLock = false;
 
   function bwMobileFindCurrentCue(){
     try{
@@ -4743,18 +4743,43 @@ async function loadProOutline(){
     }catch(_e){}
     return null;
   }
+
   function bwMobileUpdateSubtitle(){
     var el = document.getElementById('mobileSubtitle');
     if(!el) return;
     var cue = bwMobileFindCurrentCue();
     el.textContent = cue ? String(cue.en || cue.english || cue.text || '').trim() : '';
   }
+
   function bwUpdateRepeatButton(){
-    var btn = document.getElementById('btnMobileRepeatAll');
+    var btn = document.getElementById('btnMobileBigSubtitle');
     if(!btn) return;
-    btn.textContent = bwRepeatAll ? '播完重複✓' : '播完重複';
+    btn.textContent = bwRepeatAll ? '播完重複 ✓' : '播完重複';
     btn.classList.toggle('blue', !!bwRepeatAll);
   }
+
+  function bwRepeatGoStart(){
+    if(!bwRepeatAll || bwRepeatLock) return;
+    bwRepeatLock = true;
+    try{
+      if(typeof window.setCurrentPlaybackTime === 'function') window.setCurrentPlaybackTime(0);
+      else {
+        var v0 = document.getElementById('player');
+        if(v0) v0.currentTime = 0;
+      }
+    }catch(_e){}
+    setTimeout(function(){
+      try{
+        if(typeof window.playActive === 'function') window.playActive();
+        else {
+          var v1 = document.getElementById('player');
+          if(v1) v1.play().catch(function(){});
+        }
+      }catch(_e){}
+    }, 80);
+    setTimeout(function(){ bwRepeatLock = false; }, 1200);
+  }
+
   function bwSetRepeatAll(on){
     bwRepeatAll = !!on;
     try{ localStorage.setItem('BW_PLAYER_REPEAT_ALL', bwRepeatAll ? '1' : '0'); }catch(_e){}
@@ -4764,48 +4789,65 @@ async function loadProOutline(){
     }catch(_e){}
     bwUpdateRepeatButton();
   }
-  function bwRepeatEndedIfNeeded(){
-    if(!bwRepeatAll) return;
+
+  function bwCheckRepeatEnd(){
+    if(!bwRepeatAll || bwRepeatLock) return;
     try{
-      if(typeof isUsingYouTube === 'function' && isUsingYouTube() && window.ytPlayer && window.YT){
-        if(window.ytPlayer.getPlayerState && window.ytPlayer.getPlayerState() === window.YT.PlayerState.ENDED){
-          window.ytPlayer.seekTo(0, true);
-          window.ytPlayer.playVideo();
-        }
-        return;
+      var v = document.getElementById('player');
+      if(v && v.ended){ bwRepeatGoStart(); return; }
+    }catch(_e){}
+
+    try{
+      /* YouTube / iframe 播放時，HTML5 video 的 ended 不會觸發，所以用輪詢補上 */
+      if(typeof window.ytPlayer !== 'undefined' && window.ytPlayer && typeof window.ytPlayer.getPlayerState === 'function'){
+        var state = window.ytPlayer.getPlayerState();
+        if(window.YT && state === window.YT.PlayerState.ENDED){ bwRepeatGoStart(); return; }
       }
     }catch(_e){}
+
+    try{
+      var cur = 0, dur = 0;
+      if(typeof window.getCurrentPlaybackTime === 'function') cur = Number(window.getCurrentPlaybackTime()) || 0;
+      if(typeof window.ytPlayer !== 'undefined' && window.ytPlayer && typeof window.ytPlayer.getDuration === 'function') dur = Number(window.ytPlayer.getDuration()) || 0;
+      if(!dur){
+        var vv = document.getElementById('player');
+        dur = vv ? (Number(vv.duration)||0) : 0;
+      }
+      if(dur > 1 && cur >= dur - 0.35) bwRepeatGoStart();
+    }catch(_e){}
   }
+
   function bwMobileAddRepeatButton(){
     try{
-      if(document.getElementById('btnMobileRepeatAll')) return;
+      if(document.getElementById('btnMobileBigSubtitle')) return;
       var row = document.querySelector('.controls .row');
       if(!row) return;
       var btn = document.createElement('button');
-      btn.id = 'btnMobileRepeatAll';
+      btn.id = 'btnMobileBigSubtitle';
       btn.className = 'btn';
       btn.type = 'button';
       btn.textContent = '播完重複';
       btn.onclick = function(){ bwSetRepeatAll(!bwRepeatAll); };
       row.appendChild(btn);
+      bwUpdateRepeatButton();
     }catch(_e){}
   }
+
   window.BW_mobileUpdateSubtitle = bwMobileUpdateSubtitle;
   window.BW_setRepeatAll = bwSetRepeatAll;
+
   document.addEventListener('DOMContentLoaded', function(){
     bwMobileAddRepeatButton();
     try{ bwRepeatAll = localStorage.getItem('BW_PLAYER_REPEAT_ALL') === '1'; }catch(_e){ bwRepeatAll = false; }
     bwSetRepeatAll(bwRepeatAll);
+
     var v = document.getElementById('player');
     if(v){
       v.addEventListener('timeupdate', bwMobileUpdateSubtitle);
-      v.addEventListener('ended', function(){
-        if(!bwRepeatAll) return;
-        try{ v.currentTime = 0; v.play && v.play(); }catch(_e){}
-      });
+      v.addEventListener('ended', bwRepeatGoStart);
     }
     setInterval(bwMobileUpdateSubtitle, 350);
-    bwRepeatWatcher = setInterval(bwRepeatEndedIfNeeded, 500);
+    setInterval(bwCheckRepeatEnd, 450);
   });
 })();
 </script>
