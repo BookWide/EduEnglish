@@ -822,6 +822,16 @@ tr.speaking{
 
 
 /* === V17-3 MOBILE KTV：手機投屏用，音源鍵獨立顯示，與小齒輪同一列 === */
+#btnMobileRepeatAll{
+  border-color:#2c5aa3;
+  background:#13233f;
+  min-width:112px;
+}
+#btnMobileRepeatAll.blue{
+  background:#064e3b;
+  border-color:#10b981;
+  color:#d1fae5;
+}
 #btnMobileKtvAudioMode{
   border-color:#2c5aa3;
   background:#14335f;
@@ -857,12 +867,25 @@ tr.speaking{
   }
   /* 讓小齒輪與 KTV 鍵保持同一列 */
   .controls > #btnToggleControls,
+  .controls > #btnMobileRepeatAll,
   .controls > #btnMobileKtvAudioMode{
     display:inline-flex !important;
+  }
+  #btnMobileRepeatAll{
+    align-items:center !important;
+    justify-content:center !important;
+    vertical-align:top !important;
+    margin-left:8px !important;
+    padding:8px 12px !important;
+    border-radius:10px !important;
+    font-size:13px !important;
+    font-weight:900 !important;
+    white-space:nowrap !important;
   }
 }
 @media (min-width:861px){
   #btnMobileKtvAudioMode{display:none !important;}
+  #btnMobileRepeatAll{display:inline-flex !important;}
 }
 
 
@@ -1194,6 +1217,7 @@ function BW_playerStopIdleLogout(){
         </div>
         <div class="controls">
           <button class="btn" id="btnToggleControls" type="button">⚙ 控制</button>
+          <button class="btn" id="btnMobileRepeatAll" type="button" title="播完整片後自動重播">🔁 播完重複</button>
           <button class="btn" id="btnMobileKtvAudioMode" type="button" title="原唱 / 伴唱（兩音軌混音）" style="display:none">🎤 原唱</button>
           <div class="row">
             <button class="btn" id="btnPrev">⏮ 上一句</button>
@@ -2052,6 +2076,7 @@ function BW_restoreYouTubeOriginalKeepTime(shouldPlay){
         },
         onStateChange: (ev) => {
           if(window.YT && ev.data === YT.PlayerState.PLAYING){ ytStarted = true; }
+          if(window.YT && ev.data === YT.PlayerState.ENDED){ try{ window.BW_repeatAllRestart && window.BW_repeatAllRestart(); }catch(_e){} }
         },
         onError: () => {
           window.__BW_KTV_SOURCE_SWITCHING__ = false;
@@ -2311,7 +2336,7 @@ function handlePlaybackTick(){
 try{
   video.addEventListener('play', ()=>{ if(cat === 'music') BW_setSingalongButtonState(true); });
   video.addEventListener('pause', ()=>{ if(cat === 'music') BW_setSingalongButtonState(false); });
-  video.addEventListener('ended', ()=>{ if(cat === 'music') BW_setSingalongButtonState(false); });
+  video.addEventListener('ended', ()=>{ if(cat === 'music') BW_setSingalongButtonState(false); try{ window.BW_repeatAllRestart && window.BW_repeatAllRestart(); }catch(_e){} });
 }catch(_e){}
 
 async function loadVideo(){
@@ -2458,6 +2483,9 @@ async function loadVideo(){
             }
             if (window.YT && (ev.data === YT.PlayerState.PAUSED || ev.data === YT.PlayerState.ENDED)) {
               if (cat === 'music') BW_setSingalongButtonState(false);
+              if (ev.data === YT.PlayerState.ENDED) {
+                try{ window.BW_repeatAllRestart && window.BW_repeatAllRestart(); }catch(_e){}
+              }
             }
           },
           onError: () => {
@@ -4715,72 +4743,126 @@ async function loadProOutline(){
 </script>
 
 <script>
-/* === MOBILE FINAL：影片下方英文字幕 + 手機大字幕切換 === */
+/* === V17-11 FIX：影片播完重複整片，保留原本「重複本句」不動 === */
 (function(){
+  var STORAGE_KEY = 'BW_PLAYER_REPEAT_ALL';
+  var bwRepeatAll = false;
+  var bwRepeatLock = false;
+
+  function getVideo(){ return document.getElementById('player'); }
+
   function bwMobileFindCurrentCue(){
     try{
-      if(!Array.isArray(window.cues) || !window.cues.length) return null;
+      var arr = (typeof cues !== 'undefined' && Array.isArray(cues)) ? cues : [];
+      if(!arr.length) return null;
       var t = 0;
       try{
-        if(typeof window.getCurrentPlaybackTime === 'function') t = Number(window.getCurrentPlaybackTime()) || 0;
+        if(typeof getCurrentPlaybackTime === 'function') t = Number(getCurrentPlaybackTime()) || 0;
         else {
-          var v = document.getElementById('player');
+          var v = getVideo();
           t = v ? (Number(v.currentTime)||0) : 0;
         }
       }catch(_e){}
-      if(typeof window.offset !== 'undefined') t += Number(window.offset)||0;
-      for(var i=0;i<window.cues.length;i++){
-        var c = window.cues[i] || {};
-        var s = Number(c.start ?? c.s ?? c.time ?? 0) || 0;
+      try{ if(typeof offset !== 'undefined') t += Number(offset)||0; }catch(_e){}
+      for(var i=0;i<arr.length;i++){
+        var c = arr[i] || {};
+        var s = Number(c.t ?? c.start ?? c.s ?? c.time ?? 0) || 0;
         var e = Number(c.end ?? c.e ?? 0) || 0;
-        if(!e && window.cues[i+1]) e = Number(window.cues[i+1].start ?? window.cues[i+1].time ?? (s+4)) || (s+4);
+        if(!e && arr[i+1]) e = Number(arr[i+1].t ?? arr[i+1].start ?? arr[i+1].time ?? (s+4)) || (s+4);
         if(!e) e = s + 4;
         if(t >= s && t <= e) return c;
       }
     }catch(_e){}
     return null;
   }
+
   function bwMobileUpdateSubtitle(){
     var el = document.getElementById('mobileSubtitle');
     if(!el) return;
     var cue = bwMobileFindCurrentCue();
     el.textContent = cue ? String(cue.en || cue.english || cue.text || '').trim() : '';
   }
-  function bwMobileAddBigButton(){
+
+  function updateRepeatButton(){
+    var btn = document.getElementById('btnMobileRepeatAll') || document.getElementById('btnMobileBigSubtitle');
+    if(!btn) return;
+    btn.textContent = bwRepeatAll ? '🔁 播完重複 ✓' : '🔁 播完重複';
+    btn.classList.toggle('blue', !!bwRepeatAll);
+    btn.setAttribute('aria-pressed', bwRepeatAll ? 'true' : 'false');
+  }
+
+  function setRepeatAll(on){
+    bwRepeatAll = !!on;
+    try{ localStorage.setItem(STORAGE_KEY, bwRepeatAll ? '1' : '0'); }catch(_e){}
     try{
-      if(document.getElementById('btnMobileBigSubtitle')) return;
-      var row = document.querySelector('.controls .row');
-      if(!row) return;
-      var btn = document.createElement('button');
-      btn.id = 'btnMobileBigSubtitle';
-      btn.className = 'btn';
-      btn.type = 'button';
-      btn.textContent = '播完重複';
-      btn.onclick = function(){
-        var v = document.getElementById('player');
-        window.BW_PLAY_END_REPEAT = !window.BW_PLAY_END_REPEAT;
-        btn.classList.toggle('blue', !!window.BW_PLAY_END_REPEAT);
-        btn.textContent = window.BW_PLAY_END_REPEAT ? '播完重複 ON' : '播完重複';
-        if(v) v.loop = !!window.BW_PLAY_END_REPEAT;
-      };
-      var v = document.getElementById('player');
-      if(v && !v.__bwPlayEndRepeatBound){
-        v.__bwPlayEndRepeatBound = true;
-        v.addEventListener('ended', function(){
-          if(!window.BW_PLAY_END_REPEAT) return;
-          try{ v.currentTime = 0; }catch(_e){}
-          try{ v.play && v.play(); }catch(_e){}
-        });
+      var v = getVideo();
+      if(v) v.loop = bwRepeatAll;
+    }catch(_e){}
+    updateRepeatButton();
+  }
+
+  function restartFromBeginning(){
+    if(!bwRepeatAll || bwRepeatLock) return;
+    bwRepeatLock = true;
+    try{
+      if(typeof setCurrentPlaybackTime === 'function') setCurrentPlaybackTime(0);
+      else {
+        var v0 = getVideo();
+        if(v0) v0.currentTime = 0;
       }
-      row.appendChild(btn);
+    }catch(_e){}
+    setTimeout(function(){
+      try{
+        if(typeof playActive === 'function') playActive();
+        else {
+          var v1 = getVideo();
+          if(v1) v1.play().catch(function(){});
+        }
+      }catch(_e){}
+    }, 120);
+    setTimeout(function(){ bwRepeatLock = false; }, 1200);
+  }
+
+  function checkEndFallback(){
+    if(!bwRepeatAll || bwRepeatLock) return;
+    try{
+      var v = getVideo();
+      if(v && v.ended){ restartFromBeginning(); return; }
+      var cur = 0, dur = 0;
+      if(typeof getCurrentPlaybackTime === 'function') cur = Number(getCurrentPlaybackTime()) || 0;
+      else cur = v ? Number(v.currentTime || 0) : 0;
+      if(v) dur = Number(v.duration || 0) || 0;
+      if(dur > 1 && cur >= dur - 0.25) restartFromBeginning();
     }catch(_e){}
   }
+
+  function bindRepeatButton(){
+    var btn = document.getElementById('btnMobileRepeatAll') || document.getElementById('btnMobileBigSubtitle');
+    if(!btn || btn.__bwRepeatBound) return;
+    btn.__bwRepeatBound = true;
+    btn.onclick = function(){ setRepeatAll(!bwRepeatAll); };
+    updateRepeatButton();
+  }
+
   window.BW_mobileUpdateSubtitle = bwMobileUpdateSubtitle;
+  window.BW_repeatAllRestart = restartFromBeginning;
+  window.BW_setRepeatAll = setRepeatAll;
+  window.BW_isRepeatAllOn = function(){ return !!bwRepeatAll; };
+
   document.addEventListener('DOMContentLoaded', function(){
-    bwMobileAddBigButton();
-    var v = document.getElementById('player');
-    if(v) v.addEventListener('timeupdate', bwMobileUpdateSubtitle);
+    try{ bwRepeatAll = localStorage.getItem(STORAGE_KEY) === '1'; }catch(_e){ bwRepeatAll = false; }
+    bindRepeatButton();
+    setRepeatAll(bwRepeatAll);
+
+    var v = getVideo();
+    if(v && !v.__bwRepeatAllBound){
+      v.__bwRepeatAllBound = true;
+      v.addEventListener('timeupdate', bwMobileUpdateSubtitle);
+      v.addEventListener('ended', restartFromBeginning);
+      v.addEventListener('loadedmetadata', function(){ try{ v.loop = bwRepeatAll; }catch(_e){} });
+    }
     setInterval(bwMobileUpdateSubtitle, 350);
+    setInterval(checkEndFallback, 500);
   });
 })();
 </script>
