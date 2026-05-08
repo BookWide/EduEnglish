@@ -727,8 +727,8 @@
             </div>
             <div class="itemMainBody">
               <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
-                <input class="input titleInput" data-id="${escapeHtml(id)}" placeholder="顯示名稱 / 標題" value="${escapeHtml(title)}" style="flex:1; min-width:240px; height:34px; font-weight:800;">
-                <button class="btn saveTitleBtn" type="button" data-id="${escapeHtml(id)}" style="padding:7px 12px;">存名稱</button>
+                <input class="input titleInput" data-id="${escapeHtml(id)}" data-cat="${escapeHtml(cat)}" placeholder="顯示名稱 / 標題" value="${escapeHtml(title)}" style="flex:1; min-width:240px; height:34px; font-weight:800;">
+                <button class="btn saveTitleBtn" type="button" data-id="${escapeHtml(id)}" data-cat="${escapeHtml(cat)}" style="padding:7px 12px;">存名稱</button>
               </div>
               <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:6px;">
                 <input class="input ytInput" data-id="${escapeHtml(id)}" placeholder="貼上 YouTube URL" value="${escapeHtml(ytUrl)}" style="min-width:280px; height:34px;">
@@ -804,20 +804,44 @@
 
     els.tbody.querySelectorAll('.saveTitleBtn').forEach(btn => {
       btn.onclick = async () => {
-        const id = btn.getAttribute('data-id');
-        const input = els.tbody.querySelector(`.titleInput[data-id="${CSS.escape(id)}"]`);
+        const id = String(btn.getAttribute('data-id') || '').trim();
+        const cat = String(btn.getAttribute('data-cat') || '').trim();
+        const input = els.tbody.querySelector(`.titleInput[data-id="${CSS.escape(id)}"][data-cat="${CSS.escape(cat)}"]`);
         const title = String(input?.value || '').trim();
+        if (!id || !cat) return alert('缺少 category / slug，請重新整理後再試');
         if (!title) return alert('顯示名稱不能空白');
+
         btn.disabled = true;
         try{
           setBusy(true, '儲存顯示名稱…');
-          const { error } = await supa.from('assets').update({ title }).eq('slug', id);
+
+          // 精準更新：category + slug，避免只用 slug 更新不到或誤更新。
+          // select 回讀確認，避免 Supabase/RLS/欄位問題時畫面假成功。
+          const { data, error } = await supa
+            .from('assets')
+            .update({ title })
+            .eq('category', cat)
+            .eq('slug', id)
+            .select('category,slug,title')
+            .maybeSingle();
+
           if (error) throw error;
-          toast('已保存', `${id} 的顯示名稱已更新`);
+          if (!data || String(data.title || '').trim() !== title) {
+            throw new Error('Supabase 沒有確認寫入成功；請檢查 assets update policy 或資料列是否存在');
+          }
+
+          // 先更新本機狀態，避免等待重載時看起來又跳回舊值
+          state.rows = (state.rows || []).map(r => (
+            String(r.slug || '') === id && String(r.category || '') === cat
+              ? { ...r, title }
+              : r
+          ));
+
+          toast('已保存', `${cat}/${id} → ${title}`);
           await loadVideos(true);
         }catch(err){
           console.error(err);
-          alert('儲存顯示名稱失敗：\n' + (err?.message || err));
+          alert('儲存顯示名稱失敗：\n' + (err?.message || err) + '\n\n若一直失敗，請檢查 Supabase assets 的 UPDATE policy。');
         }finally{
           setBusy(false);
           btn.disabled = false;
@@ -935,28 +959,13 @@ async function hardDeleteOne(slug){
 
   setBusy(true, `永久刪除：${slug}`);
   try{
-    // 先下架：確保 index.html 立刻不顯示。
-    // 後面的黑名單 / pending R2 / delete 即使其中一步失敗，也不會讓首頁繼續露出。
-    const { error: hideError } = await supa
-      .from('assets')
-      .update({ is_published: false })
-      .eq('slug', slug);
-    if (hideError) throw hideError;
-
-    try { await addBadVideoRecord(row); }
-    catch(e){ console.warn('[launch] bad_videos 寫入失敗，但已先下架：', e); }
-
-    try { await addPendingDeleteRecord(row); }
-    catch(e){ console.warn('[launch] pending_r2_delete 寫入失敗，但已先下架：', e); }
+    await addBadVideoRecord(row);
+    await addPendingDeleteRecord(row);
 
     const { error } = await supa.from('assets').delete().eq('slug', slug);
-    if (error) {
-      console.warn('[launch] assets delete 失敗；已保留下架狀態：', error);
-      toast('已先下架', `${slug}：首頁已隱藏；資料刪除稍後再處理`);
-    } else {
-      toast('已永久刪除', `${slug}：assets 已刪；已嘗試加入黑名單與 R2 待刪清單`);
-    }
+    if (error) throw error;
 
+    toast('已永久刪除', `${slug}：assets 已刪 + 已入黑名單 + 已加入 R2 待刪清單`);
     await loadVideos(true);
     return true;
   } finally {
