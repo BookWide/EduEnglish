@@ -814,6 +814,44 @@
       return raw;
     }
 
+    // V47：首頁支援「來源站點整批上下架」
+    // 優先讀 public_assets_with_source view：
+    //   assets.is_published=true
+    //   content_sources.is_enabled=true
+    //   content_sources.is_published=true
+    // 如果 view 尚未建立，會 fallback 讀 assets，只看 is_published=true。
+    async function BW_fetchPublishedAssetsForHome() {
+      const selectFields = 'category,slug,title,difficulty_level,duration_sec,cover_url,mp4_url,is_published,domain_code,role_codes,level_code,scene_tags,lesson_type,source_key,source_name,source_enabled,source_published';
+
+      try {
+        const { data, error } = await supa
+          .from('public_assets_with_source')
+          .select(selectFields)
+          .eq('is_published', true)
+          .eq('source_enabled', true)
+          .eq('source_published', true)
+          .order('category', { ascending: true })
+          .order('slug', { ascending: true });
+
+        if (error) throw error;
+        console.info('[index] loaded from public_assets_with_source:', (data || []).length);
+        return data || [];
+      } catch (e) {
+        console.warn('[index] public_assets_with_source unavailable, fallback to assets:', e);
+      }
+
+      const { data, error } = await supa
+        .from('assets')
+        .select('category,slug,title,difficulty_level,duration_sec,cover_url,mp4_url,is_published,domain_code,role_codes,level_code,scene_tags,lesson_type,source_key,source_name')
+        .eq('is_published', true)
+        .order('category', { ascending: true })
+        .order('slug', { ascending: true });
+
+      if (error) throw error;
+      console.info('[index] loaded from assets fallback:', (data || []).length);
+      return data || [];
+    }
+
     function BW_applyLocalStaticDomFix() {
       if (!BW_isLocalStaticMode()) return;
       try {
@@ -1449,20 +1487,11 @@ async function loadAllVideoItems() {
        正在載入教材清單…
      </div>`;
 
-  // 方案 B：直接從 public.assets 讀清單（最新上架立刻生效）
+  // 方案 B：直接從 Supabase 讀清單（最新上架立刻生效）
+  // V47：優先讀 public_assets_with_source，讓來源站點可整批上下架。
   try {
     if (supa) {
-      let q = supa
-        .from('assets')
-        .select('category,slug,title,difficulty_level,duration_sec,cover_url,mp4_url,is_published,domain_code,role_codes,level_code,scene_tags,lesson_type')
-        .order('category', { ascending: true })
-        .order('slug', { ascending: true });
-
-      // 首頁一律只顯示已上架；管理員查看全部請用 LAUNCH。
-      q = q.eq('is_published', true);
-
-      const { data, error } = await q;
-      if (error) throw error;
+      const data = await BW_fetchPublishedAssetsForHome();
 
       VIDEO_ITEMS = (data || []).map(r => {
         const category = r.category;
@@ -1487,7 +1516,9 @@ async function loadAllVideoItems() {
           role_codes: normalizeBwArray(r.role_codes),
           level_code: r.level_code || '',
           scene_tags: normalizeBwArray(r.scene_tags),
-          lesson_type: r.lesson_type || ''
+          lesson_type: r.lesson_type || '',
+          source_key: r.source_key || '',
+          source_name: r.source_name || ''
         };
       });
 
