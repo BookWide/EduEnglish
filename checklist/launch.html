@@ -112,6 +112,17 @@
     .ytInput{min-width:230px!important;height:32px!important;}
     .sourceInfoLine{margin-top:4px;color:#64748b;font-size:12px;line-height:1.45;}
 
+
+    .bindSourceBox{
+      display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+      padding:10px 14px; border-top:1px solid var(--line); background:#fbfdff;
+    }
+    .bindSourceBox input{height:34px; border-radius:10px; border:1px solid var(--line); padding:0 10px; font-size:13px;}
+    .bindSourceBox .key{min-width:260px;}
+    .bindSourceBox .name{min-width:260px;}
+    .bindSourceBox .url{min-width:360px; flex:1;}
+    .bindSourceBox .btn{padding:7px 12px;}
+
   </style>
 </head>
 <body>
@@ -261,6 +272,15 @@
         </div>
       </div>
 
+      <div class="bindSourceBox">
+        <b>綁來源：</b>
+        <input id="bindSourceKey" class="key" placeholder="source_key 例：slow-english-stories-with-maya">
+        <input id="bindSourceName" class="name" placeholder="來源名稱 例：Slow English Stories with Maya">
+        <input id="bindSourceUrl" class="url" placeholder="來源網址 例：https://www.youtube.com/@Slow-English-Stories-with-Maya">
+        <button class="btn" id="mayaPresetBtn" type="button" style="background:#0f766e;">套 Maya</button>
+        <button class="btn" id="bindSourceBtn" type="button" style="background:#7c3aed;">綁目前清單</button>
+      </div>
+
       <div style="overflow:auto;">
         <table>
           <thead>
@@ -408,6 +428,11 @@
     bulkOnBtn: document.getElementById('bulkOnBtn'),
     bulkOffBtn: document.getElementById('bulkOffBtn'),
     sourceOffBtn: document.getElementById('sourceOffBtn'),
+    bindSourceKey: document.getElementById('bindSourceKey'),
+    bindSourceName: document.getElementById('bindSourceName'),
+    bindSourceUrl: document.getElementById('bindSourceUrl'),
+    mayaPresetBtn: document.getElementById('mayaPresetBtn'),
+    bindSourceBtn: document.getElementById('bindSourceBtn'),
   };
 
   // ===== Import index-*.json -> assets upsert =====
@@ -704,7 +729,7 @@
   function setBusy(busy, msg) {
     // Disable controls to prevent race conditions during updates
     const disabled = !!busy;
-    [els.q, els.catSel, els.pubSel, els.sourceSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn, els.sourceOffBtn].forEach(el=>{
+    [els.q, els.catSel, els.pubSel, els.sourceSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn, els.sourceOffBtn, els.mayaPresetBtn, els.bindSourceBtn].forEach(el=>{
       if (!el) return;
       el.disabled = disabled;
     });
@@ -1211,6 +1236,93 @@ async function hardDeleteOne(slug){
   }
 
 
+  function setMayaPreset() {
+    if (els.bindSourceKey) els.bindSourceKey.value = 'slow-english-stories-with-maya';
+    if (els.bindSourceName) els.bindSourceName.value = 'Slow English Stories with Maya';
+    if (els.bindSourceUrl) els.bindSourceUrl.value = 'https://www.youtube.com/@Slow-English-Stories-with-Maya';
+    toast('已套用 Maya', '接著按「綁目前清單」。');
+  }
+
+  function getBindSourcePayload() {
+    const source_key = String(els.bindSourceKey?.value || '').trim();
+    const source_name = String(els.bindSourceName?.value || '').trim();
+    const source_url = String(els.bindSourceUrl?.value || '').trim();
+    if (!source_key) throw new Error('請先填 source_key，或按「套 Maya」。');
+    return {
+      source_key,
+      source_name: source_name || source_key,
+      source_url,
+      source_type: 'youtube_channel',
+      category: String(els.catSel?.value || (state.filtered[0]?.category || '') || '').trim() || null,
+    };
+  }
+
+  async function ensureContentSource(src) {
+    const body = {
+      source_key: src.source_key,
+      source_name: src.source_name,
+      source_type: src.source_type || 'youtube_channel',
+      category: src.category || null,
+      source_url: src.source_url || '',
+      is_enabled: true,
+      is_published: true,
+      updated_at: new Date().toISOString()
+    };
+
+    const { error } = await supa
+      .from('content_sources')
+      .upsert(body, { onConflict: 'source_key' });
+
+    if (error) {
+      // 如果 content_sources 權限/表不存在，不中斷影片綁定；至少 assets 先綁好
+      console.warn('[launch] content_sources upsert failed, continue binding assets:', error);
+    }
+  }
+
+  async function bindCurrentListToSource() {
+    const rows = state.filtered || [];
+    if (!rows.length) {
+      alert('目前清單是空的，不能綁來源。\n\n請先搜尋 slug 或選分類/來源，讓下方清單出現影片。');
+      return;
+    }
+
+    const src = getBindSourcePayload();
+    if (!confirm(`確定把目前清單全部綁到此來源？\n\n來源：${src.source_name}\nkey：${src.source_key}\n影片數：${rows.length} 支\n\n這只改來源欄位，不會改上下架狀態。`)) return;
+
+    setBusy(true, `綁來源：${src.source_key}`);
+    try {
+      await ensureContentSource(src);
+
+      const slugs = rows.map(r => String(r.slug || '').trim()).filter(Boolean);
+      const chunk = 80;
+      let done = 0;
+
+      for (let i = 0; i < slugs.length; i += chunk) {
+        const part = slugs.slice(i, i + chunk);
+        const { error } = await supa
+          .from('assets')
+          .update({
+            source_key: src.source_key,
+            source_name: src.source_name,
+            source_url: src.source_url || '',
+            source_batch: src.source_key + '-' + new Date().toISOString().slice(0,10),
+            updated_at: new Date().toISOString()
+          })
+          .in('slug', part);
+
+        if (error) throw error;
+        done += part.length;
+        toast('綁來源中…', `${done} / ${slugs.length}`);
+      }
+
+      toast('綁來源完成', `${src.source_key}：${rows.length} 支`);
+      await loadVideos(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+
   function replaceCategoryInUrl(url, fromCat, toCat){
     const s = String(url || '').trim();
     if (!s) return '';
@@ -1382,6 +1494,8 @@ async function hardDeleteOne(slug){
       els.bulkOnBtn.onclick = ()=>bulkSet(true).catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOffBtn.onclick = ()=>bulkSet(false).catch(err=>{console.error(err); alert(err?.message||err);});
       if (els.sourceOffBtn) els.sourceOffBtn.onclick = ()=>bulkOffCurrentSource().catch(err=>{console.error(err); alert(err?.message||err);});
+      if (els.mayaPresetBtn) els.mayaPresetBtn.onclick = ()=>setMayaPreset();
+      if (els.bindSourceBtn) els.bindSourceBtn.onclick = ()=>bindCurrentListToSource().catch(err=>{console.error(err); alert(err?.message||err);});
 
       if (migEls.previewBtn) migEls.previewBtn.onclick = ()=>previewMigration().catch(err=>{console.error(err); alert(err?.message||err);});
       if (migEls.runBtn) migEls.runBtn.onclick = ()=>runLogicalMigration().catch(err=>{console.error(err); alert(err?.message||err);});
