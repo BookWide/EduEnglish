@@ -814,44 +814,6 @@
       return raw;
     }
 
-    // V47：首頁支援「來源站點整批上下架」
-    // 優先讀 public_assets_with_source view：
-    //   assets.is_published=true
-    //   content_sources.is_enabled=true
-    //   content_sources.is_published=true
-    // 如果 view 尚未建立，會 fallback 讀 assets，只看 is_published=true。
-    async function BW_fetchPublishedAssetsForHome() {
-      const selectFields = 'category,slug,title,difficulty_level,duration_sec,cover_url,mp4_url,is_published,domain_code,role_codes,level_code,scene_tags,lesson_type,source_key,source_name,source_enabled,source_published';
-
-      try {
-        const { data, error } = await supa
-          .from('public_assets_with_source')
-          .select(selectFields)
-          .eq('is_published', true)
-          .eq('source_enabled', true)
-          .eq('source_published', true)
-          .order('category', { ascending: true })
-          .order('slug', { ascending: true });
-
-        if (error) throw error;
-        console.info('[index] loaded from public_assets_with_source:', (data || []).length);
-        return data || [];
-      } catch (e) {
-        console.warn('[index] public_assets_with_source unavailable, fallback to assets:', e);
-      }
-
-      const { data, error } = await supa
-        .from('assets')
-        .select('category,slug,title,difficulty_level,duration_sec,cover_url,mp4_url,is_published,domain_code,role_codes,level_code,scene_tags,lesson_type,source_key,source_name')
-        .eq('is_published', true)
-        .order('category', { ascending: true })
-        .order('slug', { ascending: true });
-
-      if (error) throw error;
-      console.info('[index] loaded from assets fallback:', (data || []).length);
-      return data || [];
-    }
-
     function BW_applyLocalStaticDomFix() {
       if (!BW_isLocalStaticMode()) return;
       try {
@@ -1460,10 +1422,10 @@ function getWeekIndex() {
     }
 
     // ===== 從 index-all.json 載入所有影片 =====
-  // 首頁只顯示已上架 assets。
-  // 管理員要看下架/刪除狀態請到 checklist/launch.html；index.html 不再因管理員登入而顯示下架片。
+  // Only show published videos for normal users (admin sees all).
   async function applyPublishFilter() {
     try {
+      if (CURRENT_USER_IS_ADMIN) return;
       if (!supa) return;
       const { data, error } = await supa
         .from('assets')
@@ -1473,9 +1435,7 @@ function getWeekIndex() {
       const allowed = new Set((data || []).map(r => `${r.category}::${r.slug}`));
       VIDEO_ITEMS = (VIDEO_ITEMS || []).filter(v => allowed.has(`${v.category}::${v.slug}`));
     } catch (e) {
-      console.warn('[index] applyPublishFilter failed; keeping current list:', e);
-      // 不回補顯示全部，避免 launch 下架後又在首頁出現。
-      VIDEO_ITEMS = [];
+      console.warn('[index] applyPublishFilter failed (showing all):', e);
     }
   }
 
@@ -1487,11 +1447,20 @@ async function loadAllVideoItems() {
        正在載入教材清單…
      </div>`;
 
-  // 方案 B：直接從 Supabase 讀清單（最新上架立刻生效）
-  // V47：優先讀 public_assets_with_source，讓來源站點可整批上下架。
+  // 方案 B：直接從 public.assets 讀清單（最新上架立刻生效）
   try {
     if (supa) {
-      const data = await BW_fetchPublishedAssetsForHome();
+      let q = supa
+        .from('assets')
+        .select('category,slug,title,difficulty_level,duration_sec,cover_url,mp4_url,is_published,domain_code,role_codes,level_code,scene_tags,lesson_type')
+        .order('category', { ascending: true })
+        .order('slug', { ascending: true });
+
+      // 一般用戶：只顯示已上架
+      if (!CURRENT_USER_IS_ADMIN) q = q.eq('is_published', true);
+
+      const { data, error } = await q;
+      if (error) throw error;
 
       VIDEO_ITEMS = (data || []).map(r => {
         const category = r.category;
@@ -1516,9 +1485,7 @@ async function loadAllVideoItems() {
           role_codes: normalizeBwArray(r.role_codes),
           level_code: r.level_code || '',
           scene_tags: normalizeBwArray(r.scene_tags),
-          lesson_type: r.lesson_type || '',
-          source_key: r.source_key || '',
-          source_name: r.source_name || ''
+          lesson_type: r.lesson_type || ''
         };
       });
 
