@@ -257,6 +257,7 @@
           <button class="btn" id="reloadBtn">重新整理</button>
           <button class="btn" id="bulkOnBtn" title="只對目前篩選後的清單生效">目前清單全上架</button>
           <button class="btn" id="bulkOffBtn" title="只對目前篩選後的清單生效" style="background:#ef4444;">目前清單全下架</button>
+          <button class="btn" id="sourceOffBtn" title="依目前選到的來源整批下架" style="background:#b91c1c;">同來源全下架</button>
         </div>
       </div>
 
@@ -406,6 +407,7 @@
     reloadBtn: document.getElementById('reloadBtn'),
     bulkOnBtn: document.getElementById('bulkOnBtn'),
     bulkOffBtn: document.getElementById('bulkOffBtn'),
+    sourceOffBtn: document.getElementById('sourceOffBtn'),
   };
 
   // ===== Import index-*.json -> assets upsert =====
@@ -702,7 +704,7 @@
   function setBusy(busy, msg) {
     // Disable controls to prevent race conditions during updates
     const disabled = !!busy;
-    [els.q, els.catSel, els.pubSel, els.sourceSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn].forEach(el=>{
+    [els.q, els.catSel, els.pubSel, els.sourceSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn, els.sourceOffBtn].forEach(el=>{
       if (!el) return;
       el.disabled = disabled;
     });
@@ -1057,15 +1059,22 @@ async function addPendingDeleteRecord(row){
     note: 'queued by launch delete',
   };
   const { error } = await supa.from('pending_r2_delete').insert(payload);
-  if (error) throw error;
+  if (error) {
+    const msg = String(error.message || error.details || error.code || '');
+    // 已經在待刪清單就略過，不要擋住刪除流程
+    if (error.code === '23505' || msg.includes('duplicate key') || msg.includes('uq_pending_r2_delete_slug_status_pending')) {
+      console.warn('[launch] pending_r2_delete already exists, ignored:', payload.slug);
+      return;
+    }
+    throw error;
+  }
 }
 
 async function hardDeleteOne(slug){
   const row = state.rows.find(x => String(x.slug || '') === String(slug || ''));
   if (!row) throw new Error('找不到該筆資料，請先重新整理');
 
-  const confirmText = prompt(`輸入 DELETE 確認永久刪除：\n${slug}`);
-  if (confirmText !== 'DELETE') return false;
+  if (!confirm(`確定要刪除這支影片？\n${slug}\n\n會先下架，並嘗試加入黑名單 / R2 待刪清單。`)) return false;
 
   setBusy(true, `永久刪除：${slug}`);
   try{
@@ -1153,6 +1162,48 @@ async function hardDeleteOne(slug){
 
       toast("批次完成", `${val ? "全上架" : "全下架"}：${rows.length} 筆`);
       // Reload from DB as the single source of truth
+      await loadVideos(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+
+  async function bulkOffCurrentSource() {
+    const sourceKey = els.sourceSel ? String(els.sourceSel.value || '').trim() : '';
+    if (!sourceKey) {
+      alert('請先在「全部來源」下拉選一個來源，再按「同來源全下架」。');
+      return;
+    }
+
+    const sourceRows = state.rows.filter(r => String(r.source_key || '') === sourceKey);
+    const liveRows = sourceRows.filter(r => !!r.is_published);
+    if (!sourceRows.length) {
+      alert('這個來源目前沒有影片資料。');
+      return;
+    }
+    if (!liveRows.length) {
+      alert('這個來源沒有已上架影片，不需要下架。');
+      return;
+    }
+
+    if (!confirm(`確定要把同來源全部下架？\n來源：${sourceKey}\n已上架影片：${liveRows.length} 支\n\n這不會刪除檔案，只會從首頁隱藏。`)) return;
+
+    setBusy(true, `同來源下架：${sourceKey}`);
+    try {
+      const { error } = await supa
+        .from('assets')
+        .update({
+          is_published: false,
+          review_status: 'pending',
+          updated_at: new Date().toISOString()
+        })
+        .eq('source_key', sourceKey)
+        .eq('is_published', true);
+
+      if (error) throw error;
+
+      toast('同來源已下架', `${sourceKey}：${liveRows.length} 支`);
       await loadVideos(true);
     } finally {
       setBusy(false);
@@ -1330,6 +1381,7 @@ async function hardDeleteOne(slug){
       els.reloadBtn.onclick = ()=>loadVideos().catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOnBtn.onclick = ()=>bulkSet(true).catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOffBtn.onclick = ()=>bulkSet(false).catch(err=>{console.error(err); alert(err?.message||err);});
+      if (els.sourceOffBtn) els.sourceOffBtn.onclick = ()=>bulkOffCurrentSource().catch(err=>{console.error(err); alert(err?.message||err);});
 
       if (migEls.previewBtn) migEls.previewBtn.onclick = ()=>previewMigration().catch(err=>{console.error(err); alert(err?.message||err);});
       if (migEls.runBtn) migEls.runBtn.onclick = ()=>runLogicalMigration().catch(err=>{console.error(err); alert(err?.message||err);});
