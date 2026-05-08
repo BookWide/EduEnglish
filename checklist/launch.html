@@ -935,13 +935,28 @@ async function hardDeleteOne(slug){
 
   setBusy(true, `永久刪除：${slug}`);
   try{
-    await addBadVideoRecord(row);
-    await addPendingDeleteRecord(row);
+    // 先下架：確保 index.html 立刻不顯示。
+    // 後面的黑名單 / pending R2 / delete 即使其中一步失敗，也不會讓首頁繼續露出。
+    const { error: hideError } = await supa
+      .from('assets')
+      .update({ is_published: false })
+      .eq('slug', slug);
+    if (hideError) throw hideError;
+
+    try { await addBadVideoRecord(row); }
+    catch(e){ console.warn('[launch] bad_videos 寫入失敗，但已先下架：', e); }
+
+    try { await addPendingDeleteRecord(row); }
+    catch(e){ console.warn('[launch] pending_r2_delete 寫入失敗，但已先下架：', e); }
 
     const { error } = await supa.from('assets').delete().eq('slug', slug);
-    if (error) throw error;
+    if (error) {
+      console.warn('[launch] assets delete 失敗；已保留下架狀態：', error);
+      toast('已先下架', `${slug}：首頁已隱藏；資料刪除稍後再處理`);
+    } else {
+      toast('已永久刪除', `${slug}：assets 已刪；已嘗試加入黑名單與 R2 待刪清單`);
+    }
 
-    toast('已永久刪除', `${slug}：assets 已刪 + 已入黑名單 + 已加入 R2 待刪清單`);
     await loadVideos(true);
     return true;
   } finally {
