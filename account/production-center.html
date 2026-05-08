@@ -19,6 +19,7 @@
     .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
     .field{margin-bottom:14px}
     .label{display:block;margin-bottom:8px;font-size:14px;color:var(--muted)}
+    textarea{width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--line);background:#fff;color:#111827;font-size:15px;outline:none;min-height:140px;resize:vertical}
     input[type="text"],select{width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--line);background:#fff;color:#111827;font-size:16px;outline:none}
     .chips{display:flex;gap:10px;flex-wrap:wrap}
     .chip{border:1px solid var(--line);background:var(--chip);color:#fff;border-radius:999px;padding:10px 18px;cursor:pointer;user-select:none;font-size:16px;transition:.15s ease}
@@ -112,8 +113,9 @@
 
       <div class="grid">
         <div class="field">
-          <label class="label">YouTube URL</label>
-          <input id="url" type="text" placeholder="貼 YouTube URL">
+          <label class="label">YouTube URL（單支）</label>
+          <input id="url" type="text" placeholder="貼 1 支 YouTube URL">
+          <div class="small" style="margin-top:8px;">單支測試用；批次請用下方「批次 URL」。</div>
         </div>
         <div class="field">
           <label class="label">出版層級</label>
@@ -127,6 +129,14 @@
           <select id="domainSelect"></select>
           <div class="warn">production-center 是唯一入口標準。pro 模式必須明確選 domain，後端固定落到 pro/&lt;domain&gt;/&lt;slug&gt;。</div>
         </div>
+      </div>
+
+      <div class="field">
+        <label class="label">批次 YouTube URL（1 行 1 支，可一次貼 8 支）</label>
+        <textarea id="batchUrls" placeholder="https://www.youtube.com/watch?v=...
+https://www.youtube.com/watch?v=...
+https://www.youtube.com/watch?v=..."></textarea>
+        <div class="hint">批次會自動排隊：一支完成後才跑下一支，避免主機同時跑多支卡住。</div>
       </div>
 
       <div class="grid-2">
@@ -149,7 +159,8 @@
       </div>
 
       <div class="row" style="margin-top:18px;">
-        <button class="btn" id="createBtn" onclick="createJob()">🚀 建立任務</button>
+        <button class="btn" id="createBtn" onclick="createJob()">🚀 建立單支任務</button>
+        <button class="btn" id="batchBtn" onclick="createBatchJobs()" style="background:#16a34a;">🚀 批次建立並排隊</button>
         <button class="btn btn-secondary" onclick="resetForm()">清空</button>
       </div>
     </div>
@@ -209,6 +220,8 @@
     ];
 
     let jobs = [];
+    let jobQueue = [];
+    let queueBusy = false;
     let selectedMajorCategory = "story";
     let serverOnline = false;
 
@@ -256,6 +269,8 @@
 
     function resetForm() {
       document.getElementById("url").value = "";
+      const batchEl = document.getElementById("batchUrls");
+      if (batchEl) batchEl.value = "";
       document.getElementById("publishTier").value = "pro";
       document.getElementById("runMode").value = "full";
       document.getElementById("remark").value = "";
@@ -409,12 +424,156 @@ error: ${data.last_error || "-"}`;
         serverOnline = true;
         setServerBadge(data.running ? "busy" : "online", data.running ? "主機運行中" : "主機在線");
         document.getElementById("createBtn").disabled = false;
+        const batchBtn = document.getElementById("batchBtn");
+        if (batchBtn) batchBtn.disabled = false;
+        processJobQueue();
       } catch {
         serverOnline = false;
         setServerBadge("offline", "主機離線 / 無法連線");
         document.getElementById("createBtn").disabled = true;
+        const batchBtn = document.getElementById("batchBtn");
+        if (batchBtn) batchBtn.disabled = true;
       }
     }
+
+
+    function makeJob(url, remarkSuffix="") {
+      const selectedDomain = document.getElementById("domainSelect").value.trim();
+      return {
+        id: Date.now() + Math.floor(Math.random() * 100000),
+        majorCategory: selectedMajorCategory,
+        publishTier: document.getElementById("publishTier").value,
+        domain: selectedDomain,
+        runMode: document.getElementById("runMode").value,
+        url,
+        remark: (document.getElementById("remark").value.trim() + (remarkSuffix ? (" " + remarkSuffix) : "")).trim(),
+        autoPush: document.getElementById("autoPush").checked,
+        autoPublish: document.getElementById("autoPublish").checked,
+        priorityRun: document.getElementById("priorityRun").checked,
+        status: "pending",
+        slug: "",
+        realDomain: "",
+        realCategory: "",
+        realFolder: "",
+        currentStep: "",
+        log: "等待排隊送出主機...",
+        pipeline: buildRealPipeline("", "pending")
+      };
+    }
+
+    function normalizeBatchUrls(text) {
+      const lines = String(text || "")
+        .split(/\r?\n/)
+        .map(s => s.trim())
+        .filter(Boolean);
+
+      const out = [];
+      const seen = new Set();
+      for (const s of lines) {
+        if (!/^https?:\/\//i.test(s)) continue;
+        if (seen.has(s)) continue;
+        seen.add(s);
+        out.push(s);
+      }
+      return out;
+    }
+
+    function createBatchJobs() {
+      if (!serverOnline) {
+        alert("主機目前無法連線，先按『測試主機』或確認 07 server 已啟動。");
+        return;
+      }
+
+      const urls = normalizeBatchUrls(document.getElementById("batchUrls")?.value || "");
+      if (!urls.length) {
+        alert("請在批次 URL 欄位貼上 YouTube URL，一行一支。");
+        return;
+      }
+
+      const selectedDomain = document.getElementById("domainSelect").value.trim();
+      if (selectedMajorCategory === "pro" && !selectedDomain) {
+        alert("pro 模式請先明確選擇 domain");
+        return;
+      }
+
+      if (!confirm(`確定建立批次任務？\n共 ${urls.length} 支\n\n會一支完成後自動跑下一支。`)) return;
+
+      const created = urls.map((url, i) => makeJob(url, `[批次 ${i + 1}/${urls.length}]`));
+      jobs = created.concat(jobs);
+      jobQueue.push(...created);
+      renderJobs();
+      processJobQueue();
+    }
+
+    function processJobQueue() {
+      if (queueBusy) return;
+      if (!jobQueue.length) return;
+      if (!serverOnline) {
+        setServerBadge("offline", "主機離線 / 批次暫停");
+        return;
+      }
+
+      const job = jobQueue.shift();
+      queueBusy = true;
+      runQueuedJob(job);
+    }
+
+    function runQueuedJob(job) {
+      job.status = "running";
+      job.log = "批次排隊：送出主機中...";
+      job.pipeline = buildRealPipeline("01", "running");
+      renderJobs();
+
+      fetch(SERVER + "/run", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          url: job.url,
+          major_category: job.majorCategory,
+          domain: job.majorCategory === "pro" ? (job.domain || "") : ""
+        })
+      })
+      .then(async res => {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+
+        job.log = "主機已接收，背景執行中；完成後自動跑下一支。";
+        job.pipeline = buildRealPipeline("01", "running");
+        renderJobs();
+        pollQueuedJob(job);
+      })
+      .catch(err => {
+        job.status = "failed";
+        job.log = "主機連線失敗: " + err.message;
+        job.pipeline = buildRealPipeline("01", "failed");
+        queueBusy = false;
+        renderJobs();
+        setTimeout(processJobQueue, 1000);
+      });
+    }
+
+    function pollQueuedJob(job) {
+      const timer = setInterval(() => {
+        fetch(SERVER + "/status")
+          .then(res => res.json())
+          .then(data => {
+            if (!data.last_url || job.url === data.last_url) {
+              setJobStateFromBackend(job, data);
+
+              if (!data.running && data.last_finished_at) {
+                clearInterval(timer);
+                queueBusy = false;
+                renderJobs();
+                setTimeout(processJobQueue, 1200);
+              } else {
+                renderJobs();
+              }
+            }
+          })
+          .catch(() => {});
+      }, 2500);
+    }
+
 
     function createJob() {
       if (!serverOnline) {
@@ -434,26 +593,7 @@ error: ${data.last_error || "-"}`;
         return;
       }
 
-      const job = {
-        id: Date.now(),
-        majorCategory: selectedMajorCategory,
-        publishTier: document.getElementById("publishTier").value,
-        domain: selectedDomain,
-        runMode: document.getElementById("runMode").value,
-        url,
-        remark: document.getElementById("remark").value.trim(),
-        autoPush: document.getElementById("autoPush").checked,
-        autoPublish: document.getElementById("autoPublish").checked,
-        priorityRun: document.getElementById("priorityRun").checked,
-        status: "pending",
-        slug: "",
-        realDomain: "",
-        realCategory: "",
-        realFolder: "",
-        currentStep: "",
-        log: "等待送出主機...",
-        pipeline: buildRealPipeline("", "pending")
-      };
+      const job = makeJob(url);
 
       jobs.unshift(job);
       renderJobs();
