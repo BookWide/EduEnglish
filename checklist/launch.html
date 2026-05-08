@@ -1283,7 +1283,7 @@ async function hardDeleteOne(slug){
     const source_key = String(els.bindSourceKey?.value || '').trim();
     const source_name = String(els.bindSourceName?.value || '').trim();
     const source_url = String(els.bindSourceUrl?.value || '').trim();
-    if (!source_key) throw new Error('請先填 source_key，或按「套 Maya」。');
+    if (!source_key) throw new Error('請先填 source_key。');
     return {
       source_key,
       source_name: source_name || source_key,
@@ -1318,24 +1318,33 @@ async function hardDeleteOne(slug){
   async function bindCurrentListToSource() {
     const rows = state.filtered || [];
     if (!rows.length) {
-      alert('目前清單是空的，不能綁來源。\n\n請先搜尋 slug 或選分類/來源，讓下方清單出現影片。');
+      alert('目前清單是空的，不能綁來源。\n\n請先搜尋 slug / YouTube URL / ID，讓下方清單出現影片。');
       return;
     }
 
     const src = getBindSourcePayload();
+    if (!src.source_key || !src.source_key.trim()) {
+      alert('source_key 不能空白。\n例：Maya 或 slow-english-stories-with-maya');
+      return;
+    }
+
     if (!confirm(`確定把目前清單全部綁到此來源？\n\n來源：${src.source_name}\nkey：${src.source_key}\n影片數：${rows.length} 支\n\n這只改來源欄位，不會改上下架狀態。`)) return;
 
     setBusy(true, `綁來源：${src.source_key}`);
     try {
       await ensureContentSource(src);
 
-      const slugs = rows.map(r => String(r.slug || '').trim()).filter(Boolean);
+      const slugs = Array.from(new Set(rows.map(r => String(r.slug || '').trim()).filter(Boolean)));
+      if (!slugs.length) throw new Error('目前清單沒有有效 slug，無法綁來源。');
+
       const chunk = 80;
       let done = 0;
+      const updatedSlugs = [];
 
       for (let i = 0; i < slugs.length; i += chunk) {
         const part = slugs.slice(i, i + chunk);
-        const { error } = await supa
+
+        const { data, error } = await supa
           .from('assets')
           .update({
             source_key: src.source_key,
@@ -1344,14 +1353,28 @@ async function hardDeleteOne(slug){
             source_batch: src.source_key + '-' + new Date().toISOString().slice(0,10),
             updated_at: new Date().toISOString()
           })
-          .in('slug', part);
+          .in('slug', part)
+          .select('slug,source_key,source_name,source_url,source_batch');
 
         if (error) throw error;
-        done += part.length;
-        toast('綁來源中…', `${done} / ${slugs.length}`);
+
+        const got = data || [];
+        if (!got.length) {
+          throw new Error(`綁來源失敗：這批 slug 沒有任何一筆被更新。\n${part.join(', ')}\n\n請檢查 assets update policy / RLS。`);
+        }
+
+        updatedSlugs.push(...got.map(x => x.slug));
+        done += got.length;
+        toast('綁來源中…', `實際完成 ${done} / ${slugs.length}`);
       }
 
-      toast('綁來源完成', `${src.source_key}：${rows.length} 支`);
+      if (updatedSlugs.length !== slugs.length) {
+        alert(`注意：目前清單 ${slugs.length} 支，但實際只綁成功 ${updatedSlugs.length} 支。\n\n成功：\n${updatedSlugs.join('\n')}`);
+      } else {
+        alert(`綁來源成功：${updatedSlugs.length} 支\nsource_key = ${src.source_key}`);
+      }
+
+      toast('綁來源完成', `${src.source_key}：實際 ${updatedSlugs.length} 支`);
       await loadVideos(true);
     } finally {
       setBusy(false);
