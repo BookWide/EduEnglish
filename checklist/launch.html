@@ -85,6 +85,16 @@
       .coverThumbWrap{flex-basis:84px;}
       .coverThumb{width:84px; height:48px;}
     }
+
+    .sourceGrid{display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:10px;}
+    .sourceCard{border:1px solid var(--line); border-radius:14px; padding:12px; background:#fff; display:flex; flex-direction:column; gap:8px;}
+    .sourceTop{display:flex; justify-content:space-between; gap:8px; align-items:flex-start;}
+    .sourceName{font-weight:900; color:#0f172a;}
+    .sourceKey{font-size:12px; color:#64748b; word-break:break-all;}
+    .sourceBtns{display:flex; gap:8px; flex-wrap:wrap;}
+    .btn.sourceOn{background:#16a34a;}
+    .btn.sourceOff{background:#ef4444;}
+
   </style>
 </head>
 <body>
@@ -191,6 +201,26 @@
       </div>
     </div>
 
+    <div class="card" style="margin-bottom:14px;">
+      <div class="header" style="align-items:flex-start;">
+        <div>
+          <h2 class="h1" style="font-size:18px;">來源站點整批上下架（content_sources）</h2>
+          <div class="sub">
+            來源站點控制整批內容；單支影片控制單支內容。<br>
+            首頁 index.html 只顯示：<b>來源已上架</b> + <b>影片已上架</b> 的資料。
+          </div>
+        </div>
+        <div class="tools" style="justify-content:flex-end; margin-left:auto;">
+          <button class="btn" id="sourceReloadBtn" type="button">重新整理來源</button>
+        </div>
+      </div>
+      <div style="padding:0 16px 16px;">
+        <div id="sourceBox" class="sourceGrid">
+          <div class="small">載入來源站點中…</div>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="header">
         <div>
@@ -210,6 +240,9 @@
             <option value="">全部狀態</option>
             <option value="1">只看已上架</option>
             <option value="0">只看已下架</option>
+          </select>
+          <select id="sourceSel">
+            <option value="">全部來源</option>
           </select>
           <button class="btn" id="reloadBtn">重新整理</button>
           <button class="btn" id="bulkOnBtn" title="只對目前篩選後的清單生效">目前清單全上架</button>
@@ -344,6 +377,7 @@
   const state = {
     rows: [],
     filtered: [],
+    sources: [],
     catMap: new Map(),
   };
 
@@ -352,6 +386,9 @@
     q: document.getElementById('q'),
     catSel: document.getElementById('catSel'),
     pubSel: document.getElementById('pubSel'),
+    sourceSel: document.getElementById('sourceSel'),
+    sourceBox: document.getElementById('sourceBox'),
+    sourceReloadBtn: document.getElementById('sourceReloadBtn'),
     count: document.getElementById('count'),
     reloadBtn: document.getElementById('reloadBtn'),
     bulkOnBtn: document.getElementById('bulkOnBtn'),
@@ -507,7 +544,7 @@
       if (raw.is_published !== undefined) return !!raw.is_published;
       if (raw.is_public !== undefined) return !!raw.is_public;
       if (raw.published !== undefined) return !!raw.published;
-      return true;
+      return false; // V47：新增影片先進待審，不直接上首頁
     })();
 
     // 可選欄位
@@ -537,6 +574,11 @@
       youtube_id,
       preferred_source,
       is_published,
+      review_status: raw.review_status || (is_published ? 'approved' : 'pending'),
+      source_key: String(raw.source_key || ('unassigned-' + String(category))).trim(),
+      source_name: String(raw.source_name || ('未指定來源 / ' + String(category))).trim(),
+      source_url: String(raw.source_url || raw.channel_url || raw.youtube_url || '').trim(),
+      source_batch: String(raw.source_batch || '').trim(),
       difficulty_level,
       duration_sec: (duration_sec === null || duration_sec === undefined || duration_sec === "") ? null : Number(duration_sec),
       domain_code,
@@ -647,7 +689,7 @@
   function setBusy(busy, msg) {
     // Disable controls to prevent race conditions during updates
     const disabled = !!busy;
-    [els.q, els.catSel, els.pubSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn].forEach(el=>{
+    [els.q, els.catSel, els.pubSel, els.sourceSel, els.sourceReloadBtn, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn].forEach(el=>{
       if (!el) return;
       el.disabled = disabled;
     });
@@ -674,13 +716,15 @@
     const q = norm(els.q.value).trim();
     const cat = els.catSel.value;
     const pub = els.pubSel.value; // "", "1", "0"
+    const sourceKey = els.sourceSel ? els.sourceSel.value : "";
     let rows = state.rows;
 
     if (cat) rows = rows.filter(r => (r.category||"") === cat);
     if (pub !== "") rows = rows.filter(r => String(!!r.is_published ? 1 : 0) === pub);
+    if (sourceKey) rows = rows.filter(r => String(r.source_key || '') === sourceKey);
     if (q) {
       rows = rows.filter(r => {
-        const hay = `${r.title||""} ${r.slug||""} ${r.category||""} `.toLowerCase();
+        const hay = `${r.title||""} ${r.slug||""} ${r.category||""} ${r.source_key||""} ${r.source_name||""} ${r.source_batch||""} `.toLowerCase();
         return hay.includes(q);
       });
     }
@@ -741,6 +785,10 @@
                 ${openYtUrl ? `　|　<a href="${escapeHtml(openYtUrl)}" target="_blank" rel="noopener noreferrer" class="mono">直接開 YouTube</a>` : ``}
                 ${mp4Url ? `　|　<a href="${escapeHtml(mp4Url)}" target="_blank" rel="noopener noreferrer" class="mono">直接開 MP4</a>` : ``}
                 ${coverUrl ? `　|　<a href="${escapeHtml(coverUrl)}" target="_blank" rel="noopener noreferrer" class="mono">直接開 Cover</a>` : ``}
+                <br>來源：<span class="mono">${escapeHtml(r.source_key || '—')}</span>
+                ${r.source_name ? ` / ${escapeHtml(r.source_name)}` : ``}
+                ${r.source_batch ? `　批次：<span class="mono">${escapeHtml(r.source_batch)}</span>` : ``}
+                ${r.review_status ? `　審核：<span class="mono">${escapeHtml(r.review_status)}</span>` : ``}
               </div>
             </div>
           </div>
@@ -786,8 +834,11 @@
         e.target.disabled = true;
         try {
           setBusy(true, "更新影片狀態…");
-          const payload = { is_published: val };
-          const { error } = await supa.from('assets').update(payload).eq('slug', id);
+          const row = state.rows.find(x => String(x.slug || '') === String(id || ''));
+          const payload = { is_published: val, review_status: val ? 'approved' : 'pending' };
+          let q = supa.from('assets').update(payload).eq('slug', id);
+          if (row && row.category) q = q.eq('category', row.category);
+          const { error } = await q;
           if (error) throw error;
           toast("已更新", `${id} → ${val ? "上架" : "下架"}`);
           await loadVideos(true);
@@ -959,13 +1010,28 @@ async function hardDeleteOne(slug){
 
   setBusy(true, `永久刪除：${slug}`);
   try{
-    await addBadVideoRecord(row);
-    await addPendingDeleteRecord(row);
+    // 先下架，確保首頁立刻隱藏；後續黑名單/R2 待刪/刪資料失敗也不會露出。
+    let hideQ = supa.from('assets').update({ is_published:false, review_status:'rejected' }).eq('slug', slug);
+    if (row.category) hideQ = hideQ.eq('category', row.category);
+    const { error: hideError } = await hideQ;
+    if (hideError) throw hideError;
 
-    const { error } = await supa.from('assets').delete().eq('slug', slug);
-    if (error) throw error;
+    try { await addBadVideoRecord(row); }
+    catch(e){ console.warn('[launch] bad_videos 寫入失敗，但已先下架：', e); }
 
-    toast('已永久刪除', `${slug}：assets 已刪 + 已入黑名單 + 已加入 R2 待刪清單`);
+    try { await addPendingDeleteRecord(row); }
+    catch(e){ console.warn('[launch] pending_r2_delete 寫入失敗，但已先下架：', e); }
+
+    let delQ = supa.from('assets').delete().eq('slug', slug);
+    if (row.category) delQ = delQ.eq('category', row.category);
+    const { error } = await delQ;
+    if (error) {
+      console.warn('[launch] assets delete 失敗；已保留下架狀態：', error);
+      toast('已先下架', `${slug}：首頁已隱藏；資料刪除稍後再處理`);
+    } else {
+      toast('已永久刪除', `${slug}：assets 已刪；已嘗試加入黑名單與 R2 待刪清單`);
+    }
+
     await loadVideos(true);
     return true;
   } finally {
@@ -973,13 +1039,131 @@ async function hardDeleteOne(slug){
   }
 }
 
+
+  async function loadSources() {
+    if (!els.sourceBox && !els.sourceSel) return;
+    try {
+      const { data, error } = await supa
+        .from('content_sources')
+        .select('source_key,source_name,source_type,category,source_url,is_enabled,is_published,updated_at')
+        .order('category', { ascending: true })
+        .order('source_key', { ascending: true });
+
+      if (error) throw error;
+      state.sources = data || [];
+      renderSources();
+      fillSourceFilterOptions();
+    } catch (e) {
+      console.warn('[launch] content_sources 讀取失敗，略過來源站點管理：', e);
+      state.sources = [];
+      if (els.sourceBox) {
+        els.sourceBox.innerHTML = '<div class="small">尚未建立 content_sources，請先執行 source_gate_sql.sql。</div>';
+      }
+      fillSourceFilterOptions();
+    }
+  }
+
+  function renderSources() {
+    if (!els.sourceBox) return;
+    const rows = state.sources || [];
+    if (!rows.length) {
+      els.sourceBox.innerHTML = '<div class="small">沒有來源站點。新跑 05 或執行 source_gate_sql.sql 後會出現。</div>';
+      return;
+    }
+
+    els.sourceBox.innerHTML = rows.map(s => {
+      const on = !!s.is_published && !!s.is_enabled;
+      const key = String(s.source_key || '');
+      return `
+        <div class="sourceCard">
+          <div class="sourceTop">
+            <div>
+              <div class="sourceName">${escapeHtml(s.source_name || key)}</div>
+              <div class="sourceKey">${escapeHtml(key)}</div>
+              <div class="small">${escapeHtml(s.category || '—')}　${escapeHtml(s.source_type || '')}</div>
+            </div>
+            <span class="status ${on ? 'on' : 'off'}">${on ? '來源已上架' : '來源未上架'}</span>
+          </div>
+          ${s.source_url ? `<a class="mono" href="${escapeHtml(s.source_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(s.source_url)}</a>` : `<div class="small">無來源網址</div>`}
+          <div class="sourceBtns">
+            <button class="btn sourceOn" type="button" data-source-key="${escapeHtml(key)}" data-source-action="on">來源上架</button>
+            <button class="btn sourceOff" type="button" data-source-key="${escapeHtml(key)}" data-source-action="off">來源下架</button>
+            <button class="btn ghost" type="button" style="color:#0f172a;border-color:#cbd5e1;background:#fff;" data-source-filter="${escapeHtml(key)}">看此來源影片</button>
+          </div>
+        </div>`;
+    }).join('');
+
+    els.sourceBox.querySelectorAll('[data-source-action]').forEach(btn => {
+      btn.onclick = async () => {
+        const key = btn.getAttribute('data-source-key');
+        const action = btn.getAttribute('data-source-action');
+        if (!key) return;
+        const val = action === 'on';
+        await setSourcePublished(key, val);
+      };
+    });
+
+    els.sourceBox.querySelectorAll('[data-source-filter]').forEach(btn => {
+      btn.onclick = () => {
+        const key = btn.getAttribute('data-source-filter') || '';
+        if (els.sourceSel) els.sourceSel.value = key;
+        applyFilters();
+        document.querySelector('.card:last-of-type')?.scrollIntoView({ behavior:'smooth', block:'start' });
+      };
+    });
+  }
+
+  function fillSourceFilterOptions() {
+    if (!els.sourceSel) return;
+    const prev = els.sourceSel.value || '';
+    const fromSources = (state.sources || []).map(s => ({
+      key: String(s.source_key || '').trim(),
+      name: String(s.source_name || s.source_key || '').trim()
+    }));
+    const fromRows = Array.from(new Set((state.rows || []).map(r => String(r.source_key || '').trim()).filter(Boolean)))
+      .map(k => ({ key:k, name:k }));
+
+    const map = new Map();
+    [...fromSources, ...fromRows].forEach(x => {
+      if (x.key && !map.has(x.key)) map.set(x.key, x.name || x.key);
+    });
+
+    els.sourceSel.innerHTML = '<option value="">全部來源</option>' +
+      Array.from(map.entries()).sort((a,b)=>a[0].localeCompare(b[0]))
+        .map(([k,n]) => `<option value="${escapeHtml(k)}">${escapeHtml(n)}｜${escapeHtml(k)}</option>`)
+        .join('');
+
+    if (prev && map.has(prev)) els.sourceSel.value = prev;
+  }
+
+  async function setSourcePublished(sourceKey, published) {
+    if (!sourceKey) return;
+    const msg = published ? '來源上架' : '來源下架';
+    if (!confirm(`確定要${msg}？\n${sourceKey}\n\n這會影響首頁整批顯示，但不會刪除單支影片。`)) return;
+
+    setBusy(true, `${msg}：${sourceKey}`);
+    try {
+      const { error } = await supa
+        .from('content_sources')
+        .update({ is_published: !!published, is_enabled: true, updated_at: new Date().toISOString() })
+        .eq('source_key', sourceKey);
+      if (error) throw error;
+      toast('已更新來源', `${sourceKey} → ${published ? '上架' : '下架'}`);
+      await loadSources();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+
   async function loadVideos(preserve = true) {
     // Preserve current UI selections
     const prev = preserve ? {
       q: els.q.value,
       cat: els.catSel.value,
       pub: els.pubSel.value,
-    } : { q:"", cat:"", pub:"" };
+      source: els.sourceSel ? els.sourceSel.value : "",
+    } : { q:"", cat:"", pub:"", source:"" };
 
     els.tbody.innerHTML = `<tr><td colspan="8" style="padding:16px; color:#64748b;">載入中…</td></tr>`;
     state.rows = [];
@@ -988,7 +1172,7 @@ async function hardDeleteOne(slug){
     // 把常用欄位都抓出來（如果你未來又加欄位也不影響）
     const { data, error } = await supa
       .from('assets')
-      .select('slug,category,title,is_published,difficulty_level,duration_sec,cover_url,mp4_url,youtube_url,youtube_id,preferred_source,domain_code,lesson_type,role_codes,scene_tags')
+      .select('slug,category,title,is_published,review_status,difficulty_level,duration_sec,cover_url,mp4_url,youtube_url,youtube_id,preferred_source,domain_code,lesson_type,role_codes,scene_tags,source_key,source_name,source_url,source_batch')
       .order('category', { ascending: true }).order('slug', { ascending: true });
 
     if (error) throw error;
@@ -1006,8 +1190,10 @@ async function hardDeleteOne(slug){
       if (prev.cat && cats.includes(prev.cat)) els.catSel.value = prev.cat;
       else els.catSel.value = "";
       els.pubSel.value = (prev.pub === "1" || prev.pub === "0") ? prev.pub : "";
+      if (els.sourceSel) els.sourceSel.value = prev.source || "";
     }
 
+    fillSourceFilterOptions();
     applyFilters();
     fillMigrationCategoryOptions();
   }
@@ -1170,6 +1356,7 @@ async function hardDeleteOne(slug){
   (async function init() {
     try {
       await requireAdmin();
+      await loadSources();
       await loadVideos();
 
       // Import bindings
@@ -1210,7 +1397,9 @@ async function hardDeleteOne(slug){
       els.q.addEventListener('input', ()=>applyFilters());
       els.catSel.addEventListener('change', ()=>applyFilters());
       els.pubSel.addEventListener('change', ()=>applyFilters());
-      els.reloadBtn.onclick = ()=>loadVideos().catch(err=>{console.error(err); alert(err?.message||err);});
+      if (els.sourceSel) els.sourceSel.addEventListener('change', ()=>applyFilters());
+      if (els.sourceReloadBtn) els.sourceReloadBtn.onclick = ()=>loadSources().catch(err=>{console.error(err); alert(err?.message||err);});
+      els.reloadBtn.onclick = async ()=>{ try{ await loadSources(); await loadVideos(); } catch(err){ console.error(err); alert(err?.message||err); } };
       els.bulkOnBtn.onclick = ()=>bulkSet(true).catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOffBtn.onclick = ()=>bulkSet(false).catch(err=>{console.error(err); alert(err?.message||err);});
 
