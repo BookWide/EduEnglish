@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
-  <title>BookWide Admin｜影片上下架</title>
+  <title>BookWide Admin｜影片上下架 通用版</title>
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
@@ -253,7 +253,7 @@
         </div>
 
         <div class="tools">
-          <input class="input" id="q" placeholder="搜尋：標題 / slug / 分類…">
+          <input class="input" id="q" placeholder="搜尋：標題 / slug / YouTube URL / 多支URL…">
           <select id="catSel">
             <option value="">全部分類</option>
           </select>
@@ -274,10 +274,9 @@
 
       <div class="bindSourceBox">
         <b>綁來源：</b>
-        <input id="bindSourceKey" class="key" placeholder="source_key 例：slow-english-stories-with-maya">
-        <input id="bindSourceName" class="name" placeholder="來源名稱 例：Slow English Stories with Maya">
-        <input id="bindSourceUrl" class="url" placeholder="來源網址 例：https://www.youtube.com/@Slow-English-Stories-with-Maya">
-        <button class="btn" id="mayaPresetBtn" type="button" style="background:#0f766e;">套 Maya</button>
+        <input id="bindSourceKey" class="key" placeholder="source_key 例：channel-name-or-site-key">
+        <input id="bindSourceName" class="name" placeholder="來源名稱 例：頻道名稱 / 網站名稱">
+        <input id="bindSourceUrl" class="url" placeholder="來源網址 例：https://www.youtube.com/@channel">
         <button class="btn" id="bindSourceBtn" type="button" style="background:#7c3aed;">綁目前清單</button>
       </div>
 
@@ -303,7 +302,7 @@
 
       <div class="footer">
         <div class="small">共 <b id="count">0</b> 筆（依目前篩選）</div>
-        <div class="small">提示：下架 = 只隱藏；整支刪除 = 依 youtube_id 刪同影片的所有角色資料 + 加黑名單 + 加入 R2 待刪清單。</div>
+        <div class="small">提示：搜尋框可貼多支 YouTube URL / ID；下架 = 只隱藏；整支刪除 = 加黑名單 + 加入 R2 待刪清單。</div>
       </div>
     </div>
   </div>
@@ -431,7 +430,6 @@
     bindSourceKey: document.getElementById('bindSourceKey'),
     bindSourceName: document.getElementById('bindSourceName'),
     bindSourceUrl: document.getElementById('bindSourceUrl'),
-    mayaPresetBtn: document.getElementById('mayaPresetBtn'),
     bindSourceBtn: document.getElementById('bindSourceBtn'),
   };
 
@@ -729,7 +727,7 @@
   function setBusy(busy, msg) {
     // Disable controls to prevent race conditions during updates
     const disabled = !!busy;
-    [els.q, els.catSel, els.pubSel, els.sourceSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn, els.sourceOffBtn, els.mayaPresetBtn, els.bindSourceBtn].forEach(el=>{
+    [els.q, els.catSel, els.pubSel, els.sourceSel, els.reloadBtn, els.bulkOnBtn, els.bulkOffBtn, els.sourceOffBtn, els.bindSourceBtn].forEach(el=>{
       if (!el) return;
       el.disabled = disabled;
     });
@@ -796,6 +794,56 @@
   }
 
 
+
+  function extractYouTubeIdsFromText(text) {
+    const s = String(text || '').toLowerCase();
+    const ids = new Set();
+
+    // Full YouTube URL: watch?v=ID
+    for (const m of s.matchAll(/[?&]v=([a-z0-9_-]{6,})/g)) ids.add(m[1]);
+
+    // Short URL: youtu.be/ID
+    for (const m of s.matchAll(/youtu\.be\/([a-z0-9_-]{6,})/g)) ids.add(m[1]);
+
+    // Embed URL
+    for (const m of s.matchAll(/youtube\.com\/embed\/([a-z0-9_-]{6,})/g)) ids.add(m[1]);
+
+    // Raw IDs or slug-like tokens. This lets you paste several IDs/slugs separated by spaces/new lines.
+    for (const m of s.matchAll(/\b[a-z0-9][a-z0-9_-]{5,}\b/g)) {
+      const token = m[0];
+      // Avoid common URL words becoming tokens.
+      if (['youtube','watch','https','http','www','com','channel','videos','playlist'].includes(token)) continue;
+      ids.add(token);
+      ids.add(token.replaceAll('_','-'));
+      ids.add(token.replaceAll('-','_'));
+    }
+
+    return Array.from(ids);
+  }
+
+  function rowMatchesQuery(row, q) {
+    const raw = String(q || '').trim().toLowerCase();
+    if (!raw) return true;
+
+    const ids = extractYouTubeIdsFromText(raw);
+    const hay = `${row.title||""} ${row.slug||""} ${row.category||""} ${row.youtube_id||""} ${row.youtube_url||""} ${row.source_key||""} ${row.source_name||""} ${row.source_batch||""}`.toLowerCase();
+
+    // Normal keyword search.
+    if (hay.includes(raw)) return true;
+
+    // Batch URL / ID search.
+    if (ids.length) {
+      return ids.some(id => {
+        const alt1 = id.replaceAll('_','-');
+        const alt2 = id.replaceAll('-','_');
+        return hay.includes(id) || hay.includes(alt1) || hay.includes(alt2);
+      });
+    }
+
+    return false;
+  }
+
+
   function applyFilters() {
     const q = norm(els.q.value).trim();
     const cat = els.catSel.value;
@@ -807,10 +855,7 @@
     if (pub !== "") rows = rows.filter(r => String(!!r.is_published ? 1 : 0) === pub);
     if (sourceKey) rows = rows.filter(r => String(r.source_key || '') === sourceKey);
     if (q) {
-      rows = rows.filter(r => {
-        const hay = `${r.title||""} ${r.slug||""} ${r.category||""} ${r.youtube_id||""} ${r.youtube_url||""} ${r.source_key||""} ${r.source_name||""} ${r.source_batch||""} `.toLowerCase();
-        return hay.includes(q);
-      });
+      rows = rows.filter(r => rowMatchesQuery(r, q));
     }
 
     state.filtered = rows;
@@ -1234,15 +1279,6 @@ async function hardDeleteOne(slug){
       setBusy(false);
     }
   }
-
-
-  function setMayaPreset() {
-    if (els.bindSourceKey) els.bindSourceKey.value = 'slow-english-stories-with-maya';
-    if (els.bindSourceName) els.bindSourceName.value = 'Slow English Stories with Maya';
-    if (els.bindSourceUrl) els.bindSourceUrl.value = 'https://www.youtube.com/@Slow-English-Stories-with-Maya';
-    toast('已套用 Maya', '接著按「綁目前清單」。');
-  }
-
   function getBindSourcePayload() {
     const source_key = String(els.bindSourceKey?.value || '').trim();
     const source_name = String(els.bindSourceName?.value || '').trim();
@@ -1494,7 +1530,6 @@ async function hardDeleteOne(slug){
       els.bulkOnBtn.onclick = ()=>bulkSet(true).catch(err=>{console.error(err); alert(err?.message||err);});
       els.bulkOffBtn.onclick = ()=>bulkSet(false).catch(err=>{console.error(err); alert(err?.message||err);});
       if (els.sourceOffBtn) els.sourceOffBtn.onclick = ()=>bulkOffCurrentSource().catch(err=>{console.error(err); alert(err?.message||err);});
-      if (els.mayaPresetBtn) els.mayaPresetBtn.onclick = ()=>setMayaPreset();
       if (els.bindSourceBtn) els.bindSourceBtn.onclick = ()=>bindCurrentListToSource().catch(err=>{console.error(err); alert(err?.message||err);});
 
       if (migEls.previewBtn) migEls.previewBtn.onclick = ()=>previewMigration().catch(err=>{console.error(err); alert(err?.message||err);});
