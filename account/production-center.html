@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>製片派工中心（通用平台最終版）</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     :root{--bg:#091633;--panel:#1c2a46;--panel-2:#223250;--line:#304566;--text:#fff;--muted:#b9c6dd;--blue:#3b82f6;--blue-2:#2563eb;--green:#16a34a;--orange:#f59e0b;--red:#ef4444;--gray:#64748b;--chip:#0f1c35;}
     *{box-sizing:border-box}
@@ -20,7 +21,7 @@
     .field{margin-bottom:14px}
     .label{display:block;margin-bottom:8px;font-size:14px;color:var(--muted)}
     textarea{width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--line);background:#fff;color:#111827;font-size:15px;outline:none;min-height:140px;resize:vertical}
-    input[type="text"],select{width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--line);background:#fff;color:#111827;font-size:16px;outline:none}
+    input[type="text"],input[type="number"],select{width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--line);background:#fff;color:#111827;font-size:16px;outline:none}
     .chips{display:flex;gap:10px;flex-wrap:wrap}
     .chip{border:1px solid var(--line);background:var(--chip);color:#fff;border-radius:999px;padding:10px 18px;cursor:pointer;user-select:none;font-size:16px;transition:.15s ease}
     .chip.active{background:#fff;color:#0f172a;border-color:#fff;font-weight:700}
@@ -159,6 +160,35 @@ https://www.youtube.com/watch?v=..."></textarea>
           <button class="btn btn-secondary" type="button" onclick="deriveSourceFromUrl()">從 source_url 自動填 key/name</button>
           <span class="hint">送出後會一併傳給主機；02 會寫進 index/meta，05 寫 assets 時就會自動綁好。</span>
         </div>
+
+        <div style="margin-top:14px;border-top:1px solid var(--line);padding-top:14px;">
+          <h2 style="margin:0 0 12px;">從 source_key 自動挑片填入批次 URL</h2>
+          <div class="grid">
+            <div class="field">
+              <label class="label">數量（最多 18）</label>
+              <input id="sourcePickLimit" type="number" min="1" max="18" value="8" placeholder="8">
+            </div>
+            <div class="field">
+              <label class="label">挑片範圍</label>
+              <select id="sourcePickMode">
+                <option value="unpublished">只抓未上架</option>
+                <option value="all">全部都可抓</option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label">排序</label>
+              <select id="sourcePickOrder">
+                <option value="newest">最新優先</option>
+                <option value="oldest">最舊優先</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <button class="btn" type="button" onclick="fillBatchUrlsFromSourceKey()" style="background:#0f766e;">依 source_key 自動填入 URL</button>
+            <button class="btn btn-secondary" type="button" onclick="previewSourceKeyPool()">先看可挑影片數</button>
+            <span class="hint" id="sourcePickHint">會用上方 source_key 查 assets，把可用 YouTube URL 自動填進「批次 YouTube URL」。</span>
+          </div>
+        </div>
       </div>
 
       <div class="grid-2">
@@ -219,6 +249,10 @@ https://www.youtube.com/watch?v=..."></textarea>
   </div>
 
   <script>
+    const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
+    const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJqZWFqcncwbXJnY3ppbW1yZmx4byIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzYwNzE4OTM5LCJleHAiOjIwNzYyOTQ5Mzl9.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do".replace("qZWFqcncwbXJnY3ppbW1yZmx4by","plYWpyd3BtcmdjemltbXJmbHhv");
+    const supa = window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON) : null;
+
     let SERVER = "http://100.79.115.109:8787";
     const SERVER_OPTIONS = [
       { label: "桌機 100.79.115.109", value: "http://100.79.115.109:8787" },
@@ -499,6 +533,86 @@ error: ${data.last_error || "-"}`;
         source_url,
         source_batch
       };
+    }
+
+    function getPickLimit() {
+      const n = Number(document.getElementById("sourcePickLimit")?.value || 8);
+      if (!Number.isFinite(n)) return 8;
+      return Math.max(1, Math.min(18, Math.trunc(n)));
+    }
+
+    function buildYoutubeUrlFromAsset(row) {
+      const url = String(row?.youtube_url || "").trim();
+      if (url) return url;
+      const id = String(row?.youtube_id || "").trim();
+      if (id) return `https://www.youtube.com/watch?v=${id}`;
+      return "";
+    }
+
+    async function fetchAssetsBySourceKeyForBatch() {
+      if (!supa) throw new Error("Supabase client 未載入，請檢查網路或 CDN。");
+
+      const sourceKey = cleanSourceKey(document.getElementById("sourceKey")?.value || "");
+      if (!sourceKey) throw new Error("請先填 source_key。");
+
+      const limit = getPickLimit();
+      const mode = String(document.getElementById("sourcePickMode")?.value || "unpublished");
+      const order = String(document.getElementById("sourcePickOrder")?.value || "newest");
+      const asc = order === "oldest";
+
+      let q = supa
+        .from("assets")
+        .select("slug,title,youtube_id,youtube_url,is_published,source_key,updated_at")
+        .ilike("source_key", sourceKey)
+        .order("updated_at", { ascending: asc })
+        .limit(limit);
+
+      if (mode === "unpublished") q = q.eq("is_published", false);
+
+      const { data, error } = await q;
+      if (error) throw error;
+
+      const rows = (data || []).filter(r => buildYoutubeUrlFromAsset(r));
+      return { sourceKey, limit, rows };
+    }
+
+    async function previewSourceKeyPool() {
+      const hint = document.getElementById("sourcePickHint");
+      try {
+        const { sourceKey, limit, rows } = await fetchAssetsBySourceKeyForBatch();
+        if (hint) hint.textContent = `source_key=${sourceKey}，目前可挑 ${rows.length} 支（本次最多 ${limit} 支）。`;
+        if (!rows.length) alert(`找不到可用影片：${sourceKey}
+
+請確認 assets.source_key、youtube_url/youtube_id，或切成「全部都可抓」。`);
+      } catch (err) {
+        console.error(err);
+        alert("查 source_key 失敗：
+" + (err?.message || err));
+      }
+    }
+
+    async function fillBatchUrlsFromSourceKey() {
+      const hint = document.getElementById("sourcePickHint");
+      try {
+        const { sourceKey, limit, rows } = await fetchAssetsBySourceKeyForBatch();
+        if (!rows.length) {
+          alert(`找不到可填入的影片：${sourceKey}
+
+請確認 assets 裡有這個 source_key，且有 youtube_url 或 youtube_id。`);
+          return;
+        }
+
+        const urls = rows.map(buildYoutubeUrlFromAsset).filter(Boolean);
+        document.getElementById("batchUrls").value = urls.join("\n");
+
+        if (hint) hint.textContent = `已從 ${sourceKey} 自動填入 ${urls.length} 支 URL（上限 ${limit}）。`;
+        alert(`已填入批次 URL：${urls.length} 支
+source_key = ${sourceKey}`);
+      } catch (err) {
+        console.error(err);
+        alert("自動填入 URL 失敗：
+" + (err?.message || err));
+      }
     }
 
     function makeJob(url, remarkSuffix="") {
