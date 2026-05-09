@@ -184,9 +184,10 @@ https://www.youtube.com/watch?v=..."></textarea>
             </div>
           </div>
           <div class="row">
-            <button class="btn" type="button" onclick="fillBatchUrlsFromSourceKey()" style="background:#0f766e;">依 source_key 自動填入 URL</button>
-            <button class="btn btn-secondary" type="button" onclick="previewSourceKeyPool()">先看可挑影片數</button>
-            <span class="hint" id="sourcePickHint">會用上方 source_key 查 assets，把可用 YouTube URL 自動填進「批次 YouTube URL」。</span>
+            <button class="btn" type="button" onclick="fillBatchUrlsFromYoutubeChannel()" style="background:#dc2626;">從 YouTube 頻道抓 URL</button>
+            <button class="btn" type="button" onclick="fillBatchUrlsFromSourceKey()" style="background:#0f766e;">從 assets.source_key 填 URL</button>
+            <button class="btn btn-secondary" type="button" onclick="previewSourceKeyPool()">先看 assets 可挑數</button>
+            <span class="hint" id="sourcePickHint">紅色按鈕會走 07 主機 yt-dlp 抓 YouTube 頻道；綠色按鈕只查 Supabase assets 舊資料。</span>
           </div>
         </div>
       </div>
@@ -569,6 +570,69 @@ error: ${data.last_error || "-"}`;
       return "";
     }
 
+    function escapeSupabaseOrValue(v) {
+      return String(v || "").replace(/[%_,()]/g, "");
+    }
+
+    function normalizeSourceComparable(v) {
+      return String(v || "")
+        .toLowerCase()
+        .replace(/https?:\/\//g, "")
+        .replace(/www\./g, "")
+        .replace(/youtube\.com\/@/g, "")
+        .replace(/[^a-z0-9]+/g, "");
+    }
+
+    function getYoutubeChannelInput() {
+      const sourceUrl = String(document.getElementById("sourceUrl")?.value || "").trim();
+      const sourceKey = cleanSourceKey(document.getElementById("sourceKey")?.value || "");
+      if (sourceUrl) return { sourceUrl, sourceKey };
+      if (sourceKey) return { sourceUrl: `https://www.youtube.com/@${sourceKey}`, sourceKey };
+      return { sourceUrl: "", sourceKey: "" };
+    }
+
+    async function fetchYoutubeChannelUrlsFromServer() {
+      const { sourceUrl, sourceKey } = getYoutubeChannelInput();
+      if (!sourceUrl && !sourceKey) throw new Error("請先填 source_url 或 source_key。source_url 建議填 YouTube 頻道網址，例如 https://www.youtube.com/@LearnEnglishWithTVSeries");
+
+      const limit = getPickLimit();
+      const res = await fetch(SERVER + "/youtube/list-channel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        cache: "no-store",
+        body: JSON.stringify({
+          source_url: sourceUrl,
+          source_key: sourceKey,
+          limit
+        })
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+      const urls = Array.isArray(data.urls) ? data.urls.filter(Boolean) : [];
+      return { sourceUrl: data.source_url || sourceUrl, limit: data.limit || limit, urls, data };
+    }
+
+    async function fillBatchUrlsFromYoutubeChannel() {
+      const hint = document.getElementById("sourcePickHint");
+      try {
+        if (hint) hint.textContent = "正在請 07 主機用 yt-dlp 抓 YouTube 頻道影片...";
+        const { sourceUrl, limit, urls } = await fetchYoutubeChannelUrlsFromServer();
+        if (!urls.length) {
+          alert(`YouTube 頻道沒有抓到影片：${sourceUrl}\n\n請確認 07 server 已換新版、yt-dlp 可用、source_url 是頻道網址。`);
+          if (hint) hint.textContent = `YouTube 沒抓到影片：${sourceUrl}`;
+          return;
+        }
+        document.getElementById("batchUrls").value = urls.join("\n");
+        if (hint) hint.textContent = `已從 YouTube 頻道抓到 ${urls.length} 支 URL（上限 ${limit}）：${sourceUrl}`;
+        alert(`已從 YouTube 頻道填入 ${urls.length} 支 URL\n${sourceUrl}`);
+      } catch (err) {
+        console.error(err);
+        if (hint) hint.textContent = "YouTube 頻道抓取失敗：" + (err?.message || err);
+        alert("YouTube 頻道抓取失敗：\n" + (err?.message || err) + "\n\n請確認你已啟動新版 07 server，並且主機可執行 yt-dlp。");
+      }
+    }
+
     async function fetchAssetsBySourceKeyForBatch() {
       const db = window.supa || supa;
       if (!db) throw new Error("Supabase client 未載入，請檢查網路或 CDN。");
@@ -580,27 +644,64 @@ error: ${data.last_error || "-"}`;
       const mode = String(document.getElementById("sourcePickMode")?.value || "unpublished");
       const order = String(document.getElementById("sourcePickOrder")?.value || "newest");
       const asc = order === "oldest";
+      const safeKey = escapeSupabaseOrValue(sourceKey);
+      const wanted = normalizeSourceComparable(sourceKey);
 
-      async function runQuery(pattern) {
+      function rowMatchesSource(row) {
+        const pool = [row?.source_key, row?.source_name, row?.source_url, row?.channel, row?.author]
+          .map(normalizeSourceComparable)
+          .filter(Boolean);
+        return pool.some(v => v.includes(wanted) || wanted.includes(v));
+      }
+
+      function rowAllowedByMode(row) {
+        if (mode !== "unpublished") return true;
+        // 舊資料可能是 false / null / 0 / "false"，都視為可抓；只有 true 明確排除。
+        return !(row?.is_published === true || row?.is_published === "true" || row?.is_published === 1);
+      }
+
+      async function runQuery(orFilter, queryLimit = Math.max(limit * 4, 30)) {
         let q = db
           .from("assets")
-          .select("slug,title,youtube_id,youtube_url,is_published,source_key,source_name,updated_at")
-          .ilike("source_key", pattern)
+          .select("slug,title,youtube_id,youtube_url,is_published,source_key,source_name,source_url,updated_at")
+          .or(orFilter)
           .order("updated_at", { ascending: asc })
-          .limit(limit);
-        if (mode === "unpublished") q = q.eq("is_published", false);
+          .limit(queryLimit);
         return await q;
       }
 
-      let result = await runQuery(sourceKey);
-      if (result.error) throw result.error;
+      const filters = [
+        `source_key.eq.${safeKey},source_key.ilike.%${safeKey}%`,
+        `source_name.ilike.%${safeKey}%,source_url.ilike.%${safeKey}%`,
+        `title.ilike.%${safeKey}%`
+      ];
 
-      if (!result.data || !result.data.length) {
-        result = await runQuery(`%${sourceKey}%`);
+      let allRows = [];
+      for (const f of filters) {
+        const result = await runQuery(f);
         if (result.error) throw result.error;
+        allRows = allRows.concat(result.data || []);
+        if (allRows.length >= limit) break;
       }
 
-      const rows = (result.data || []).filter(r => buildYoutubeUrlFromAsset(r));
+      // 去重 + 前端再做一次寬鬆比對，避免 LearnEnglishWithTVSeries / Learn-English-With-TV-Series 對不上。
+      const seen = new Set();
+      let rows = allRows
+        .filter(r => {
+          const key = String(r?.slug || r?.youtube_id || r?.youtube_url || Math.random());
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return buildYoutubeUrlFromAsset(r) && rowMatchesSource(r) && rowAllowedByMode(r);
+        })
+        .slice(0, limit);
+
+      // 「只抓未上架」找不到時，自動放寬成全部可抓，避免卡死。
+      if (!rows.length && mode === "unpublished") {
+        rows = allRows
+          .filter(r => buildYoutubeUrlFromAsset(r) && rowMatchesSource(r))
+          .slice(0, limit);
+      }
+
       return { sourceKey, limit, rows };
     }
 
