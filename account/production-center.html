@@ -560,17 +560,27 @@ error: ${data.last_error || "-"}`;
       const order = String(document.getElementById("sourcePickOrder")?.value || "newest");
       const asc = order === "oldest";
 
-      let q = supa
-        .from("assets")
-        .select("slug,title,youtube_id,youtube_url,is_published,source_key,updated_at")
-        .ilike("source_key", sourceKey)
-        .order("updated_at", { ascending: asc })
-        .limit(limit);
+      async function runQuery(usePattern) {
+        let q = supa
+          .from("assets")
+          .select("slug,title,youtube_id,youtube_url,is_published,source_key,source_name,updated_at")
+          .ilike("source_key", usePattern ? `%${sourceKey}%` : sourceKey)
+          .order("updated_at", { ascending: asc })
+          .limit(limit);
 
-      if (mode === "unpublished") q = q.eq("is_published", false);
+        if (mode === "unpublished") q = q.eq("is_published", false);
+        return await q;
+      }
 
-      const { data, error } = await q;
+      let { data, error } = await runQuery(false);
       if (error) throw error;
+
+      // source_key 大小寫或符號略不同時，第二次用包含查詢補救。
+      if (!data || !data.length) {
+        const retry = await runQuery(true);
+        if (retry.error) throw retry.error;
+        data = retry.data || [];
+      }
 
       const rows = (data || []).filter(r => buildYoutubeUrlFromAsset(r));
       return { sourceKey, limit, rows };
@@ -586,8 +596,7 @@ error: ${data.last_error || "-"}`;
 請確認 assets.source_key、youtube_url/youtube_id，或切成「全部都可抓」。`);
       } catch (err) {
         console.error(err);
-        alert("查 source_key 失敗：
-" + (err?.message || err));
+        alert("查 source_key 失敗：\n" + (err?.message || err));
       }
     }
 
@@ -610,8 +619,7 @@ error: ${data.last_error || "-"}`;
 source_key = ${sourceKey}`);
       } catch (err) {
         console.error(err);
-        alert("自動填入 URL 失敗：
-" + (err?.message || err));
+        alert("自動填入 URL 失敗：\n" + (err?.message || err));
       }
     }
 
@@ -964,7 +972,7 @@ source_key = ${sourceKey}`);
     function initServerOptions() {
       const preset = document.getElementById("serverPreset");
       preset.innerHTML = SERVER_OPTIONS.map(opt => `<option value="${opt.value}">${opt.label}</option>`).join("");
-      preset.value = SERVER;
+      preset.value = SERVER_OPTIONS.some(opt => opt.value === SERVER) ? SERVER : SERVER_OPTIONS[0].value;
       document.getElementById("serverInput").value = SERVER;
       document.getElementById("serverUrlText").textContent = SERVER;
     }
@@ -983,6 +991,8 @@ source_key = ${sourceKey}`);
       setServerBadge("offline", "主機切換後待測試");
       serverOnline = false;
       document.getElementById("createBtn").disabled = true;
+      const batchBtn = document.getElementById("batchBtn");
+      if (batchBtn) batchBtn.disabled = true;
     }
 
     initCategoryChips();
