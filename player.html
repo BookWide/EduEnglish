@@ -2926,12 +2926,27 @@ async function loadVocab(){
       const zh   = v.zh || '';
       const en   = v.en || '';
       const ja   = v.ja || v.ja_def || '';
+      const ipa  = v.ipa || v.phonetic || v.phonetic_ipa || v.pronunciation || '';
+      const kk   = v.kk || v.kk_phonetic || '';
+      const kana = v.kana || v.furigana || v.yomi || v.ja_kana || '';
+      const romaji = v.romaji || v.romanji || v.ja_romaji || '';
       const enEx = v.en_example || '';
       const zhEx = v.zh_example || '';
       const jaEx = v.ja_example || '';
       const img  = v.img || '';
 
       const hasExample = enEx || zhEx || jaEx;
+      const phoneticHtml = (ipa || kk) ? `
+        <div style="margin:3px 0 6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;color:#c7d2fe;font-size:14px;">
+          ${ipa ? `<span style="background:#0b1f3a;border:1px solid #24446f;border-radius:999px;padding:3px 8px;">IPA ${esc(ipa)}</span>` : ''}
+          ${kk ? `<span style="background:#0b1f3a;border:1px solid #24446f;border-radius:999px;padding:3px 8px;">KK ${esc(kk)}</span>` : ''}
+          ${ipa ? `<button class="btn sm" data-act="speak" data-lang="en-US" data-text="${esc(v.word||'')}">🔊 音標</button>` : ''}
+        </div>` : '';
+      const kanaHtml = (kana || romaji) ? `
+        <div style="margin:2px 0 4px;padding-left:2px;color:#fde68a;font-size:14px;line-height:1.55;">
+          ${kana ? `<span style="font-size:13px;color:#9fb0c9;">假名：</span><span>${esc(kana)}</span>${kana ? `<button class="btn sm" data-act="speak" data-lang="ja-JP" data-text="${esc(kana)}" style="margin-left:6px;">🔊</button>` : ''}` : ''}
+          ${romaji ? `<span style="margin-left:8px;font-size:13px;color:#9fb0c9;">Romaji：</span><span>${esc(romaji)}</span>` : ''}
+        </div>` : '';
       const imgHtml = img ? `
         <div class="vocab-img-wrap" style="margin:6px 0 10px;">
           <img src="${esc(img)}" alt="${esc(v.word||'')}" class="vocab-img" style="max-width:100%;border-radius:10px;display:block;">
@@ -2946,6 +2961,7 @@ async function loadVocab(){
           </div>
           ${v.pos ? `<div style="font-size:12px;color:#9fb0c9;">${esc(v.pos)}</div>` : ''}
         </div>
+        ${phoneticHtml}
 
         ${en ? `
         <div style="margin:2px 0;">
@@ -2967,6 +2983,7 @@ async function loadVocab(){
           <span>${esc(ja)}</span>
           <button class="btn sm" data-act="speak" data-lang="ja-JP" data-text="${esc(ja)}" style="margin-left:6px;">🔊</button>
         </div>` : ''}
+        ${kanaHtml}
 
         ${hasExample ? `
         <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #223048;font-size:13px;">
@@ -3355,38 +3372,81 @@ function updateTalkSpeechBox(transcript='', scoreText='—'){
   if(talkSpeechText) talkSpeechText.textContent = '辨識文字：' + (transcript || '—');
   if(talkSpeechScore) talkSpeechScore.textContent = '相似度：' + scoreText;
 }
+function BW_talkRecognitionLang(){
+  const item = talkData[talkCurrentIdx] || {};
+  const txt = String(item.text || item.en || '');
+  if(/[\u3040-\u30ff\u3400-\u9fff]/.test(txt) && cat === 'music') return 'ja-JP';
+  return 'en-US';
+}
+
+function BW_talkErrorText(err){
+  const code = String((err && err.error) || err || 'unknown');
+  const map = {
+    'not-allowed': '麥克風被瀏覽器封鎖，請點網址左邊圖示允許麥克風',
+    'service-not-allowed': '語音辨識服務被封鎖，可能是網路/地區限制',
+    'audio-capture': '抓不到麥克風，請檢查 Windows / Chrome 麥克風權限',
+    'network': '語音辨識網路失敗；Chrome 這功能會連 Google，網路被擋會失敗',
+    'no-speech': '沒有收到聲音，請再按一次並靠近麥克風',
+    'aborted': '語音辨識已中止'
+  };
+  return map[code] || ('辨識失敗：' + code);
+}
+
 function startTalkRecognition(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
   if(!SR){
-    updateTalkSpeechBox('此瀏覽器不支援語音辨識', '—');
+    updateTalkSpeechBox('此瀏覽器不支援語音辨識，請用 Chrome / Edge', '—');
     return;
   }
+
   if(talkRecognition){
-    try{ talkRecognition.stop(); }catch(_e){}
+    try{ talkRecognition.onend = null; talkRecognition.onerror = null; talkRecognition.abort && talkRecognition.abort(); }catch(_e){}
+    talkRecognition = null;
   }
+
   const rec = new SR();
   talkRecognition = rec;
-  rec.lang = 'en-US';
+  rec.lang = BW_talkRecognitionLang();
   rec.interimResults = true;
   rec.continuous = false;
-  updateTalkSpeechBox('正在聽...', '—');
+  rec.maxAlternatives = 1;
+
+  let finalTranscript = '';
+  updateTalkSpeechBox('正在聽...（' + rec.lang + '）', '—');
+
   rec.onresult = (e) => {
     let transcript = '';
     for(let i = e.resultIndex; i < e.results.length; i++){
       transcript += e.results[i][0].transcript + ' ';
+      if(e.results[i].isFinal) finalTranscript += e.results[i][0].transcript + ' ';
     }
-    transcript = transcript.trim();
+    transcript = (finalTranscript || transcript).trim();
     const target = talkData[talkCurrentIdx]?.text || '';
     const score = similarityScore(transcript, target);
     talkLastScore = score;
     updateTalkSpeechBox(transcript, score + '%');
   };
-  rec.onerror = () => {
-    updateTalkSpeechBox('辨識失敗，請再試一次', '—');
+
+  rec.onerror = (e) => {
+    updateTalkSpeechBox(BW_talkErrorText(e), '—');
   };
-  rec.onend = () => {};
-  rec.start();
+
+  rec.onend = () => {
+    talkRecognition = null;
+    const txt = (talkSpeechText?.textContent || '').replace(/^辨識文字：/,'').trim();
+    if(!txt || txt === '正在聽...' || txt.startsWith('正在聽')){
+      updateTalkSpeechBox('沒有收到聲音，請再按一次「我來說」', '—');
+    }
+  };
+
+  try{
+    rec.start();
+  }catch(e){
+    talkRecognition = null;
+    updateTalkSpeechBox('語音辨識啟動失敗：' + (e.message || e), '—');
+  }
 }
+
 function stopTalkRecognition(){
   if(talkRecognition){
     try{ talkRecognition.stop(); }catch(_e){}
@@ -3394,14 +3454,22 @@ function stopTalkRecognition(){
   }
   talkRecognition = null;
 }
+function BW_findNextTalkIndexForSelectedRole(fromIdx){
+  if(!talkSelectedRole) return fromIdx + 1;
+  for(let i = fromIdx + 1; i < talkData.length; i++){
+    if(talkData[i] && talkData[i].role === talkSelectedRole) return i;
+  }
+  return Math.min(talkData.length - 1, fromIdx + 1);
+}
+
 function startTalkTurn(){
   const item = talkData[talkCurrentIdx];
-  if(!item) return;
+  if(!item){
+    updateTalkSpeechBox('目前沒有 Talk 資料', '—');
+    return;
+  }
 
-  // MUSIC 跟唱：
-  // 1)「開始跟唱」只控制左側影片播放 / 暫停，不開麥克風。
-  // 2) 再按一次「開始跟唱」會停止左側影片。
-  // 3)「我來唱」才單獨啟動麥克風辨識打分，不會啟動左側影片。
+  // MUSIC 跟唱：開始本輪只控制左側影片播放/暫停；「我來唱」才開麥克風。
   if(cat === 'music'){
     try{
       if(!activePaused()){
@@ -3425,15 +3493,26 @@ function startTalkTurn(){
     return;
   }
 
+  // 角色扮演：不是自己角色 → 先朗讀對方句；是自己角色 → 直接開麥克風。
   if(talkMode === 'roleplay' && talkSelectedRole && item.role !== talkSelectedRole){
     speakText(item.text || '', 'en-US');
     if(talkAutoNext?.checked){
-      setTimeout(() => setTalkCurrent(talkCurrentIdx + 1, true), 1600);
+      const waitMs = Math.max(1400, Math.min(4500, String(item.text || '').split(/\s+/).length * 420));
+      setTimeout(() => {
+        const nextIdx = BW_findNextTalkIndexForSelectedRole(talkCurrentIdx);
+        setTalkCurrent(nextIdx, true);
+        const nextItem = talkData[nextIdx];
+        if(nextItem && (!talkSelectedRole || nextItem.role === talkSelectedRole)){
+          startTalkRecognition();
+        }
+      }, waitMs);
     }
     return;
   }
+
   startTalkRecognition();
 }
+
 function similarityScore(spoken, target){
   const a = String(spoken || '').trim().toLowerCase().replace(/[^a-z0-9' ]+/g,' ').split(/\s+/).filter(Boolean);
   const b = String(target || '').trim().toLowerCase().replace(/[^a-z0-9' ]+/g,' ').split(/\s+/).filter(Boolean);
