@@ -166,49 +166,60 @@
 
       els.who.textContent = '登入檢查中…';
 
-      try{
-        console.log('[BW-exam] import shared supa.js start');
-        const importPromise = import(`${ROOT_BASE || ''}/supa.js`);
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('supa.js 載入逾時')), 5000)
-        );
-        const mod = await Promise.race([importPromise, timeoutPromise]);
-        supabase = mod?.supabase || mod?.BW?.supa || null;
-        if (supabase) console.log('[BW-exam] using shared supabase client from supa.js');
-      }catch(e){
-        console.warn('[BW-exam] shared supa.js import failed, fallback to local client', e);
+      if (!window.supabase?.createClient) {
+        throw new Error('找不到 Supabase client，無法讀取登入狀態。');
       }
 
-      if(!supabase){
-        if (!window.supabase?.createClient) {
-          throw new Error('找不到 Supabase client，無法讀取登入狀態。');
+      // 完全比照 player.html：本頁使用自己的 Supabase Client，不依賴共用 supa.js
+      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      console.log('[BW-exam] using local player-style supabase client');
+
+      async function bwExamGetUser(){
+        try{
+          let { data: { session } } = await supabase.auth.getSession();
+          if (!session){
+            await new Promise(r => setTimeout(r, 250));
+            ({ data: { session } } = await supabase.auth.getSession());
+          }
+          if (session?.user){
+            return { user: session.user, session };
+          }
+
+          const { data, error } = await supabase.auth.getUser();
+          if (error || !data?.user) return { user: null, session: null };
+          return { user: data.user, session: null };
+        }catch(err){
+          console.error('[exam-auth] getUser error', err);
+          return { user: null, session: null };
         }
-        supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-        console.log('[BW-exam] using local fallback supabase client');
       }
 
-      let sess = await supabase.auth.getSession();
-      session = sess?.data?.session || null;
+      async function waitUser(maxMs = 1500, stepMs = 250){
+        const t0 = Date.now();
+        while (Date.now() - t0 < maxMs){
+          const res = await bwExamGetUser();
+          if (res?.user) return res;
+          await new Promise(r => setTimeout(r, stepMs));
+        }
+        return { user: null, session: null };
+      }
 
-      if(!session?.user){
-        await new Promise(r => setTimeout(r, 250));
-        sess = await supabase.auth.getSession();
+      const got = await waitUser(1500, 250);
+      currentUser = got.user;
+      session = got.session;
+
+      if (!currentUser) {
+        throw new Error('請先登入 BookWide 後再開啟成果測驗。');
+      }
+
+      // getUser 成功但 session 物件沒回來時，補抓一次 session，供提交 Edge Function Authorization 使用
+      if (!session?.access_token){
+        const sess = await supabase.auth.getSession();
         session = sess?.data?.session || null;
       }
 
-      if(!session?.user){
-        const { data, error } = await supabase.auth.getUser();
-        if(!error && data?.user){
-          currentUser = data.user;
-          els.who.textContent = currentUser.email || '已登入';
-          return;
-        }
-      }
-
-      if(!session?.user) throw new Error('請先登入 BookWide 後再開啟成果測驗。');
-
-      currentUser = session.user;
       els.who.textContent = currentUser.email || '已登入';
+      console.log('[BW-exam] auth ok user =', currentUser.email || currentUser.id);
     }
     async function loadExam(){
       if(!examId) throw new Error('缺少 exam id。請使用測驗專屬連結開啟。');
