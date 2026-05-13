@@ -1150,7 +1150,7 @@ async function loadHeroBanner() {
     let currentLevel = 0;
     let currentSearch = "";
 
-    const NON_ADMIN_PER_CATEGORY_LIMIT = 12; // 非 admin：每分類輪動顯示 12 片；全部 = 12 × 5 = 60
+    const NON_ADMIN_VISIBLE_LIMIT = 20; // 非 admin 最多顯示 20 片
     let CURRENT_USER_IS_ADMIN = false;   // 從 profiles.is_admin 讀取
     const ADMIN_EMAILS = ['pmktools@gmail.com'];
 
@@ -1160,7 +1160,7 @@ async function loadHeroBanner() {
 
     function limitVisibleItemsForViewer(items) {
       if (CURRENT_USER_IS_ADMIN) return items;
-      return rotatePerCategoryItems(items || [], NON_ADMIN_PER_CATEGORY_LIMIT);
+      return (items || []).slice(0, NON_ADMIN_VISIBLE_LIMIT);
     }
 
     async function loadUnlockedSlugs() {
@@ -1186,85 +1186,22 @@ async function loadHeroBanner() {
       return (items || []).filter(v => !CURRENT_UNLOCKED_SLUGS.has(String(v.slug || '').trim()));
     }
 
-    function rotatePerCategoryItems(items, perCat = NON_ADMIN_PER_CATEGORY_LIMIT) {
-      const list = Array.isArray(items) ? items.slice() : [];
-      if (!list.length) return [];
-
-      const weekIndex = getWeekIndex();
-      const byCat = {};
-      for (const v of list) {
-        const cat = String(v.category || '').trim() || 'other';
-        if (!byCat[cat]) byCat[cat] = [];
-        byCat[cat].push(v);
-      }
-
-      const preferredCats = ['story','music','movie','news','pro'];
-      const restCats = Object.keys(byCat).filter(cat => !preferredCats.includes(cat)).sort();
-      const cats = preferredCats.filter(cat => byCat[cat]?.length).concat(restCats);
-
-      const out = [];
-      for (const cat of cats) {
-        const catList = byCat[cat] || [];
-        const total = catList.length;
-        if (!total) continue;
-        const count = Math.min(perCat, total);
-        const start = total ? (weekIndex % total) : 0;
-        for (let i = 0; i < count; i++) {
-          out.push(catList[(start + i) % total]);
-        }
-      }
-      return out;
-    }
-
     function buildViewerItems(items, reserveItems) {
       if (CURRENT_USER_IS_ADMIN) return (items || []).slice();
-
-      // 先排除已解鎖，再依分類做輪動：每類最多 12 片
       const primary = removeUnlockedItems(items || []);
-      let rotated = rotatePerCategoryItems(primary, NON_ADMIN_PER_CATEGORY_LIMIT);
-
-      // 若某分類被已解鎖排掉後不足 12，從 reserve 補回同分類候選
-      const reserve = removeUnlockedItems(reserveItems || []);
-      const seen = new Set(rotated.map(v => `${v.category}::${v.slug}`));
-      const byCat = {};
-      for (const v of rotated) {
-        const cat = String(v.category || '').trim() || 'other';
-        byCat[cat] = (byCat[cat] || 0) + 1;
+      if (primary.length >= NON_ADMIN_VISIBLE_LIMIT) {
+        return primary.slice(0, NON_ADMIN_VISIBLE_LIMIT);
       }
 
-      const weekIndex = getWeekIndex();
-      const reserveByCat = {};
-      for (const v of reserve) {
-        const cat = String(v.category || '').trim() || 'other';
-        if (!reserveByCat[cat]) reserveByCat[cat] = [];
-        reserveByCat[cat].push(v);
-      }
+      const seen = new Set(primary.map(v => `${v.category}::${v.slug}`));
+      const extra = removeUnlockedItems(reserveItems || []).filter(v => {
+        const key = `${v.category}::${v.slug}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
 
-      const preferredCats = ['story','music','movie','news','pro'];
-      const restCats = Object.keys(reserveByCat).filter(cat => !preferredCats.includes(cat)).sort();
-      const cats = preferredCats.filter(cat => reserveByCat[cat]?.length).concat(restCats);
-
-      for (const cat of cats) {
-        const need = Math.max(0, NON_ADMIN_PER_CATEGORY_LIMIT - Number(byCat[cat] || 0));
-        if (!need) continue;
-
-        const pool = reserveByCat[cat] || [];
-        const total = pool.length;
-        if (!total) continue;
-
-        let added = 0;
-        const start = total ? (weekIndex % total) : 0;
-        for (let i = 0; i < total && added < need; i++) {
-          const v = pool[(start + i) % total];
-          const key = `${v.category}::${v.slug}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          rotated.push(v);
-          added++;
-        }
-      }
-
-      return rotated;
+      return primary.concat(extra).slice(0, NON_ADMIN_VISIBLE_LIMIT);
     }
 
     
