@@ -1176,7 +1176,7 @@ async function loadHeroBanner() {
     let currentLevel = 0;
     let currentSearch = "";
 
-    const NON_ADMIN_VISIBLE_LIMIT = 20; // 非 admin 最多顯示 20 片
+    const NON_ADMIN_PER_CATEGORY_LIMIT = 12; // 非 admin 輪動：每分類最多 12 片；全部最多 60 片
     let CURRENT_USER_IS_ADMIN = false;   // 從 profiles.is_admin 讀取
     const ADMIN_EMAILS = ['pmktools@gmail.com'];
 
@@ -1186,7 +1186,7 @@ async function loadHeroBanner() {
 
     function limitVisibleItemsForViewer(items) {
       if (CURRENT_USER_IS_ADMIN) return items;
-      return (items || []).slice(0, NON_ADMIN_VISIBLE_LIMIT);
+      return rotatePerCategoryItems(items || [], NON_ADMIN_PER_CATEGORY_LIMIT);
     }
 
     async function loadUnlockedSlugs() {
@@ -1212,24 +1212,86 @@ async function loadHeroBanner() {
       return (items || []).filter(v => !CURRENT_UNLOCKED_SLUGS.has(String(v.slug || '').trim()));
     }
 
-    function buildViewerItems(items, reserveItems) {
-      if (CURRENT_USER_IS_ADMIN) return (items || []).slice();
-      const primary = removeUnlockedItems(items || []);
-      if (primary.length >= NON_ADMIN_VISIBLE_LIMIT) {
-        return primary.slice(0, NON_ADMIN_VISIBLE_LIMIT);
+    function rotatePerCategoryItems(items, perCat = NON_ADMIN_PER_CATEGORY_LIMIT) {
+      const list = Array.isArray(items) ? items.slice() : [];
+      if (!list.length) return [];
+
+      const weekIndex = getWeekIndex();
+      const byCat = {};
+      for (const v of list) {
+        const cat = String(v.category || '').trim() || 'other';
+        if (!byCat[cat]) byCat[cat] = [];
+        byCat[cat].push(v);
       }
 
-      const seen = new Set(primary.map(v => `${v.category}::${v.slug}`));
-      const extra = removeUnlockedItems(reserveItems || []).filter(v => {
-        const key = `${v.category}::${v.slug}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
+      const preferredCats = ['story','music','movie','news','pro'];
+      const otherCats = Object.keys(byCat).filter(cat => !preferredCats.includes(cat)).sort();
+      const cats = preferredCats.filter(cat => byCat[cat]?.length).concat(otherCats);
 
-      return primary.concat(extra).slice(0, NON_ADMIN_VISIBLE_LIMIT);
+      const result = [];
+      for (const cat of cats) {
+        const catList = byCat[cat] || [];
+        const total = catList.length;
+        if (!total) continue;
+        const count = Math.min(perCat, total);
+        const start = total ? (weekIndex % total) : 0;
+        for (let i = 0; i < count; i++) {
+          result.push(catList[(start + i) % total]);
+        }
+      }
+      return result;
     }
 
+    function buildViewerItems(items, reserveItems) {
+      if (CURRENT_USER_IS_ADMIN) return (items || []).slice();
+
+      // 先用目前篩選結果做輪動：單一分類最多 12；全部分類最多 60。
+      const primary = removeUnlockedItems(items || []);
+      let result = rotatePerCategoryItems(primary, NON_ADMIN_PER_CATEGORY_LIMIT);
+
+      // 若目前篩選清單中某分類不足 12，再從 reserve 同分類補位。
+      const seen = new Set(result.map(v => `${v.category}::${v.slug}`));
+      const categoryCount = {};
+      for (const v of result) {
+        const cat = String(v.category || '').trim() || 'other';
+        categoryCount[cat] = (categoryCount[cat] || 0) + 1;
+      }
+
+      const reserve = removeUnlockedItems(reserveItems || []);
+      const reserveByCat = {};
+      for (const v of reserve) {
+        const cat = String(v.category || '').trim() || 'other';
+        if (!reserveByCat[cat]) reserveByCat[cat] = [];
+        reserveByCat[cat].push(v);
+      }
+
+      const preferredCats = ['story','music','movie','news','pro'];
+      const otherCats = Object.keys(reserveByCat).filter(cat => !preferredCats.includes(cat)).sort();
+      const cats = preferredCats.filter(cat => reserveByCat[cat]?.length).concat(otherCats);
+      const weekIndex = getWeekIndex();
+
+      for (const cat of cats) {
+        const need = Math.max(0, NON_ADMIN_PER_CATEGORY_LIMIT - Number(categoryCount[cat] || 0));
+        if (!need) continue;
+
+        const pool = reserveByCat[cat] || [];
+        const total = pool.length;
+        if (!total) continue;
+
+        const start = total ? (weekIndex % total) : 0;
+        let added = 0;
+        for (let i = 0; i < total && added < need; i++) {
+          const v = pool[(start + i) % total];
+          const key = `${v.category}::${v.slug}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          result.push(v);
+          added++;
+        }
+      }
+
+      return result;
+    }
     
 async function loadWeeklyIndex() {
   try {
@@ -1410,6 +1472,19 @@ function getWeekIndex() {
       const reserveFiltered = (VIDEO_ITEMS || []).filter(filterFn);
 
       const limited = buildViewerItems(primaryFiltered, reserveFiltered);
+      console.debug('[index-visible]', {
+        category: currentCategory,
+        level: currentLevel,
+        suitableLevel: CURRENT_MY_DIFFICULTY_LEVEL,
+        primaryFiltered: primaryFiltered.length,
+        reserveFiltered: reserveFiltered.length,
+        shown: limited.length,
+        shownByCategory: limited.reduce((acc, v) => {
+          const cat = String(v.category || '').trim() || 'other';
+          acc[cat] = (acc[cat] || 0) + 1;
+          return acc;
+        }, {})
+      });
 
       if (!limited.length) {
         const msg = (CURRENT_HAS_ACTIVE_PAID && CURRENT_PROFILE_READY)
