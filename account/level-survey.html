@@ -352,7 +352,7 @@ a{color:inherit}
         <div class="small" id="saveHint">正在寫入你的帳號資料…</div>
         <div style="display:flex; gap:10px; flex-wrap:wrap">
           <button class="btn" id="btnHome">回首頁</button>
-          <button class="btn btnPrimary" id="btnGoTalk">前往 Talk</button>
+          <button class="btn btnPrimary" id="btnGoTalk">查看適合我的教材</button>
           <button class="btn" id="btnAgain">再測一次</button>
         </div>
       </div>
@@ -375,8 +375,9 @@ a{color:inherit}
 /* ============================
    BookWide Level Survey (MVP)
    - Requires login + active subscription
-   - Writes profiles.cefr_level + cefr_score + level_updated_at
+   - Writes profiles.cefr_level + cefr_score + level_updated_at + level_code
    - Stores week cap into localStorage (BW_LEVEL_WEEK_CAP)
+   - Stores first-login level completion marker for Index "適合我" (BW_LEVEL_DONE)
    ============================ */
 
 const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
@@ -428,7 +429,7 @@ function getNextTarget(defaultPath="/talk.html"){
 }
 function isMissingProfileLevelColumnsError(err){
   const msg = (err && (err.message || err.details || err.hint || err.code)) ? String(err.message || err.details || err.hint || err.code) : "";
-  return /cefr_level|cefr_score|level_updated_at/i.test(msg) && /profiles|schema cache|column/i.test(msg);
+  return /cefr_level|cefr_score|level_updated_at|level_code/i.test(msg) && /profiles|schema cache|column/i.test(msg);
 }
 async function ensureSupabaseReady(){
   if(bwSbClient) return bwSbClient;
@@ -455,6 +456,13 @@ const CEFR_WEEK_CAP = { A0:1, A1:4, A2:8, B1:16, B2:32, C1:999, C2:999 };
 function weekCapFromCefr(cefr){
   const k = String(cefr||"").toUpperCase().trim();
   return CEFR_WEEK_CAP[k] || 1;
+}
+function levelCodeFromCefr(cefr){
+  const k = String(cefr||"").toUpperCase().trim();
+  if(k === "A1" || k === "A2" || k === "A0") return "beginner";
+  if(k === "B1") return "intermediate";
+  if(k === "B2" || k === "C1" || k === "C2") return "advanced";
+  return "beginner";
 }
 
 const LEVEL_TEXT = {
@@ -672,6 +680,14 @@ function finish(){
     localStorage.setItem("BW_CEFR_RESULT", level);
     localStorage.setItem("BW_LEVEL_WEEK_CAP", String(cap));
     localStorage.setItem("BW_LEVEL_UNLOCKED_WEEK", String(cap));
+    localStorage.setItem("BW_LEVEL_DONE", "1");
+    localStorage.setItem("BW_CEFR_BEST", JSON.stringify({
+      level,
+      week: cap,
+      week_cap: cap,
+      score: rawScore,
+      updated_at: new Date().toISOString()
+    }));
   }catch(_e){}
 
   // write to profiles
@@ -683,11 +699,13 @@ async function saveToProfile(level, score, cap){
   try{
     await ensureSupabaseReady();
 
+    const mappedLevelCode = levelCodeFromCefr(level);
     const payload = {
       id: uid,
       email: (user && user.email) ? user.email : null,
       cefr_level: level,
       cefr_score: score,
+      level_code: mappedLevelCode,
       level_updated_at: new Date().toISOString(),
     };
 
@@ -713,6 +731,7 @@ async function saveToProfile(level, score, cap){
           email: payload.email,
           cefr_level: level,
           cefr_score: score,
+          level_code: mappedLevelCode,
           level_updated_at: payload.level_updated_at,
         })
         .eq("id", uid);
@@ -743,7 +762,7 @@ async function saveToProfile(level, score, cap){
       return false;
     }
 
-    $("saveHint").textContent = `已更新：${level}（Talk 將解鎖到 W${cap}）`;
+    $("saveHint").textContent = `已更新：${level}／${mappedLevelCode}（首頁「適合我」已啟用，Talk 將解鎖到 W${cap}）`;
     return true;
   }catch(err){
     if(isMissingProfileLevelColumnsError(err)){
@@ -804,7 +823,7 @@ async function guard(){
 // ----- events -----
 $("btnBack").onclick = ()=>history.back();
 $("btnHome").onclick = ()=>location.replace(safePath("/"));
-$("btnGoTalk").onclick = ()=>location.replace(getNextTarget("/talk.html"));
+$("btnGoTalk").onclick = ()=>location.replace(getNextTarget("/index.html?level_ready=1"));
 $("btnAgain").onclick = ()=>startQuiz(true);
 $("btnRetake").onclick = ()=>startQuiz(true);
 $("btnQuit").onclick = ()=>location.replace(safePath("/"));
