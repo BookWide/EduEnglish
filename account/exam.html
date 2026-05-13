@@ -161,36 +161,36 @@
         throw new Error('找不到 Supabase client，無法讀取登入狀態。');
       }
 
-      // 完全跟目前可登入的 learning-dashboard.html 同一種讀法：
-      // CDN UMD createClient + auth.getUser()
-      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-      console.log('[BW-exam] using dashboard-style local supabase client');
+      // 完全比照目前 Talk 守門：
+      // CDN UMD client + auth.getSession() 先拿 session.user
+      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+        auth: {
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true
+        }
+      });
+      console.log('[BW-exam] using talk-style session guard');
 
-      let authRes = await supabase.auth.getUser();
-      currentUser = authRes?.data?.user || null;
-
-      // 瀏覽器剛切頁時偶發 auth 還在恢復，補等一次
-      if (!currentUser){
-        await new Promise(r => setTimeout(r, 450));
-        authRes = await supabase.auth.getUser();
-        currentUser = authRes?.data?.user || null;
+      async function readSession(){
+        const { data, error } = await supabase.auth.getSession();
+        if(error) console.warn('[BW-exam] getSession error', error);
+        return data?.session || null;
       }
 
-      if (!currentUser) {
+      // exam 頁很輕，auth storage 恢復可能比 dashboard 更晚；最多等 5 秒
+      const started = Date.now();
+      while(Date.now() - started < 5000){
+        session = await readSession();
+        if(session?.user) break;
+        await new Promise(r => setTimeout(r, 250));
+      }
+
+      if (!session?.user) {
         throw new Error('請先登入 BookWide 後再開啟成果測驗。');
       }
 
-      // 提交 Edge Function 仍需 access_token，登入確認後再補拿 session
-      const sess = await supabase.auth.getSession();
-      session = sess?.data?.session || null;
-
-      if (!session?.access_token) {
-        // 再補一次，避免 getUser 成功但 session 尚在恢復
-        await new Promise(r => setTimeout(r, 350));
-        const sess2 = await supabase.auth.getSession();
-        session = sess2?.data?.session || null;
-      }
-
+      currentUser = session.user;
       els.who.textContent = currentUser.email || '已登入';
       console.log('[BW-exam] auth ok user =', currentUser.email || currentUser.id);
     }
