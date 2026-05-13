@@ -157,91 +157,38 @@
 
       els.who.textContent = '登入檢查中…';
 
-      // 先吃 BookWide 共用 supa.js 的 client。
-      // 這樣 exam.html 會與登入頁 / 學習控制台使用同一份 session。
-      try{
-        console.log('[BW-exam] import shared supa.js start');
-        const importPromise = import(`${ROOT_BASE || ''}/supa.js`);
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('supa.js 載入逾時')), 5000)
-        );
-        const mod = await Promise.race([importPromise, timeoutPromise]);
-        supabase = mod?.supabase || mod?.BW?.supa || null;
-        if (supabase) {
-          console.log('[BW-exam] using shared supabase client from supa.js');
-        }
-      }catch(e){
-        console.warn('[BW-exam] shared supa.js import failed, fallback to local client', e);
+      if (!window.supabase?.createClient) {
+        throw new Error('找不到 Supabase client，無法讀取登入狀態。');
       }
 
-      // 只有共用 supa.js 真的拿不到時，才退回 local client。
-      if(!supabase){
-        if (!window.supabase?.createClient) {
-          throw new Error('找不到 Supabase client，無法讀取登入狀態。');
-        }
-        supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-          auth: {
-            persistSession: true,
-            autoRefreshToken: true,
-            detectSessionInUrl: true,
-          },
-        });
-        console.log('[BW-exam] using local fallback supabase client');
+      // 完全跟目前可登入的 learning-dashboard.html 同一種讀法：
+      // CDN UMD createClient + auth.getUser()
+      supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      console.log('[BW-exam] using dashboard-style local supabase client');
+
+      let authRes = await supabase.auth.getUser();
+      currentUser = authRes?.data?.user || null;
+
+      // 瀏覽器剛切頁時偶發 auth 還在恢復，補等一次
+      if (!currentUser){
+        await new Promise(r => setTimeout(r, 450));
+        authRes = await supabase.auth.getUser();
+        currentUser = authRes?.data?.user || null;
       }
-
-      async function readExamAuth(){
-        try{
-          let sess = await supabase.auth.getSession();
-          let gotSession = sess?.data?.session || null;
-
-          if(!gotSession?.user){
-            await new Promise(r => setTimeout(r, 250));
-            sess = await supabase.auth.getSession();
-            gotSession = sess?.data?.session || null;
-          }
-
-          if(gotSession?.user){
-            return { user: gotSession.user, session: gotSession };
-          }
-
-          const { data, error } = await supabase.auth.getUser();
-          if(!error && data?.user){
-            const sess2 = await supabase.auth.getSession();
-            return {
-              user: data.user,
-              session: sess2?.data?.session || null
-            };
-          }
-
-          return { user: null, session: null };
-        }catch(err){
-          console.error('[exam-auth] readExamAuth error', err);
-          return { user: null, session: null };
-        }
-      }
-
-      async function waitUser(maxMs = 5000, stepMs = 250){
-        const t0 = Date.now();
-        while (Date.now() - t0 < maxMs){
-          const res = await readExamAuth();
-          if (res?.user) return res;
-          await new Promise(r => setTimeout(r, stepMs));
-        }
-        return { user: null, session: null };
-      }
-
-      const got = await waitUser(5000, 250);
-      currentUser = got.user;
-      session = got.session;
 
       if (!currentUser) {
         throw new Error('請先登入 BookWide 後再開啟成果測驗。');
       }
 
-      // Edge Function 提交需要 access_token；若 user 有了但 session 尚未同步，最後補抓一次。
-      if (!session?.access_token){
-        const sess = await supabase.auth.getSession();
-        session = sess?.data?.session || null;
+      // 提交 Edge Function 仍需 access_token，登入確認後再補拿 session
+      const sess = await supabase.auth.getSession();
+      session = sess?.data?.session || null;
+
+      if (!session?.access_token) {
+        // 再補一次，避免 getUser 成功但 session 尚在恢復
+        await new Promise(r => setTimeout(r, 350));
+        const sess2 = await supabase.auth.getSession();
+        session = sess2?.data?.session || null;
       }
 
       els.who.textContent = currentUser.email || '已登入';
