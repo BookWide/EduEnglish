@@ -639,14 +639,73 @@ function pickFromPool(pool, used){
   return pool[used.size % pool.length] || pool[0] || null;
 }
 function cloneLesson(item, extra={}){ return {...item, ...extra}; }
-function buildCategoryRoadmaps(items, profile){
+function BW_sortCategoryPool(items, profile, matchTier){
+  return (items||[])
+    .map(x=>({
+      ...x,
+      _match_tier: matchTier,
+      _cat_score: scoreLesson(x, profile)+scoreRelaxItem(x, profile)
+    }))
+    .sort((a,b)=>
+      b._cat_score-a._cat_score ||
+      (a.order||999)-(b.order||999) ||
+      String(a.slug).localeCompare(String(b.slug))
+    );
+}
+
+function BW_mergeUniqueLessons(...groups){
+  const out=[];
+  const seen=new Set();
+  groups.flat().forEach(item=>{
+    const slug=String(item?.slug||'').trim();
+    if(!slug || seen.has(slug)) return;
+    seen.add(slug);
+    out.push(item);
+  });
+  return out;
+}
+
+function buildCategoryRoadmaps(items, profile, filterInfo=null){
+  /*
+    V17-2：真正把 Profile 選出的教材拿來排課。
+    優先序：
+      1) exact：domain + role 完全符合
+      2) role：角色符合
+      3) general：全部已上架教材補位，避免某分類空白
+  */
+  const allItems = Array.isArray(items) ? items : [];
+  const assetRole = filterInfo?.assetRole || mapProfileRoleToAssetRole(profile.role_code);
+  const assetDomain = filterInfo?.assetDomain || mapProfileDomainToAssetDomain(profile.domain_code);
+
+  const exactItems = allItems.filter(x =>
+    String(x.domain_code||'').trim().toLowerCase() === assetDomain &&
+    (x.role_codes||[]).includes(assetRole)
+  );
+  const roleItems = allItems.filter(x =>
+    (x.role_codes||[]).includes(assetRole) &&
+    !exactItems.some(y=>String(y.slug||'')===String(x.slug||''))
+  );
+
   const pools={};
   CATEGORY_KEYS.forEach(cat=>{
-    pools[cat]=(items||[])
-      .filter(x=>String(x.category||'').trim()===cat)
-      .map(x=>({...x,_cat_score:scoreLesson(x, profile)+scoreRelaxItem(x, profile)}))
-      .sort((a,b)=>b._cat_score-a._cat_score||(a.order||999)-(b.order||999)||String(a.slug).localeCompare(String(b.slug)));
+    const exactCat = BW_sortCategoryPool(
+      exactItems.filter(x=>String(x.category||'').trim()===cat),
+      profile,
+      'exact'
+    );
+    const roleCat = BW_sortCategoryPool(
+      roleItems.filter(x=>String(x.category||'').trim()===cat),
+      profile,
+      'role'
+    );
+    const generalCat = BW_sortCategoryPool(
+      allItems.filter(x=>String(x.category||'').trim()===cat),
+      profile,
+      'general'
+    );
+    pools[cat]=BW_mergeUniqueLessons(exactCat, roleCat, generalCat);
   });
+
   return pools;
 }
 function buildFiveCategoryRoadmap(categoryRoadmaps){
@@ -839,6 +898,7 @@ function renderTimeline(workRoadmap, relaxRoadmap){
       <div>
         <div class="route-head">
           <span class="route-kind">${CATEGORY_META[rowData.item.category]?.label || '分類'}</span>
+          <span class="route-kind" style="background:${rowData.item._match_tier==='exact'?'#dcfce7':rowData.item._match_tier==='role'?'#dbeafe':'#f8fafc'};color:${rowData.item._match_tier==='exact'?'#166534':rowData.item._match_tier==='role'?'#1d4ed8':'#64748b'}">${BW_matchTierLabel(rowData.item)}</span>
           <div class="route-title">${rowData.item.title}</div>
         </div>
         <div class="route-sub">${(rowData.item.role_codes||[]).join(" / ") || 'general'} · ${rowData.item.domain_code || ''}</div>
@@ -865,7 +925,8 @@ function renderLessonDay(dayObj, progress){
     const doneCat=isCategoryDone(dayObj.day, cat);
     const badge = dayObj.weekend ? '休閒' : (dayObj.review ? '複習' : '新課');
     const metaMain = `${catMeta.label} · ${item.level_code}`;
-    const tags = `<span style="border-color:${catMeta.color};color:${catMeta.color}">${catMeta.label}</span><span>${item.category}</span>${(item.scene_tags||[]).slice(0,2).map(x=>`<span>${x}</span>`).join("")}`;
+    const matchBadge = `<span>${BW_matchTierLabel(item)}</span>`;
+    const tags = `<span style="border-color:${catMeta.color};color:${catMeta.color}">${catMeta.label}</span><span>${item.category}</span>${matchBadge}${(item.scene_tags||[]).slice(0,2).map(x=>`<span>${x}</span>`).join("")}`;
     const box=document.createElement("div");
     box.className="lesson";
     box.innerHTML=`<div class="thumb" style="background-image:url('${item.cover||''}')"></div><div><div class="title">${item.title}</div><div class="meta">${badge} · ${metaMain}</div><div class="tiny">${tags}</div></div><div style="display:flex;flex-direction:column;gap:8px;"><a class="btn primary" href="${playerHref(item)}">進入播放器</a><button class="btn ${doneCat?'ok':''}" onclick="markCategoryDone(${dayObj.day}, '${cat}')">${doneCat?'本分類已完成':'完成本分類'}</button></div>`;
@@ -1126,7 +1187,20 @@ function renderAll(){
 function renderProfileExplain(profile, filterInfo){
   const sub = document.querySelector('.hero .sub');
   if(!sub) return;
-  sub.textContent = `五大分類模式：story / music / movie / news / pro 都會進入曲線與排課；不再只抓單一 role/pro。exact=${filterInfo.exactCount}，role=${filterInfo.roleCount}。`;
+  const exact = Number(filterInfo?.exactCount || 0);
+  const role = Number(filterInfo?.roleCount || 0);
+  if(exact > 0 || role > 0){
+    sub.textContent = `職業化排課已啟用：優先安排「${getDomainLabel(profile.domain_code)} / ${profile.role_code}」精準教材，再用角色相符教材補齊五大分類；不足時才使用通用教材。精準=${exact}，角色相符=${role}。`;
+  }else{
+    sub.textContent = `目前尚無「${getDomainLabel(profile.domain_code)} / ${profile.role_code}」精準或角色相符教材；系統暫以五大分類通用教材補位，待後台補齊職業教材後會自動優先換入。`;
+  }
+}
+
+function BW_matchTierLabel(item){
+  const tier=String(item?._match_tier||'general');
+  if(tier==='exact') return '精準';
+  if(tier==='role') return '角色相符';
+  return '通用補位';
 }
 
 
@@ -1155,7 +1229,7 @@ async function bootstrap(){
     const filterInfo = hardFilterRoleItems(assets, state.profile);
     renderProfileExplain(state.profile, filterInfo);
 
-    state.categoryRoadmaps = buildCategoryRoadmaps(assets, state.profile);
+    state.categoryRoadmaps = buildCategoryRoadmaps(assets, state.profile, filterInfo);
     state.workRoadmap = buildFiveCategoryRoadmap(state.categoryRoadmaps);
     state.relaxRoadmap = buildRelaxRoadmap(assets, state.profile);
     state.schedule = buildSchedule(state.categoryRoadmaps, state.relaxRoadmap, 14);
