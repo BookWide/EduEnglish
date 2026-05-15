@@ -314,7 +314,7 @@ function BW_startDeviceWatcher(userId){
   <div class="grid">
     <section class="card">
       <h2>14 天行事曆</h2>
-      <div class="muted">左邊是排課結果：把右邊行業主題教材分配到 Day 1～14。點任一天，右邊會同步高亮對應教材。</div>
+      <div class="muted">左邊是排課結果：Day 1 / 3 / 5 走行業 pro 主線；Day 2 / 4 / 6 / 7 走故事、音樂、電影、實況。點任一天，右邊會同步高亮對應教材。</div>
       <div class="calendar-head">
         <div class="weekday">Mon</div><div class="weekday">Tue</div><div class="weekday">Wed</div><div class="weekday">Thu</div><div class="weekday">Fri</div><div class="weekday">Sat</div><div class="weekday">Sun</div>
       </div>
@@ -339,8 +339,8 @@ function BW_startDeviceWatcher(userId){
     </section>
 
     <section class="card route-card">
-      <h2>五大分類進度路線</h2>
-      <div class="muted">故事 / 音樂 / 電影 / 實況 / 語法一起排進路線；每天學什麼請看左邊 14 天行事曆。</div>
+      <h2>14 天教材進度路線</h2>
+      <div class="muted">Day 1 / 3 / 5 優先顯示行業 pro；其餘天數顯示故事、音樂、電影、實況。每天學什麼請看左邊 14 天行事曆。</div>
       <div class="timeline" id="timeline"></div>
     </section>
   </div>
@@ -605,31 +605,35 @@ function BW_mergeUniqueLessons(...groups){
 
 function buildCategoryRoadmaps(items, profile, filterInfo=null){
   /*
-    行業版排課：
-      1) industry：domain_code 完全符合使用者所選行業
-      2) general：全部已上架教材補位，避免某分類空白
+    V17-3 正確排課來源：
+      - pro：Day 1 / 3 / 5 的行業主線，優先該 domain_code 的 pro 教材，不足才用通用 pro 補位
+      - story / music / movie / news：共用學習素材，不按行業硬套
   */
   const allItems = Array.isArray(items) ? items : [];
   const assetDomain = filterInfo?.assetDomain || mapProfileDomainToAssetDomain(profile.domain_code);
 
-  const domainItems = allItems.filter(x =>
+  const industryProItems = allItems.filter(x =>
+    String(x.category||'').trim() === 'pro' &&
     String(x.domain_code||'').trim().toLowerCase() === assetDomain
   );
 
   const pools={};
-  CATEGORY_KEYS.forEach(cat=>{
-    const industryCat = BW_sortCategoryPool(
-      domainItems.filter(x=>String(x.category||'').trim()===cat),
-      profile,
-      'industry'
-    );
-    const generalCat = BW_sortCategoryPool(
+
+  ['story','music','movie','news'].forEach(cat=>{
+    pools[cat] = BW_sortCategoryPool(
       allItems.filter(x=>String(x.category||'').trim()===cat),
       profile,
       'general'
     );
-    pools[cat]=BW_mergeUniqueLessons(industryCat, generalCat);
   });
+
+  const industryProPool = BW_sortCategoryPool(industryProItems, profile, 'industry');
+  const generalProPool = BW_sortCategoryPool(
+    allItems.filter(x=>String(x.category||'').trim()==='pro'),
+    profile,
+    'general'
+  );
+  pools.pro = BW_mergeUniqueLessons(industryProPool, generalProPool);
 
   return pools;
 }
@@ -643,44 +647,40 @@ function buildFiveCategoryRoadmap(categoryRoadmaps){
   return out.sort((a,b)=>(a.category_order||999)-(b.category_order||999)||CATEGORY_KEYS.indexOf(a.category)-CATEGORY_KEYS.indexOf(b.category));
 }
 function buildSchedule(workRoadmap, relaxRoadmap, totalDays=14){
-  // V5：五大分類排課。每天從 story/music/movie/news/pro 各挑 1 支，
-  // 以行業主題教材為主資料來源；不足時由通用教材補位。workRoadmap 可傳 categoryRoadmaps。
+  /*
+    V17-3 回到原始正確節奏：
+      Day 1 / 3 / 5  = pro 行業主線
+      Day 2          = story
+      Day 4          = music
+      Day 6          = movie
+      Day 7          = news
+    第二週照同樣節奏循環。
+    每天 1 支，不再一天塞 5 支。
+  */
   const categoryRoadmaps = (workRoadmap && !Array.isArray(workRoadmap)) ? workRoadmap : null;
-  if(!categoryRoadmaps){
-    const out=[];
-    const usedWork=new Set();
-    const usedRelax=new Set();
-    for(let day=1;day<=totalDays;day++){
-      const weekday=(day-1)%7;
-      const isWeekend=weekday>=5;
-      const isReview=(!isWeekend && weekday===3);
-      let lessons=[];
-      if(isWeekend){
-        const a=pickFromPool(relaxRoadmap, usedRelax);
-        const b=pickFromPool(relaxRoadmap, usedRelax);
-        lessons=[a,b].filter(Boolean).map(x=>cloneLesson(x,{track:'weekend'}));
-      }else{
-        const a=pickFromPool(workRoadmap, usedWork);
-        const b=pickFromPool(workRoadmap, usedWork);
-        lessons=[a,b].filter(Boolean).map(x=>cloneLesson(x,{track:isReview?'review':'work'}));
-      }
-      out.push({day, review:isReview, weekend:isWeekend, lessons});
-    }
-    return out;
-  }
-  const out=[];
-  const used={};
+  if(!categoryRoadmaps) return [];
+
+  const weekPattern = ['pro','story','pro','music','pro','movie','news'];
+  const used = {};
   CATEGORY_KEYS.forEach(cat=>used[cat]=new Set());
+
+  const out=[];
   for(let day=1;day<=totalDays;day++){
-    const weekday=(day-1)%7;
-    const isWeekend=weekday>=5;
-    const isReview=(!isWeekend && weekday===3);
-    const lessons=[];
-    CATEGORY_KEYS.forEach(cat=>{
-      const item=pickFromPool(categoryRoadmaps[cat]||[], used[cat]);
-      if(item) lessons.push(cloneLesson(item,{track:isReview?'review':(isWeekend?'weekend':'category'), category_group:cat}));
+    const weekIndex=(day-1)%7;
+    const targetCat=weekPattern[weekIndex];
+    const item=pickFromPool(categoryRoadmaps[targetCat]||[], used[targetCat]);
+    const lessons=item ? [cloneLesson(item,{
+      track: targetCat==='pro' ? 'industry' : 'category',
+      category_group:targetCat
+    })] : [];
+
+    out.push({
+      day,
+      review:false,
+      weekend:false,
+      lessons,
+      target_category:targetCat
     });
-    out.push({day, review:isReview, weekend:isWeekend, lessons});
   }
   return out;
 }
@@ -1113,16 +1113,16 @@ function renderProfileExplain(profile, filterInfo){
   if(!sub) return;
   const domainCount = Number(filterInfo?.domainCount || 0);
   if(domainCount > 0){
-    sub.textContent = `行業排課已啟用：優先安排「${getDomainLabel(profile.domain_code)}」行業教材，再補齊五大分類；不足時才使用通用教材。行業教材=${domainCount}。`;
+    sub.textContent = `行業排課已啟用：Day 1 / 3 / 5 優先安排「${getDomainLabel(profile.domain_code)}」的 pro 行業教材；Day 2 / 4 / 6 / 7 分別安排故事、音樂、電影、實況。可用行業 pro=${domainCount}。`;
   }else{
-    sub.textContent = `目前尚無「${getDomainLabel(profile.domain_code)}」行業教材；系統暫以五大分類通用教材補位，待後台補齊該行業教材後會自動優先換入。`;
+    sub.textContent = `目前尚無「${getDomainLabel(profile.domain_code)}」pro 行業教材；Day 1 / 3 / 5 會先用通用 pro 補位，待後台補齊該行業 pro 後會自動優先換入。`;
   }
 }
 
 function BW_matchTierLabel(item){
   const tier=String(item?._match_tier||'general');
-  if(tier==='industry') return '行業';
-  return '通用補位';
+  if(tier==='industry') return '行業主線';
+  return '共用教材';
 }
 
 
