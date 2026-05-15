@@ -950,30 +950,44 @@ function activateMineLevelTabIfReady(){
   });
 }
 
-function applySelectedWorkFilter(items){
-  if (CURRENT_USER_IS_ADMIN) return items;
-  if (!CURRENT_HAS_ACTIVE_PAID || !CURRENT_PROFILE_READY || !CURRENT_PROFILE) return items;
+function BW_isProfessionalProfileMatch(v){
+  if (!CURRENT_HAS_ACTIVE_PAID || !CURRENT_PROFILE_READY || !CURRENT_PROFILE) return false;
 
   const assetDomain = mapProfileDomainToAssetDomain(CURRENT_PROFILE.domain_code);
   const assetRole = mapProfileRoleToAssetRole(CURRENT_PROFILE.role_code);
+  const itemDomain = String(v?.domain_code || '').trim().toLowerCase();
+  const itemRoles = normalizeBwArray(v?.role_codes);
+
+  const domainMatch = !!assetDomain && itemDomain === assetDomain;
+  const roleMatch = !!assetRole && itemRoles.includes(assetRole);
+
+  // launch.html 存入 domain_code / role_codes 後，
+  // 非 pro 類別（例如 news）也能視為「職業相關教材」。
+  return domainMatch && roleMatch;
+}
+
+function BW_isProfessionalRoleOnlyMatch(v){
+  if (!CURRENT_HAS_ACTIVE_PAID || !CURRENT_PROFILE_READY || !CURRENT_PROFILE) return false;
+  const assetRole = mapProfileRoleToAssetRole(CURRENT_PROFILE.role_code);
+  const itemRoles = normalizeBwArray(v?.role_codes);
+  return !!assetRole && itemRoles.includes(assetRole);
+}
+
+function applySelectedWorkFilter(items){
+  if (CURRENT_USER_IS_ADMIN) return items;
+  if (!CURRENT_HAS_ACTIVE_PAID || !CURRENT_PROFILE_READY || !CURRENT_PROFILE) return items;
 
   const musicItems = (items || []).filter(v =>
     String(v.category || '').trim().toLowerCase() === 'music'
   );
 
-  const exact = (items || []).filter(v =>
-    String(v.category || '') === 'pro' &&
-    String(v.domain_code || '').trim().toLowerCase() === assetDomain &&
-    (normalizeBwArray(v.role_codes)).includes(assetRole)
-  );
+  // 原本只吃 category=pro；
+  // 現在改成所有分類只要有「職業推薦標籤」就能進入首頁職業主題清單。
+  const exact = (items || []).filter(BW_isProfessionalProfileMatch);
+  const roleOnly = (items || []).filter(BW_isProfessionalRoleOnlyMatch);
 
-  const roleOnly = (items || []).filter(v =>
-    String(v.category || '') === 'pro' &&
-    (normalizeBwArray(v.role_codes)).includes(assetRole)
-  );
-
-  const proItems = exact.length ? exact : roleOnly;
-  const merged = [...musicItems, ...proItems];
+  const professionalItems = exact.length ? exact : roleOnly;
+  const merged = [...musicItems, ...professionalItems];
   const seen = new Set();
 
   return merged.filter(v => {
@@ -1458,7 +1472,18 @@ function getWeekIndex() {
 
       const roleFiltered = applySelectedWorkFilter(VIDEO_ITEMS);
       const filterFn = (v) => {
-        if (currentCategory !== "all" && v.category !== currentCategory) return false;
+        // 「專業 / Pro」分頁：
+        // 1) 保留原本 category=pro
+        // 2) 另外納入 launch 後台標記成職業相關的跨分類影片（例如 news 醫療影片）
+        const categoryMatched = (() => {
+          if (currentCategory === "all") return true;
+          if (currentCategory === "pro") {
+            return String(v.category || '') === 'pro' || BW_isProfessionalProfileMatch(v) || BW_isProfessionalRoleOnlyMatch(v);
+          }
+          return String(v.category || '') === currentCategory;
+        })();
+        if (!categoryMatched) return false;
+
         const effectiveLevel = (currentLevel === 'mine') ? CURRENT_MY_DIFFICULTY_LEVEL : Number(currentLevel || 0);
         if (effectiveLevel && Number(v.difficulty_level) !== Number(effectiveLevel)) return false;
         if (kw && !(
