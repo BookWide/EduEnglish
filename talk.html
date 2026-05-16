@@ -46,51 +46,56 @@
     const pexp = prof && prof.expires_at ? String(prof.expires_at).slice(0,10) : '';
 
     // --- orders fallback (handle test accounts recreated with new uid) ---
+    // 若 profiles 已明確顯示訂閱有效，就不要再多查 orders；
+    // 這能少 1~2 次 Supabase round-trip，Talk 進頁會快不少。
+    const profileValid = (!paused) && !!(pexp && pexp >= today);
     let oexp = '';
     let opaid = '';
     let ocreated = '';
     let hasPaid = false;
-    try {
-      // 1) by user_id (best)
-      const r1 = await supabase
-        .from('orders')
-        .select('status,expires_at,paid_at,created_at')
-        .eq('user_id', uid)
-        .order('created_at', { ascending:false })
-        .limit(1);
-      if (!r1.error && r1.data && r1.data.length) {
-        const row = r1.data[0];
-        if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
-        if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
-        if (row?.paid_at) opaid = String(row.paid_at);
-        if (row?.created_at) ocreated = String(row.created_at);
-      } else {
-        // 2) fallback by email (covers cases where order created before account was recreated)
-        const r2 = await supabase
+
+    if (!profileValid) {
+      try {
+        // 1) by user_id (best)
+        const r1 = await supabase
           .from('orders')
           .select('status,expires_at,paid_at,created_at')
-          .eq('email', email)
+          .eq('user_id', uid)
           .order('created_at', { ascending:false })
           .limit(1);
-        if (!r2.error && r2.data && r2.data.length) {
-          const row = r2.data[0];
+        if (!r1.error && r1.data && r1.data.length) {
+          const row = r1.data[0];
           if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
           if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
           if (row?.paid_at) opaid = String(row.paid_at);
           if (row?.created_at) ocreated = String(row.created_at);
+        } else {
+          // 2) fallback by email (covers cases where order created before account was recreated)
+          const r2 = await supabase
+            .from('orders')
+            .select('status,expires_at,paid_at,created_at')
+            .eq('email', email)
+            .order('created_at', { ascending:false })
+            .limit(1);
+          if (!r2.error && r2.data && r2.data.length) {
+            const row = r2.data[0];
+            if (row?.status) hasPaid = String(row.status).toLowerCase() === 'paid';
+            if (row?.expires_at) oexp = String(row.expires_at).slice(0,10);
+            if (row?.paid_at) opaid = String(row.paid_at);
+            if (row?.created_at) ocreated = String(row.created_at);
+          }
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
 
     // If paid order exists but expires_at is missing, allow access for safety (prevents paid users being kicked).
 // We still apply a loose recency check to avoid accidental perpetual access if old data lacks expires_at.
 const today_sub = new Date().toISOString().slice(0,10);
 
 // Base validity from profile/orders expires_at (YYYY-MM-DD)
-let ok = (!paused) && (
-  (pexp && pexp >= today) ||
+let ok = profileValid || ((!paused) && (
   (oexp && oexp >= today)
-);
+));
 
 // Safety: if paid order exists but expires_at is missing, allow access for a limited recency window
 if (!ok && hasPaid) {
@@ -946,7 +951,7 @@ body{line-height:1.1}
     <div class="hero card">
       <div class="heroRow">
         <div class="avatar" aria-label="AI 老師頭像">
-          <video id="teacherVideo" class="teacherMedia" autoplay muted playsinline webkit-playsinline></video>
+          <video id="teacherVideo" class="teacherMedia" autoplay muted playsinline webkit-playsinline preload="metadata"></video>
           <span class="dot" id="dotLive"></span>
         </div>
         <div class="heroText">
@@ -1050,8 +1055,15 @@ body{line-height:1.1}
     const el = document.getElementById("selTeacher");
     if(el) el.value = f;
     if(__teacherVideo){
-      __teacherVideo.src = TEACHER_BASE_URL + encodeURIComponent(f) + "?v=" + Date.now();
-      __teacherVideo.load();
+      // 以前每次進頁都加 Date.now()，會讓老師 MP4 完全無法快取，手機特別卡。
+      // 現在固定 URL，讓瀏覽器 / CDN 可正常快取。
+      const nextSrc = TEACHER_BASE_URL + encodeURIComponent(f);
+      const currentSrc = (__teacherVideo.getAttribute("src") || "").trim();
+      if(currentSrc !== nextSrc){
+        __teacherVideo.setAttribute("preload", "metadata");
+        __teacherVideo.src = nextSrc;
+        __teacherVideo.load();
+      }
     }
   }
 let __tvWatch = null;
@@ -1933,8 +1945,10 @@ try{showReport();}catch(e){}
   }
 
 
-  function renderPicker(){
+  let pickerRendered = false;
+function renderPicker(){
   modalBody.innerHTML = "";
+  const frag = document.createDocumentFragment();
   for(let wk=1; wk<=MAX_WEEKS; wk++){
     const list = byWeek.get(wk) || [];
     if(!list.length) continue;
@@ -1980,8 +1994,10 @@ try{showReport();}catch(e){}
       g.appendChild(row);
     }
 
-    modalBody.appendChild(g);
+    frag.appendChild(g);
   }
+  modalBody.appendChild(frag);
+  pickerRendered = true;
 }
 
   function escapeHtml(s){
@@ -2082,7 +2098,8 @@ async function init(){
       }
     }
 
-    renderPicker();
+    // 情境選單改為「按下時才建 DOM」，避免進頁就把 648 支情境清單全部 render。
+    pickerRendered = false;
 
     // pick scene
     const params = new URLSearchParams(location.search);
@@ -2206,7 +2223,10 @@ if(!firstId){
   }
 
   // -------- events --------
-  btnPick.addEventListener("click", openModal);
+  btnPick.addEventListener("click", ()=>{
+    if(!pickerRendered) renderPicker();
+    openModal();
+  });
   btnClose.addEventListener("click", closeModal);
   mask.addEventListener("click", (e)=>{ if(e.target===mask) closeModal(); });
 
