@@ -977,6 +977,26 @@ body{line-height:1.1}
 }
 </style>
 
+
+<style id="bw-talk-player-voice-css">
+#btnMic.isRecording{
+  filter:saturate(1.2);
+  box-shadow:0 0 0 4px rgba(239,68,68,.16), 0 10px 24px rgba(15,23,42,.14) !important;
+}
+#btnMicStop:disabled{
+  opacity:.48;
+  cursor:not-allowed;
+}
+@media (max-width:520px){
+  #btnMicStop{
+    height:34px !important;
+    min-height:34px !important;
+    padding:0 10px !important;
+    font-size:11px !important;
+  }
+}
+</style>
+
 </head>
 <body>
 <div class="wrap">
@@ -1032,7 +1052,8 @@ body{line-height:1.1}
     </div>
 
     <div class="controlsWrap"><div class="controls">
-      <button class="mic" id="btnMic" aria-label="開始語音辨識">🎤</button>
+      <button class="mic" id="btnMic" aria-label="開始語音辨識" title="開始語音辨識">🎤</button>
+      <button class="ctrlBtn" id="btnMicStop" type="button" disabled><span>停止</span></button>
       <button class="ctrlBtn" id="btnType"><span aria-hidden="true">⌨️</span><span>輸入</span></button>
       <button class="ctrlBtn" id="btnSkip"><span>跳過</span></button>
     </div><div class="row2">
@@ -1637,7 +1658,7 @@ function updateUI(){
         const uja = (user && user.ja) ? user.ja : "";
         renderZhJa(fillTrans, uzh, uja);
       }renderFillOptions(cl);
-      fillHint.textContent = "語音會先填入回覆欄；按「送出」後進入下一句。按「提示」查看完整建議句。" + (expectedSrc==="generated" ? "  ⚠ 缺 USER 建議句：已用規則生成，請補 JSON。" : "");
+      fillHint.textContent = "按 🎤 開始說，按「停止」後內容留在回覆欄；再按「送出」進入下一句。按「提示」查看完整建議句。" + (expectedSrc==="generated" ? "  ⚠ 缺 USER 建議句：已用規則生成，請補 JSON。" : "");
       // do not auto-clear while typing
       // top labels
       weekLabel.textContent = "W" + String(activeWeek);
@@ -2447,197 +2468,83 @@ if(!firstId){
     history.length>1 ? history.back() : (location.href = "./");
   });
 
-  // Speech recognition
-  let rec = null;
-  let recTimer = null;
-  let recBusy = false;
-  let recLastPartial = "";
-  let recSubmitted = false;
+  // Speech recognition — Player 同款簡化版
+  // 原則：只負責「持續聽 → 即時寫入回覆欄 → 停止」。
+  // 不做自動送出、不做 timeout、不做 partial 決策、不在辨識結束時觸發下一句。
+  const btnMicStop = $("btnMicStop");
+  let recognition = null;
 
-  function BW_talkSpeechErrorText(err){
-    const code = String((err && err.error) || err || "unknown");
-    const map = {
-      "not-allowed": "麥克風未允許，請開啟麥克風權限",
-      "service-not-allowed": "此瀏覽器的語音辨識服務被封鎖",
-      "audio-capture": "抓不到麥克風，請檢查裝置權限",
-      "network": "語音服務暫時失敗，可再按一次或直接輸入",
-      "no-speech": "沒聽清楚，可再說一次或直接輸入",
-      "aborted": "語音已停止，可再按一次繼續"
-    };
-    return map[code] || ("語音辨識暫時失敗，可改用輸入");
+  function getTalkSR(){
+    return window.SpeechRecognition || window.webkitSpeechRecognition || null;
   }
 
-  function BW_finishRec(){
-    recBusy = false;
-    if(recTimer){
-      clearTimeout(recTimer);
-      recTimer = null;
-    }
+  function resetTalkRecUI(){
+    try{ btnMic.disabled = false; }catch(_e){}
+    try{ btnMicStop.disabled = true; }catch(_e){}
+    try{ btnMic.classList.remove("isRecording"); }catch(_e){}
     try{ $("dotLive").style.background = "#22c55e"; }catch(_e){}
   }
 
-  function BW_acceptRecognizedSpeech(text, toastMsg){
-    const said = String(text || "").trim();
-    if(!said || recSubmitted) return false;
-    recSubmitted = true;
+  btnMic.addEventListener("click", ()=>{
+    const SR = getTalkSR();
+    if(!SR){
+      showToast("此瀏覽器暫不支援語音辨識，請直接輸入");
+      try{ fillInput && fillInput.focus(); }catch(_e){}
+      return;
+    }
 
-    // 手機穩定版：
-    // 語音辨識只負責「填入回覆欄」，不再自動送出 / 自動跳下一句。
-    // 這可避開手機瀏覽器 SpeechRecognition 結束瞬間又觸發下一輪 UI/TTS 的卡死競態。
-    BW_finishRec();
     try{
-      if(rec){
-        rec.onresult = null;
-        rec.onerror = null;
-        rec.onend = null;
-        try{ rec.stop && rec.stop(); }catch(_e){}
-      }
+      if(recognition) recognition.stop();
     }catch(_e){}
 
-    fillInput.value = said;
-    showToast((toastMsg || "已聽到：") + said + "｜請按送出");
-    try{ fillInput && fillInput.focus(); }catch(_e){}
-    return true;
-  }
+    recognition = new SR();
+    recognition.lang = "en-US";
+    recognition.interimResults = true;
+    recognition.continuous = true;
 
-  async function BW_primeMicPermission(){
-    // 先明確請求麥克風權限，讓手機端能分辨：
-    // 是「權限沒開」還是「SpeechRecognition 服務本身失敗」。
-    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return true;
-    try{
-      const stream = await navigator.mediaDevices.getUserMedia({ audio:true });
-      try{ stream.getTracks().forEach(t=>t.stop()); }catch(_e){}
-      return true;
-    }catch(err){
-      const name = String((err && err.name) || "");
-      if(name === "NotAllowedError" || name === "SecurityError"){
-        showToast("麥克風未允許，請在瀏覽器開啟權限");
-      }else if(name === "NotFoundError"){
-        showToast("找不到麥克風裝置");
-      }else{
-        showToast("麥克風啟動失敗，可先改用輸入");
-      }
-      return false;
-    }
-  }
+    fillInput.value = "";
+    btnMic.disabled = true;
+    btnMicStop.disabled = false;
+    try{ btnMic.classList.add("isRecording"); }catch(_e){}
+    try{ $("dotLive").style.background = "#ef4444"; }catch(_e){}
+    showToast("正在聽，按「停止」結束");
 
-  function BW_pickBestSpeech(ev){
-    try{
-      const row = ev && ev.results && ev.results[0];
-      if(!row) return "";
-      let best = "";
-      let bestScore = -1;
-      for(let i=0; i<row.length; i++){
-        const alt = row[i];
-        const txt = String(alt?.transcript || "").trim();
-        const conf = Number.isFinite(Number(alt?.confidence)) ? Number(alt.confidence) : 0;
-        // 容錯放寬：信心值優先，若沒有 confidence 則選較完整的 transcript。
-        const score = conf * 1000 + txt.length;
-        if(txt && score > bestScore){
-          bestScore = score;
-          best = txt;
-        }
+    recognition.onresult = (e)=>{
+      let text = "";
+      for(let i = 0; i < e.results.length; i++){
+        text += e.results[i][0].transcript + " ";
       }
-      return best;
+      fillInput.value = text.trim();
+    };
+
+    const reset = ()=>{
+      resetTalkRecUI();
+    };
+    recognition.onerror = reset;
+    recognition.onend = reset;
+
+    try{
+      recognition.start();
     }catch(_e){
-      return "";
+      resetTalkRecUI();
+      showToast("語音辨識無法啟動，請再試一次或直接輸入");
+      try{ fillInput && fillInput.focus(); }catch(__e){}
     }
+  });
+
+  if(btnMicStop){
+    btnMicStop.addEventListener("click", ()=>{
+      try{
+        if(recognition) recognition.stop();
+      }catch(_e){}
+      resetTalkRecUI();
+      if((fillInput.value || "").trim()){
+        showToast("語音已填入，請按「送出」");
+      }else{
+        showToast("已停止，可再按 🎤 重說");
+      }
+    });
   }
-
-  async function startRec(){
-    if(recBusy){
-      // 再按一次麥克風：直接結束，若已有片段就照樣送出，避免卡住。
-      try{ rec && rec.stop && rec.stop(); }catch(_e){}
-      if(!BW_acceptRecognizedSpeech(recLastPartial, "已聽到：")){
-        BW_finishRec();
-        showToast("語音已停止，可再按一次或直接輸入");
-        try{ fillInput && fillInput.focus(); }catch(_e){}
-      }
-      return;
-    }
-
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if(!SR){
-      showToast("此瀏覽器不支援語音辨識，請直接輸入");
-      try{ fillInput && fillInput.focus(); }catch(_e){}
-      return;
-    }
-
-    const micOk = await BW_primeMicPermission();
-    if(!micOk){
-      try{ fillInput && fillInput.focus(); }catch(_e){}
-      return;
-    }
-
-    if(rec){
-      try{ rec.onend = null; rec.onerror = null; rec.abort && rec.abort(); }catch(e){}
-      rec = null;
-    }
-
-    rec = new SR();
-    recLastPartial = "";
-    recSubmitted = false;
-    rec.lang = "en-US";
-    rec.interimResults = true;
-    rec.continuous = false;
-    rec.maxAlternatives = 3;
-
-    recBusy = true;
-    $("dotLive").style.background = "#ef4444";
-    showToast("正在聽，說完會填入欄位");
-
-    // 避免手機內嵌瀏覽器偶爾不回 onend / onerror，造成使用者覺得卡死。
-    recTimer = setTimeout(()=>{
-      if(!recBusy || recSubmitted) return;
-      try{ rec && rec.abort && rec.abort(); }catch(_e){}
-      if(!BW_acceptRecognizedSpeech(recLastPartial, "已聽到：")){
-        BW_finishRec();
-        showToast("沒收到可用語音，可再按一次或直接輸入");
-        try{ fillInput && fillInput.focus(); }catch(_e){}
-      }
-    }, 6500);
-
-    rec.onresult = (ev)=>{
-      const said = BW_pickBestSpeech(ev);
-      if(!said.trim()) return;
-
-      recLastPartial = said.trim();
-
-      // 手機穩定版：聽到就填入欄位，交給使用者按「送出」。
-      if(BW_acceptRecognizedSpeech(recLastPartial, "已聽到：")){
-        try{ rec && rec.stop && rec.stop(); }catch(_e){}
-      }
-    };
-
-    rec.onerror = (e)=>{
-      if(recSubmitted){
-        BW_finishRec();
-        return;
-      }
-      if(BW_acceptRecognizedSpeech(recLastPartial, "已聽到：")) return;
-      BW_finishRec();
-      showToast(BW_talkSpeechErrorText(e));
-      try{ fillInput && fillInput.focus(); }catch(_e){}
-    };
-
-    rec.onend = ()=>{
-      if(recSubmitted){
-        BW_finishRec();
-        return;
-      }
-      if(BW_acceptRecognizedSpeech(recLastPartial, "已聽到：")) return;
-      BW_finishRec();
-    };
-
-    try{
-      rec.start();
-    }catch(e){
-      BW_finishRec();
-      showToast("語音辨識無法啟動，請改用輸入");
-      try{ fillInput && fillInput.focus(); }catch(_e){}
-    }
-  }
-  btnMic.addEventListener("click", startRec);
 
   // Avoid iOS rubber band scroll / keep stable
   document.addEventListener("touchmove", (e)=>{
