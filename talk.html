@@ -1270,14 +1270,33 @@ const fillInput = $("fillInput");
   }
   function safeText(v){ return (v==null) ? "" : String(v); }
 
+  const __talkJsonCache = new Map();
+
   async function fetchJsonAny(urls){
     let lastErr = null;
     for(const u of urls){
       try{
-        const res = await fetch(u, {cache:"no-cache"});
+        const key = String(u || "");
+        if(__talkJsonCache.has(key)) return __talkJsonCache.get(key);
+
+        // 靜態 talk/index.json 與場景 JSON 不需要每次強制 no-cache；
+        // 改回 default 讓瀏覽器/CDN 可正常快取，並加 8 秒 timeout，避免網路卡住整頁。
+        const ctrl = ("AbortController" in window) ? new AbortController() : null;
+        const timer = ctrl ? setTimeout(()=>{ try{ ctrl.abort(); }catch(_e){} }, 8000) : null;
+        const res = await fetch(key, {
+          cache:"default",
+          signal: ctrl ? ctrl.signal : undefined
+        });
+        if(timer) clearTimeout(timer);
         if(!res.ok) throw new Error("HTTP "+res.status);
-        return await res.json();
-      }catch(e){ lastErr = e; try{ console.warn('[Talk] fetch failed', u, e); }catch(_e){} }
+
+        const data = await res.json();
+        __talkJsonCache.set(key, data);
+        return data;
+      }catch(e){
+        lastErr = e;
+        try{ console.warn('[Talk] fetch failed', u, e); }catch(_e){}
+      }
     }
     throw lastErr || new Error("fetch failed");
   }
@@ -2065,7 +2084,17 @@ async function init(){
   let savedT = "";
   try{ savedT = localStorage.getItem("bw_teacher_file") || ""; }catch(_){}
   const urlT = getTeacherFromURL();
-  setTeacher(urlT || savedT || (selTeacher ? selTeacher.value : "teacher.mp4"));
+  const initialTeacherFile = urlT || savedT || (selTeacher ? selTeacher.value : "teacher.mp4");
+  try{
+    if(selTeacher) selTeacher.value = normalizeTeacherFile(initialTeacherFile);
+  }catch(_e){}
+  // 初次進頁先把文字/場景載入；老師 MP4 延後到瀏覽器空檔再抓，減少首屏卡頓。
+  const __deferTeacherLoad = ()=> setTeacher(initialTeacherFile);
+  if("requestIdleCallback" in window){
+    requestIdleCallback(__deferTeacherLoad, { timeout: 1200 });
+  }else{
+    setTimeout(__deferTeacherLoad, 240);
+  }
     getOverrides();
     // Front: unlockedWeek 由「訂閱/時間」計算，再套用 level cap（若有）
     unlockedWeek = computeUnlockedWeek();
@@ -2281,19 +2310,20 @@ if(!firstId){
     if(talkMode === "dialogue"){
       const said = (fillInput.value || "").trim();
       if(!said){ showToast("請先輸入你的回覆"); return; }
-      // speak user's reply (optional)
-      try{ await speak(said); }catch(e){}
-      // clear input but keep the guidance panel
+
+      // 舊版會 await TTS；Azure / 網路慢時，學生說完會像「卡住」。
+      // 改成不等待朗讀完成，畫面立即進下一句。
+      try{ speak(said); }catch(e){}
       fillInput.value = "";
       showToast("已送出 ✅");
-      // advance to NEXT AI line (skip USER expected line)
       nextTurn();
       return;
     }
+
     // non-dialogue (fill practice)
     const said = (fillInput.value || "").trim();
     if(!said){ showToast("請先填空"); return; }
-    await speak(said);
+    try{ speak(said); }catch(e){}
     showToast("做得好 ✅");
   });
 
@@ -2324,6 +2354,8 @@ if(!firstId){
 
   // Speech recognition
   let rec = null;
+  let recTimer = null;
+  let recBusy = false;
 
   function BW_talkSpeechErrorText(err){
     const code = String((err && err.error) || err || "unknown");
@@ -2331,11 +2363,20 @@ if(!firstId){
       "not-allowed": "麥克風未允許，請開啟麥克風權限",
       "service-not-allowed": "此瀏覽器的語音辨識服務被封鎖",
       "audio-capture": "抓不到麥克風，請檢查裝置權限",
-      "network": "語音辨識網路服務失敗，請改用 Safari / 桌機 Chrome 測試",
-      "no-speech": "沒有收到聲音，請靠近麥克風再說一次",
-      "aborted": "語音辨識已中止"
+      "network": "語音服務暫時失敗，可再按一次或直接輸入",
+      "no-speech": "沒聽清楚，可再說一次或直接輸入",
+      "aborted": "語音已停止，可再按一次繼續"
     };
-    return map[code] || ("語音辨識失敗：" + code);
+    return map[code] || ("語音辨識暫時失敗，可改用輸入");
+  }
+
+  function BW_finishRec(){
+    recBusy = false;
+    if(recTimer){
+      clearTimeout(recTimer);
+      recTimer = null;
+    }
+    try{ $("dotLive").style.background = "#22c55e"; }catch(_e){}
   }
 
   async function BW_primeMicPermission(){
@@ -2353,16 +2394,44 @@ if(!firstId){
       }else if(name === "NotFoundError"){
         showToast("找不到麥克風裝置");
       }else{
-        showToast("麥克風啟動失敗");
+        showToast("麥克風啟動失敗，可先改用輸入");
       }
       return false;
     }
   }
 
+  function BW_pickBestSpeech(ev){
+    try{
+      const row = ev && ev.results && ev.results[0];
+      if(!row) return "";
+      let best = "";
+      let bestScore = -1;
+      for(let i=0; i<row.length; i++){
+        const alt = row[i];
+        const txt = String(alt?.transcript || "").trim();
+        const conf = Number.isFinite(Number(alt?.confidence)) ? Number(alt.confidence) : 0;
+        // 容錯放寬：信心值優先，若沒有 confidence 則選較完整的 transcript。
+        const score = conf * 1000 + txt.length;
+        if(txt && score > bestScore){
+          bestScore = score;
+          best = txt;
+        }
+      }
+      return best;
+    }catch(_e){
+      return "";
+    }
+  }
+
   async function startRec(){
+    if(recBusy){
+      showToast("正在聽，請直接說英文");
+      return;
+    }
+
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if(!SR){
-      showToast("此瀏覽器不支援語音辨識，請改用 Safari 或桌機 Chrome");
+      showToast("此瀏覽器不支援語音辨識，請直接輸入");
       try{ fillInput && fillInput.focus(); }catch(_e){}
       return;
     }
@@ -2380,40 +2449,49 @@ if(!firstId){
 
     rec = new SR();
     rec.lang = "en-US";
-    rec.interimResults = false;
+    rec.interimResults = true;
     rec.continuous = false;
-    rec.maxAlternatives = 1;
+    rec.maxAlternatives = 3;
 
+    recBusy = true;
     $("dotLive").style.background = "#ef4444";
-    showToast("正在聽，請說英文");
+    showToast("正在聽，說完會自動送出");
+
+    // 避免手機內嵌瀏覽器偶爾不回 onend / onerror，造成使用者覺得卡死。
+    recTimer = setTimeout(()=>{
+      if(!recBusy) return;
+      try{ rec && rec.abort && rec.abort(); }catch(_e){}
+      BW_finishRec();
+      showToast("沒收到完整聲音，可再按一次或直接輸入");
+      try{ fillInput && fillInput.focus(); }catch(_e){}
+    }, 9000);
 
     rec.onresult = (ev)=>{
-      const said = (ev.results && ev.results[0] && ev.results[0][0] && ev.results[0][0].transcript) ? ev.results[0][0].transcript : "";
-      $("dotLive").style.background = "#22c55e";
-      if(!said.trim()){
-        showToast("沒有聽清楚，請再說一次");
-        return;
-      }
+      const said = BW_pickBestSpeech(ev);
+      if(!said.trim()) return;
+
+      // 一旦已有可用辨識結果就接受，不嚴格要求完全句，避免卡住。
       fillInput.value = said.trim();
+      BW_finishRec();
+      try{ rec && rec.stop && rec.stop(); }catch(_e){}
       showToast("你說：" + said.trim());
-      setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 350);
+      setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 120);
     };
 
     rec.onerror = (e)=>{
-      $("dotLive").style.background = "#22c55e";
+      BW_finishRec();
       showToast(BW_talkSpeechErrorText(e));
-      // 手機語音失敗時，直接把焦點給輸入框，不讓學習流程卡住。
       try{ fillInput && fillInput.focus(); }catch(_e){}
     };
 
     rec.onend = ()=>{
-      $("dotLive").style.background = "#22c55e";
+      BW_finishRec();
     };
 
     try{
       rec.start();
     }catch(e){
-      $("dotLive").style.background = "#22c55e";
+      BW_finishRec();
       showToast("語音辨識無法啟動，請改用輸入");
       try{ fillInput && fillInput.focus(); }catch(_e){}
     }
