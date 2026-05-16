@@ -1293,6 +1293,19 @@ button,input{font:inherit}
     els.btnMic.textContent = on ? "●" : "🎤";
   }
 
+  function speechErrorText(event){
+    const code = String((event && event.error) || event || "unknown");
+    const map = {
+      "not-allowed": "麥克風權限被封鎖，請允許瀏覽器使用麥克風",
+      "service-not-allowed": "語音服務被封鎖，請檢查瀏覽器或網路限制",
+      "audio-capture": "抓不到麥克風，請檢查手機麥克風權限",
+      "network": "語音辨識網路失敗，請稍後再試",
+      "no-speech": "沒有聽到聲音，請再按一次 🎤",
+      "aborted": "已停止收音"
+    };
+    return map[code] || ("語音辨識失敗：" + code);
+  }
+
   function startRecognition(){
     const SR = getSpeechRecognition();
     if(!SR){
@@ -1300,6 +1313,8 @@ button,input{font:inherit}
       return;
     }
 
+    // 手機關鍵：先完整停掉 Emma / TTS，再稍等音訊通道釋放後才開麥。
+    // 直接 stopSpeak() 後立即 rec.start()，手機常會直接回 no-speech。
     stopSpeak();
     stopRecognition(false);
 
@@ -1307,66 +1322,79 @@ button,input{font:inherit}
     state.finalTranscript = "";
     state.liveTranscript = "";
     els.replyInput.value = "";
-    setStatus("正在聽，說完後會自動判分…", "wait");
+    setStatus("準備開啟麥克風…", "wait");
 
-    const rec = new SR();
-    state.recognition = rec;
-    rec.lang = "en-US";
-    rec.interimResults = true;
-    rec.continuous = false;
-    rec.maxAlternatives = 1;
+    setTimeout(() => {
+      const rec = new SR();
+      state.recognition = rec;
+      rec.lang = "en-US";
+      rec.interimResults = true;
+      rec.continuous = false;
+      rec.maxAlternatives = 1;
 
-    rec.onstart = () => setRecordingUI(true);
+      rec.onstart = () => {
+        setRecordingUI(true);
+        setStatus("正在聽，說完後會自動判分…", "wait");
+      };
 
-    rec.onresult = (event) => {
-      let interim = "";
-      let finalText = state.finalTranscript;
+      rec.onresult = (event) => {
+        let interim = "";
+        let finalText = state.finalTranscript;
 
-      for(let i = event.resultIndex; i < event.results.length; i++){
-        const piece = cleanText(event.results[i][0]?.transcript || "");
-        if(!piece) continue;
-        if(event.results[i].isFinal){
-          finalText = cleanText((finalText + " " + piece).trim());
-        }else{
-          interim = cleanText((interim + " " + piece).trim());
+        for(let i = event.resultIndex; i < event.results.length; i++){
+          const piece = cleanText(event.results[i][0]?.transcript || "");
+          if(!piece) continue;
+          if(event.results[i].isFinal){
+            finalText = cleanText((finalText + " " + piece).trim());
+          }else{
+            interim = cleanText((interim + " " + piece).trim());
+          }
         }
+
+        state.finalTranscript = finalText;
+        state.liveTranscript = cleanText((finalText + " " + interim).trim());
+        els.replyInput.value = state.liveTranscript;
+      };
+
+      rec.onerror = (event) => {
+        console.warn("[Talk clean] speech error", event);
+        const heard = cleanText(state.finalTranscript || state.liveTranscript || els.replyInput.value);
+        setRecordingUI(false);
+        state.recognition = null;
+
+        // 若其實已有辨識到字，就不要被後續錯誤蓋掉，照樣進行判分。
+        if(heard){
+          evaluateReply(heard, { fromSpeech:true });
+          return;
+        }
+
+        if(!state.manualStop){
+          setStatus(speechErrorText(event), "bad");
+        }
+      };
+
+      rec.onend = () => {
+        const heard = cleanText(state.finalTranscript || state.liveTranscript || els.replyInput.value);
+        setRecordingUI(false);
+        state.recognition = null;
+
+        if(!heard){
+          if(!state.manualStop) setStatus("沒有聽到內容，請再按一次 🎤", "bad");
+          return;
+        }
+
+        evaluateReply(heard, { fromSpeech:true });
+      };
+
+      try{
+        rec.start();
+      }catch(err){
+        console.warn("[Talk clean] speech start failed", err);
+        setRecordingUI(false);
+        state.recognition = null;
+        setStatus("麥克風啟動失敗，請再試一次", "bad");
       }
-
-      state.finalTranscript = finalText;
-      state.liveTranscript = cleanText((finalText + " " + interim).trim());
-      els.replyInput.value = state.liveTranscript;
-    };
-
-    rec.onerror = (event) => {
-      console.warn("[Talk clean] speech error", event);
-      setRecordingUI(false);
-      state.recognition = null;
-      if(event.error === "no-speech"){
-        setStatus("沒有聽到聲音，請再按一次 🎤", "bad");
-      }else{
-        setStatus("語音辨識失敗，請再試一次", "bad");
-      }
-    };
-
-    rec.onend = () => {
-      const heard = cleanText(state.finalTranscript || state.liveTranscript || els.replyInput.value);
-      setRecordingUI(false);
-      state.recognition = null;
-      if(!heard){
-        if(!state.manualStop) setStatus("沒有聽到內容，請再試一次", "bad");
-        return;
-      }
-      evaluateReply(heard, { fromSpeech:true });
-    };
-
-    try{
-      rec.start();
-    }catch(err){
-      console.warn("[Talk clean] speech start failed", err);
-      setRecordingUI(false);
-      state.recognition = null;
-      setStatus("麥克風啟動失敗，請再試一次", "bad");
-    }
+    }, 280);
   }
 
   function stopRecognition(markManual=true){
