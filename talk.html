@@ -751,6 +751,10 @@ button,input{font:inherit}
     ttsAbort: null,
     lastSpokenText: "",
     lastSpokenAt: 0,
+    speechSession: 0,
+    speechStartTimer: null,
+    speechFinishedSession: 0,
+    advanceTimer: null,
   };
 
   function toast(msg){
@@ -1014,7 +1018,7 @@ button,input{font:inherit}
   }
 
   async function loadScene(scene){
-    stopRecognition(false);
+    stopRecognition(false, true);
     stopSpeak();
     setStatus("讀取情境中…", "wait");
 
@@ -1201,7 +1205,7 @@ button,input{font:inherit}
     state.lastSpokenText = line;
     state.lastSpokenAt = now;
 
-    stopRecognition(false);
+    stopRecognition(false, true);
     stopSpeak();
     const seq = ++state.ttsSeq;
     startTeacher();
@@ -1306,6 +1310,51 @@ button,input{font:inherit}
     return map[code] || ("語音辨識失敗：" + code);
   }
 
+  function clearSpeechStartTimer(){
+    if(state.speechStartTimer){
+      clearTimeout(state.speechStartTimer);
+      state.speechStartTimer = null;
+    }
+  }
+
+  function silentlyKillRecognition(){
+    clearSpeechStartTimer();
+    const rec = state.recognition;
+    state.recognition = null;
+    if(rec){
+      try{
+        rec.onstart = null;
+        rec.onresult = null;
+        rec.onerror = null;
+        rec.onend = null;
+      }catch(_e){}
+      try{ rec.abort && rec.abort(); }catch(_e){}
+      try{ rec.stop && rec.stop(); }catch(_e){}
+    }
+    setRecordingUI(false);
+  }
+
+  function finishRecognitionOnce(sessionId, fallbackErrorText=""){
+    if(sessionId !== state.speechSession) return;
+    if(state.speechFinishedSession === sessionId) return;
+    state.speechFinishedSession = sessionId;
+
+    const heard = cleanText(state.finalTranscript || state.liveTranscript || els.replyInput.value);
+    state.recognition = null;
+    setRecordingUI(false);
+
+    if(heard){
+      evaluateReply(heard, { fromSpeech:true });
+      return;
+    }
+
+    if(!state.manualStop){
+      setStatus(fallbackErrorText || "沒有聽到內容，請再按一次 🎤", "bad");
+    }else{
+      setStatus("已停止收音，請再按一次 🎤", "bad");
+    }
+  }
+
   function startRecognition(){
     const SR = getSpeechRecognition();
     if(!SR){
@@ -1313,18 +1362,33 @@ button,input{font:inherit}
       return;
     }
 
-    // 手機關鍵：先完整停掉 Emma / TTS，再稍等音訊通道釋放後才開麥。
-    // 直接 stopSpeak() 後立即 rec.start()，手機常會直接回 no-speech。
-    stopSpeak();
-    stopRecognition(false);
-
+    // 每次開麥都建立一個新的語音 session。
+    // 舊 session 的 onend / onerror 即使晚到，也會被 sessionId 擋掉，不可再干擾下一句。
+    const sessionId = ++state.speechSession;
+    state.speechFinishedSession = 0;
     state.manualStop = false;
     state.finalTranscript = "";
     state.liveTranscript = "";
     els.replyInput.value = "";
+
+    if(state.advanceTimer){
+      clearTimeout(state.advanceTimer);
+      state.advanceTimer = null;
+    }
+
+    stopSpeak();
+    silentlyKillRecognition();
+
+    // 準備期也先鎖住麥克風，避免連點產生兩個 start timer。
+    els.btnMic.disabled = true;
+    els.btnStop.disabled = true;
+    els.btnMic.textContent = "…";
     setStatus("準備開啟麥克風…", "wait");
 
-    setTimeout(() => {
+    state.speechStartTimer = setTimeout(() => {
+      state.speechStartTimer = null;
+      if(sessionId !== state.speechSession) return;
+
       const rec = new SR();
       state.recognition = rec;
       rec.lang = "en-US";
@@ -1333,11 +1397,15 @@ button,input{font:inherit}
       rec.maxAlternatives = 1;
 
       rec.onstart = () => {
+        if(sessionId !== state.speechSession) return;
         setRecordingUI(true);
         setStatus("正在聽，說完後會自動判分…", "wait");
       };
 
       rec.onresult = (event) => {
+        if(sessionId !== state.speechSession) return;
+        if(state.speechFinishedSession === sessionId) return;
+
         let interim = "";
         let finalText = state.finalTranscript;
 
@@ -1357,52 +1425,60 @@ button,input{font:inherit}
       };
 
       rec.onerror = (event) => {
+        if(sessionId !== state.speechSession) return;
         console.warn("[Talk clean] speech error", event);
+
         const heard = cleanText(state.finalTranscript || state.liveTranscript || els.replyInput.value);
-        setRecordingUI(false);
-        state.recognition = null;
-
-        // 若其實已有辨識到字，就不要被後續錯誤蓋掉，照樣進行判分。
-        if(heard){
-          evaluateReply(heard, { fromSpeech:true });
-          return;
-        }
-
-        if(!state.manualStop){
-          setStatus(speechErrorText(event), "bad");
-        }
+        const msg = heard ? "" : speechErrorText(event);
+        finishRecognitionOnce(sessionId, msg);
       };
 
       rec.onend = () => {
-        const heard = cleanText(state.finalTranscript || state.liveTranscript || els.replyInput.value);
-        setRecordingUI(false);
-        state.recognition = null;
-
-        if(!heard){
-          if(!state.manualStop) setStatus("沒有聽到內容，請再按一次 🎤", "bad");
-          return;
-        }
-
-        evaluateReply(heard, { fromSpeech:true });
+        if(sessionId !== state.speechSession) return;
+        finishRecognitionOnce(sessionId, "沒有聽到內容，請再按一次 🎤");
       };
 
       try{
         rec.start();
       }catch(err){
         console.warn("[Talk clean] speech start failed", err);
-        setRecordingUI(false);
-        state.recognition = null;
-        setStatus("麥克風啟動失敗，請再試一次", "bad");
+        finishRecognitionOnce(sessionId, "麥克風啟動失敗，請再試一次");
       }
-    }, 280);
+    }, 320);
   }
 
-  function stopRecognition(markManual=true){
+  function stopRecognition(markManual=true, silent=false){
     if(markManual) state.manualStop = true;
+    if(silent){
+      silentlyKillRecognition();
+      return;
+    }
+
+    clearSpeechStartTimer();
+
     const rec = state.recognition;
     if(rec){
-      try{ rec.stop(); }catch(_){}
+      try{ rec.stop(); }catch(_e){}
+      return;
     }
+
+    // 若使用者在「準備開麥」期間按停止，也要立即還原 UI。
+    if(markManual){
+      state.speechFinishedSession = state.speechSession;
+      setRecordingUI(false);
+      setStatus("已停止收音，請再按一次 🎤", "bad");
+    }
+  }
+
+  function queueNextTurn(delayMs){
+    if(state.advanceTimer){
+      clearTimeout(state.advanceTimer);
+      state.advanceTimer = null;
+    }
+    state.advanceTimer = setTimeout(() => {
+      state.advanceTimer = null;
+      nextTurn();
+    }, delayMs);
   }
 
   function evaluateReply(text, { fromSpeech=false } = {}){
@@ -1416,7 +1492,7 @@ button,input{font:inherit}
     if(!expected){
       setStatus("已收到你的回覆 ✅", "good");
       toast("已送出");
-      setTimeout(nextTurn, 380);
+      queueNextTurn(380);
       return;
     }
 
@@ -1427,15 +1503,16 @@ button,input{font:inherit}
     if(score >= PASS_SCORE){
       setStatus(`正確度 ${pct}% ✅ 自動下一句`, "good");
       toast(`正確度 ${pct}% ✅`);
-      setTimeout(nextTurn, fromSpeech ? 420 : 300);
+      queueNextTurn(fromSpeech ? 520 : 300);
     }else{
       setStatus(`正確度 ${pct}%　未達 50%，請再說一次`, "bad");
     }
   }
 
   function nextTurn(){
-    stopRecognition(false);
+    stopRecognition(false, true);
     stopSpeak();
+
     const next = firstAiIndex(state.aiIndex + 1);
     if(next < 0){
       state.aiIndex = -1;
@@ -1444,6 +1521,7 @@ button,input{font:inherit}
       toast("本情境完成");
       return;
     }
+
     state.aiIndex = next;
     state.hintOn = false;
     state.fillOn = false;
