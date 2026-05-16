@@ -1838,7 +1838,7 @@ function updateUI(){
         const uja = (user && user.ja) ? user.ja : "";
         renderZhJa(fillTrans, uzh, uja);
       }renderFillOptions(cl);
-      fillHint.textContent = "按 🎤 開始說；回覆相似度達 50% 會自動下一句。未達門檻可重說，或直接按「送出」。" + (expectedSrc==="generated" ? "  ⚠ 缺 USER 建議句：已用規則生成，請補 JSON。" : "");
+      fillHint.textContent = "按 🎤 開始說；相似度達 50% 會自動下一句。未達門檻會自動收麥，直接重說或按「送出」。" + (expectedSrc==="generated" ? "  ⚠ 缺 USER 建議句：已用規則生成，請補 JSON。" : "");
       // do not auto-clear while typing
       // top labels
       weekLabel.textContent = "W" + String(activeWeek);
@@ -2686,12 +2686,32 @@ if(!firstId){
   let talkVoiceAutoAdvancing = false;
   let talkVoiceFinalTranscript = "";
   let talkVoiceLastTranscript = "";
+  let talkVoiceListenTimer = null;
+  const TALK_VOICE_LISTEN_TIMEOUT_MS = 9000;
 
   function getTalkSR(){
     return window.SpeechRecognition || window.webkitSpeechRecognition || null;
   }
 
+  function clearTalkVoiceListenTimer(){
+    if(talkVoiceListenTimer){
+      clearTimeout(talkVoiceListenTimer);
+      talkVoiceListenTimer = null;
+    }
+  }
+
+  function armTalkVoiceListenTimeout(){
+    clearTalkVoiceListenTimer();
+    talkVoiceListenTimer = setTimeout(()=>{
+      if(talkVoiceAutoAdvancing) return;
+      try{
+        if(recognition) recognition.stop();
+      }catch(_e){}
+    }, TALK_VOICE_LISTEN_TIMEOUT_MS);
+  }
+
   function resetTalkRecUI(){
+    clearTalkVoiceListenTimer();
     try{ btnMic.disabled = false; }catch(_e){}
     try{ btnMicStop.disabled = true; }catch(_e){}
     try{ btnMic.classList.remove("isRecording"); }catch(_e){}
@@ -2752,6 +2772,7 @@ if(!firstId){
 
     talkVoiceAutoAdvancing = true;
     fillInput.value = said;
+    clearTalkVoiceListenTimer();
 
     try{
       if(recognition){
@@ -2791,9 +2812,8 @@ if(!firstId){
     const expected = String(talkVoiceExpectedReply() || "").trim();
     const score = expected ? talkSpeechSimilarity(said, expected) : 0;
 
-    // 2026-05-16：改成 Player AI 語音的「即時互動」感。
-    // 不再硬等 final / onend；只要即時辨識已達 50%，就直接進下一句。
-    // final 仍保留作保險，避免部分瀏覽器 interim 更新很慢。
+    // 即時辨識若已達 50%，直接進下一句；
+    // 若未達標，這輪收音會在瀏覽器 onend 或逾時保險後結束，恢復按鍵可重說。
     if(score >= 0.50 || hasFinal){
       talkVoiceAdvanceIfScoreOK(said, score);
     }
@@ -2828,7 +2848,7 @@ if(!firstId){
       recognition = new SR();
       recognition.lang = "en-US";
       recognition.interimResults = true;
-      recognition.continuous = true;
+      recognition.continuous = false;
       recognition.maxAlternatives = 1;
 
       fillInput.value = "";
@@ -2836,9 +2856,11 @@ if(!firstId){
       btnMicStop.disabled = false;
       try{ btnMic.classList.add("isRecording"); }catch(_e){}
       try{ $("dotLive").style.background = "#ef4444"; }catch(_e){}
-      showToast("正在聽；答對 50% 會自動下一句");
+      showToast("正在聽；達 50% 自動下一句，未達會自動收麥可重說");
+      armTalkVoiceListenTimeout();
 
       recognition.onresult = (e)=>{
+        armTalkVoiceListenTimeout();
         let interim = "";
         let hasFinal = false;
 
