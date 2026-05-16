@@ -2385,25 +2385,41 @@ if(!firstId){
     fillInput.focus();
   });
 
-  btnSendFill.addEventListener("click", async ()=>{
-    if(talkMode === "dialogue"){
-      const said = (fillInput.value || "").trim();
-      if(!said){ showToast("請先輸入你的回覆"); return; }
+  function BW_submitReplyNow(said, opts){
+    const options = opts || {};
+    const text = String(said || "").trim();
+    if(!text){ showToast("請先輸入你的回覆"); return false; }
 
-      // 舊版會 await TTS；Azure / 網路慢時，學生說完會像「卡住」。
-      // 改成不等待朗讀完成，畫面立即進下一句。
-      try{ speak(said); }catch(e){}
+    if(talkMode === "dialogue"){
+      // 手機語音辨識自動送出時，絕不再依賴 btn.click()。
+      // 直接清欄位、直接進下一句，避免部分手機瀏覽器程式 click 失效或延遲。
       fillInput.value = "";
-      showToast("已送出 ✅");
+      showToast(options.toast || "已送出 ✅");
+
+      // 先推進 UI，再視情況朗讀使用者剛才說的句子；
+      // 語音自動送出預設不回放 said，避免 SpeechRecognition 與 TTS 搶音訊導致卡住。
       nextTurn();
-      return;
+
+      if(options.echoUser){
+        setTimeout(()=>{ try{ speak(text); }catch(e){} }, 180);
+      }
+      return true;
     }
 
     // non-dialogue (fill practice)
+    try{ speak(text); }catch(e){}
+    showToast(options.toast || "做得好 ✅");
+    return true;
+  }
+
+  btnSendFill.addEventListener("click", ()=>{
     const said = (fillInput.value || "").trim();
+    if(talkMode === "dialogue"){
+      BW_submitReplyNow(said, { echoUser:true, toast:"已送出 ✅" });
+      return;
+    }
     if(!said){ showToast("請先填空"); return; }
-    try{ speak(said); }catch(e){}
-    showToast("做得好 ✅");
+    BW_submitReplyNow(said, { echoUser:true, toast:"做得好 ✅" });
   });
 
 
@@ -2464,11 +2480,27 @@ if(!firstId){
     const said = String(text || "").trim();
     if(!said || recSubmitted) return false;
     recSubmitted = true;
-    fillInput.value = said;
+
+    // 手機修正重點：
+    // 1. 先徹底結束 SpeechRecognition 狀態
+    // 2. 直接呼叫送出流程，不再透過 btnSendFill.click()
+    // 3. 自動語音回答不再回放使用者句子，避免麥克風 / TTS 搶資源卡住
     BW_finishRec();
-    if(toastMsg) showToast(toastMsg + said);
-    setTimeout(()=>{ try{ btnSendFill.click(); }catch(e){} }, 80);
-    return true;
+    try{
+      if(rec){
+        rec.onresult = null;
+        rec.onerror = null;
+        rec.onend = null;
+        try{ rec.stop && rec.stop(); }catch(_e){}
+      }
+    }catch(_e){}
+
+    fillInput.value = said;
+    const ok = BW_submitReplyNow(said, {
+      echoUser:false,
+      toast:(toastMsg ? (toastMsg + said) : "語音已送出 ✅")
+    });
+    return !!ok;
   }
 
   async function BW_primeMicPermission(){
@@ -2559,7 +2591,7 @@ if(!firstId){
 
     // 避免手機內嵌瀏覽器偶爾不回 onend / onerror，造成使用者覺得卡死。
     recTimer = setTimeout(()=>{
-      if(!recBusy) return;
+      if(!recBusy || recSubmitted) return;
       try{ rec && rec.abort && rec.abort(); }catch(_e){}
       if(!BW_submitRecognizedSpeech(recLastPartial, "先採用聽到的內容：")){
         BW_finishRec();
@@ -2581,6 +2613,10 @@ if(!firstId){
     };
 
     rec.onerror = (e)=>{
+      if(recSubmitted){
+        BW_finishRec();
+        return;
+      }
       if(BW_submitRecognizedSpeech(recLastPartial, "先採用聽到的內容：")) return;
       BW_finishRec();
       showToast(BW_talkSpeechErrorText(e));
@@ -2588,6 +2624,10 @@ if(!firstId){
     };
 
     rec.onend = ()=>{
+      if(recSubmitted){
+        BW_finishRec();
+        return;
+      }
       if(BW_submitRecognizedSpeech(recLastPartial, "先採用聽到的內容：")) return;
       BW_finishRec();
     };
