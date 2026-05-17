@@ -1136,7 +1136,7 @@ async function init(){
     });
   }
 
-  btnSkip.addEventListener("click", ()=>nextTurn());
+  btnSkip.addEventListener("click", ()=>{ stopTalkRecognition({ clearInput:false }); nextTurn(); });
 
   btnHint.addEventListener("click", ()=>{
     const expected = (currentExpectedEn() || "").trim();
@@ -1160,7 +1160,9 @@ async function init(){
   });
 
   btnFillReset.addEventListener("click", ()=>{
+    stopTalkRecognition({ clearInput:true });
     fillInput.value = "";
+    showToast("已清空，可重新說");
     BW_focusInputDesktopOnly();
   });
 
@@ -1168,6 +1170,7 @@ async function init(){
     const options = opts || {};
     const text = String(said || "").trim();
     if(!text){ showToast("請先輸入你的回覆"); return false; }
+    stopTalkRecognition({ clearInput:false });
     fillInput.value = "";
     showToast(options.toast || "已送出 ✅");
     nextTurn();
@@ -1197,6 +1200,8 @@ async function init(){
   let talkVoiceAutoAdvancing = false;
   let talkVoiceFinalTranscript = "";
   let talkVoiceLastTranscript = "";
+  let talkVoiceSession = 0;
+  let talkVoiceStopping = false;
 
   function getTalkSR(){
     return window.SpeechRecognition || window.webkitSpeechRecognition || null;
@@ -1207,6 +1212,30 @@ async function init(){
     try{ btnMicStop.disabled = true; }catch(_e){}
     try{ btnMic.classList.remove("isRecording"); }catch(_e){}
     try{ $("dotLive").style.background = "#22c55e"; }catch(_e){}
+  }
+
+  function stopTalkRecognition(opts){
+    const options = opts || {};
+    talkVoiceSession++;
+    talkVoiceStopping = true;
+    const old = recognition;
+    recognition = null;
+    try{
+      if(old){
+        old.onresult = null;
+        old.onerror = null;
+        old.onend = null;
+        if(typeof old.abort === "function") old.abort();
+        else if(typeof old.stop === "function") old.stop();
+      }
+    }catch(_e){}
+    talkVoiceFinalTranscript = "";
+    talkVoiceLastTranscript = "";
+    if(options.clearInput){
+      try{ fillInput.value = ""; }catch(_e){}
+    }
+    resetTalkRecUI();
+    setTimeout(()=>{ talkVoiceStopping = false; }, 80);
   }
 
   function normalizeTalkSpeechText(s){
@@ -1262,17 +1291,8 @@ async function init(){
 
     talkVoiceAutoAdvancing = true;
     fillInput.value = said;
+    stopTalkRecognition({ clearInput:false });
 
-    try{
-      if(recognition){
-        recognition.onresult = null;
-        recognition.onerror = null;
-        recognition.onend = null;
-        recognition.stop();
-      }
-    }catch(_e){}
-
-    resetTalkRecUI();
     setTimeout(()=>{
       try{
         BW_submitReplyNow(said, {
@@ -1284,7 +1304,7 @@ async function init(){
       }finally{
         talkVoiceAutoAdvancing = false;
       }
-    }, 520);
+    }, 360);
 
     return true;
   }
@@ -1298,38 +1318,35 @@ async function init(){
 
     const expected = String(talkVoiceExpectedReply() || "").trim();
     const score = expected ? talkSpeechSimilarity(said, expected) : 0;
-    if(score >= 0.50 || hasFinal){
+    if(score >= 0.50 || (hasFinal && score >= 0.50)){
       talkVoiceAdvanceIfScoreOK(said, score);
     }
   }
 
-  btnMic.addEventListener("click", ()=>{
+  function startTalkRecognition(){
     const SR = getTalkSR();
     if(!SR){
       showToast("此瀏覽器暫不支援語音辨識，請直接輸入");
       BW_focusInputDesktopOnly();
       return;
     }
-    stopSpeak();
 
+    stopSpeak();
+    stopTalkRecognition({ clearInput:true });
     talkVoiceAutoAdvancing = false;
     talkVoiceFinalTranscript = "";
     talkVoiceLastTranscript = "";
 
-    try{
-      if(recognition){
-        recognition.onend = null;
-        recognition.onerror = null;
-        recognition.abort && recognition.abort();
-      }
-    }catch(_e){}
-    recognition = null;
+    const mySession = ++talkVoiceSession;
     setTimeout(()=>{
-      recognition = new SR();
-      recognition.lang = "en-US";
-      recognition.interimResults = true;
-      recognition.continuous = true;
-      recognition.maxAlternatives = 1;
+      if(mySession !== talkVoiceSession) return;
+
+      const rec = new SR();
+      recognition = rec;
+      rec.lang = "en-US";
+      rec.interimResults = true;
+      rec.continuous = false;
+      rec.maxAlternatives = 1;
 
       fillInput.value = "";
       btnMic.disabled = true;
@@ -1338,65 +1355,68 @@ async function init(){
       try{ $("dotLive").style.background = "#ef4444"; }catch(_e){}
       showToast("正在聽；答對 50% 會自動下一句");
 
-      recognition.onresult = (e)=>{
-        let interim = "";
-        let hasFinal = false;
-
-        for(let i = e.resultIndex; i < e.results.length; i++){
+      rec.onresult = (e)=>{
+        if(mySession !== talkVoiceSession || rec !== recognition) return;
+        let finalText = "";
+        let interimText = "";
+        for(let i = 0; i < e.results.length; i++){
           const seg = String(e.results[i]?.[0]?.transcript || "").trim();
           if(!seg) continue;
-          if(e.results[i].isFinal){
-            talkVoiceFinalTranscript += seg + " ";
-            hasFinal = true;
-          }else{
-            interim += seg + " ";
-          }
+          if(e.results[i].isFinal) finalText += seg + " ";
+          else interimText += seg + " ";
         }
-
-        const transcript = (talkVoiceFinalTranscript || interim).trim();
+        talkVoiceFinalTranscript = finalText.trim();
+        const transcript = (talkVoiceFinalTranscript || interimText).trim();
+        const hasFinal = !!talkVoiceFinalTranscript;
         talkVoiceHandleTranscript(transcript, hasFinal);
       };
 
-      recognition.onerror = ()=>{
-        if(talkVoiceAutoAdvancing) return;
-        resetTalkRecUI();
-        const said = String(talkVoiceLastTranscript || fillInput.value || "").trim();
+      rec.onerror = (ev)=>{
+        if(mySession !== talkVoiceSession || rec !== recognition) return;
+        const err = String(ev?.error || "");
+        if(err === "aborted" || talkVoiceStopping || talkVoiceAutoAdvancing) return;
+        const said = String(talkVoiceFinalTranscript || talkVoiceLastTranscript || fillInput.value || "").trim();
         const expected = String(talkVoiceExpectedReply() || "").trim();
         const score = expected ? talkSpeechSimilarity(said, expected) : 0;
         const pct = Math.round(score * 100);
+        stopTalkRecognition({ clearInput:false });
         if(!talkVoiceAdvanceIfScoreOK(said, score)){
           showToast(said ? `正確度 ${pct}%｜可再說或直接送出` : "沒有聽清楚，可再按 🎤");
         }
       };
 
-      recognition.onend = ()=>{
-        if(talkVoiceAutoAdvancing) return;
-        resetTalkRecUI();
+      rec.onend = ()=>{
+        if(mySession !== talkVoiceSession || rec !== recognition) return;
         const said = String(talkVoiceFinalTranscript || talkVoiceLastTranscript || fillInput.value || "").trim();
         const expected = String(talkVoiceExpectedReply() || "").trim();
         const score = expected ? talkSpeechSimilarity(said, expected) : 0;
         const pct = Math.round(score * 100);
-
+        stopTalkRecognition({ clearInput:false });
         if(!talkVoiceAdvanceIfScoreOK(said, score)){
           showToast(said ? `正確度 ${pct}%｜未達 50%，可重說或直接送出` : "沒有收到聲音，請再按 🎤");
         }
       };
 
       try{
-        recognition.start();
+        rec.start();
       }catch(_e){
-        resetTalkRecUI();
+        stopTalkRecognition({ clearInput:false });
         showToast("語音辨識無法啟動，請再試一次或直接輸入");
         BW_focusInputDesktopOnly();
       }
     }, 260);
-  });
+  }
+
+  btnMic.addEventListener("click", startTalkRecognition);
 
   if(btnMicStop){
     btnMicStop.addEventListener("click", ()=>{
       try{
-        if(recognition) recognition.stop();
-      }catch(_e){}
+        if(recognition && typeof recognition.stop === "function") recognition.stop();
+        else stopTalkRecognition({ clearInput:false });
+      }catch(_e){
+        stopTalkRecognition({ clearInput:false });
+      }
     });
   }
   document.addEventListener("touchmove", (e)=>{
