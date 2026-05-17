@@ -1862,7 +1862,7 @@ function levelOfGroupId(groupId){
 }
 // TODO: 未來若要依訂閱等級守門，可在這裡加入 userMaxLevel 判斷。
 let quizData=[],currentQuizCat='all';
-let talkData=[], talkLoaded=false, talkMode='shadow', talkSelectedRole='', talkCurrentIdx=0, talkSyncTimer=null;
+let talkData=[], talkDialogueData=[], talkMovieCueShadowData=[], talkLoaded=false, talkMode='shadow', talkSelectedRole='', talkCurrentIdx=0, talkSyncTimer=null;
 let talkRecognition=null, talkLastScore=0;
 const talkStatus=$('#talkStatus'), talkRoleSelect=$('#talkRoleSelect'), talkCurrentCard=$('#talkCurrentCard'), talkList=$('#talkList'), talkCounter=$('#talkCounter');
 const talkModeShadowBtn=$('#talkModeShadow'), talkModeRoleplayBtn=$('#talkModeRoleplay');
@@ -2728,6 +2728,9 @@ async function loadCues(){
         source_url:x.source_url||'',
         words:x.words || x.word_timings || x.wordTiming || x.ktv || x.lyrics_words || null
       }));
+    if(cat === 'movie' && talkLoaded){
+      BW_refreshMovieCueShadowTalk(true);
+    }
     cuesBody.innerHTML=cues.map((c,i)=>`
       <tr data-i="${i}" style="position:relative">
         <td class="cue-time">${c.t?fmt(c.t):''}</td>
@@ -3405,6 +3408,57 @@ function buildTalkItemsFromCuesForMusic(){
   })).filter(x => x.text || x.zh || x.ja);
 }
 
+function buildTalkItemsFromCuesForMovie(){
+  // MOVIE 跟讀：必須使用 cues 字幕逐句同步。
+  // dialogue.json 是整理後的對話，保留給「角色扮演」，不能拿來當精準時間軸。
+  if(cat !== 'movie' || !Array.isArray(cues) || !cues.length) return [];
+  return cues.map((c, idx) => ({
+    idx,
+    cueIndex: idx,
+    role: 'subtitle',
+    text: String(c.en || '').trim(),
+    zh: String(c.zh || '').trim(),
+    ja: String(c.ja || '').trim(),
+    time: fmt(Number(c.t) || 0),
+    sec: Number(c.t) || 0
+  })).filter(x => x.text || x.zh || x.ja);
+}
+
+function BW_applyMovieTalkModeDataset(){
+  if(cat === 'movie' && talkMode === 'shadow' && talkMovieCueShadowData.length){
+    talkData = talkMovieCueShadowData;
+    return;
+  }
+  if(talkDialogueData.length){
+    talkData = talkDialogueData;
+    return;
+  }
+  if(talkMovieCueShadowData.length){
+    talkData = talkMovieCueShadowData;
+    return;
+  }
+  talkData = [];
+}
+
+function BW_refreshMovieCueShadowTalk(renderNow=true){
+  if(cat !== 'movie') return false;
+  const built = buildTalkItemsFromCuesForMovie();
+  if(!built.length) return false;
+  talkMovieCueShadowData = built;
+  if(talkMode === 'shadow'){
+    BW_applyMovieTalkModeDataset();
+    talkCurrentIdx = findTalkCurrentIdx();
+    if(renderNow){
+      fillTalkRoleOptions();
+      renderTalkCurrent();
+      renderTalkList();
+      highlightTalkRow();
+    }
+  }
+  return true;
+}
+
+
 function uniqueTalkRoles(items){
   return [...new Set(items.map(x => x.role).filter(Boolean))];
 }
@@ -3412,7 +3466,15 @@ function setTalkMode(mode){
   talkMode = mode === 'roleplay' ? 'roleplay' : 'shadow';
   talkModeShadowBtn?.classList.toggle('blue', talkMode === 'shadow');
   talkModeRoleplayBtn?.classList.toggle('blue', talkMode === 'roleplay');
+  if(cat === 'movie' && talkMode === 'shadow'){
+    BW_refreshMovieCueShadowTalk(false);
+  }
+  BW_applyMovieTalkModeDataset();
+  talkCurrentIdx = findTalkCurrentIdx();
+  fillTalkRoleOptions();
   renderTalkCurrent();
+  renderTalkList();
+  highlightTalkRow();
 }
 function fillTalkRoleOptions(){
   const roles = uniqueTalkRoles(talkData);
@@ -3649,7 +3711,9 @@ function renderTalkCurrent(){
   const roleBadge = `<span class="chip" style="margin-left:8px">${esc(item.role)}</span>`;
   let helper = (cat === 'music')
     ? '模式：跟唱。「開始跟唱」只播放/停止左側影片；「我來唱」只開麥克風辨識打分；「停止」會全部停止。'
-    : '模式：跟讀。可用「跳句 / 朗讀 / 上一句 / 下一句」練習。';
+    : ((cat === 'movie' && talkMode === 'shadow')
+      ? '模式：MOVIE 跟讀使用 cues 字幕逐句同步。'
+      : '模式：跟讀。可用「跳句 / 朗讀 / 上一句 / 下一句」練習。');
   if(talkMode === 'roleplay'){
     if(talkSelectedRole){
       helper = item.role === talkSelectedRole
@@ -3731,12 +3795,21 @@ async function loadTalk(){
   }catch(_e){}
 
   if(!payload){
-    const fallbackTalk = buildTalkItemsFromCuesForMusic();
+    const fallbackTalk = (cat === 'movie')
+      ? buildTalkItemsFromCuesForMovie()
+      : buildTalkItemsFromCuesForMusic();
     if(fallbackTalk.length){
-      talkData = fallbackTalk;
+      if(cat === 'movie'){
+        talkDialogueData = [];
+        talkMovieCueShadowData = fallbackTalk;
+        BW_applyMovieTalkModeDataset();
+        if(talkStatus) talkStatus.textContent = 'MOVIE 跟讀：使用 cues 字幕逐句同步';
+      }else{
+        talkData = fallbackTalk;
+        if(talkStatus) talkStatus.textContent = 'MUSIC 跟唱：已由字幕自動生成';
+      }
       fillTalkRoleOptions();
       talkCurrentIdx = findTalkCurrentIdx();
-      if(talkStatus) talkStatus.textContent = 'MUSIC 跟唱：已由字幕自動生成';
       renderTalkCurrent();
       renderTalkList();
       if(!talkSyncTimer){
@@ -3752,6 +3825,8 @@ async function loadTalk(){
       }
       return;
     }
+    talkDialogueData = [];
+    talkMovieCueShadowData = [];
     talkData = [];
     if(talkStatus) talkStatus.textContent = '（尚未載入 Talk）';
     renderTalkCurrent();
@@ -3760,10 +3835,18 @@ async function loadTalk(){
   }
 
   const raw = normalizeTalkItems(payload);
-  talkData = raw.map(normalizeTalkItem).filter(x => x.text || x.zh || x.ja);
+  talkDialogueData = raw.map(normalizeTalkItem).filter(x => x.text || x.zh || x.ja);
+  if(cat === 'movie'){
+    talkMovieCueShadowData = buildTalkItemsFromCuesForMovie();
+  }
+  BW_applyMovieTalkModeDataset();
   fillTalkRoleOptions();
-  talkCurrentIdx = 0;
-  if(talkStatus) talkStatus.textContent = `已載入 Talk：${(hit && hit.fileName) || ''}`;
+  talkCurrentIdx = findTalkCurrentIdx();
+  if(talkStatus){
+    talkStatus.textContent = (cat === 'movie' && talkMode === 'shadow' && talkMovieCueShadowData.length)
+      ? 'MOVIE 跟讀：使用 cues 字幕逐句同步；角色扮演仍用 dialogue.json'
+      : `已載入 Talk：${(hit && hit.fileName) || ''}`;
+  }
   renderTalkCurrent();
   renderTalkList();
 
@@ -3929,6 +4012,30 @@ $('#btnAutoSync').addEventListener('click',()=>{
 });
 
 video.addEventListener('timeupdate',handlePlaybackTick);
+
+// MOVIE 長片 / HTML5 MP4 補同步：
+// YouTube 原本已有 250ms tick；HTML5 以前只靠 timeupdate，長片時字幕/Talk 可能變鈍。
+// 這裡保留原本 timeupdate，再加低頻 heartbeat，MOVIE cues 跟隨與 Talk 都能持續推進。
+let BW_PLAYER_CUES_FOLLOW_HEARTBEAT = null;
+function BW_startCuesFollowHeartbeat(){
+  if(BW_PLAYER_CUES_FOLLOW_HEARTBEAT){
+    clearInterval(BW_PLAYER_CUES_FOLLOW_HEARTBEAT);
+  }
+  BW_PLAYER_CUES_FOLLOW_HEARTBEAT = setInterval(() => {
+    try{
+      if(typeof activePaused === 'function' && activePaused()) return;
+      handlePlaybackTick();
+    }catch(_e){}
+  }, 250);
+}
+BW_startCuesFollowHeartbeat();
+document.addEventListener('visibilitychange', () => {
+  try{
+    if(document.visibilityState === 'visible'){
+      handlePlaybackTick();
+    }
+  }catch(_e){}
+});
 
 /* ==== TTS (iOS-friendly) ==== */
 const TTS_CLOUD_ENDPOINT = window.BOOKWIDE_TTS_ENDPOINT || ""; 
