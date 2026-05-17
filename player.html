@@ -1862,7 +1862,7 @@ function levelOfGroupId(groupId){
 }
 // TODO: 未來若要依訂閱等級守門，可在這裡加入 userMaxLevel 判斷。
 let quizData=[],currentQuizCat='all';
-let talkData=[], talkDialogueData=[], talkMovieCueData=[], talkLoaded=false, talkMode='shadow', talkSelectedRole='', talkCurrentIdx=0, talkSyncTimer=null;
+let talkData=[], talkLoaded=false, talkMode='shadow', talkSelectedRole='', talkCurrentIdx=0, talkSyncTimer=null;
 let talkRecognition=null, talkLastScore=0;
 const talkStatus=$('#talkStatus'), talkRoleSelect=$('#talkRoleSelect'), talkCurrentCard=$('#talkCurrentCard'), talkList=$('#talkList'), talkCounter=$('#talkCounter');
 const talkModeShadowBtn=$('#talkModeShadow'), talkModeRoleplayBtn=$('#talkModeRoleplay');
@@ -2728,9 +2728,6 @@ async function loadCues(){
         source_url:x.source_url||'',
         words:x.words || x.word_timings || x.wordTiming || x.ktv || x.lyrics_words || null
       }));
-    if(cat === 'movie' && talkLoaded){
-      BW_refreshMovieTalkShadowIfReady(true);
-    }
     cuesBody.innerHTML=cues.map((c,i)=>`
       <tr data-i="${i}" style="position:relative">
         <td class="cue-time">${c.t?fmt(c.t):''}</td>
@@ -3408,54 +3405,6 @@ function buildTalkItemsFromCuesForMusic(){
   })).filter(x => x.text || x.zh || x.ja);
 }
 
-function BW_buildMovieTalkFromCues(){
-  if(cat !== 'movie' || !Array.isArray(cues) || !cues.length) return [];
-  return cues.map((c, idx) => ({
-    idx,
-    cueIndex: idx,
-    role: 'Subtitle',
-    text: String(c.en || '').trim(),
-    zh: String(c.zh || '').trim(),
-    ja: String(c.ja || '').trim(),
-    time: fmt(Number(c.t) || 0),
-    sec: Number(c.t) || 0
-  })).filter(item => item.text || item.zh || item.ja);
-}
-
-function BW_useTalkDatasetForCurrentMode(){
-  if(cat === 'movie' && talkMode === 'shadow' && talkMovieCueData.length){
-    talkData = talkMovieCueData;
-    return;
-  }
-  if(talkDialogueData.length){
-    talkData = talkDialogueData;
-    return;
-  }
-  if(talkMovieCueData.length){
-    talkData = talkMovieCueData;
-    return;
-  }
-  talkData = [];
-}
-
-function BW_refreshMovieTalkShadowIfReady(renderNow=true){
-  if(cat !== 'movie') return false;
-  const built = BW_buildMovieTalkFromCues();
-  if(!built.length) return false;
-  talkMovieCueData = built;
-  if(talkMode === 'shadow'){
-    BW_useTalkDatasetForCurrentMode();
-    talkCurrentIdx = findTalkCurrentIdx();
-    if(renderNow){
-      fillTalkRoleOptions();
-      renderTalkCurrent();
-      renderTalkList();
-    }
-  }
-  return true;
-}
-
-
 function uniqueTalkRoles(items){
   return [...new Set(items.map(x => x.role).filter(Boolean))];
 }
@@ -3463,14 +3412,7 @@ function setTalkMode(mode){
   talkMode = mode === 'roleplay' ? 'roleplay' : 'shadow';
   talkModeShadowBtn?.classList.toggle('blue', talkMode === 'shadow');
   talkModeRoleplayBtn?.classList.toggle('blue', talkMode === 'roleplay');
-  if(cat === 'movie' && talkMode === 'shadow'){
-    BW_refreshMovieTalkShadowIfReady(false);
-  }
-  BW_useTalkDatasetForCurrentMode();
-  talkCurrentIdx = findTalkCurrentIdx();
-  fillTalkRoleOptions();
   renderTalkCurrent();
-  renderTalkList();
 }
 function fillTalkRoleOptions(){
   const roles = uniqueTalkRoles(talkData);
@@ -3516,21 +3458,6 @@ function highlightTalkRow(){
   const rows = $$('#talkList .talk-row');
   rows.forEach((row, i) => row.style.background = i === talkCurrentIdx ? 'rgba(60,124,255,.14)' : 'transparent');
 }
-
-function BW_syncTalkToPlayback(){
-  if(!talkLoaded || !talkData.length) return;
-  if(cat === 'movie' && talkMode === 'shadow' && !talkMovieCueData.length){
-    BW_refreshMovieTalkShadowIfReady(false);
-    BW_useTalkDatasetForCurrentMode();
-  }
-  const idx = findTalkCurrentIdx();
-  if(idx !== talkCurrentIdx){
-    talkCurrentIdx = idx;
-    renderTalkCurrent();
-    highlightTalkRow();
-  }
-}
-
 function talkRateFor(lang='en-US'){
   let rate = Number(TALK_RATE)||0.8;
   if(talkAutoSlow?.checked){
@@ -3722,9 +3649,7 @@ function renderTalkCurrent(){
   const roleBadge = `<span class="chip" style="margin-left:8px">${esc(item.role)}</span>`;
   let helper = (cat === 'music')
     ? '模式：跟唱。「開始跟唱」只播放/停止左側影片；「我來唱」只開麥克風辨識打分；「停止」會全部停止。'
-    : ((cat === 'movie' && talkMode === 'shadow')
-      ? '模式：MOVIE 字幕逐句跟讀，與字幕時間軸同步。'
-      : '模式：跟讀。可用「跳句 / 朗讀 / 上一句 / 下一句」練習。');
+    : '模式：跟讀。可用「跳句 / 朗讀 / 上一句 / 下一句」練習。';
   if(talkMode === 'roleplay'){
     if(talkSelectedRole){
       helper = item.role === talkSelectedRole
@@ -3806,25 +3731,27 @@ async function loadTalk(){
   }catch(_e){}
 
   if(!payload){
-    const fallbackTalk = (cat === 'movie') ? BW_buildMovieTalkFromCues() : buildTalkItemsFromCuesForMusic();
+    const fallbackTalk = buildTalkItemsFromCuesForMusic();
     if(fallbackTalk.length){
-      if(cat === 'movie'){
-        talkDialogueData = [];
-        talkMovieCueData = fallbackTalk;
-        BW_useTalkDatasetForCurrentMode();
-        if(talkStatus) talkStatus.textContent = 'MOVIE 跟讀：字幕逐句同步';
-      }else{
-        talkData = fallbackTalk;
-        if(talkStatus) talkStatus.textContent = 'MUSIC 跟唱：已由字幕自動生成';
-      }
+      talkData = fallbackTalk;
       fillTalkRoleOptions();
       talkCurrentIdx = findTalkCurrentIdx();
+      if(talkStatus) talkStatus.textContent = 'MUSIC 跟唱：已由字幕自動生成';
       renderTalkCurrent();
       renderTalkList();
+      if(!talkSyncTimer){
+        talkSyncTimer = setInterval(() => {
+          if(!talkData.length) return;
+          const idx = findTalkCurrentIdx();
+          if(idx !== talkCurrentIdx){
+            talkCurrentIdx = idx;
+            renderTalkCurrent();
+            highlightTalkRow();
+          }
+        }, 500);
+      }
       return;
     }
-    talkDialogueData = [];
-    talkMovieCueData = [];
     talkData = [];
     if(talkStatus) talkStatus.textContent = '（尚未載入 Talk）';
     renderTalkCurrent();
@@ -3833,24 +3760,22 @@ async function loadTalk(){
   }
 
   const raw = normalizeTalkItems(payload);
-  talkDialogueData = raw.map(normalizeTalkItem).filter(x => x.text || x.zh || x.ja);
-  if(cat === 'movie'){
-    BW_refreshMovieTalkShadowIfReady(false);
-  }
-  BW_useTalkDatasetForCurrentMode();
+  talkData = raw.map(normalizeTalkItem).filter(x => x.text || x.zh || x.ja);
   fillTalkRoleOptions();
-  talkCurrentIdx = findTalkCurrentIdx();
-  if(talkStatus){
-    talkStatus.textContent = (cat === 'movie' && talkMode === 'shadow' && talkMovieCueData.length)
-      ? 'MOVIE 跟讀：字幕逐句同步；角色扮演仍用 dialogue.json'
-      : `已載入 Talk：${(hit && hit.fileName) || ''}`;
-  }
+  talkCurrentIdx = 0;
+  if(talkStatus) talkStatus.textContent = `已載入 Talk：${(hit && hit.fileName) || ''}`;
   renderTalkCurrent();
   renderTalkList();
 
   if(!talkSyncTimer){
     talkSyncTimer = setInterval(() => {
-      BW_syncTalkToPlayback();
+      if(!talkData.length) return;
+      const idx = findTalkCurrentIdx();
+      if(idx !== talkCurrentIdx){
+        talkCurrentIdx = idx;
+        renderTalkCurrent();
+        highlightTalkRow();
+      }
     }, 500);
   }
 }
@@ -4004,30 +3929,6 @@ $('#btnAutoSync').addEventListener('click',()=>{
 });
 
 video.addEventListener('timeupdate',handlePlaybackTick);
-
-let BW_PLAYER_MOVIE_SYNC_HEARTBEAT = null;
-function BW_syncPlaybackUIHeartbeat(){
-  try{
-    if(typeof activePaused === 'function' && activePaused()) return;
-    if(cues.length) handlePlaybackTick();
-    BW_syncTalkToPlayback();
-  }catch(_e){}
-}
-function BW_startPlaybackUIHeartbeat(){
-  if(BW_PLAYER_MOVIE_SYNC_HEARTBEAT){
-    clearInterval(BW_PLAYER_MOVIE_SYNC_HEARTBEAT);
-  }
-  BW_PLAYER_MOVIE_SYNC_HEARTBEAT = setInterval(BW_syncPlaybackUIHeartbeat, 250);
-}
-BW_startPlaybackUIHeartbeat();
-document.addEventListener('visibilitychange', () => {
-  if(document.visibilityState === 'visible'){
-    try{
-      if(cues.length) handlePlaybackTick();
-      BW_syncTalkToPlayback();
-    }catch(_e){}
-  }
-});
 
 /* ==== TTS (iOS-friendly) ==== */
 const TTS_CLOUD_ENDPOINT = window.BOOKWIDE_TTS_ENDPOINT || ""; 
