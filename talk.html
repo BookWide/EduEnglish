@@ -1255,6 +1255,48 @@ body{line-height:1.1}
 }
 </style>
 
+
+<style id="bw-mobile-followread-flow-css">
+@media (max-width:720px){
+  .mobileMicBar{
+    display:flex !important;
+    align-items:center !important;
+    gap:8px !important;
+    flex-wrap:wrap !important;
+    margin:1px 0 4px !important;
+  }
+  .mobileMicToggle{
+    height:30px !important;
+    padding:0 11px !important;
+    border:1px solid var(--line) !important;
+    border-radius:999px !important;
+    background:#fff !important;
+    color:#64748b !important;
+    font-size:10px !important;
+    font-weight:900 !important;
+    box-shadow:0 6px 14px rgba(15,23,42,.06) !important;
+  }
+  .mobileMicNote{
+    color:#64748b !important;
+    font-size:10px !important;
+    font-weight:800 !important;
+    line-height:1.3 !important;
+  }
+  #talkControlsWrap.mobileMicCollapsed .controls{
+    display:none !important;
+  }
+  #talkControlsWrap.mobileMicCollapsed{
+    margin-top:0 !important;
+    margin-bottom:0 !important;
+  }
+}
+@media (min-width:721px){
+  .mobileMicBar{
+    display:none !important;
+  }
+}
+</style>
+
 </head>
 <body>
 <div class="wrap">
@@ -1309,7 +1351,11 @@ body{line-height:1.1}
       <div class="zh" id="lineZh">（載入中…）</div>
     </div>
 
-    <div class="controlsWrap"><div class="controls">
+    <div class="mobileMicBar">
+      <button class="mobileMicToggle" id="btnToggleMobileMic" type="button" aria-expanded="false">語音辨識備用 ▾</button>
+      <span class="mobileMicNote">手機建議先用「提示跟讀」</span>
+    </div>
+    <div class="controlsWrap mobileMicCollapsed" id="talkControlsWrap"><div class="controls">
       <button class="mic" id="btnMic" aria-label="開始語音辨識" title="開始語音辨識">🎤</button>
       <button class="ctrlBtn" id="btnMicStop" type="button" disabled><span>停止</span></button>
       <button class="ctrlBtn" id="btnType"><span aria-hidden="true">⌨️</span><span>輸入</span></button>
@@ -1853,6 +1899,64 @@ function speakENQuick(text){
     }catch(_e2){}
   }
 }
+
+async function speakReplyMaleEN(text){
+  const line = String(text || "").trim();
+  if(!line) return;
+
+  try{
+    // 回覆試讀固定男聲；老師 Emma 的 speak() 女聲流程不動。
+    try{ if(__ttsAbortCtrl){ __ttsAbortCtrl.abort(); } }catch(_e){}
+    try{ if(window.speechSynthesis) window.speechSynthesis.cancel(); }catch(_e){}
+    try{ if(__ttsAudio){ __ttsAudio.pause(); __ttsAudio.currentTime = 0; } }catch(_e){}
+    try{ if(__ttsBlobUrl){ URL.revokeObjectURL(__ttsBlobUrl); } }catch(_e){}
+    __ttsAudio = null;
+    __ttsBlobUrl = null;
+
+    if(USE_AZURE_TTS){
+      const r = await fetch(AZURE_TTS_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "apikey": SUPABASE_ANON_KEY,
+          "Authorization": "Bearer " + SUPABASE_ANON_KEY
+        },
+        body: JSON.stringify({
+          text: line,
+          voice: "en-US-GuyNeural",
+          rate: "+2%",
+          pitch: "-2%"
+        })
+      });
+
+      if(r.ok){
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = ()=>{ try{ URL.revokeObjectURL(url); }catch(_e){} };
+        audio.onerror = ()=>{ try{ URL.revokeObjectURL(url); }catch(_e){} };
+        await audio.play();
+        return;
+      }
+    }
+  }catch(err){
+    try{ console.warn("[Talk] reply male TTS fallback", err); }catch(_e){}
+  }
+
+  // Browser Speech fallback：盡量挑男聲，若裝置沒有就用預設英文聲。
+  try{
+    if(!("speechSynthesis" in window)) return;
+    const u = new SpeechSynthesisUtterance(line);
+    u.lang = "en-US";
+    u.rate = 1.0;
+    const voices = window.speechSynthesis.getVoices ? window.speechSynthesis.getVoices() : [];
+    const male = voices.find(v => /guy|david|matthew|male/i.test(String(v.name || ""))) || null;
+    if(male) u.voice = male;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  }catch(_e){}
+}
+
 function renderZhJa(containerEl, zhText, jaText){
   if(!containerEl) return;
   containerEl.innerHTML = '';
@@ -1931,7 +2035,7 @@ function updateUI(){
         renderZhJa(fillTrans, uzh, uja);
       }renderFillOptions(cl);
       fillHint.textContent = (BW_isMobileViewport()
-        ? "手機麥克風若卡卡，可按「提示跟讀」；下方選答案後直接跟讀。"
+        ? "步驟：① 聽老師朗讀　② 按「提示跟讀」練口語　③ 選下方答案　④ 看完整句　⑤ 送出。"
         : "按 🎤 開始說；回覆相似度達 50% 會自動下一句。未達門檻可重說，或直接按「送出」。")
         + (expectedSrc==="generated" ? "  ⚠ 缺 USER 建議句：已用規則生成，請補 JSON。" : "");
       // do not auto-clear while typing
@@ -2092,6 +2196,7 @@ function makeCloze(expectedEn){
           ? cl2.cloze.replace("____", opt)
           : expected;
         fillInput.value = completed;
+        fillEn.textContent = completed || expected;
         BW_focusInputDesktopOnly();
       });
       el.appendChild(b);
@@ -2665,8 +2770,13 @@ if(!firstId){
     btnSpeakFillEn.addEventListener("click", ()=>{
       const raw = (fillEn?.textContent || "").trim();
       const expected = (currentExpectedEn() || raw || "").trim();
-      // 若畫面是挖空句，優先朗讀完整建議句，學習比較有用。
-      if(expected) speakENQuick(expected);
+      // 回覆提示跟讀：固定男聲，老師 Emma 女聲不變。
+      if(expected){
+        speakReplyMaleEN(expected);
+        if(BW_isMobileViewport()){
+          showToast("跟著男聲練口語，再選下方答案");
+        }
+      }
     });
   }
 
@@ -2769,6 +2879,15 @@ if(!firstId){
   btnBack.addEventListener("click", ()=>{
     history.length>1 ? history.back() : (location.href = "./");
   });
+  const btnToggleMobileMic = $("btnToggleMobileMic");
+  const talkControlsWrap = $("talkControlsWrap");
+  if(btnToggleMobileMic && talkControlsWrap){
+    btnToggleMobileMic.addEventListener("click", ()=>{
+      const collapsed = talkControlsWrap.classList.toggle("mobileMicCollapsed");
+      btnToggleMobileMic.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      btnToggleMobileMic.textContent = collapsed ? "語音辨識備用 ▾" : "收起語音辨識 ▴";
+    });
+  }
 
   // Speech recognition — 改回 Player Talk 型穩定流程 + 50% 自動過關
   // Player Talk 的穩定點：
