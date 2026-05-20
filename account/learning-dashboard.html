@@ -278,7 +278,7 @@ function BW_startDeviceWatcher(userId){
         </div>
       </div>
       <div class="stats">
-        <div class="stat"><div class="sub">已完成天數</div><b id="doneDays">0</b><div class="sub">/ 14 天</div></div>
+        <div class="stat"><div class="sub">已完成天數</div><b id="doneDays">0</b><div class="sub">/ 30 天</div></div>
         <div class="stat"><div class="sub">今日教材</div><b id="todayCount">0</b><div class="sub">已自動分配</div></div>
         <div class="stat"><div class="sub">已解鎖</div><b id="unlockCount">1</b><div class="sub">目前可進入天數</div></div>
       </div>
@@ -313,8 +313,8 @@ function BW_startDeviceWatcher(userId){
 
   <div class="grid">
     <section class="card">
-      <h2>14 天行事曆</h2>
-      <div class="muted">左邊是排課結果：Day 1 / 3 / 5 走行業 pro 主線；Day 2 / 4 / 6 / 7 走故事、音樂、電影、實況。點任一天，右邊會同步高亮對應教材。</div>
+      <h2>30 天月表行事曆</h2>
+      <div class="muted">左邊是月表排課結果：每週 Day 1 / 3 / 5 節奏走行業 pro 主線；Day 2 / 4 / 6 / 7 走故事、音樂、電影、實況。點任一天，右邊會同步高亮對應教材。</div>
       <div class="calendar-head">
         <div class="weekday">Mon</div><div class="weekday">Tue</div><div class="weekday">Wed</div><div class="weekday">Thu</div><div class="weekday">Fri</div><div class="weekday">Sat</div><div class="weekday">Sun</div>
       </div>
@@ -339,8 +339,8 @@ function BW_startDeviceWatcher(userId){
     </section>
 
     <section class="card route-card">
-      <h2>14 天教材進度路線</h2>
-      <div class="muted">Day 1 / 3 / 5 優先顯示行業 pro；其餘天數顯示故事、音樂、電影、實況。每天學什麼請看左邊 14 天行事曆。</div>
+      <h2>30 天教材進度路線</h2>
+      <div class="muted">以每週 7 天節奏循環：Day 1 / 3 / 5 型態優先顯示行業 pro；其餘型態顯示故事、音樂、電影、實況。每天學什麼請看左邊 30 天月表行事曆。</div>
       <div class="timeline" id="timeline"></div>
     </section>
   </div>
@@ -646,7 +646,7 @@ function buildFiveCategoryRoadmap(categoryRoadmaps){
   });
   return out.sort((a,b)=>(a.category_order||999)-(b.category_order||999)||CATEGORY_KEYS.indexOf(a.category)-CATEGORY_KEYS.indexOf(b.category));
 }
-function buildSchedule(workRoadmap, relaxRoadmap, totalDays=14){
+function buildSchedule(workRoadmap, relaxRoadmap, totalDays=30){
   /*
     V17-3 回到原始正確節奏：
       Day 1 / 3 / 5  = pro 行業主線
@@ -684,7 +684,7 @@ function buildSchedule(workRoadmap, relaxRoadmap, totalDays=14){
   }
   return out;
 }
-function getUnlockedDay(progress){const done=Object.keys(progress).filter(k=>progress[k]===true).map(Number);if(!done.length)return 1;return Math.min(14,Math.max(...done)+1)}
+function getUnlockedDay(progress){const done=Object.keys(progress).filter(k=>progress[k]===true).map(Number);if(!done.length)return 1;return Math.min(30,Math.max(...done)+1)}
 function dayScore(dayObj, progress){if(!dayObj) return 0; if(progress[dayObj.day]) return dayObj.weekend ? 61 : (dayObj.review ? 49 : 91); return dayObj.weekend ? 28 : (dayObj.review ? 18 : 43);}
 function dayCompletion(dayObj, progress){if(!dayObj) return 0; if(progress[dayObj.day]) return 100; return dayObj.weekend ? 22 : (dayObj.review ? 35 : 12);}
 function formatShortDate(d){return `${d.getMonth()+1}/${d.getDate()}`}
@@ -880,6 +880,69 @@ function renderCalendar(schedule, progress, selectedDay){
   document.getElementById("progressBar").style.width=percent+"%";
   document.getElementById("progressText").textContent=percent+"%"
 }
+
+const BW_REWARD_MILESTONES = new Set([7,14,21]);
+const BW_REWARD_LOCAL_KEY = "BW_DASH_PROGRESS_REWARD_REQUESTED_V1";
+
+function BW_getRewardRequestedMap(){
+  try{return JSON.parse(localStorage.getItem(BW_REWARD_LOCAL_KEY)||"{}")}catch(_e){return {}}
+}
+function BW_saveRewardRequestedMap(v){
+  localStorage.setItem(BW_REWARD_LOCAL_KEY, JSON.stringify(v||{}));
+}
+function BW_rewardLocalKey(dayNo){
+  return `${getDashStartKey()}::day${Number(dayNo||0)}`;
+}
+async function BW_grantProgressRewardIfNeeded(dayNo){
+  const milestoneDay = Number(dayNo||0);
+  if(!BW_REWARD_MILESTONES.has(milestoneDay)) return;
+
+  const localMap = BW_getRewardRequestedMap();
+  const localKey = BW_rewardLocalKey(milestoneDay);
+  if(localMap[localKey] === "granted") return;
+
+  try{
+    const { data:{ session } } = await supabaseClient.auth.getSession();
+    const token = session?.access_token || "";
+    if(!token){
+      console.warn("[progress-reward] missing access token");
+      return;
+    }
+
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/learning-progress-reward`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+        "apikey": SUPABASE_ANON_KEY
+      },
+      body: JSON.stringify({
+        milestone_day: milestoneDay,
+        dry_run: false
+      })
+    });
+
+    const payload = await res.json().catch(()=>({}));
+    if(!res.ok || payload?.ok !== true){
+      console.warn("[progress-reward] grant failed", milestoneDay, payload);
+      return;
+    }
+
+    // 後端已用 order_id + cycle_no + milestone_day 防重；
+    // 前端只做提示與避免重複送請求。
+    localMap[localKey] = "granted";
+    BW_saveRewardRequestedMap(localMap);
+
+    if(payload?.already_granted){
+      console.log(`[progress-reward] Day ${milestoneDay} 已領過`);
+    }else{
+      console.log(`[progress-reward] Day ${milestoneDay} +5 金幣`);
+    }
+  }catch(err){
+    console.error("[progress-reward] exception", err);
+  }
+}
+
 function renderCurveCategoryFilters(){
   const root=document.getElementById('curveCategoryFilters');
   if(!root) return;
@@ -940,7 +1003,7 @@ function renderCurve(schedule, progress, selectedDay){
   const topFocus=document.getElementById('curveFocusText'); if(topFocus) topFocus.textContent=`目前焦點：Day ${selectedDay}｜${labelText}`;
   const bottomFocus=document.getElementById('curveFocusTextBottom'); if(bottomFocus) bottomFocus.textContent=`目前焦點：Day ${selectedDay}｜${labelText}`;
 }
-function markCategoryDone(day, cat){
+async function markCategoryDone(day, cat){
   const key=getScheduleDateKey(day);
   const saved=getCatSaved();
   saved[key]=saved[key]||{};
@@ -950,13 +1013,15 @@ function markCategoryDone(day, cat){
   const dayObj=(state.schedule||[]).find(x=>x.day===day);
   const cats=[...new Set(((dayObj&&dayObj.lessons)||[]).map(x=>String(x.category||'')).filter(c=>CATEGORY_KEYS.includes(c)))];
   if(cats.length && cats.every(c=>!!(saved[key]&&saved[key][c]))){
+    const wasDone = !!state.progress[day];
     state.progress[day]=true;
     saveSaved(state.progress);
+    if(!wasDone) await BW_grantProgressRewardIfNeeded(day);
     if(day < state.schedule.length && state.selectedDay===day) state.selectedDay=day+1;
   }
   renderAll();
 }
-function markDone(day){
+async function markDone(day){
   const dayObj=(state.schedule||[]).find(x=>x.day===day);
   const cats=[...new Set(((dayObj&&dayObj.lessons)||[]).map(x=>String(x.category||'')).filter(c=>CATEGORY_KEYS.includes(c)))];
   const saved=getCatSaved();
@@ -964,8 +1029,10 @@ function markDone(day){
   saved[key]=saved[key]||{};
   cats.forEach(cat=>{ saved[key][cat]=true; });
   saveCatSaved(saved);
+  const wasDone = !!state.progress[day];
   state.progress[day]=true;
   saveSaved(state.progress);
+  if(!wasDone) await BW_grantProgressRewardIfNeeded(day);
   if(day < state.schedule.length && state.selectedDay===day) state.selectedDay=day+1;
   renderAll();
 }
@@ -1113,9 +1180,9 @@ function renderProfileExplain(profile, filterInfo){
   if(!sub) return;
   const domainCount = Number(filterInfo?.domainCount || 0);
   if(domainCount > 0){
-    sub.textContent = `行業排課已啟用：Day 1 / 3 / 5 優先安排「${getDomainLabel(profile.domain_code)}」的 pro 行業教材；Day 2 / 4 / 6 / 7 分別安排故事、音樂、電影、實況。可用行業 pro=${domainCount}。`;
+    sub.textContent = `月表排課已啟用：每週 Day 1 / 3 / 5 型態優先安排「${getDomainLabel(profile.domain_code)}」的 pro 行業教材；Day 2 / 4 / 6 / 7 型態分別安排故事、音樂、電影、實況。可用行業 pro=${domainCount}。`;
   }else{
-    sub.textContent = `目前尚無「${getDomainLabel(profile.domain_code)}」pro 行業教材；Day 1 / 3 / 5 會先用通用 pro 補位，待後台補齊該行業 pro 後會自動優先換入。`;
+    sub.textContent = `目前尚無「${getDomainLabel(profile.domain_code)}」pro 行業教材；每週 Day 1 / 3 / 5 型態會先用通用 pro 補位，待後台補齊該行業 pro 後會自動優先換入。`;
   }
 }
 
@@ -1154,7 +1221,7 @@ async function bootstrap(){
     state.categoryRoadmaps = buildCategoryRoadmaps(assets, state.profile, filterInfo);
     state.workRoadmap = buildFiveCategoryRoadmap(state.categoryRoadmaps);
     state.relaxRoadmap = buildRelaxRoadmap(assets, state.profile);
-    state.schedule = buildSchedule(state.categoryRoadmaps, state.relaxRoadmap, 14);
+    state.schedule = buildSchedule(state.categoryRoadmaps, state.relaxRoadmap, 30);
 
     if(!state.workRoadmap.length){
       document.getElementById('timeline').innerHTML='<div class="muted" style="padding:10px 0">目前沒有已上架教材。請先補齊 story / music / movie / news / pro 內容。</div>';
