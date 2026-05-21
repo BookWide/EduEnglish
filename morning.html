@@ -587,6 +587,68 @@ a{color:inherit;text-decoration:none}
   .hero,.heroSlide{min-height:184px!important}
 }
 
+
+/* === V9：照片清晰、不跳空白；用 img 載入，失敗自動跳下一張 === */
+.hero{
+  background:#071225!important;
+  min-height:220px!important;
+  border-radius:22px!important;
+  overflow:hidden!important;
+}
+.heroTrack{height:100%!important}
+.heroSlide{
+  min-height:220px!important;
+  position:relative!important;
+  overflow:hidden!important;
+  background:#071225!important;
+}
+.heroSlide::before{
+  content:"";
+  position:absolute;
+  inset:-20px;
+  z-index:1;
+  background-image:var(--bg-img);
+  background-repeat:no-repeat;
+  background-position:center;
+  background-size:cover;
+  filter:blur(12px);
+  transform:scale(1.08);
+  opacity:.55;
+}
+.heroSlide::after{
+  content:"";
+  position:absolute;
+  inset:0;
+  z-index:2;
+  background:linear-gradient(180deg,rgba(5,12,24,.04),rgba(5,12,24,.08) 52%,rgba(5,12,24,.34) 100%)!important;
+}
+.heroPhotoImg{
+  position:absolute;
+  inset:0;
+  z-index:3;
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  object-position:center;
+  display:block;
+  opacity:1;
+}
+.heroPhotoContain{display:none!important}
+.heroPlayHint,.dots,.heroArrow{z-index:8!important}
+.heroPlayHint{
+  background:rgba(15,23,42,.28)!important;
+  border:2px solid rgba(255,255,255,.86)!important;
+}
+.heroSlide.is-broken{
+  display:none!important;
+}
+@media(max-width:430px){
+  .hero,.heroSlide{min-height:204px!important}
+}
+@media(max-width:390px){
+  .hero,.heroSlide{min-height:192px!important}
+}
+
 </style>
 </head>
 <body>
@@ -736,7 +798,7 @@ function shuffleCopy(arr){
 }
 
 function buildRandomSlides(){
-  const picks = shuffleCopy(PHOTO_POOL).slice(0, 5);
+  const picks = shuffleCopy(PHOTO_POOL.filter(Boolean)).slice(0, 5);
   const titles = [
     ["早安，今天一起走一段路", "一句英文，一句日文，讓語言變成生活。", "Morning Walk"],
     ["山路很長，但每天一點就會到", "Small steps every day make a big difference.", "Daily Progress"],
@@ -839,28 +901,70 @@ function setupRefLinks(){
 }
 
 function imageStyle(img, fallback){
-  const safe = String(img || "").replace(/'/g, "%27").replace(/\)/g, "%29");
+  const safe = safeImgUrl(img);
   return `background-image:url('${safe}'),${fallback || FALLBACK_IMG}`;
+}
+
+
+function safeImgUrl(url){
+  const raw = String(url || "").trim();
+  if(!raw) return "";
+  try{
+    return encodeURI(raw).replace(/'/g, "%27").replace(/\)/g, "%29").replace(/\(/g, "%28");
+  }catch(e){
+    return raw.replace(/'/g, "%27").replace(/\)/g, "%29").replace(/\(/g, "%28");
+  }
+}
+function cssUrlVar(url){
+  const safe = safeImgUrl(url);
+  return `--bg-img:url('${safe}')`;
 }
 
 function renderSlides(){
   const track = $("heroTrack");
-  track.innerHTML = SLIDES.map(s => `
-    <div class="heroSlide" style="${imageStyle(s.img,s.fallback)}">
-      <div class="heroPhotoContain" style="${imageStyle(s.img,'transparent')}"></div>
+  track.innerHTML = SLIDES.map((s,i) => `
+    <div class="heroSlide" data-slide="${i}" style="${cssUrlVar(s.img)}">
+      <img class="heroPhotoImg" src="${safeImgUrl(s.img)}" alt="" loading="${i < 2 ? 'eager' : 'lazy'}" decoding="async"
+           onerror="this.closest('.heroSlide')?.classList.add('is-broken'); window.__morningImageBroken && window.__morningImageBroken();" />
     </div>
   `).join("");
   $("dots").innerHTML = SLIDES.map((_,i)=>`<span class="dot ${i===slideIndex?'active':''}"></span>`).join("");
   updateSlide();
+  preloadNextPhotos();
 }
 function updateSlide(){
+  const slides = [...document.querySelectorAll(".heroSlide")];
+  if(slides.length){
+    let guard = 0;
+    while(slides[slideIndex]?.classList.contains("is-broken") && guard < slides.length){
+      slideIndex = (slideIndex + 1) % slides.length;
+      guard++;
+    }
+  }
   $("heroTrack").style.transform = `translateX(${-slideIndex*100}%)`;
   [...$("dots").children].forEach((d,i)=>d.classList.toggle("active",i===slideIndex));
   const item = LESSONS[activeIndex] || LESSONS[0];
-  $("lessonThumb").style.cssText = imageStyle(item.image, SLIDES[slideIndex]?.fallback);
+  if($("lessonThumb")) $("lessonThumb").style.cssText = imageStyle(item.image, SLIDES[slideIndex]?.fallback);
 }
-function nextSlide(){ slideIndex=(slideIndex+1)%SLIDES.length; updateSlide(); }
-function prevSlide(){ slideIndex=(slideIndex-1+SLIDES.length)%SLIDES.length; updateSlide(); }
+window.__morningImageBroken = function(){
+  const slides = [...document.querySelectorAll(".heroSlide")];
+  if(slides[slideIndex]?.classList.contains("is-broken")){
+    nextSlide();
+  }
+};
+function preloadNextPhotos(){
+  const urls = [];
+  for(let k=1;k<=3;k++){
+    const s = SLIDES[(slideIndex+k) % SLIDES.length];
+    if(s && s.img) urls.push(safeImgUrl(s.img));
+  }
+  urls.forEach(u=>{
+    const img = new Image();
+    img.src = u;
+  });
+}
+function nextSlide(){ slideIndex=(slideIndex+1)%SLIDES.length; updateSlide(); preloadNextPhotos(); }
+function prevSlide(){ slideIndex=(slideIndex-1+SLIDES.length)%SLIDES.length; updateSlide(); preloadNextPhotos(); }
 
 function renderPhrases(){
   const root = $("phraseStack");
