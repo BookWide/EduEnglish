@@ -1858,6 +1858,34 @@ if(btnJpIndex) btnJpIndex.style.display='none';
 const video=$('#player');
 const ytWrap=$('#ytWrap');
 let ytPlayer=null, activeSource='html5', ytTickTimer=null, ytStarted=false, ytStartTimer=null;
+window.__BW_VIDEO_SOURCE_STATUS__ = 'idle'; // idle | loading | ready | failed
+window.__BW_VIDEO_HAS_CANDIDATE__ = false;
+window.__BW_VIDEO_SOURCE_DETAIL__ = '';
+function BW_markVideoSourceStatus(status, detail=''){
+  window.__BW_VIDEO_SOURCE_STATUS__ = status;
+  window.__BW_VIDEO_SOURCE_DETAIL__ = detail || '';
+  console.log('[Player] source status:', status, detail || '');
+}
+function BW_isVideoReadyForUnlock(){
+  try{
+    if(window.__BW_VIDEO_SOURCE_STATUS__ === 'ready') return true;
+    if(activeSource === 'html5' && video && video.src && Number(video.readyState || 0) >= 1) return true;
+    if(activeSource === 'youtube' && ytPlayer && typeof ytPlayer.getDuration === 'function'){
+      const d = Number(ytPlayer.getDuration() || 0);
+      if(d > 1) return true;
+    }
+  }catch(_e){}
+  return false;
+}
+async function BW_waitVideoReadyForUnlock(ms=3500){
+  const t0 = Date.now();
+  while(Date.now() - t0 < ms){
+    if(BW_isVideoReadyForUnlock()) return true;
+    if(window.__BW_VIDEO_SOURCE_STATUS__ === 'failed') return false;
+    await new Promise(r => setTimeout(r, 150));
+  }
+  return BW_isVideoReadyForUnlock();
+}
 const cuesBody=$('#cuesBody');
 const cuesStatus=$('#cuesStatus');
 const rightScrollEl = $('#rightScroll');
@@ -2564,6 +2592,8 @@ try{
 }catch(_e){}
 
 async function loadVideo(){
+  BW_markVideoSourceStatus('loading', 'loadVideo start');
+  window.__BW_VIDEO_HAS_CANDIDATE__ = false;
   const SUPA_PUBLIC_BASE = 'https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public';
   const SUPA_VIDEOS_BASE = SUPA_PUBLIC_BASE + '/videos';
 
@@ -2624,12 +2654,15 @@ async function loadVideo(){
 
   if (cat !== 'pro') add(`${BASE}/videos/story/houyi.mp4`);
 
+  window.__BW_VIDEO_HAS_CANDIDATE__ = !!(sources.length || youtubeId);
+
   let i = 0;
 
   function setSrc(k){
     if (!sources[k]) return false;
     destroyYouTubePlayer();
     showHtml5();
+    BW_markVideoSourceStatus('loading', sources[k]);
     video.src = sources[k];
     video.load();
     console.log('[Player] try html5 source', (k+1) + '/' + sources.length, sources[k]);
@@ -2638,6 +2671,8 @@ async function loadVideo(){
 
   video.removeEventListener('timeupdate', handlePlaybackTick);
   video.addEventListener('timeupdate', handlePlaybackTick);
+  video.addEventListener('loadedmetadata', () => BW_markVideoSourceStatus('ready', 'html5 metadata'));
+  video.addEventListener('canplay', () => BW_markVideoSourceStatus('ready', 'html5 canplay'));
 
   video.onerror = () => {
     if(window.__BW_KTV_SOURCE_SWITCHING__){
@@ -2651,12 +2686,14 @@ async function loadVideo(){
       console.warn('[Player] html5 exhausted, fallback to youtube', { slug, youtubeId, preferred, sources });
       tryYouTubeFirst();
     } else {
+      BW_markVideoSourceStatus('failed', 'all sources failed');
       console.warn('[Player] 所有影片來源都失敗了', { slug, sources, assetRow: row });
     }
   };
 
   const tryHtml5First = () => {
     if (!sources.length) {
+      if(!youtubeId) BW_markVideoSourceStatus('failed', 'no html5/youtube source');
       console.warn('[Player] 沒有任何 html5/mp4 來源可試', { slug, assetRow: row });
       return false;
     }
@@ -2670,6 +2707,7 @@ async function loadVideo(){
       await loadYouTubeApi();
       destroyYouTubePlayer();
       showYouTube();
+      BW_markVideoSourceStatus('loading', 'youtube ' + youtubeId);
       ytStarted = false;
       if (ytStartTimer) clearTimeout(ytStartTimer);
       ytStartTimer = setTimeout(() => {
@@ -2689,6 +2727,7 @@ async function loadVideo(){
         },
         events: {
           onReady: (ev) => {
+            BW_markVideoSourceStatus('ready', 'youtube ready');
             try {
               const r = Number(speedRange?.value || 1) || 1;
               try { ev.target.setPlaybackRate(r); } catch(_e) {}
@@ -4388,7 +4427,7 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
 }
 
 
-/* === V8 GUEST COINS：以原本 setupCoinGate 為基礎，只把錢包改成 localStorage === */
+/* === GUEST COINS：遊客金幣（localStorage），安全版：影片未載入成功不扣幣 === */
 function BW_guestVideoKey(){
   return `${cat || ''}::${slug || ''}`;
 }
@@ -4456,6 +4495,7 @@ async function setupGuestCoinGate(){
   let resolvedCoinCost = null;
   let durationReady = false;
   let durationWarnShown = false;
+  let sourceWarnShown = false;
 
   const setDurationPending = () => {
     if (durationBadge) durationBadge.textContent = '--:--';
@@ -4497,25 +4537,10 @@ async function setupGuestCoinGate(){
   const usedMap = BW_guestUsedMap();
   const alreadyUnlocked = !!usedMap[BW_guestVideoKey()];
 
-  // 完全沿用原本方式：先 assets.duration_sec，沒有才等播放器實際時長。
   const rowDuration = getAssetDurationSec(row);
   if (!applyResolvedDuration(rowDuration)) {
     const actualDuration = await waitForActualDurationSec(12000);
     applyResolvedDuration(actualDuration);
-  }
-
-  // V9：遊客模式不能因為抓不到影片時長就卡死。
-  // 例如某些 story/music 的 mp4 duration 未回填、或影片來源還沒載入成功時，
-  // 先暫扣 1 金幣，讓使用者可以按「立即解鎖」進行播放測試。
-  if (!durationReady || !resolvedCoinCost) {
-    resolvedDurationSec = 0;
-    resolvedCoinCost = 1;
-    durationReady = true;
-    if (durationBadge) durationBadge.textContent = '--:--';
-    if (coinBadge) coinBadge.textContent = '1';
-    if (trialBadge) trialBadge.textContent = '時長未明，暫扣 1 金幣';
-    if (coinCostChip) coinCostChip.classList.remove('ok','warn');
-    if (btnUnlockNow) btnUnlockNow.disabled = false;
   }
 
   if (alreadyUnlocked){
@@ -4523,7 +4548,7 @@ async function setupGuestCoinGate(){
     return;
   }
 
-  if (btnUnlockNow) { btnUnlockNow.style.display = 'inline-flex'; btnUnlockNow.disabled = false; btnUnlockNow.textContent = '立即解鎖'; }
+  if (btnUnlockNow) { btnUnlockNow.style.display = 'inline-flex'; btnUnlockNow.textContent = '立即解鎖'; }
   if (!durationReady) setDurationPending();
 
   let gatePassed = false;
@@ -4537,7 +4562,17 @@ async function setupGuestCoinGate(){
       pauseActive();
       if (!durationWarnShown){
         durationWarnShown = true;
-        alert('影片時長尚未取得，暫時不能解鎖。');
+        alert('影片時長尚未取得，暫時不能解鎖，也不會扣遊客金幣。');
+      }
+      return false;
+    }
+
+    const videoReady = await BW_waitVideoReadyForUnlock(3500);
+    if(!videoReady){
+      pauseActive();
+      if(!sourceWarnShown){
+        sourceWarnShown = true;
+        alert('影片尚未載入成功，暫時不能扣遊客金幣。請確認 mp4_url / YouTube ID 或影片是否已上架。');
       }
       return false;
     }
@@ -4674,6 +4709,13 @@ async function setupCoinGate(user){
         durationWarnShown = true;
         alert('影片時長尚未取得，暫時不能解鎖。');
       }
+      return false;
+    }
+
+    const videoReady = await BW_waitVideoReadyForUnlock(3500);
+    if(!videoReady){
+      pauseActive();
+      alert('影片尚未載入成功，暫時不能扣金幣。請確認 mp4_url / YouTube ID 或影片是否已上架。');
       return false;
     }
 
@@ -4966,6 +5008,20 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
   }
 }
 
+// 3-9) 遊客 / preview 也必須先讀 assets，否則 loadVideo 會拿不到 mp4_url / youtube_id
+  try{
+    if (!window.__ASSET_ROW__) {
+      const okPublished = await ensureVideoPublished(cat, slug, !!CURRENT_USER_IS_ADMIN);
+      if (!okPublished) {
+        alert('此影片目前已下架 / 未上架');
+        window.location.href = (ROOT_BASE || '') + '/services/video.html';
+        return;
+      }
+    }
+  }catch(e){
+    console.warn('[BW-player] pre-load asset check skipped:', e);
+  }
+
 // 4️⃣ 守門通過後，初始化播放器 + 載入資料
   try {
     const saved = localStorage.getItem(`offset:${slug}`);
@@ -4976,7 +5032,8 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     speedVal.textContent = `${r.toFixed(2)}x`;
 
     await loadVideo();
-    if (user) await setupCoinGate(user); else await setupGuestCoinGate();
+    if (user) await setupCoinGate(user);
+    else await setupGuestCoinGate();
     await loadCues();
     await loadQuiz();
     await loadVocab();
@@ -5159,10 +5216,6 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
 
   async function initWatch(){
     if (started) return;
-    if (typeof BW_isGuestRequest === 'function' && BW_isGuestRequest()){
-      console.log('[BW-WATCH] guest mode: skip watch_logs');
-      return;
-    }
     initTries++;
 
     const user = await getUserForWatch();
