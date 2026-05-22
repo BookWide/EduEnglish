@@ -1174,6 +1174,29 @@ body.bw-guest-mode #guestCoinChip{
   }
 }
 
+
+/* === Guest Player V7：修正 guest 初始化卡住；顯示同正式扣幣列 === */
+body.bw-guest-mode #coinCostChip,
+body.bw-guest-mode #walletChip,
+body.bw-guest-mode #trialBadge,
+body.bw-guest-mode #btnUnlockNow,
+body.bw-guest-mode #durationBadge,
+body.bw-guest-mode #coinBadge,
+body.bw-guest-mode #walletBadge{
+  display:inline-flex!important;
+}
+body.bw-guest-mode #guestCoinChip{
+  display:inline-flex!important;
+}
+@media(max-width:860px){
+  body.bw-guest-mode #coinCostChip,
+  body.bw-guest-mode #walletChip,
+  body.bw-guest-mode #trialBadge,
+  body.bw-guest-mode #btnUnlockNow{
+    display:inline-flex!important;
+  }
+}
+
 </style>
 
 <!-- Supabase JS（只用於 player 守門，不影響其它頁面） -->
@@ -4481,83 +4504,111 @@ async function setupGuestCoinGate(){
 
   let resolvedDurationSec = 0;
   let resolvedCoinCost = null;
-  let durationReady = false;
-  let durationWarnShown = false;
   let gatePassed = false;
   let gateInFlight = null;
 
+  const key = BW_guestVideoKey();
+  const usedMap = BW_guestUsedMap();
+
   const showUnlockedState = () => {
     if (coinBadge) coinBadge.textContent = '已解鎖';
-    if (trialBadge) trialBadge.textContent = '遊客重看不扣幣';
+    if (walletBadge) walletBadge.textContent = String(BW_guestCoins());
+    if (trialBadge) trialBadge.textContent = '遊客已解鎖，重看不扣幣';
     if (coinCostChip) {
       coinCostChip.classList.remove('warn');
       coinCostChip.classList.add('ok');
     }
-    if (btnUnlockNow) btnUnlockNow.style.display = 'none';
+    if (btnUnlockNow) btnUnlockNow.textContent = '已解鎖';
     BW_updateGuestChip();
   };
 
-  const applyResolvedDuration = (sec) => {
+  const applyDuration = (sec) => {
     const d = Number(sec) || 0;
     if (d <= 1) return false;
     resolvedDurationSec = d;
     resolvedCoinCost = calcCoins(d);
-    durationReady = true;
     if (durationBadge) durationBadge.textContent = fmt(d);
-    if (coinBadge) coinBadge.textContent = String(resolvedCoinCost);
+    if (coinBadge && !gatePassed) coinBadge.textContent = String(resolvedCoinCost);
     if (walletBadge) walletBadge.textContent = String(BW_guestCoins());
-    if (trialBadge) trialBadge.textContent = '遊客試看前 60 秒';
-    if (coinCostChip) coinCostChip.classList.remove('ok','warn');
-    if (btnUnlockNow) {
+    if (trialBadge && !gatePassed) trialBadge.textContent = '遊客試看前 60 秒';
+    if (btnUnlockNow && !gatePassed) {
       btnUnlockNow.disabled = false;
       btnUnlockNow.style.display = 'inline-flex';
-      btnUnlockNow.textContent = '遊客金幣解鎖';
+      btnUnlockNow.textContent = '立即解鎖';
     }
+    if (coinCostChip) coinCostChip.classList.remove('ok','warn');
     BW_updateGuestChip();
     return true;
   };
 
+  // 先用資料庫/JSON duration，不要卡住字幕與播放器初始化
   if (durationBadge) durationBadge.textContent = '--:--';
   if (coinBadge) coinBadge.textContent = '?';
   if (walletBadge) walletBadge.textContent = String(BW_guestCoins());
   if (trialBadge) trialBadge.textContent = '讀取影片時長中';
-  if (btnUnlockNow) btnUnlockNow.disabled = true;
-
-  const rowDuration = getAssetDurationSec(row);
-  if (!applyResolvedDuration(rowDuration)) {
-    const actualDuration = await waitForActualDurationSec(12000);
-    applyResolvedDuration(actualDuration);
+  if (btnUnlockNow) {
+    btnUnlockNow.disabled = true;
+    btnUnlockNow.style.display = 'inline-flex';
+    btnUnlockNow.textContent = '讀取中';
   }
 
-  const key = BW_guestVideoKey();
-  const usedMap = BW_guestUsedMap();
+  applyDuration(getAssetDurationSec(row));
+
   if (usedMap[key]){
     gatePassed = true;
     showUnlockedState();
     return;
   }
 
+  const resolveDurationLater = () => {
+    if (resolvedCoinCost) return;
+    let d = 0;
+    try{
+      if (typeof isUsingYouTube === 'function' && isUsingYouTube() && typeof ytPlayer !== 'undefined' && ytPlayer && typeof ytPlayer.getDuration === 'function'){
+        d = Number(ytPlayer.getDuration()) || 0;
+      }
+    }catch(_e){}
+    if(!d){
+      try{ d = Number(video && video.duration) || 0; }catch(_e){}
+    }
+    if(applyDuration(d)){
+      return;
+    }
+    // 不要永遠卡住：拿不到時長時先用 1 金幣，讓使用者可以播放
+    if(!resolvedCoinCost){
+      resolvedDurationSec = 0;
+      resolvedCoinCost = 1;
+      if (durationBadge) durationBadge.textContent = '--:--';
+      if (coinBadge) coinBadge.textContent = '1';
+      if (walletBadge) walletBadge.textContent = String(BW_guestCoins());
+      if (trialBadge) trialBadge.textContent = '時長未明，暫扣 1 金幣';
+      if (btnUnlockNow) {
+        btnUnlockNow.disabled = false;
+        btnUnlockNow.style.display = 'inline-flex';
+        btnUnlockNow.textContent = '立即解鎖';
+      }
+    }
+  };
+
+  // 非阻塞：背景嘗試取得真實時長
+  setTimeout(resolveDurationLater, 800);
+  setTimeout(resolveDurationLater, 2500);
+  setTimeout(resolveDurationLater, 5000);
+
   const passGate = async () => {
     if (gatePassed) return true;
     if (gateInFlight) return gateInFlight;
 
-    if (!durationReady || !resolvedCoinCost){
-      pauseActive();
-      if (!durationWarnShown){
-        durationWarnShown = true;
-        alert('影片時長尚未取得，暫時不能解鎖。');
-      }
-      return false;
-    }
+    if (!resolvedCoinCost) resolveDurationLater();
+    const cost = resolvedCoinCost || 1;
 
     gateInFlight = (async () => {
-      const result = BW_tryUseGuestCoin(resolvedCoinCost);
+      const result = BW_tryUseGuestCoin(cost);
       if(!result || !result.ok){
         pauseActive();
         return false;
       }
       gatePassed = true;
-      if (walletBadge) walletBadge.textContent = String(BW_guestCoins());
       showUnlockedState();
       return true;
     })();
@@ -4585,10 +4636,13 @@ async function setupGuestCoinGate(){
 
   if (window.__BW_COIN_GATE_TIMER__) clearInterval(window.__BW_COIN_GATE_TIMER__);
   window.__BW_COIN_GATE_TIMER__ = setInterval(() => {
+    try{ resolveDurationLater(); }catch(_e){}
     onTimeUpdate().catch(err => console.warn('[guest coin] onTimeUpdate error', err));
-  }, 500);
+  }, 700);
 
-  video.addEventListener('timeupdate', onTimeUpdate);
+  try{ video.addEventListener('loadedmetadata', resolveDurationLater); }catch(_e){}
+  try{ video.addEventListener('durationchange', resolveDurationLater); }catch(_e){}
+  try{ video.addEventListener('timeupdate', onTimeUpdate); }catch(_e){}
 }
 
 async function setupCoinGate(user){
