@@ -4440,12 +4440,58 @@ async function spendCoinsAndUnlock(userId, lessonSlug, coinCost){
 function BW_guestVideoKey(){
   return `${cat || ''}::${slug || ''}`;
 }
+function BW_guestLocalInt(key, fallback=0){
+  const n = Number(localStorage.getItem(key));
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
+}
+function BW_guestWalletSnapshot(){
+  // V45：遊客金幣改成 earned / spent 分帳，避免 hiking 回補已花掉金幣。
+  const hasEarned = localStorage.getItem("bw_guest_earned_coins") !== null;
+  const hasSpent = localStorage.getItem("bw_guest_spent_coins") !== null;
+  const legacyRaw = localStorage.getItem("bw_guest_coins");
+  const hasLegacyBalance = legacyRaw !== null;
+
+  let earned = BW_guestLocalInt("bw_guest_earned_coins", 0);
+  let spent = BW_guestLocalInt("bw_guest_spent_coins", 0);
+  const legacyBalance = Number.isFinite(Number(legacyRaw)) ? Math.max(0, Math.floor(Number(legacyRaw))) : 0;
+
+  if(!hasEarned && !hasSpent && hasLegacyBalance){
+    // 舊版只有餘額，先當作已賺未花；若再回 hiking，hiking 會依完成關卡補推 spent。
+    earned = legacyBalance;
+    spent = 0;
+    localStorage.setItem("bw_guest_earned_coins", String(earned));
+    localStorage.setItem("bw_guest_spent_coins", String(spent));
+  }
+
+  if(spent > earned) spent = earned;
+  const balance = Math.max(0, earned - spent);
+  localStorage.setItem("bw_guest_coins", String(balance));
+  return { earned, spent, balance };
+}
 function BW_guestCoins(){
-  return Number(localStorage.getItem("bw_guest_coins") || "0") || 0;
+  return BW_guestWalletSnapshot().balance;
 }
 function BW_setGuestCoins(n){
-  localStorage.setItem("bw_guest_coins", String(Math.max(0, Number(n) || 0)));
+  // 只留給舊呼叫相容：直接校正餘額時，不清掉 spent。
+  const targetBalance = Math.max(0, Math.floor(Number(n) || 0));
+  const snap = BW_guestWalletSnapshot();
+  const earned = Math.max(snap.earned, targetBalance + snap.spent);
+  const spent = Math.max(0, earned - targetBalance);
+  localStorage.setItem("bw_guest_earned_coins", String(earned));
+  localStorage.setItem("bw_guest_spent_coins", String(spent));
+  localStorage.setItem("bw_guest_coins", String(Math.max(0, earned - spent)));
   BW_updateGuestChip();
+}
+function BW_addGuestSpent(cost){
+  const safeCost = Math.max(1, Math.floor(Number(cost || 1) || 1));
+  const snap = BW_guestWalletSnapshot();
+  const spent = Math.min(snap.earned, snap.spent + safeCost);
+  const balance = Math.max(0, snap.earned - spent);
+  localStorage.setItem("bw_guest_spent_coins", String(spent));
+  localStorage.setItem("bw_guest_coins", String(balance));
+  localStorage.setItem("bw_guest_coin_updated_at", new Date().toISOString());
+  BW_updateGuestChip();
+  return { earned:snap.earned, spent, balance };
 }
 function BW_guestUsedMap(){
   try{ return JSON.parse(localStorage.getItem("bw_guest_used_videos_v2") || "{}"); }
@@ -4456,7 +4502,8 @@ function BW_saveGuestUsedMap(map){
 }
 function BW_isGuestRequest(){
   const p = new URLSearchParams(location.search);
-  return p.get("guest") === "1" || BW_guestCoins() > 0 || !!BW_guestUsedMap()[BW_guestVideoKey()];
+  const snap = BW_guestWalletSnapshot();
+  return p.get("guest") === "1" || snap.earned > 0 || snap.balance > 0 || !!BW_guestUsedMap()[BW_guestVideoKey()];
 }
 function BW_updateGuestChip(){
   const chip = document.getElementById("guestCoinChip");
@@ -4465,8 +4512,9 @@ function BW_updateGuestChip(){
     chip.style.display = "none";
     return;
   }
+  const snap = BW_guestWalletSnapshot();
   chip.style.display = "inline-flex";
-  chip.textContent = `遊客金幣 ${BW_guestCoins()}`;
+  chip.textContent = `遊客金幣 ${snap.balance}`;
 }
 function BW_guestGoSubscribe(cost, wallet){
   const q = new URLSearchParams();
@@ -4500,13 +4548,12 @@ function BW_guestSpendAndUnlock(cost){
     return { ok:false, reason:"insufficient", wallet, cost:safeCost };
   }
 
-  const nextWallet = wallet - safeCost;
   map[key] = { cost:safeCost, at:new Date().toISOString() };
   BW_saveGuestUsedMap(map);
-  BW_setGuestCoins(nextWallet);
+  const next = BW_addGuestSpent(safeCost);
   localStorage.setItem("bw_guest_last_unlocked", key);
   localStorage.setItem("bw_guest_coin_updated_at", new Date().toISOString());
-  return { ok:true, already:false, cost:safeCost, wallet:nextWallet };
+  return { ok:true, already:false, cost:safeCost, wallet:next.balance };
 }
 
 async function setupGuestCoinGate(){
