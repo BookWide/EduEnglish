@@ -1483,7 +1483,104 @@ function saveTodayComplete(){
 }
 
 
+const BW_GUEST_TOPIC = "hotel";
+const BW_GUEST_CLAIMS_KEY = "bw_guest_coin_claims_v1";
+const BW_GUEST_ALL_TOPICS = ["airport","directions","doctor","hotel","restaurant","shopping","taxi","hiking"];
+
+function BW_guestReadClaims(){
+  try{
+    const obj = JSON.parse(localStorage.getItem(BW_GUEST_CLAIMS_KEY) || "{}");
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  }catch(_e){
+    return {};
+  }
+}
+function BW_guestWriteClaims(obj){
+  localStorage.setItem(BW_GUEST_CLAIMS_KEY, JSON.stringify(obj || {}));
+}
+function BW_guestClaimTotal(obj){
+  return Object.values(obj || {}).reduce((sum, item)=>{
+    const n = Number(item && item.amount);
+    return sum + (Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0);
+  }, 0);
+}
+function BW_guestClaimCoinsOnce(topic, stage, amount=1){
+  const key = `${topic}_stage_${stage}`;
+  const claims = BW_guestReadClaims();
+  if(!claims[key]){
+    claims[key] = {
+      topic,
+      stage,
+      amount,
+      created_at: new Date().toISOString()
+    };
+    BW_guestWriteClaims(claims);
+    return true;
+  }
+  return false;
+}
+function BW_guestMigrateOldCompletedClaims(){
+  const claims = BW_guestReadClaims();
+  let changed = false;
+
+  for(const topic of BW_GUEST_ALL_TOPICS){
+    const count = BW_guestStorageInt(`bw_guest_completed_${topic}`, 0);
+    for(let stage = COIN_EVERY_STAGES; stage <= count; stage += COIN_EVERY_STAGES){
+      const key = `${topic}_stage_${stage}`;
+      if(!claims[key]){
+        claims[key] = {
+          topic,
+          stage,
+          amount: 1,
+          created_at: new Date().toISOString(),
+          migrated: true
+        };
+        changed = true;
+      }
+    }
+  }
+
+  // 舊版若只有 earned 沒有 completed_*，保留舊餘額，避免更新後金幣消失。
+  if(Object.keys(claims).length === 0){
+    const oldEarned = BW_guestStorageInt("bw_guest_earned_coins", 0);
+    if(oldEarned > 0){
+      claims["legacy_pre_v47"] = {
+        topic: "legacy",
+        stage: 0,
+        amount: oldEarned,
+        created_at: new Date().toISOString(),
+        migrated: true
+      };
+      changed = true;
+    }
+  }
+
+  if(changed) BW_guestWriteClaims(claims);
+  return claims;
+}
+function BW_guestSyncClaimsByProgress(){
+  BW_guestMigrateOldCompletedClaims();
+
+  const count = completedStageCount();
+  for(let stage = COIN_EVERY_STAGES; stage <= count; stage += COIN_EVERY_STAGES){
+    BW_guestClaimCoinsOnce(BW_GUEST_TOPIC, stage, 1);
+  }
+
+  const claims = BW_guestReadClaims();
+  const earned = BW_guestClaimTotal(claims);
+  const spent = Math.min(BW_guestStorageInt("bw_guest_spent_coins", 0), earned);
+  const balance = Math.max(0, earned - spent);
+
+  localStorage.setItem("bw_guest_earned_coins", String(earned));
+  localStorage.setItem("bw_guest_spent_coins", String(spent));
+  localStorage.setItem("bw_guest_coins", String(balance));
+  localStorage.setItem(`bw_guest_completed_${BW_GUEST_TOPIC}`, String(count));
+  localStorage.setItem("bw_guest_coin_source", BW_GUEST_TOPIC);
+  localStorage.setItem("bw_guest_coin_updated_at", new Date().toISOString());
+  return { claims, earned, spent, balance };
+}
 function guestCoinCount(){
+  // 本頁顯示用；真正總遊客金幣由 bw_guest_coin_claims_v1 加總。
   return Math.floor(completedStageCount() / COIN_EVERY_STAGES);
 }
 function nextCoinNeed(){
@@ -1530,38 +1627,9 @@ function BW_guestStorageInt(key, fallback=0){
   return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
 }
 function syncGuestWallet(){
-  // V45：遊客金幣改成「已賺 / 已花」分帳。
-  // hiking 只更新 earned，不直接覆蓋餘額，避免客戶花掉金幣後回到 hiking 又被補回。
-  const earnedFromHiking = guestCoinCount ? guestCoinCount() : Math.floor(completedStageCount() / COIN_EVERY_STAGES);
-
-  const hasEarned = localStorage.getItem("bw_guest_earned_coins") !== null;
-  const hasSpent = localStorage.getItem("bw_guest_spent_coins") !== null;
-  const legacyRaw = localStorage.getItem("bw_guest_coins");
-  const hasLegacyBalance = legacyRaw !== null;
-
-  const prevEarned = BW_guestStorageInt("bw_guest_earned_coins", 0);
-  let prevSpent = BW_guestStorageInt("bw_guest_spent_coins", 0);
-  const legacyBalance = Number.isFinite(Number(legacyRaw)) ? Math.max(0, Math.floor(Number(legacyRaw))) : 0;
-
-  let earned = Math.max(prevEarned, earnedFromHiking);
-
-  if(!hasEarned && !hasSpent){
-    earned = Math.max(earnedFromHiking, hasLegacyBalance ? legacyBalance : 0);
-    prevSpent = hasLegacyBalance ? Math.max(0, earned - legacyBalance) : 0;
-  }else if(hasLegacyBalance && prevSpent === 0 && legacyBalance < earned){
-    // 舊版 player 可能只剩 bw_guest_coins 餘額，沒有 spent；這裡補推已花掉數。
-    prevSpent = Math.max(0, earned - legacyBalance);
-  }
-
-  const spent = Math.min(prevSpent, earned);
-  const balance = Math.max(0, earned - spent);
-
-  localStorage.setItem("bw_guest_earned_coins", String(earned));
-  localStorage.setItem("bw_guest_spent_coins", String(spent));
-  localStorage.setItem("bw_guest_coins", String(balance));
-  localStorage.setItem("bw_guest_completed_hotel", String(completedStageCount()));
-  localStorage.setItem("bw_guest_coin_source", "hotel");
-  localStorage.setItem("bw_guest_coin_updated_at", new Date().toISOString());
+  // V47：遊客金幣改成事件流水帳。
+  // 同一主題同一里程碑只會給一次，避免重新整理、重開頁面、重複完成後重複拿金幣。
+  return BW_guestSyncClaimsByProgress();
 }
 function isAllStagesDone(){
   return completedStageCount() >= Math.min(TOTAL_STAGES, lessons.length);
