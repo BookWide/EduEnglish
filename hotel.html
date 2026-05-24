@@ -1033,6 +1033,24 @@ a{color:inherit;text-decoration:none}
   .hint{right:8px!important;bottom:8px!important}
 }
 
+
+/* === V65：新版合理回答句型：選項顯示英／日／中，小喇叭讀英日 === */
+.choiceText .choiceZh:first-child{
+  font-size:14px!important;
+  line-height:1.18!important;
+}
+.choiceText .choiceJa{
+  color:#c4b5fd!important;
+}
+.choiceText .choiceZh:last-child{
+  display:block!important;
+  font-weight:850!important;
+}
+@media(max-width:390px){
+  .choiceText .choiceZh:first-child{font-size:12.5px!important}
+  .choiceText .choiceZh:last-child{font-size:10.5px!important}
+}
+
 </style>
 </head>
 <body>
@@ -1468,12 +1486,16 @@ async function loadData(){
     const arr = Array.isArray(data) ? data : data.lessons;
     if(Array.isArray(arr) && arr.length){
       lessons = arr.slice(0, TOTAL_STAGES).map((x,i)=>({
-        day:i+1,
+        day:Number(x.day || i+1),
         scene:String(x.scene||`Day ${i+1}`),
         title:String(x.title||`Day ${i+1}`),
-        en:String(x.en||""),
-        zh:String(x.zh||""),
-        ja:String(x.ja||"")
+        en:String((x.question && x.question.en) || x.en || ""),
+        zh:String((x.question && x.question.zh) || x.zh || ""),
+        ja:String((x.question && x.question.ja) || x.ja || ""),
+        question:x.question || null,
+        answer:x.answer || null,
+        choices:Array.isArray(x.choices) ? x.choices : null,
+        quiz:x.quiz || null
       })).filter(x=>x.en && x.zh && x.ja);
     }
   }catch(e){ console.warn("[hotel] lessons fallback", e); }
@@ -1830,6 +1852,29 @@ function completeToday(force=false){
   else toast(`第 ${l.day} 關已完成`);
 }
 
+
+function speakChoiceAnswer(choice){
+  if(!choice) return;
+  try{ speechSynthesis.cancel(); }catch(e){}
+  const seq = [];
+  if(choice.en) seq.push({ text: choice.en, lang: "en-US" });
+  if(choice.ja) seq.push({ text: choice.ja, lang: "ja-JP" });
+  let idx = 0;
+  function next(){
+    if(idx >= seq.length) return;
+    const item = seq[idx++];
+    const u = new SpeechSynthesisUtterance(item.text);
+    u.lang = item.lang;
+    const pickedVoice = pickVoice(item.lang);
+    if(pickedVoice) u.voice = pickedVoice;
+    u.rate = RATE;
+    u.pitch = 1;
+    u.onend = () => setTimeout(next, 120);
+    speechSynthesis.speak(u);
+  }
+  next();
+}
+
 function speakTiny(text, lang){
   try{ speechSynthesis.cancel(); }catch(e){}
   const u = new SpeechSynthesisUtterance(text);
@@ -1860,6 +1905,68 @@ function makeQuiz(){
 
   const l = lessons[activeIndex] || lessons[0];
   window.__quizCorrect = isDone(l.day);
+  window.__quizAnswered = false;
+
+  if(l.choices && Array.isArray(l.choices) && l.choices.length){
+    qEl.textContent = `「${l.en}」選合理回答：`;
+
+    const items = l.choices.slice(0,3).map((c, i)=>({
+      en: String(c.en || ""),
+      zh: String(c.zh || ""),
+      ja: String(c.ja || ""),
+      correct: !!c.correct,
+      idx: i
+    }));
+
+    let answerIndex = items.findIndex(x => x.correct);
+    if(answerIndex < 0) answerIndex = 0;
+
+    choicesEl.innerHTML = items.map((it,i)=>`
+      <button class="choice" type="button" data-i="${i}">
+        <span class="choiceInner">
+          <span class="choiceNo">${String.fromCharCode(65+i)}.</span>
+          <span class="choiceText">
+            <span class="choiceZh" style="color:#fff">${escapeHtml(it.en)}</span>
+            <span class="choiceJa">${escapeHtml(it.ja || "")}</span>
+            <span class="choiceZh" style="font-size:11px;color:#bfdbfe;margin-top:2px">${escapeHtml(it.zh || "")}</span>
+          </span>
+          <span class="choiceSpeak" data-i="${i}">🔊</span>
+        </span>
+      </button>
+    `).join("");
+
+    choicesEl.querySelectorAll(".choiceSpeak").forEach(sp=>{
+      sp.onclick = (e)=>{
+        e.preventDefault();
+        e.stopPropagation();
+        const i = Number(sp.getAttribute("data-i") || 0);
+        speakChoiceAnswer(items[i]);
+      };
+    });
+
+    choicesEl.querySelectorAll(".choice").forEach(btn=>{
+      btn.onclick = ()=>{
+        if(window.__quizAnswered) return;
+        const i = Number(btn.dataset.i);
+        if(i === answerIndex){
+          window.__quizAnswered = true;
+          choicesEl.querySelectorAll(".choice").forEach(b=>b.disabled=true);
+          btn.classList.add("correct");
+          window.__quizCorrect = true;
+          updateProgress();
+          toast("答對了！");
+          speakChoiceAnswer(items[i]);
+          completeToday(true);
+        }else{
+          btn.classList.add("wrong");
+          toast("答錯了，直接再選一次");
+          setTimeout(()=>btn.classList.remove("wrong"), 900);
+        }
+      };
+    });
+    return;
+  }
+
   qEl.textContent = `「${l.en}」選正確意思：`;
 
   let items = [];
