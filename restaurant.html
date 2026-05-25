@@ -1883,33 +1883,39 @@ function completeToday(force=false){
 
 
 
-function completeAfterAnswerSpeech(){
-  const runComplete = ()=>{
-    try{ completeToday(true); }catch(e){ console.warn("completeToday failed", e); }
-  };
-
-  // 不讓「第5關完成」彈窗蓋住答案；等英文/日文朗讀結束後再跳。
-  let waited = 0;
-  const timer = setInterval(()=>{
-    waited += 120;
-    let speaking = false;
-    try{ speaking = !!speechSynthesis.speaking || !!speechSynthesis.pending; }catch(e){}
-    if(!speaking || waited >= 6500){
-      clearInterval(timer);
-      setTimeout(runComplete, 420);
-    }
-  }, 120);
+function completeAfterAnswerSpeech(choice){
+  // V67：改成「正確答案英文 + 日文全部朗讀結束」後，才跳完成視窗。
+  // 不再用 speechSynthesis.speaking 輪詢，避免英日之間短暫空檔誤判已讀完。
+  speakChoiceAnswer(choice, ()=>{
+    setTimeout(()=>{
+      try{ completeToday(true); }catch(e){ console.warn("completeToday failed", e); }
+    }, 650);
+  });
 }
 
-function speakChoiceAnswer(choice){
-  if(!choice) return;
+function speakChoiceAnswer(choice, onDone){
+  if(!choice){
+    if(typeof onDone === "function") onDone();
+    return;
+  }
   try{ speechSynthesis.cancel(); }catch(e){}
   const seq = [];
   if(choice.en) seq.push({ text: choice.en, lang: "en-US" });
   if(choice.ja) seq.push({ text: choice.ja, lang: "ja-JP" });
   let idx = 0;
+  let finished = false;
+
+  function doneOnce(){
+    if(finished) return;
+    finished = true;
+    if(typeof onDone === "function") onDone();
+  }
+
   function next(){
-    if(idx >= seq.length) return;
+    if(idx >= seq.length){
+      doneOnce();
+      return;
+    }
     const item = seq[idx++];
     const u = new SpeechSynthesisUtterance(item.text);
     u.lang = item.lang;
@@ -1917,10 +1923,15 @@ function speakChoiceAnswer(choice){
     if(pickedVoice) u.voice = pickedVoice;
     u.rate = RATE;
     u.pitch = 1;
-    u.onend = () => setTimeout(next, 120);
+    u.onend = () => setTimeout(next, 260);
+    u.onerror = () => setTimeout(next, 260);
     speechSynthesis.speak(u);
   }
+
   next();
+
+  // 保險：避免某些手機瀏覽器 onend 不回來，最多 12 秒後才放行。
+  setTimeout(doneOnce, 12000);
 }
 
 function speakTiny(text, lang){
@@ -2003,8 +2014,7 @@ function makeQuiz(){
           window.__quizCorrect = true;
           updateProgress();
           toast("答對了！");
-          speakChoiceAnswer(items[i]);
-          completeAfterAnswerSpeech();
+          completeAfterAnswerSpeech(items[i]);
         }else{
           btn.classList.add("wrong");
           toast("答錯了，直接再選一次");
