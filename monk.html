@@ -1176,6 +1176,15 @@ const SLIDE_MS = 4600;
 const BGM_URL = "./assets/monk/bgm.mp3";
 const BGM_VOLUME = 0.16;
 
+// === V71：角色 MP3 語音模式 ===
+// 放入真實配音檔後，會優先播放 MP3；找不到檔案才退回瀏覽器 TTS。
+// 問話＝豬八戒感；回答＝老和尚感。
+// 建議檔名：assets/monk/audio/day01_question_en.mp3、day01_answer_en.mp3
+// 日文可加：day01_question_ja.mp3、day01_answer_ja.mp3
+const ROLE_AUDIO_BASE = "assets/monk/audio/";
+const USE_ROLE_MP3 = true;
+let BW_roleAudio = null;
+
 // === V68：老和尚闖關金幣規則 ===
 // 20 關最多 4 個金幣；每 5 關一個。
 // 只要金幣關答錯過，該關金幣永久失效，但仍可答對後解鎖下一關。
@@ -1235,40 +1244,6 @@ function pickVoice(lang){
     .sort((a,b) => b.score - a.score);
 
   return candidates.length ? candidates[0].v : null;
-}
-
-
-
-/* === V70 ROLE VOICES：問話像豬八戒、回答像老和尚 ===
-   Web Speech 不能指定真正角色音色；這裡用瀏覽器內建 TTS 的 pitch/rate 模擬。
-   disciple = 問話者：較高音、稍快、帶喜感。
-   monk = 老和尚：較低音、慢速、穩。
-*/
-function roleVoiceProfile(role, lang){
-  if(role === "disciple"){
-    return {
-      rate: lang === "ja-JP" ? 1.02 : 1.08,
-      pitch: 1.45,
-      volume: 1
-    };
-  }
-  if(role === "monk"){
-    return {
-      rate: lang === "ja-JP" ? 0.72 : 0.70,
-      pitch: 0.72,
-      volume: 1
-    };
-  }
-  return { rate: RATE, pitch: 1, volume: 1 };
-}
-function applyRoleVoice(u, role, lang){
-  const pickedVoice = pickVoice(lang);
-  if(pickedVoice) u.voice = pickedVoice;
-  const p = roleVoiceProfile(role, lang);
-  u.rate = p.rate;
-  u.pitch = p.pitch;
-  u.volume = p.volume;
-  return u;
 }
 
 function prepareVoices(){
@@ -2332,6 +2307,71 @@ function completeToday(force=false){
 
 
 
+
+function stageCode(day){
+  const n = Math.max(1, Number(day || activeIndex + 1) || 1);
+  return String(n).padStart(2,"0");
+}
+function roleAudioCandidates(day, role, lang){
+  const d = stageCode(day);
+  const lg = String(lang || "en-US").toLowerCase().startsWith("ja") ? "ja" : "en";
+  const base = `${ROLE_AUDIO_BASE}day${d}_${role}`;
+  const list = [`${base}_${lg}.mp3`];
+  if(lg === "en") list.push(`${base}.mp3`);
+  return list;
+}
+function stopRoleAudio(){
+  try{
+    if(BW_roleAudio){
+      BW_roleAudio.pause();
+      BW_roleAudio.currentTime = 0;
+    }
+  }catch(_e){}
+  BW_roleAudio = null;
+}
+function playAudioCandidates(list, cls){
+  return new Promise(resolve=>{
+    if(!USE_ROLE_MP3 || !Array.isArray(list) || !list.length){ resolve(false); return; }
+    let i = 0;
+    function tryOne(){
+      if(i >= list.length){ resolve(false); return; }
+      const url = list[i++];
+      stopRoleAudio();
+      const a = new Audio(encodeURI(url));
+      BW_roleAudio = a;
+      a.preload = "auto";
+      a.onplay = ()=>{
+        speaking = true;
+        if(cls) mark(cls);
+      };
+      a.onended = ()=>{
+        if(cls) mark(cls,true);
+        clearHeroWordHighlight();
+        BW_roleAudio = null;
+        setTimeout(()=>resolve(true),220);
+      };
+      a.onerror = ()=>{
+        if(BW_roleAudio === a) BW_roleAudio = null;
+        tryOne();
+      };
+      const p = a.play();
+      if(p && p.catch){
+        p.catch(()=>{
+          if(BW_roleAudio === a) BW_roleAudio = null;
+          tryOne();
+        });
+      }
+    }
+    tryOne();
+  });
+}
+function roleOfCurrentQuestion(){ return "question"; }
+function roleOfAnswer(){ return "answer"; }
+function roleVoiceParams(role, lang){
+  // fallback TTS：不會真的像 MP3，但保底可讀。
+  if(role === "question") return { rate: 1.04, pitch: 1.42 }; // 豬八戒感：高一點、快一點
+  return { rate: 0.68, pitch: 0.72 }; // 老和尚感：低沉、慢速
+}
 function completeAfterAnswerSpeech(choice){
   // V67：改成「正確答案英文 + 日文全部朗讀結束」後，才跳完成視窗。
   // 不再用 speechSynthesis.speaking 輪詢，避免英日之間短暫空檔誤判已讀完。
@@ -2348,9 +2388,11 @@ function speakChoiceAnswer(choice, onDone){
     return;
   }
   try{ speechSynthesis.cancel(); }catch(e){}
+  stopRoleAudio();
+  const l = lessons[activeIndex] || lessons[0];
   const seq = [];
-  if(choice.en) seq.push({ text: choice.en, lang: "en-US" });
-  if(choice.ja) seq.push({ text: choice.ja, lang: "ja-JP" });
+  if(choice.en) seq.push({ text: choice.en, lang: "en-US", role: roleOfAnswer(), audio: roleAudioCandidates(l.day, "answer", "en-US") });
+  if(choice.ja) seq.push({ text: choice.ja, lang: "ja-JP", role: roleOfAnswer(), audio: roleAudioCandidates(l.day, "answer", "ja-JP") });
   let idx = 0;
   let finished = false;
 
@@ -2360,31 +2402,38 @@ function speakChoiceAnswer(choice, onDone){
     if(typeof onDone === "function") onDone();
   }
 
-  function next(){
-    if(idx >= seq.length){
-      doneOnce();
-      return;
-    }
+  async function next(){
+    if(idx >= seq.length){ doneOnce(); return; }
     const item = seq[idx++];
+    const played = await playAudioCandidates(item.audio, item.lang === "ja-JP" ? "ja" : "en");
+    if(played){ setTimeout(next, 260); return; }
     const u = new SpeechSynthesisUtterance(item.text);
     u.lang = item.lang;
-    applyRoleVoice(u, "monk", item.lang);
-    u.onend = () => setTimeout(next, 360);
+    const pickedVoice = pickVoice(item.lang);
+    if(pickedVoice) u.voice = pickedVoice;
+    const vp = roleVoiceParams(item.role, item.lang);
+    u.rate = vp.rate;
+    u.pitch = vp.pitch;
+    speaking = true;
+    mark(item.lang === "ja-JP" ? "ja" : "en");
+    u.onend = () => { mark(item.lang === "ja-JP" ? "ja" : "en", true); setTimeout(next, 260); };
     u.onerror = () => setTimeout(next, 260);
     speechSynthesis.speak(u);
   }
 
   next();
-
-  // 保險：避免某些手機瀏覽器 onend 不回來，最多 12 秒後才放行。
-  setTimeout(doneOnce, 12000);
+  setTimeout(doneOnce, 20000);
 }
 
 function speakTiny(text, lang){
+  stopRoleAudio();
   try{ speechSynthesis.cancel(); }catch(e){}
   const u = new SpeechSynthesisUtterance(text);
   u.lang = lang;
-  applyRoleVoice(u, "monk", lang);
+  const pickedVoice = pickVoice(lang);
+  if(pickedVoice) u.voice = pickedVoice;
+  u.rate = RATE;
+  u.pitch = 1;
   speechSynthesis.speak(u);
 }
 function looksJapanese(s){
@@ -2664,16 +2713,31 @@ function mark(cls, done=false){
   }
 }
 
-function speakOne(text, lang, cls){
-  return new Promise(resolve=>{
+function speakOne(text, lang, cls, role){
+  return new Promise(async resolve=>{
     try{ speechSynthesis.cancel(); }catch(e){}
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = lang;
-    const role = (cls === "en" || cls === "ja") ? "disciple" : "monk";
-    applyRoleVoice(u, role, lang);
+    stopRoleAudio();
+    const l = lessons[activeIndex] || lessons[0];
+    const audioRole = role || (cls === "ja" ? "question" : "question");
     speaking = true;
     mark(cls);
     if(cls === "en") animateHeroWords(text, Math.max(900, splitHeroWords(text).length * 430));
+
+    const played = await playAudioCandidates(roleAudioCandidates(l.day, audioRole, lang), cls);
+    if(played){
+      mark(cls,true);
+      clearHeroWordHighlight();
+      setTimeout(resolve,220);
+      return;
+    }
+
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = lang;
+    const pickedVoice = pickVoice(lang);
+    if(pickedVoice) u.voice = pickedVoice;
+    const vp = roleVoiceParams(audioRole, lang);
+    u.rate = vp.rate;
+    u.pitch = vp.pitch;
     u.onend = u.onerror = ()=>{
       mark(cls,true);
       clearHeroWordHighlight();
@@ -2682,6 +2746,7 @@ function speakOne(text, lang, cls){
     speechSynthesis.speak(u);
   });
 }
+
 
 
 
@@ -2768,14 +2833,20 @@ async function playAll(){
   $("playHint").textContent = "播放中";
   startBgm();
   clearMarks();
-  await speakOne(l.en,"en-US","en");
-  await speakOne(l.ja,"ja-JP","ja");
+  await speakOne(l.en,"en-US","en","question");
+  await speakOne(l.ja,"ja-JP","ja","question");
+  const ans = (Array.isArray(l.choices) ? l.choices.find(x=>x && x.correct) : null) || null;
+  if(ans){
+    await speakOne(ans.en,"en-US","en","answer");
+    if(ans.ja) await speakOne(ans.ja,"ja-JP","ja","answer");
+  }
   speaking = false;
   $("play").textContent = "▶";
   $("playHint").textContent = "點一下播放";
 }
 
 function stopAll(){
+  stopRoleAudio();
   try{ speechSynthesis.cancel(); }catch(e){}
   speaking=false;
   $("play").textContent="▶";
