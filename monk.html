@@ -1237,6 +1237,62 @@ function pickVoice(lang){
   return candidates.length ? candidates[0].v : null;
 }
 
+
+// === V70A：老和尚回答聲線（不走 MP3，維持自動化） ===
+// 瀏覽器 TTS 無法真正指定「老人」，這裡用「男聲優先 + 慢速 + 低音」做老和尚感。
+function answerVoiceScore(v, lang){
+  const name = (v.name || "").toLowerCase();
+  const vlang = (v.lang || "").toLowerCase();
+  let score = voiceScore(v, lang);
+
+  if(lang === "en-US"){
+    if(vlang === "en-us") score += 70;
+    if(vlang.startsWith("en")) score += 45;
+    if(name.includes("daniel")) score += 80;
+    if(name.includes("fred")) score += 75;
+    if(name.includes("alex")) score += 55;
+    if(name.includes("david")) score += 50;
+    if(name.includes("mark")) score += 45;
+    if(name.includes("male")) score += 45;
+    if(name.includes("man")) score += 30;
+    if(name.includes("samantha") || name.includes("zira") || name.includes("female") || name.includes("woman")) score -= 120;
+  }
+
+  if(lang === "ja-JP"){
+    if(vlang === "ja-jp") score += 70;
+    if(vlang.startsWith("ja")) score += 45;
+    if(name.includes("otoya")) score += 90;
+    if(name.includes("ichiro")) score += 55;
+    if(name.includes("male") || name.includes("man")) score += 45;
+    if(name.includes("kyoko") || name.includes("female") || name.includes("woman")) score -= 120;
+  }
+  return score;
+}
+
+function pickAnswerVoice(lang){
+  refreshVoices();
+  const voices = BW_VOICES.length ? BW_VOICES : [];
+  if(!voices.length) return pickVoice(lang);
+  const candidates = voices
+    .filter(v => v && v.lang)
+    .map(v => ({ v, score: answerVoiceScore(v, lang) }))
+    .filter(x => x.score > 0)
+    .sort((a,b) => b.score - a.score);
+  return candidates.length ? candidates[0].v : pickVoice(lang);
+}
+
+function answerVoiceParams(lang){
+  if(lang === "ja-JP") return { rate: 0.66, pitch: 0.68, volume: 1 };
+  return { rate: 0.68, pitch: 0.62, volume: 1 };
+}
+
+function estimateSpeechTimeout(text, lang){
+  const s = String(text || "");
+  const units = lang === "ja-JP" ? s.length : Math.max(1, s.split(/\s+/).filter(Boolean).length);
+  const ms = lang === "ja-JP" ? 2800 + units * 230 : 2800 + units * 520;
+  return Math.max(9000, Math.min(42000, ms));
+}
+
 function prepareVoices(){
   refreshVoices();
   if("onvoiceschanged" in speechSynthesis){
@@ -2304,7 +2360,7 @@ function completeAfterAnswerSpeech(choice){
   speakChoiceAnswer(choice, ()=>{
     setTimeout(()=>{
       try{ completeToday(true); }catch(e){ console.warn("completeToday failed", e); }
-    }, 650);
+    }, 450);
   });
 }
 
@@ -2313,40 +2369,52 @@ function speakChoiceAnswer(choice, onDone){
     if(typeof onDone === "function") onDone();
     return;
   }
+
+  // V70A：正確答案用老和尚聲線；一定等 EN + JA 都讀完，才允許跳過關提示。
   try{ speechSynthesis.cancel(); }catch(e){}
   const seq = [];
-  if(choice.en) seq.push({ text: choice.en, lang: "en-US" });
-  if(choice.ja) seq.push({ text: choice.ja, lang: "ja-JP" });
-  let idx = 0;
-  let finished = false;
+  if(choice.en) seq.push({ text: choice.en, lang: "en-US", cls: "answer-en" });
+  if(choice.ja) seq.push({ text: choice.ja, lang: "ja-JP", cls: "answer-ja" });
 
+  let finished = false;
   function doneOnce(){
     if(finished) return;
     finished = true;
     if(typeof onDone === "function") onDone();
   }
 
-  function next(){
-    if(idx >= seq.length){
-      doneOnce();
-      return;
-    }
-    const item = seq[idx++];
-    const u = new SpeechSynthesisUtterance(item.text);
-    u.lang = item.lang;
-    const pickedVoice = pickVoice(item.lang);
-    if(pickedVoice) u.voice = pickedVoice;
-    u.rate = RATE;
-    u.pitch = 1;
-    u.onend = () => setTimeout(next, 260);
-    u.onerror = () => setTimeout(next, 260);
-    speechSynthesis.speak(u);
+  function speakAnswerItem(item){
+    return new Promise(resolve=>{
+      const u = new SpeechSynthesisUtterance(item.text);
+      u.lang = item.lang;
+      const pickedVoice = pickAnswerVoice(item.lang);
+      if(pickedVoice) u.voice = pickedVoice;
+      const params = answerVoiceParams(item.lang);
+      u.rate = params.rate;
+      u.pitch = params.pitch;
+      u.volume = params.volume;
+
+      let settled = false;
+      function finish(){
+        if(settled) return;
+        settled = true;
+        setTimeout(resolve, 420);
+      }
+      u.onend = finish;
+      u.onerror = finish;
+      speechSynthesis.speak(u);
+
+      // 只防止少數瀏覽器 onend 不回來；時間依句長估算，不再固定 12 秒提前放行。
+      setTimeout(finish, estimateSpeechTimeout(item.text, item.lang));
+    });
   }
 
-  next();
-
-  // 保險：避免某些手機瀏覽器 onend 不回來，最多 12 秒後才放行。
-  setTimeout(doneOnce, 12000);
+  (async()=>{
+    for(const item of seq){
+      await speakAnswerItem(item);
+    }
+    doneOnce();
+  })().catch(()=>doneOnce());
 }
 
 function speakTiny(text, lang){
@@ -2887,6 +2955,8 @@ function showVoiceDebugIfNeeded(){
 }
 setTimeout(showVoiceDebugIfNeeded, 1200);
 
+
+<!-- V70A: answer voice old male + wait EN/JA before reward -->
 </script>
 </body>
 </html>
