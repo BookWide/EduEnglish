@@ -347,62 +347,139 @@
   // 本機 output_v3 只作產檔/測試，不寫進 assets.cover_url。
   const STORAGE_BASE = "https://pub-578e9e060a104f24b6865e26eb941648.r2.dev";
 
-  // 心靈問答不是一般 player 影片，但要納入 assets 上下架，讓 index 篩選可控。
-  // category 仍固定用 "monk"，不要新增 zodiac 分類；星座問答之後也併入這條「心靈問答」線。
-  const MONK_ASSET_ROW = {
-    category: "monk",
-    slug: "wenchan-chuyi",
-    title: "心靈問答｜問禪・星座 20 句",
-    is_published: true,
-    review_status: "approved",
-    difficulty_level: 3,
-    duration_sec: 0,
-    cover_url: STORAGE_BASE + "/ads/monk/monk_01.png",
-    mp4_url: STORAGE_BASE + "/ads/monk/monk_01.mp4",
-    preferred_source: "mp4",
-    source_key: "bookwide-monk",
-    source_name: "BookWide 心靈問答",
-    source_url: "/monk.html",
-    source_batch: "monk-topic"
-  };
+  // 心靈問答改為資料驅動：
+  // 只維護 /data/monk/heart-topics.json，不再在 launch 寫死問禪/星座/戀愛心理。
+  const HEART_TOPICS_URLS = [
+    "/data/monk/heart-topics.json",
+    "../data/monk/heart-topics.json",
+    "./data/monk/heart-topics.json"
+  ].map(u => u + "?v=" + Date.now());
+
+  let HEART_TOPIC_ROWS = [];
+
+  function bwPath(u){
+    let s = String(u || "").trim();
+    if(!s) return s;
+    if(/^https?:\/\//i.test(s)) return s;
+    s = s.replace(/^\/EduEnglish\//, "/");
+    s = s.replace(/^EduEnglish\//, "/");
+    if(!s.startsWith("/")) s = "/" + s;
+    return s;
+  }
+
+  async function fetchJsonAny(urls){
+    let lastErr = null;
+    for(const u of urls){
+      try{
+        const res = await fetch(u, { cache:"no-store" });
+        if(res.ok) return await res.json();
+        lastErr = new Error("HTTP " + res.status + "｜" + u);
+      }catch(e){ lastErr = e; }
+    }
+    throw lastErr || new Error("fetch failed");
+  }
+
+  function heartTopicToAssetRow(t){
+    const slug = String(t && t.slug || "").trim();
+    const title = String(t && t.title || t && t.series || slug || "心靈問答").trim();
+    const isPublished = !!(t && t.is_published);
+    const cover = bwPath(t && t.cover_url) || `${STORAGE_BASE}/ads/monk/${slug}/monk_01.png`;
+    const mp4 = bwPath(t && t.mp4_url) || "";
+    return normalizeAssetMediaUrls({
+      category: "monk",
+      slug,
+      title,
+      is_published: isPublished,
+      review_status: isPublished ? "approved" : "pending",
+      difficulty_level: Number(t && t.difficulty_level || 3),
+      duration_sec: Number(t && t.duration_sec || 0),
+      cover_url: cover,
+      mp4_url: mp4,
+      preferred_source: "mp4",
+      source_key: "bookwide-heart",
+      source_name: "BookWide 心靈問答",
+      source_url: bwPath(t && t.direct_url) || `/heart.html?topic=${encodeURIComponent(slug)}`,
+      source_batch: "heart-topic",
+      __heart_topic: true
+    });
+  }
+
+  async function loadHeartTopicRows(){
+    try{
+      const cfg = await fetchJsonAny(HEART_TOPICS_URLS);
+      const topics = Array.isArray(cfg.topics) ? cfg.topics : [];
+      HEART_TOPIC_ROWS = topics.map(heartTopicToAssetRow).filter(r => r.slug);
+    }catch(e){
+      console.warn("[launch] load heart-topics failed, fallback wenchan only:", e);
+      HEART_TOPIC_ROWS = [normalizeAssetMediaUrls({
+        category: "monk",
+        slug: "wenchan-chuyi",
+        title: "心靈問答｜問禪・初一禪語 20 句",
+        is_published: true,
+        review_status: "approved",
+        difficulty_level: 3,
+        duration_sec: 0,
+        cover_url: STORAGE_BASE + "/ads/monk/wenchan-chuyi/monk_01.png",
+        mp4_url: STORAGE_BASE + "/ads/monk/wenchan-chuyi/monk_01.mp4",
+        preferred_source: "mp4",
+        source_key: "bookwide-heart",
+        source_name: "BookWide 心靈問答",
+        source_url: "/heart.html?topic=wenchan-chuyi",
+        source_batch: "heart-topic",
+        __heart_topic: true
+      })];
+    }
+    return HEART_TOPIC_ROWS;
+  }
 
   async function ensureMonkAssetRow(){
+    await loadHeartTopicRows();
     try{
-      const { data, error } = await supa
-        .from("assets")
-        .select("slug,category,is_published")
-        .eq("category","monk")
-        .eq("slug","wenchan-chuyi")
-        .maybeSingle();
-      if(error) throw error;
-      if(!data){
-        const { error: upErr } = await supa
+      for(const row of HEART_TOPIC_ROWS){
+        const { data, error } = await supa
           .from("assets")
-          .upsert(MONK_ASSET_ROW, { onConflict: "slug" });
-        if(upErr) throw upErr;
+          .select("slug,category,is_published")
+          .eq("category", "monk")
+          .eq("slug", row.slug)
+          .maybeSingle();
+        if(error) throw error;
+
+        // 沒有資料才新增；已有資料時不覆蓋上/下架狀態，避免重新整理又把下架打回上架。
+        if(!data){
+          const { error: upErr } = await supa
+            .from("assets")
+            .upsert(row, { onConflict: "slug" });
+          if(upErr) throw upErr;
+        }
       }
     }catch(e){
-      console.warn("[launch] ensureMonkAssetRow failed:", e);
+      console.warn("[launch] ensure heart topic rows failed:", e);
     }
   }
 
-  function getMonkVirtualRow(){
+  function getMonkVirtualRow(slug){
+    const row = HEART_TOPIC_ROWS.find(r => String(r.slug) === String(slug)) || HEART_TOPIC_ROWS[0];
     return normalizeAssetMediaUrls({
-      ...MONK_ASSET_ROW,
+      ...row,
       updated_at: new Date().toISOString(),
       __virtual_monk: true
     });
   }
 
   function ensureMonkInRows(){
-    if(!state.rows.some(r => String(r.category||'') === 'monk' && String(r.slug||'') === 'wenchan-chuyi')){
-      state.rows.push(getMonkVirtualRow());
+    // 只把 heart-topics.json 內的主題補進清單；每個主題可獨立上下架。
+    for(const row of HEART_TOPIC_ROWS){
+      if(!state.rows.some(r => String(r.category||"") === "monk" && String(r.slug||"") === String(row.slug||""))){
+        state.rows.push(getMonkVirtualRow(row.slug));
+      }
     }
   }
 
-  async function upsertMonkPublish(val){
+  async function upsertMonkPublish(val, row){
+    const slug = String(row && row.slug || "").trim();
+    const base = HEART_TOPIC_ROWS.find(r => String(r.slug) === slug) || heartTopicToAssetRow(row || {});
     const payload = {
-      ...MONK_ASSET_ROW,
+      ...base,
       is_published: !!val,
       review_status: val ? "approved" : "pending",
       updated_at: new Date().toISOString()
@@ -429,6 +506,7 @@
     const category = String(row && row.category || '').trim();
     const slug = String(row && row.slug || '').trim();
     if (!category || !slug) return '';
+    if (category === 'monk') return `${STORAGE_BASE}/ads/monk/${slug}/monk_01.png`;
     return `${STORAGE_BASE}/assets/${category}/${slug}.jpg`;
   }
 
@@ -436,6 +514,7 @@
     const category = String(row && row.category || '').trim();
     const slug = String(row && row.slug || '').trim();
     if (!category || !slug) return '';
+    if (category === 'monk') return `${STORAGE_BASE}/ads/monk/${slug}/monk_01.mp4`;
     return `${STORAGE_BASE}/videos/${category}/${slug}.mp4`;
   }
 
@@ -1125,7 +1204,7 @@
           setBusy(true, "更新影片狀態…");
           const row = state.rows.find(x => String(x.slug || '') === String(id || ''));
           if(row && row.category === 'monk'){
-            await upsertMonkPublish(val);
+            await upsertMonkPublish(val, row);
           }else{
             const payload = { is_published: val, review_status: val ? 'approved' : 'pending', updated_at: new Date().toISOString() };
             let q = supa.from('assets').update(payload).eq('slug', id);
@@ -1312,7 +1391,8 @@
     if (!category || !slug) return '';
 
     if (category === 'monk') {
-      const url = new URL('../monk.html', location.href);
+      const url = new URL('../heart.html', location.href);
+      url.searchParams.set('topic', slug);
       url.searchParams.set('preview', '1');
       return url.pathname + url.search;
     }
@@ -1465,7 +1545,7 @@ async function hardDeleteOne(slug){
     try {
       // Supabase update 需要分批避免 URL 太長
       const ids = rows.map(r => String(r.slug)).filter(s => s && s !== 'null' && s !== 'undefined');
-      if(rows.some(r => r.category === 'monk')) await upsertMonkPublish(val);
+      for(const mr of rows.filter(r => r.category === 'monk')) await upsertMonkPublish(val, mr);
       const chunk = 100;
       let done = 0;
 
