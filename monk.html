@@ -71,19 +71,37 @@ function setFailed(a){localStorage.setItem("bw_monk_light_failed",JSON.stringify
 function markFailed(day){const f=getFailed(); if(!f.includes(day)) setFailed([...f,day])}
 function coinCount(){const f=getFailed(); return getDone().filter(n=>n%COIN_EVERY===0 && !f.includes(n)).length}
 function setPlaying(v){playing=v;document.body.classList.toggle("playing",v);$("play").textContent=v?"⏸":"▶";$("hint").textContent=v?"播放中":"點一下播放"}
-function stopSpeech(){try{speechSynthesis.cancel()}catch(e){}setPlaying(false)}
-function voices(){return speechSynthesis.getVoices?speechSynthesis.getVoices():[]}
+let speechToken=0;
+function stopSpeech(){
+  speechToken++;
+  try{speechSynthesis.cancel()}catch(e){}
+  setPlaying(false);
+}
+function voices(){
+  try{return speechSynthesis.getVoices?speechSynthesis.getVoices():[]}catch(e){return[]}
+}
 function pickVoice(lang,role){
-  const vs=voices().filter(v=>(v.lang||"").toLowerCase().startsWith(lang.slice(0,2).toLowerCase()));
+  const want=lang.slice(0,2).toLowerCase();
+  const vs=voices().filter(v=>(v.lang||"").toLowerCase().startsWith(want));
   const male=["male","man","男","男性","daniel","david","alex","mark","fred","george","thomas","aaron","bruce","otoya","ichiro","kyushu"];
   const female=["female","woman","女","女性","samantha","zira","susan","victoria","karen","moira","tessa","kyoko","haruka","nanami","sayaka"];
-  return vs.sort((a,b)=>score(b)-score(a))[0]||null;
+  const picked=vs.map(v=>({v,score:score(v)})).sort((a,b)=>b.score-a.score)[0];
+  return picked?picked.v:null;
   function score(v){
     const n=(v.name||"").toLowerCase(), vl=(v.lang||"").toLowerCase();
-    let s=0; if(vl===lang.toLowerCase())s+=100;
+    let s=0;
+    if(vl===lang.toLowerCase())s+=120;
+    if(v.localService)s+=8;
     const isMale=male.some(x=>n.includes(x)), isFemale=female.some(x=>n.includes(x));
-    if(role==="student"){ if(isFemale)s+=160; if(isMale)s-=120; if(lang==="en-US"&&n.includes("samantha"))s+=90; if(lang==="ja-JP"&&(n.includes("kyoko")||n.includes("nanami")||n.includes("haruka")))s+=90; }
-    else{ if(isMale)s+=160; if(isFemale)s-=140; if(lang==="en-US"&&(n.includes("daniel")||n.includes("david")||n.includes("alex")))s+=90; if(lang==="ja-JP"&&(n.includes("otoya")||n.includes("ichiro")))s+=90; }
+    if(role==="student"){
+      if(isFemale)s+=160; if(isMale)s-=120;
+      if(lang==="en-US"&&n.includes("samantha"))s+=90;
+      if(lang==="ja-JP"&&(n.includes("kyoko")||n.includes("nanami")||n.includes("haruka")))s+=90;
+    }else{
+      if(isMale)s+=160; if(isFemale)s-=140;
+      if(lang==="en-US"&&(n.includes("daniel")||n.includes("david")||n.includes("alex")))s+=90;
+      if(lang==="ja-JP"&&(n.includes("otoya")||n.includes("ichiro")))s+=90;
+    }
     return s;
   }
 }
@@ -91,44 +109,69 @@ function voiceParams(lang,role){
   if(role==="student") return lang==="ja-JP" ? {rate:.76,pitch:1.18} : {rate:.78,pitch:1.12};
   return lang==="ja-JP" ? {rate:.62,pitch:.52} : {rate:.68,pitch:.58};
 }
-function makeUtter(text,lang,role){
-  const u=new SpeechSynthesisUtterance(text);
+function makeUtter(text,lang,role,useVoice=true){
+  const u=new SpeechSynthesisUtterance(String(text||""));
   const vp=voiceParams(lang,role);
   u.lang=lang;
-  u.voice=pickVoice(lang,role);
+  if(useVoice) u.voice=pickVoice(lang,role);
   u.rate=vp.rate;
   u.pitch=vp.pitch;
   u.volume=1;
   return u;
 }
-function speakOne(text,lang,role="monk"){
+function waitMs(ms){return new Promise(r=>setTimeout(r,ms))}
+function hardTimeoutMs(text,lang){
+  const s=String(text||"");
+  const units=lang==="ja-JP"?s.length:Math.max(1,s.split(/\s+/).filter(Boolean).length);
+  return Math.max(3500,Math.min(18000,lang==="ja-JP"?2200+units*210:2200+units*430));
+}
+function speakStep(text,lang,role,token){
   return new Promise(resolve=>{
-    stopSpeech();
-    const u=makeUtter(text,lang,role);
-    let done=false;
-    const finish=()=>{if(done)return;done=true;setPlaying(false);resolve()};
-    u.onend=finish;
-    u.onerror=finish;
-    setPlaying(true);
-    speechSynthesis.speak(u);
-    setTimeout(finish,Math.max(7000,String(text||"").length*650));
+    if(token!==speechToken || !text){resolve(false);return}
+    let finished=false, triedFallback=false, current=null;
+    const finish=ok=>{if(finished)return;finished=true;clearTimeout(timer);resolve(ok)};
+    const speakNow=useVoice=>{
+      if(token!==speechToken){finish(false);return}
+      current=makeUtter(text,lang,role,useVoice);
+      current.onend=()=>finish(true);
+      current.onerror=()=>{
+        // Edge / 手機有時指定 voice 會失敗；失敗時立刻改用該瀏覽器預設語音重讀同一句，不能直接跳到日文。
+        if(!triedFallback && useVoice){
+          triedFallback=true;
+          setTimeout(()=>speakNow(false),120);
+        }else{
+          finish(false);
+        }
+      };
+      try{
+        speechSynthesis.resume&&speechSynthesis.resume();
+        speechSynthesis.speak(current);
+      }catch(e){
+        if(!triedFallback && useVoice){triedFallback=true;setTimeout(()=>speakNow(false),120)}else finish(false);
+      }
+    };
+    const timer=setTimeout(()=>finish(false),hardTimeoutMs(text,lang));
+    speakNow(true);
   });
 }
-function speakPair(en,ja,role="monk"){
-  return new Promise(resolve=>{
-    stopSpeech();
-    const u1=makeUtter(en,"en-US",role);
-    const u2=makeUtter(ja,"ja-JP",role);
-    let done=false;
-    const finish=()=>{if(done)return;done=true;setPlaying(false);resolve()};
-    u1.onerror=()=>{ setTimeout(()=>speechSynthesis.speak(u2),120); };
-    u1.onend=()=>{ setTimeout(()=>speechSynthesis.speak(u2),180); };
-    u2.onend=finish;
-    u2.onerror=finish;
-    setPlaying(true);
-    speechSynthesis.speak(u1);
-    setTimeout(finish,Math.max(12000,(String(en||"").length+String(ja||"").length)*520));
-  });
+async function speakOne(text,lang,role="monk"){
+  stopSpeech();
+  const token=++speechToken;
+  setPlaying(true);
+  await waitMs(80);
+  await speakStep(text,lang,role,token);
+  if(token===speechToken)setPlaying(false);
+}
+async function speakPair(en,ja,role="monk"){
+  stopSpeech();
+  const token=++speechToken;
+  setPlaying(true);
+  await waitMs(80);
+  // 必須先英文，再日文；英文失敗時也先用預設語音重試英文，不可直接跳日文。
+  await speakStep(en,"en-US",role,token);
+  await waitMs(260);
+  await speakStep(ja,"ja-JP",role,token);
+  if(token===speechToken)setPlaying(false);
 }
 function speakQuestion(){return speakPair(lessons[idx].en,lessons[idx].ja,"student")}
 function speakAnswer(en,ja){return speakPair(en,ja,"monk")}
