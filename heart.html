@@ -36,6 +36,28 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
 .toast{position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:99;background:rgba(15,23,42,.9);border:1px solid var(--line);padding:10px 14px;border-radius:999px;font-size:13px;font-weight:900;display:none;max-width:min(360px,92vw);text-align:center}.toast.show{display:block}
 .modal{position:fixed;inset:0;z-index:999;display:none;place-items:center;padding:20px;background:rgba(7,18,37,.66);backdrop-filter:blur(8px)}.modal.show{display:grid}.box{width:min(340px,92vw);border:1px solid rgba(251,191,36,.38);border-radius:24px;background:linear-gradient(145deg,rgba(16,40,71,.98),rgba(9,25,47,.98));box-shadow:0 24px 60px rgba(0,0,0,.42);padding:18px;text-align:center}.box h2{margin:0 0 8px;font-size:21px}.box p{margin:0 0 12px;color:#dbeafe;font-weight:850;line-height:1.45}.box button{width:100%;border:0;border-radius:999px;padding:10px 12px;background:linear-gradient(135deg,#f59e0b,#22c55e);color:#fff;font-weight:950}
 @media(max-width:390px){.hero{height:214px;border-radius:18px}.app{padding-left:7px;padding-right:7px}}
+
+/* === Doctor-style read-along highlight: 英文逐字變色，日文整句變色 === */
+.heroWord{
+  display:inline-block;
+  padding:0 2px;
+  border-radius:7px;
+  transition:transform .14s ease,color .14s ease,background .14s ease;
+}
+.heroWord.on{
+  color:#fde047;
+  background:rgba(251,191,36,.18);
+  transform:translateY(-2px) scale(1.035);
+}
+.ja.on{
+  color:#fde047 !important;
+  text-shadow:0 0 18px rgba(250,204,21,.42),0 3px 16px rgba(0,0,0,.86) !important;
+}
+.zh.on{
+  color:#fde68a !important;
+  text-shadow:0 0 14px rgba(250,204,21,.30),0 3px 16px rgba(0,0,0,.86) !important;
+}
+
 </style>
 </head>
 <body>
@@ -73,6 +95,7 @@ let HEART_QUESTIONS_URL = "";
 let HEART_PHOTOS_URL = "";
 let HEART_BGM_URL = "";
 
+function escapeHtml(s){return String(s??"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#39;");}
 function bwPath(u){
   let s = String(u || "").trim();
   if(!s) return s;
@@ -244,7 +267,70 @@ function zenRewardText(day,totalDone){
   if(totalDone%FORMAL_COIN_EVERY===0)return `已完成 ${totalDone}/${TOTAL}，本階段消耗 1 個正式金幣；目前共消耗 ${cost} 個。`;
   return `已完成 ${totalDone}/${TOTAL}；每10句消耗1個正式金幣，目前共消耗 ${cost} 個。`;
 }
-function setPlaying(v){playing=v;document.body.classList.toggle("playing",v);$("play").textContent=v?"⏸":"▶";$("hint").textContent=v?"播放中":"點一下播放";duckBgm(v)}
+function setPlaying(v){playing=v;document.body.classList.toggle("playing",v);$("play").textContent=v?"⏸":"▶";$("hint").textContent=v?"播放中":"點一下播放";duckBgm(v);if(!v)clearHeroWordHighlight()}
+
+function splitHeroWords(text){
+  return String(text || "").trim().split(/\s+/).filter(Boolean);
+}
+function renderHeroText(l){
+  const en = $("heroEn");
+  const ja = $("heroJa");
+  const zh = $("heroZh");
+  if(en){
+    const words = splitHeroWords(l && l.en);
+    en.innerHTML = words.map((w,i)=>`<span class="heroWord" data-word="${i}">${escapeHtml(w)}</span>`).join(" ");
+  }
+  if(ja){
+    ja.textContent = (l && l.ja) || "";
+    ja.classList.remove("on");
+  }
+  if(zh){
+    zh.textContent = (l && l.zh) || "";
+    zh.classList.remove("on");
+  }
+}
+function clearHeroWordHighlight(){
+  document.querySelectorAll(".heroWord").forEach(x=>x.classList.remove("on"));
+  const ja = $("heroJa");
+  const zh = $("heroZh");
+  if(ja) ja.classList.remove("on");
+  if(zh) zh.classList.remove("on");
+}
+function animateHeroWords(text, ms, token){
+  const words = splitHeroWords(text);
+  if(!words.length) return;
+  const start = performance.now();
+  const total = Math.max(700, ms || words.length * 430);
+  function step(now){
+    if(token !== speechToken || !playing){
+      clearHeroWordHighlight();
+      return;
+    }
+    const p = Math.min(0.999, (now - start) / total);
+    const idxNow = Math.min(words.length - 1, Math.floor(p * words.length));
+    document.querySelectorAll(".heroWord").forEach((el,i)=>el.classList.toggle("on", i === idxNow));
+    if(p < 0.999) requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+}
+function setHeroLangActive(lang,on){
+  const ja = $("heroJa");
+  const zh = $("heroZh");
+  if(!on){
+    clearHeroWordHighlight();
+    return;
+  }
+  clearHeroWordHighlight();
+  if(lang === "ja-JP" && ja) ja.classList.add("on");
+  if(lang === "zh-TW" && zh) zh.classList.add("on");
+}
+function estimateSpeechMs(text, lang){
+  const s = String(text || "");
+  if(!s) return 700;
+  if(lang === "ja-JP" || lang === "zh-TW") return Math.max(900, s.length * 155);
+  return Math.max(900, splitHeroWords(s).length * 460);
+}
+
 let speechToken=0;
 function stopSpeech(){
   speechToken++;
@@ -303,7 +389,12 @@ function speakStep(text,lang,role,token){
   return new Promise(resolve=>{
     if(token!==speechToken || !text){resolve(false);return}
     let finished=false, triedFallback=false, current=null;
-    const finish=ok=>{if(finished)return;finished=true;clearTimeout(timer);resolve(ok)};
+    const shouldHeroHighlight = role === "student" && lessons[idx] && (String(text||"") === String(lessons[idx].en||"") || String(text||"") === String(lessons[idx].ja||"") || String(text||"") === String(lessons[idx].zh||""));
+    if(shouldHeroHighlight){
+      if(lang === "en-US") animateHeroWords(text, estimateSpeechMs(text,lang), token);
+      else setHeroLangActive(lang,true);
+    }
+    const finish=ok=>{if(finished)return;finished=true;clearTimeout(timer);if(shouldHeroHighlight)clearHeroWordHighlight();resolve(ok)};
     const speakNow=useVoice=>{
       if(token!==speechToken){finish(false);return}
       current=makeUtter(text,lang,role,useVoice);
@@ -445,7 +536,7 @@ function render(){
   idx=Math.max(0,Math.min(idx,Math.max(0,lessons.length-1))); localStorage.setItem("bw_heart_idx_"+HEART_TOPIC_SLUG,idx);
   const l=lessons[idx]; answered=false; correct=false; stopSpeech();
   showMedia(photos.length?photos[idx%photos.length]:(HEART_TOPIC&&HEART_TOPIC.cover_url?HEART_TOPIC.cover_url:"")); $("stage").textContent=`第 ${idx+1} 關`; $("title").textContent=l.title; $("scene").textContent=l.scene;
-  $("heroEn").textContent=l.en; $("heroJa").textContent=l.ja; $("heroZh").textContent=l.zh;
+  renderHeroText(l);
   const d=getDone(); $("done").textContent=`${d.length}/${TOTAL}`; $("coins").textContent=`耗${coinCount()}金`; $("nextCoin").textContent=zenProgressText();
   $("complete").textContent=d.includes(l.day)?"已完成":"先答題"; $("complete").classList.remove("ready");
   const cs=[...l.choices].sort(()=>Math.random()-.5); $("choices").innerHTML="";
