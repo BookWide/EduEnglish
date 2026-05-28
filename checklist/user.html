@@ -221,6 +221,7 @@
       }
     }
   </style>
+
 </head>
 
 <body>
@@ -276,81 +277,109 @@
       </div>
     </div>
   </div>
-  <script src="https://unpkg.com/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
-  <script>
-// BookWide Admin | 使用者清單 R9
-// 版面保留原 user.html；修正 R8 anon key，且不再自動踢回首頁。
 
-const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
-const SUPABASE_ANON =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJqZWFqcndwbXJnY3ppbW1yZmx4byIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
+<script src="https://unpkg.com/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
+<script>
 
-const supa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+  const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
+  const SUPABASE_ANON =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
-// R9：不要在 user.html 自動踢回首頁，避免「一進頁面就被登出」。
-// 只做檢查；失敗就顯示錯誤，保留目前登入狀態。
+  const supa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-function esc(v){
-  return String(v ?? '').replace(/[&<>"]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[s]));
-}
+  // ✅ 商業化：不要 alert，直接導回（避免暴露後台）
+  const DENY_SIGNIN = "/index.html?denied=signin";
+  const DENY_ADMIN  = "/index.html?denied=admin";
+  const DENY_PAUSED = "/index.html?denied=paused";
+  const DENY_PROFILE= "/index.html?denied=profile";
 
-function fmtTW(ts){
-  if (!ts) return '—';
-  try{
-    const d = ts instanceof Date ? ts : new Date(ts);
-    if (isNaN(d.getTime())) return '—';
-    return d.toLocaleString('zh-TW', { timeZone:'Asia/Taipei', hour12:false });
-  }catch(_){ return '—'; }
-}
+  function kick(url){
+    try { location.replace(url); } catch(e){ location.href = url; }
+  }
 
-function isOnlineWithin(ts, minutes=10){
-  if (!ts) return false;
-  const t = new Date(ts).getTime();
-  if (!Number.isFinite(t)) return false;
-  return (Date.now() - t) <= minutes * 60 * 1000;
-}
+  async function requireAdmin() {
+    const { data: sess } = await supa.auth.getSession();
+    const session = sess?.session;
+    if (!session?.user) return kick(DENY_SIGNIN);
 
-function pill(text, cls=''){
-  return `<span class="pill ${cls}">${esc(text)}</span>`;
-}
+    const { data: profile, error } = await supa
+      .from("profiles")
+      .select("email,is_admin,is_paused")
+      .eq("id", session.user.id)
+      .maybeSingle();
 
-async function requireAdmin(){
-  const { data: sess, error: sessErr } = await supa.auth.getSession();
-  if (sessErr) throw sessErr;
-  const session = sess?.session;
-  if (!session?.user) throw new Error('尚未登入或瀏覽器沒有保留 Supabase session');
+    if (error || !profile) return kick(DENY_PROFILE);
+    if (profile.is_paused) return kick(DENY_PAUSED);
+    if (!profile.is_admin) return kick(DENY_ADMIN);
 
-  const { data: profile, error } = await supa
-    .from('profiles')
-    .select('email,is_admin,is_paused')
-    .eq('id', session.user.id)
-    .maybeSingle();
+    const email = profile.email || session.user.email || "admin";
+    const el = document.getElementById("adminEmail");
+    if (el) el.textContent = email;
 
-  if (error) throw error;
-  if (!profile) throw new Error('找不到 profiles 管理員資料');
-  if (profile.is_paused) throw new Error('此帳號已被暫停');
-  if (!profile.is_admin) throw new Error('此帳號不是管理員');
+    supa.auth.onAuthStateChange((_event, s) => {
+      if (!s?.user) kick(DENY_SIGNIN);
+    });
+  }
 
-  const email = profile.email || session.user.email || 'admin';
-  const el = document.getElementById('adminEmail');
-  if (el) el.textContent = email;
-  return { session, profile };
-}
 
-(function main(){
+// BookWide Admin | 使用者清單  (R10 admin-auth restored layout)
+// 版面維持原 user.html；登入/管理員檢查抽 admin.html 可用寫法；資料讀取沿用 admin_users_overview。
+
+const main = async () => {
   const $ = (q, root=document) => root.querySelector(q);
+
+  const fmtTW = (ts) => {
+    if (!ts) return '—';
+    try{
+      const d = ts instanceof Date ? ts : new Date(ts);
+      if (isNaN(d.getTime())) return '—';
+      return d.toLocaleString('zh-TW', { timeZone:'Asia/Taipei', hour12:false });
+    }catch(_){ return '—'; }
+  };
+
+  const esc = (v) => String(v ?? '—')
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'",'&#039;');
+
+  const badge = (text, cls='') => `<span class="pill ${cls}">${esc(text)}</span>`;
+
+  const isOnlineWithin = (ts, min=10) => {
+    if (!ts) return false;
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return false;
+    return (Date.now() - d.getTime()) <= min * 60 * 1000;
+  };
+
   const tbody = $('#usersTable tbody');
   const q = $('#q');
   const btnRefresh = $('#btnRefresh');
   const metaText = $('#metaText');
   const state = { rows: [] };
 
+  try{
+    await requireAdmin();
+  }catch(e){
+    console.error('[BookWide] requireAdmin failed:', e);
+    tbody.innerHTML = `<tr><td class="hint" colspan="9">管理員檢查失敗：${esc(e?.message || e)}</td></tr>`;
+    metaText.textContent = '管理員檢查失敗';
+    return;
+  }
+
+  const isValid = (d) => d && !isNaN(d.getTime());
+
+  function getExpireValue(row){
+    return row?.expires_at || row?.expire_at || row?.order_expires_at || row?.profile_expires_at || null;
+  }
+
   function computeStatus(row){
-    const expRaw = row?.expires_at || row?.expire_at || null;
-    const exp = expRaw ? new Date(expRaw) : null;
-    const hasExp = exp && !isNaN(exp.getTime());
+    const raw = getExpireValue(row);
+    const exp = raw ? new Date(raw) : null;
+    const hasExp = isValid(exp);
     const ok = hasExp && exp.getTime() > Date.now();
-    const source = row?.expire_source ? String(row.expire_source) : (row?.expire_at ? 'orders' : 'profiles');
+    const source = row?.expire_source ? String(row.expire_source) : 'orders';
     return { exp, hasExp, ok, source };
   }
 
@@ -363,23 +392,25 @@ async function requireAdmin(){
 
     list.forEach((r, i) => {
       const st = computeStatus(r);
-      const onlineTag = isOnlineWithin(r.last_seen_at, 10) ? pill('使用中','online') : pill('離線','offline');
-      const adminTag = r.is_admin ? pill('管理員','pill-admin') : pill('—','');
-      const deviceTag = pill(r.device_text || '0/2','dev');
-      const statusTag = !st.hasExp ? pill('未訂閱','warn') : (st.ok ? pill('有效','ok') : pill('已到期','warn'));
+      const lastSign = fmtTW(r.last_sign_in_at);
+      const lastSeen = fmtTW(r.last_seen_at);
+      const online = isOnlineWithin(r.last_seen_at, 10) ? badge('使用中','online') : badge('離線','offline');
+      const adminTag = r.is_admin ? badge('管理員','pill-admin') : badge('—','');
+      const deviceTag = badge('0/2','');
+      const statusTag = !st.hasExp ? badge('未訂閱','warn') : (st.ok ? badge('有效','ok') : badge('已到期','warn'));
       const expireText = st.hasExp ? fmtTW(st.exp) : '—';
-      const sourceText = st.hasExp ? ` <span style="color:#6b7280;font-size:12px;">(${esc(st.source)})</span>` : '';
+      const statusNote = st.hasExp ? ` <span style="color:#6b7280;font-size:12px;">(${esc(st.source)})</span>` : '';
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td data-label="#">${i+1}</td>
-        <td data-label="Email">${esc(r.email || '—')}</td>
-        <td data-label="顯示名稱">${esc(r.display_name || '—')}</td>
-        <td data-label="最後登入">${fmtTW(r.last_sign_in_at)}</td>
-        <td data-label="最近在線">${fmtTW(r.last_seen_at)} ${onlineTag}</td>
+        <td data-label="Email">${esc(r.email)}</td>
+        <td data-label="顯示名稱">${esc(r.display_name)}</td>
+        <td data-label="最後登入">${lastSign}</td>
+        <td data-label="最近在線">${lastSeen} ${online}</td>
         <td data-label="裝置">${deviceTag}</td>
         <td data-label="管理員">${adminTag}</td>
-        <td data-label="狀態">${statusTag}${sourceText}</td>
+        <td data-label="狀態">${statusTag}${statusNote}</td>
         <td data-label="到期日">${expireText}</td>
       `;
       tbody.appendChild(tr);
@@ -396,7 +427,7 @@ async function requireAdmin(){
       metaText.textContent = `資料來源：admin_users_overview（${rows.length}）`;
       return rows;
     }catch(e){
-      console.warn('[BookWide] RPC admin_users_overview 不可用，改讀 profiles：', e?.message || e);
+      console.warn('[BookWide] RPC admin_users_overview 不可用，fallback profiles：', e?.message || e);
     }
 
     const cols = 'id,email,display_name,is_admin,is_paused,last_sign_in_at,last_seen_at,expires_at';
@@ -405,6 +436,18 @@ async function requireAdmin(){
     const rows = (r.data || []).filter(x => x && x.id).map(x => ({...x, expire_source:'profiles'}));
     metaText.textContent = `資料來源：profiles（${rows.length}）`;
     return rows;
+  }
+
+  async function load(){
+    tbody.innerHTML = `<tr><td class="hint" colspan="9">載入中…</td></tr>`;
+    try{
+      state.rows = await fetchRows();
+      applyFilterAndRender();
+    }catch(e){
+      console.error('[BookWide] load failed:', e);
+      tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：${esc(e?.message || e)}</td></tr>`;
+      metaText.textContent = '讀取失敗';
+    }
   }
 
   function applyFilterAndRender(){
@@ -417,43 +460,17 @@ async function requireAdmin(){
     render(list);
   }
 
-  async function load(){
-    tbody.innerHTML = `<tr><td class="hint" colspan="9">載入中…</td></tr>`;
-    try{
-      state.rows = await fetchRows();
-      applyFilterAndRender();
-    }catch(e){
-      console.error('[BookWide] 使用者清單讀取失敗：', e);
-      tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：${esc(e?.message || e)}</td></tr>`;
-      metaText.textContent = '讀取失敗';
-    }
-  }
-
   q.addEventListener('input', applyFilterAndRender);
   btnRefresh.addEventListener('click', load);
+  await load();
+};
 
-  requireAdmin()
-    .then(load)
-    .catch(e => {
-      console.error('[BookWide] requireAdmin failed:', e);
-      document.getElementById('adminEmail').textContent = '檢查失敗';
-      tbody.innerHTML = `<tr><td class="hint" colspan="9">管理員檢查失敗：${esc(e?.message || e)}</td></tr>`;
-    });
-})();
-  </script>
+main().catch(err => {
+  console.error('[BookWide] user.html R10 main() failed:', err);
+  const tbody = document.querySelector('#usersTable tbody');
+  if (tbody) tbody.innerHTML = `<tr><td class="hint" colspan="9">頁面錯誤：${String(err?.message || err)}</td></tr>`;
+});
+
+</script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
