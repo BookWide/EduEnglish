@@ -221,9 +221,8 @@
       }
     }
   </style>
-
-  <!-- 載入 supa.js（會把 BW 掛到 window.BW） -->
-  <script type="module" src="../supa.js?v=20251109g"></script>
+  <!-- 使用與 admin.html 相同的 Supabase 載入方式，避免 supa.js / BW.requireAdmin 卡住 -->
+  <script src="https://unpkg.com/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
 </head>
 
 <body>
@@ -280,88 +279,112 @@
     </div>
   </div>
 
-  <script type="module">
-    
-// BookWide Admin | 使用者清單  (R6 stable)
-// - 先走 RPC: admin_users_overview()（server 端彙總 orders+profiles）
-// - RPC 不可用則 fallback profiles（仍可列出使用者，但到期可能不含訂單覆蓋）
-// - 全部程式包在 main()，避免頂層語法/return/await 差異造成整頁掛掉
+  <script>
+/*
+  BookWide Admin | 使用者清單 R7 direct-supabase
+  修正重點：
+  1) 不再依賴 ../supa.js 與 window.BW.requireAdmin()，改用 admin.html 相同的 Supabase UMD + requireAdmin。
+  2) 先確認目前登入者 profile.is_admin，再讀 users。
+  3) RPC admin_users_overview 可用就用；不可用就 fallback profiles + orders。
+  4) 所有錯誤會顯示在畫面與 Console，不再停在「讀取中」。
+*/
 
-const main = async () => {
-  const $ = (q, root=document) => root.querySelector(q);
+const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
+const SUPABASE_ANON =
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
 
-  const ready = () => new Promise((resolve) => {
-    if (window.BW && window.BW.supa) return resolve();
-    const t = setInterval(() => {
-      if (window.BW && window.BW.supa) { clearInterval(t); resolve(); }
-    }, 50);
-    setTimeout(() => { clearInterval(t); resolve(); }, 8000);
+const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+window.supa = supa;
+
+const DENY_SIGNIN = "/index.html?denied=signin";
+const DENY_ADMIN  = "/index.html?denied=admin";
+const DENY_PAUSED = "/index.html?denied=paused";
+const DENY_PROFILE= "/index.html?denied=profile";
+
+function kick(url){
+  try { location.replace(url); } catch(e){ location.href = url; }
+}
+
+function esc(v){
+  return String(v ?? '—')
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'","&#39;");
+}
+
+function fmtTW(ts){
+  if (!ts) return '—';
+  try{
+    const d = ts instanceof Date ? ts : new Date(ts);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleString('zh-TW', { timeZone:'Asia/Taipei', hour12:false });
+  }catch(_){ return '—'; }
+}
+
+function pill(text, cls=''){
+  return `<span class="pill ${cls}">${esc(text)}</span>`;
+}
+
+function isOnlineWithin(ts, minutes=10){
+  if (!ts) return false;
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return false;
+  return (Date.now() - d.getTime()) <= minutes * 60 * 1000;
+}
+
+async function requireAdmin(){
+  const { data: sess, error: sessErr } = await supa.auth.getSession();
+  if (sessErr) throw sessErr;
+
+  const session = sess?.session;
+  if (!session?.user) return kick(DENY_SIGNIN);
+
+  const { data: profile, error } = await supa
+    .from("profiles")
+    .select("id,email,is_admin,is_paused")
+    .eq("id", session.user.id)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!profile) return kick(DENY_PROFILE);
+  if (profile.is_paused) return kick(DENY_PAUSED);
+  if (!profile.is_admin) return kick(DENY_ADMIN);
+
+  const email = profile.email || session.user.email || "admin";
+  const el = document.getElementById("adminEmail");
+  if (el) el.textContent = email;
+
+  supa.auth.onAuthStateChange((_event, s) => {
+    if (!s?.user) kick(DENY_SIGNIN);
   });
 
-  const fmtTW = (ts) => {
-    if (!ts) return '—';
-    try{
-      const d = new Date(ts);
-      if (isNaN(d.getTime())) return '—';
-      return d.toLocaleString('zh-TW', { timeZone:'Asia/Taipei', hour12:false });
-    }catch(_){
-      return '—';
-    }
-  };
+  return { session, profile };
+}
 
-  const badge = (text, cls='') => `<span class="pill ${cls}">${text}</span>`;
-
-  const withTimeout = (promise, ms=3000) => Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
-  ]);
-
-  await ready();
-
-  if (!window.BW || !window.BW.supa){
-    $('#adminEmail').textContent = 'supa.js 未載入';
-    const tbody = $('#usersTable tbody');
-    if (tbody) tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：supa.js / window.BW.supa 沒有載入。請檢查 ../supa.js 路徑、版本或快取。</td></tr>`;
-    return;
-  }
-
-  const supa = window.BW.supa;
-
-  // 先顯示登入者，避免 requireAdmin 卡住時整頁停在「讀取中」
-  try{
-    const { data } = await supa.auth.getUser();
-    $('#adminEmail').textContent = data?.user?.email ? data.user.email : '—';
-  }catch(_){
-    $('#adminEmail').textContent = '—';
-  }
-
-  // admin guard：不再無限 await，避免 requireAdmin / admins 讀取卡住造成整頁不載入
-  try{
-    if (window.BW.requireAdmin) await withTimeout(window.BW.requireAdmin(), 3000);
-  }catch(e){
-    console.warn('[BookWide] requireAdmin timeout/failed，繼續嘗試讀取清單：', e?.message || e);
-  }
-
-  // heartbeat（存在就啟動）
-  try{ window.BW.startHeartbeat?.(2); }catch(_){}
-
+(async function main(){
+  const $ = (q, root=document) => root.querySelector(q);
   const tbody = $('#usersTable tbody');
   const q = $('#q');
   const btnRefresh = $('#btnRefresh');
   const metaText = $('#metaText');
-
   const state = { rows: [] };
 
-  const isValid = (d) => d && !isNaN(d.getTime());
-  const nowMs = () => Date.now();
+  function setError(place, e){
+    const msg = String(e?.message || e || 'unknown error');
+    console.error('[BookWide user.html]', place, e);
+    metaText.textContent = `${place} 失敗：${msg}`;
+    tbody.innerHTML = `<tr><td class="hint" colspan="9">${esc(place)} 失敗：${esc(msg)}</td></tr>`;
+  }
 
   function computeStatus(row){
-    const exp = row?.expires_at ? new Date(row.expires_at) : null;
-    const hasExp = isValid(exp);
-    const ok = hasExp && exp.getTime() > nowMs();
-    const source = row?.expire_source ? String(row.expire_source) : 'profiles';
-    const statusText = !hasExp ? '未訂閱' : (ok ? `有效（${source}.expires_at）` : `已到期（${source}：${fmtTW(exp)}）`);
-    return { exp, hasExp, ok, source, statusText };
+    const raw = row?.expires_at || row?.expire_at || row?.subscription_expires_at;
+    const exp = raw ? new Date(raw) : null;
+    const hasExp = exp && !isNaN(exp.getTime());
+    const ok = hasExp && exp.getTime() > Date.now();
+    const source = row?.expire_source ? String(row.expire_source) : (row?.expire_at ? 'orders' : 'profiles');
+    return { exp, hasExp, ok, source };
   }
 
   function render(list){
@@ -370,102 +393,126 @@ const main = async () => {
       tbody.innerHTML = `<tr><td class="hint" colspan="9">沒有資料</td></tr>`;
       return;
     }
+
     list.forEach((r, i) => {
       const st = computeStatus(r);
+      const online = isOnlineWithin(r.last_seen_at, 10) ? pill('使用中','online') : pill('離線','offline');
+      const adminTag = r.is_admin ? pill('管理員','pill-admin') : pill('—','');
+      const deviceTag = pill('0/2','');
 
-      const lastSign = fmtTW(r.last_sign_in_at);
-      const lastSeen = fmtTW(r.last_seen_at);
-
-      const online = (() => {
-        try{
-          return BW.isOnlineWithin?.(r.last_seen_at, 10) ? badge('使用中','ok') : badge('離線','');
-        }catch(_){
-          return badge('—','');
-        }
-      })();
-
-      const adminTag = r.is_admin ? badge('管理員','ok') : badge('—','');
-      const deviceTag = badge('0/2',''); // 這頁目前只顯示佔位（避免讀 device 表造成不穩）
-
-      const statusTag = (() => {
-        if (!st.hasExp) return badge('未訂閱','warn');
-        return st.ok ? badge('有效','ok') : badge('已到期','bad');
-      })();
+      const statusTag = !st.hasExp
+        ? pill('未訂閱','warn')
+        : (st.ok ? pill('有效','ok') : pill('已到期','warn'));
 
       const expireText = st.hasExp ? fmtTW(st.exp) : '—';
-      const statusNote = st.hasExp ? ` <span class="muted">(${st.statusText})</span>` : '';
-
-      const name = (r.display_name || '—').replaceAll('<','&lt;').replaceAll('>','&gt;');
-      const email = (r.email || '—').replaceAll('<','&lt;').replaceAll('>','&gt;');
+      const sourceNote = st.hasExp ? ` <span style="color:#6b7280;font-size:12px;">(${esc(st.source)})</span>` : '';
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${i+1}</td>
-        <td>${email}</td>
-        <td>${name}</td>
-        <td>${lastSign}</td>
-        <td>${lastSeen} ${online}</td>
-        <td>${deviceTag}</td>
-        <td>${adminTag}</td>
-        <td>${statusTag}${statusNote}</td>
-        <td>${expireText}</td>
+        <td data-label="#">${i+1}</td>
+        <td data-label="Email">${esc(r.email)}</td>
+        <td data-label="顯示名稱">${esc(r.display_name || r.full_name || '')}</td>
+        <td data-label="最後登入">${fmtTW(r.last_sign_in_at)}</td>
+        <td data-label="最近在線">${fmtTW(r.last_seen_at)} ${online}</td>
+        <td data-label="裝置">${deviceTag}</td>
+        <td data-label="管理員">${adminTag}</td>
+        <td data-label="狀態">${statusTag}${sourceNote}</td>
+        <td data-label="到期日">${expireText}</td>
       `;
       tbody.appendChild(tr);
     });
   }
 
-  async function fetchRows(){
-    metaText.textContent = '讀取中…';
-    // 1) RPC
+  function applyFilterAndRender(){
+    const kw = (q.value || '').trim().toLowerCase();
+    const list = !kw ? state.rows : state.rows.filter(r => {
+      return String(r.email || '').toLowerCase().includes(kw)
+          || String(r.display_name || r.full_name || '').toLowerCase().includes(kw);
+    });
+    render(list);
+  }
+
+  async function fetchByRPC(){
+    const vr = await supa.rpc('admin_users_overview');
+    if (vr.error) throw vr.error;
+    const rows = (vr.data || []).filter(x => x && x.id);
+    metaText.textContent = `資料來源：admin_users_overview（${rows.length}）`;
+    return rows;
+  }
+
+  async function fetchByProfilesAndOrders(){
+    const cols = 'id,email,display_name,is_admin,is_paused,last_sign_in_at,last_seen_at,expires_at';
+    const p = await supa
+      .from('profiles')
+      .select(cols)
+      .order('last_seen_at', { ascending:false, nullsFirst:false });
+
+    if (p.error) throw p.error;
+
+    const rows = (p.data || []).filter(x => x && x.id);
+
+    // orders 補訂閱到期：失敗不讓整頁掛掉
+    let orderMap = new Map();
     try{
-      const vr = await supa.rpc('admin_users_overview');
-      if (vr.error) throw vr.error;
-      const rows = (vr.data || []).filter(x => x && x.id);
-      metaText.textContent = `資料來源：admin_users_overview（${rows.length}）`;
-      return rows;
+      const ids = rows.map(r => r.id).filter(Boolean);
+      if (ids.length){
+        const o = await supa
+          .from('orders')
+          .select('buyer_id,expire_at,status,created_at')
+          .in('buyer_id', ids)
+          .eq('status','paid')
+          .order('expire_at', { ascending:false, nullsFirst:false });
+
+        if (o.error) throw o.error;
+
+        for (const od of (o.data || [])){
+          if (!od?.buyer_id || !od?.expire_at) continue;
+          if (!orderMap.has(od.buyer_id)) orderMap.set(od.buyer_id, od.expire_at);
+        }
+      }
     }catch(e){
-      console.warn('[BookWide] RPC admin_users_overview 不可用，fallback profiles：', e?.message || e);
+      console.warn('[BookWide user.html] orders fallback failed, only profiles will be shown:', e?.message || e);
     }
 
-    // 2) fallback profiles
-    const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
-    const r = await supa.from('profiles').select(cols);
-    if (r.error) throw r.error;
-    const rows = (r.data || []).filter(x => x && x.id).map(x => ({...x, expire_source:'profiles'}));
-    metaText.textContent = `資料來源：profiles（${rows.length}）`;
-    return rows;
+    const merged = rows.map(r => {
+      const orderExp = orderMap.get(r.id);
+      if (orderExp) return { ...r, expires_at: orderExp, expire_source:'orders' };
+      return { ...r, expire_source:'profiles' };
+    });
+
+    metaText.textContent = `資料來源：profiles + orders fallback（${merged.length}）`;
+    return merged;
   }
 
   async function load(){
     tbody.innerHTML = `<tr><td class="hint" colspan="9">載入中…</td></tr>`;
+    metaText.textContent = '讀取中…';
+
     try{
-      state.rows = await fetchRows();
+      try{
+        state.rows = await fetchByRPC();
+      }catch(e){
+        console.warn('[BookWide user.html] RPC admin_users_overview 不可用，改用 fallback：', e?.message || e);
+        state.rows = await fetchByProfilesAndOrders();
+      }
       applyFilterAndRender();
     }catch(e){
-      console.error('[BookWide] load failed:', e);
-      tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：${String(e?.message || e)}</td></tr>`;
-      metaText.textContent = '讀取失敗';
+      setError('讀取使用者清單', e);
     }
-  }
-
-  function applyFilterAndRender(){
-    const kw = (q.value || '').trim().toLowerCase();
-    const list = !kw ? state.rows : state.rows.filter(r => {
-      const a = String(r.email || '').toLowerCase();
-      const b = String(r.display_name || '').toLowerCase();
-      return a.includes(kw) || b.includes(kw);
-    });
-    render(list);
   }
 
   q.addEventListener('input', applyFilterAndRender);
   btnRefresh.addEventListener('click', load);
 
+  try{
+    await requireAdmin();
+  }catch(e){
+    setError('管理員檢查', e);
+    return;
+  }
+
   load();
-};
-
-main().catch(err => console.error('[BookWide] user.html R6 main() failed:', err));
-
+})();
   </script>
 </body>
 </html>
