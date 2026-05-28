@@ -152,6 +152,24 @@
       color:var(--muted);
       font-size:13px;
     }
+
+    .badge{
+      display:inline-flex;
+      padding:2px 9px;
+      border-radius:999px;
+      border:1px solid #d1d5db;
+      font-size:12px;
+      align-items:center;
+      gap:4px;
+      white-space:nowrap;
+      background:#f9fafb;
+      color:#4b5563;
+    }
+    .badge.ok{border-color:var(--ok);color:var(--ok);background:#ecfdf3;}
+    .badge.warn{border-color:var(--warn);color:#c2410c;background:#fff7ed;}
+    .badge.bad{border-color:var(--danger);color:var(--danger);background:#fef2f2;}
+    .muted{color:var(--muted);font-size:12px;}
+
     .pill{
       display:inline-flex;
       padding:2px 9px;
@@ -223,7 +241,7 @@
   </style>
 
   <!-- 載入 supa.js（會把 BW 掛到 window.BW） -->
-  <script type="module" src="/supa.js?v=20260529_userfix1"></script>
+  <script type="module" src="../supa.js?v=20251109g"></script>
 </head>
 
 <body>
@@ -254,7 +272,7 @@
 
       <div class="meta" id="metaText">
         資料來源：<b>public.profiles</b>（使用者主檔）＋ <b>public.orders</b>（訂閱狀態補充）。<br/>
-        合併鍵：<b>orders.buyer_id = profiles.id</b>（不再產生 orders-only/unknown）。台灣時區顯示．最後活動 10 分鐘內視為「目前使用中」，這不是訂閱狀態。
+        合併鍵：<b>orders.buyer_id = profiles.id</b>（不再產生 orders-only/unknown）。台灣時區顯示．最後活動 10 分鐘內視為「目前使用中」；這不是訂閱狀態。
       </div>
 
       <div style="overflow-x:auto;">
@@ -290,20 +308,12 @@
 const main = async () => {
   const $ = (q, root=document) => root.querySelector(q);
 
-  const ready = () => new Promise((resolve, reject) => {
-    if (window.BW && window.BW.supa) return resolve(true);
-    const started = Date.now();
+  const ready = () => new Promise((resolve) => {
+    if (window.BW && window.BW.supa) return resolve();
     const t = setInterval(() => {
-      if (window.BW && window.BW.supa) {
-        clearInterval(t);
-        resolve(true);
-        return;
-      }
-      if (Date.now() - started > 8000) {
-        clearInterval(t);
-        reject(new Error('supa.js 沒有成功載入，window.BW.supa 不存在'));
-      }
-    }, 80);
+      if (window.BW && window.BW.supa) { clearInterval(t); resolve(); }
+    }, 50);
+    setTimeout(() => { clearInterval(t); resolve(); }, 8000);
   });
 
   const fmtTW = (ts) => {
@@ -317,41 +327,33 @@ const main = async () => {
     }
   };
 
-  const badge = (text, cls='') => `<span class="pill ${cls}">${text}</span>`;
+  const badge = (text, cls='') => `<span class="badge ${cls}">${text}</span>`;
 
+  await ready();
+
+  const supa = BW.supa;
+
+  // admin guard：加 timeout，避免 requireAdmin 卡住造成整頁一直「讀取中」
   try{
-    await ready();
+    if (typeof BW.requireAdmin === 'function') {
+      await withTimeout(BW.requireAdmin(), 5000, 'requireAdmin');
+    }
   }catch(e){
-    console.error('[BookWide] supa.js ready failed:', e);
-    const admin = $('#adminEmail');
-    if(admin) admin.textContent = 'supa.js 未載入';
-    const tb = $('#usersTable tbody');
-    if(tb) tb.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：supa.js 未載入。請確認 /supa.js 存在，並按 Ctrl+F5 重新整理。</td></tr>`;
-    return;
-  }
-
-  const supa = window.BW.supa;
-
-  // 顯示 admin email：先顯示，不要被 requireAdmin 卡住
-  try{
-    const { data } = await supa.auth.getUser();
-    $('#adminEmail').textContent = data?.user?.email ? data.user.email : '—';
-  }catch(_){
-    $('#adminEmail').textContent = '—';
-  }
-
-  // admin guard：加 timeout，避免卡在「讀取中」
-  try{
-    await Promise.race([
-      window.BW.requireAdmin?.(),
-      new Promise(resolve => setTimeout(resolve, 2500))
-    ]);
-  }catch(e){
-    console.error('[BookWide] requireAdmin failed:', e);
+    console.warn('[BookWide] requireAdmin timeout/failed, continue loading page:', e?.message || e);
+    // 若不是管理員，後面 Supabase/RLS 仍會擋住；但頁面不應永遠卡住。
   }
 
   // heartbeat（存在就啟動）
-  try{ window.BW.startHeartbeat?.(2); }catch(_){}
+  try{ BW.startHeartbeat?.(2); }catch(_){}
+
+  // 顯示 admin email
+  try{
+    const { data } = await withTimeout(supa.auth.getUser(), 5000, 'auth.getUser');
+    $('#adminEmail').textContent = data?.user?.email ? data.user.email : '—';
+  }catch(e){
+    console.warn('[BookWide] auth.getUser failed:', e?.message || e);
+    $('#adminEmail').textContent = '—';
+  }
 
   const tbody = $('#usersTable tbody');
   const q = $('#q');
@@ -362,6 +364,14 @@ const main = async () => {
 
   const isValid = (d) => d && !isNaN(d.getTime());
   const nowMs = () => Date.now();
+
+  function withTimeout(promise, ms, label){
+    return Promise.race([
+      Promise.resolve(promise),
+      new Promise((_, reject) => setTimeout(() => reject(new Error((label || 'operation') + ' timeout')), ms))
+    ]);
+  }
+
 
   function computeStatus(row){
     const exp = row?.expires_at ? new Date(row.expires_at) : null;
@@ -426,7 +436,7 @@ const main = async () => {
     metaText.textContent = '讀取中…';
     // 1) RPC
     try{
-      const vr = await supa.rpc('admin_users_overview');
+      const vr = await withTimeout(supa.rpc('admin_users_overview'), 8000, 'admin_users_overview');
       if (vr.error) throw vr.error;
       const rows = (vr.data || []).filter(x => x && x.id);
       metaText.textContent = `資料來源：admin_users_overview（${rows.length}）`;
@@ -437,7 +447,7 @@ const main = async () => {
 
     // 2) fallback profiles
     const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
-    const r = await supa.from('profiles').select(cols);
+    const r = await withTimeout(supa.from('profiles').select(cols), 8000, 'profiles.select');
     if (r.error) throw r.error;
     const rows = (r.data || []).filter(x => x && x.id).map(x => ({...x, expire_source:'profiles'}));
     metaText.textContent = `資料來源：profiles（${rows.length}）`;
