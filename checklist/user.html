@@ -221,8 +221,6 @@
       }
     }
   </style>
-  <!-- 使用與 admin.html 相同的 Supabase 載入方式，避免 supa.js / BW.requireAdmin 卡住 -->
-  <script src="https://unpkg.com/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
 </head>
 
 <body>
@@ -278,23 +276,16 @@
       </div>
     </div>
   </div>
-
+  <script src="https://unpkg.com/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
   <script>
-/*
-  BookWide Admin | 使用者清單 R7 direct-supabase
-  修正重點：
-  1) 不再依賴 ../supa.js 與 window.BW.requireAdmin()，改用 admin.html 相同的 Supabase UMD + requireAdmin。
-  2) 先確認目前登入者 profile.is_admin，再讀 users。
-  3) RPC admin_users_overview 可用就用；不可用就 fallback profiles + orders。
-  4) 所有錯誤會顯示在畫面與 Console，不再停在「讀取中」。
-*/
+// BookWide Admin | 使用者清單 R8
+// 版面保留原 user.html，只把讀取方式改成 admin.html 同款直接 Supabase，不再卡 BW.requireAdmin。
 
 const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
 const SUPABASE_ANON =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJIYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do".replace("IHW", "jea");
 
-const supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
-window.supa = supa;
+const supa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
 const DENY_SIGNIN = "/index.html?denied=signin";
 const DENY_ADMIN  = "/index.html?denied=admin";
@@ -306,12 +297,7 @@ function kick(url){
 }
 
 function esc(v){
-  return String(v ?? '—')
-    .replaceAll('&','&amp;')
-    .replaceAll('<','&lt;')
-    .replaceAll('>','&gt;')
-    .replaceAll('"','&quot;')
-    .replaceAll("'","&#39;");
+  return String(v ?? '').replace(/[&<>"]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[s]));
 }
 
 function fmtTW(ts){
@@ -323,47 +309,39 @@ function fmtTW(ts){
   }catch(_){ return '—'; }
 }
 
+function isOnlineWithin(ts, minutes=10){
+  if (!ts) return false;
+  const t = new Date(ts).getTime();
+  if (!Number.isFinite(t)) return false;
+  return (Date.now() - t) <= minutes * 60 * 1000;
+}
+
 function pill(text, cls=''){
   return `<span class="pill ${cls}">${esc(text)}</span>`;
 }
 
-function isOnlineWithin(ts, minutes=10){
-  if (!ts) return false;
-  const d = new Date(ts);
-  if (isNaN(d.getTime())) return false;
-  return (Date.now() - d.getTime()) <= minutes * 60 * 1000;
-}
-
 async function requireAdmin(){
-  const { data: sess, error: sessErr } = await supa.auth.getSession();
-  if (sessErr) throw sessErr;
-
+  const { data: sess } = await supa.auth.getSession();
   const session = sess?.session;
   if (!session?.user) return kick(DENY_SIGNIN);
 
   const { data: profile, error } = await supa
-    .from("profiles")
-    .select("id,email,is_admin,is_paused")
-    .eq("id", session.user.id)
+    .from('profiles')
+    .select('email,is_admin,is_paused')
+    .eq('id', session.user.id)
     .maybeSingle();
 
-  if (error) throw error;
-  if (!profile) return kick(DENY_PROFILE);
+  if (error || !profile) return kick(DENY_PROFILE);
   if (profile.is_paused) return kick(DENY_PAUSED);
   if (!profile.is_admin) return kick(DENY_ADMIN);
 
-  const email = profile.email || session.user.email || "admin";
-  const el = document.getElementById("adminEmail");
+  const email = profile.email || session.user.email || 'admin';
+  const el = document.getElementById('adminEmail');
   if (el) el.textContent = email;
-
-  supa.auth.onAuthStateChange((_event, s) => {
-    if (!s?.user) kick(DENY_SIGNIN);
-  });
-
   return { session, profile };
 }
 
-(async function main(){
+(function main(){
   const $ = (q, root=document) => root.querySelector(q);
   const tbody = $('#usersTable tbody');
   const q = $('#q');
@@ -371,16 +349,9 @@ async function requireAdmin(){
   const metaText = $('#metaText');
   const state = { rows: [] };
 
-  function setError(place, e){
-    const msg = String(e?.message || e || 'unknown error');
-    console.error('[BookWide user.html]', place, e);
-    metaText.textContent = `${place} 失敗：${msg}`;
-    tbody.innerHTML = `<tr><td class="hint" colspan="9">${esc(place)} 失敗：${esc(msg)}</td></tr>`;
-  }
-
   function computeStatus(row){
-    const raw = row?.expires_at || row?.expire_at || row?.subscription_expires_at;
-    const exp = raw ? new Date(raw) : null;
+    const expRaw = row?.expires_at || row?.expire_at || null;
+    const exp = expRaw ? new Date(expRaw) : null;
     const hasExp = exp && !isNaN(exp.getTime());
     const ok = hasExp && exp.getTime() > Date.now();
     const source = row?.expire_source ? String(row.expire_source) : (row?.expire_at ? 'orders' : 'profiles');
@@ -396,122 +367,81 @@ async function requireAdmin(){
 
     list.forEach((r, i) => {
       const st = computeStatus(r);
-      const online = isOnlineWithin(r.last_seen_at, 10) ? pill('使用中','online') : pill('離線','offline');
+      const onlineTag = isOnlineWithin(r.last_seen_at, 10) ? pill('使用中','online') : pill('離線','offline');
       const adminTag = r.is_admin ? pill('管理員','pill-admin') : pill('—','');
-      const deviceTag = pill('0/2','');
-
-      const statusTag = !st.hasExp
-        ? pill('未訂閱','warn')
-        : (st.ok ? pill('有效','ok') : pill('已到期','warn'));
-
+      const deviceTag = pill(r.device_text || '0/2','dev');
+      const statusTag = !st.hasExp ? pill('未訂閱','warn') : (st.ok ? pill('有效','ok') : pill('已到期','warn'));
       const expireText = st.hasExp ? fmtTW(st.exp) : '—';
-      const sourceNote = st.hasExp ? ` <span style="color:#6b7280;font-size:12px;">(${esc(st.source)})</span>` : '';
+      const sourceText = st.hasExp ? ` <span style="color:#6b7280;font-size:12px;">(${esc(st.source)})</span>` : '';
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td data-label="#">${i+1}</td>
-        <td data-label="Email">${esc(r.email)}</td>
-        <td data-label="顯示名稱">${esc(r.display_name || r.full_name || '')}</td>
+        <td data-label="Email">${esc(r.email || '—')}</td>
+        <td data-label="顯示名稱">${esc(r.display_name || '—')}</td>
         <td data-label="最後登入">${fmtTW(r.last_sign_in_at)}</td>
-        <td data-label="最近在線">${fmtTW(r.last_seen_at)} ${online}</td>
+        <td data-label="最近在線">${fmtTW(r.last_seen_at)} ${onlineTag}</td>
         <td data-label="裝置">${deviceTag}</td>
         <td data-label="管理員">${adminTag}</td>
-        <td data-label="狀態">${statusTag}${sourceNote}</td>
+        <td data-label="狀態">${statusTag}${sourceText}</td>
         <td data-label="到期日">${expireText}</td>
       `;
       tbody.appendChild(tr);
     });
   }
 
+  async function fetchRows(){
+    metaText.textContent = '讀取中…';
+
+    try{
+      const vr = await supa.rpc('admin_users_overview');
+      if (vr.error) throw vr.error;
+      const rows = (vr.data || []).filter(x => x && x.id);
+      metaText.textContent = `資料來源：admin_users_overview（${rows.length}）`;
+      return rows;
+    }catch(e){
+      console.warn('[BookWide] RPC admin_users_overview 不可用，改讀 profiles：', e?.message || e);
+    }
+
+    const cols = 'id,email,display_name,is_admin,is_paused,last_sign_in_at,last_seen_at,expires_at';
+    const r = await supa.from('profiles').select(cols).order('last_seen_at', { ascending:false, nullsFirst:false });
+    if (r.error) throw r.error;
+    const rows = (r.data || []).filter(x => x && x.id).map(x => ({...x, expire_source:'profiles'}));
+    metaText.textContent = `資料來源：profiles（${rows.length}）`;
+    return rows;
+  }
+
   function applyFilterAndRender(){
     const kw = (q.value || '').trim().toLowerCase();
     const list = !kw ? state.rows : state.rows.filter(r => {
-      return String(r.email || '').toLowerCase().includes(kw)
-          || String(r.display_name || r.full_name || '').toLowerCase().includes(kw);
+      const a = String(r.email || '').toLowerCase();
+      const b = String(r.display_name || '').toLowerCase();
+      return a.includes(kw) || b.includes(kw);
     });
     render(list);
   }
 
-  async function fetchByRPC(){
-    const vr = await supa.rpc('admin_users_overview');
-    if (vr.error) throw vr.error;
-    const rows = (vr.data || []).filter(x => x && x.id);
-    metaText.textContent = `資料來源：admin_users_overview（${rows.length}）`;
-    return rows;
-  }
-
-  async function fetchByProfilesAndOrders(){
-    const cols = 'id,email,display_name,is_admin,is_paused,last_sign_in_at,last_seen_at,expires_at';
-    const p = await supa
-      .from('profiles')
-      .select(cols)
-      .order('last_seen_at', { ascending:false, nullsFirst:false });
-
-    if (p.error) throw p.error;
-
-    const rows = (p.data || []).filter(x => x && x.id);
-
-    // orders 補訂閱到期：失敗不讓整頁掛掉
-    let orderMap = new Map();
-    try{
-      const ids = rows.map(r => r.id).filter(Boolean);
-      if (ids.length){
-        const o = await supa
-          .from('orders')
-          .select('buyer_id,expire_at,status,created_at')
-          .in('buyer_id', ids)
-          .eq('status','paid')
-          .order('expire_at', { ascending:false, nullsFirst:false });
-
-        if (o.error) throw o.error;
-
-        for (const od of (o.data || [])){
-          if (!od?.buyer_id || !od?.expire_at) continue;
-          if (!orderMap.has(od.buyer_id)) orderMap.set(od.buyer_id, od.expire_at);
-        }
-      }
-    }catch(e){
-      console.warn('[BookWide user.html] orders fallback failed, only profiles will be shown:', e?.message || e);
-    }
-
-    const merged = rows.map(r => {
-      const orderExp = orderMap.get(r.id);
-      if (orderExp) return { ...r, expires_at: orderExp, expire_source:'orders' };
-      return { ...r, expire_source:'profiles' };
-    });
-
-    metaText.textContent = `資料來源：profiles + orders fallback（${merged.length}）`;
-    return merged;
-  }
-
   async function load(){
     tbody.innerHTML = `<tr><td class="hint" colspan="9">載入中…</td></tr>`;
-    metaText.textContent = '讀取中…';
-
     try{
-      try{
-        state.rows = await fetchByRPC();
-      }catch(e){
-        console.warn('[BookWide user.html] RPC admin_users_overview 不可用，改用 fallback：', e?.message || e);
-        state.rows = await fetchByProfilesAndOrders();
-      }
+      state.rows = await fetchRows();
       applyFilterAndRender();
     }catch(e){
-      setError('讀取使用者清單', e);
+      console.error('[BookWide] 使用者清單讀取失敗：', e);
+      tbody.innerHTML = `<tr><td class="hint" colspan="9">讀取失敗：${esc(e?.message || e)}</td></tr>`;
+      metaText.textContent = '讀取失敗';
     }
   }
 
   q.addEventListener('input', applyFilterAndRender);
   btnRefresh.addEventListener('click', load);
 
-  try{
-    await requireAdmin();
-  }catch(e){
-    setError('管理員檢查', e);
-    return;
-  }
-
-  load();
+  requireAdmin()
+    .then(load)
+    .catch(e => {
+      console.error('[BookWide] requireAdmin failed:', e);
+      tbody.innerHTML = `<tr><td class="hint" colspan="9">管理員檢查失敗：${esc(e?.message || e)}</td></tr>`;
+    });
 })();
   </script>
 </body>
