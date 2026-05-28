@@ -152,24 +152,6 @@
       color:var(--muted);
       font-size:13px;
     }
-
-    .badge{
-      display:inline-flex;
-      padding:2px 9px;
-      border-radius:999px;
-      border:1px solid #d1d5db;
-      font-size:12px;
-      align-items:center;
-      gap:4px;
-      white-space:nowrap;
-      background:#f9fafb;
-      color:#4b5563;
-    }
-    .badge.ok{border-color:var(--ok);color:var(--ok);background:#ecfdf3;}
-    .badge.warn{border-color:var(--warn);color:#c2410c;background:#fff7ed;}
-    .badge.bad{border-color:var(--danger);color:var(--danger);background:#fef2f2;}
-    .muted{color:var(--muted);font-size:12px;}
-
     .pill{
       display:inline-flex;
       padding:2px 9px;
@@ -256,7 +238,7 @@
     </div>
 
     <h1>BookWide Admin｜使用者清單</h1>
-    <p class="sub">查看所有使用者登入紀錄、最後活動時間與訂閱期限。</p>
+    <p class="sub">查看所有使用者登入紀錄、在線狀態與訂閱期限。</p>
 
     <div class="tabs">
       <a class="tab active" href="user.html">使用者清單</a>
@@ -272,7 +254,7 @@
 
       <div class="meta" id="metaText">
         資料來源：<b>public.profiles</b>（使用者主檔）＋ <b>public.orders</b>（訂閱狀態補充）。<br/>
-        合併鍵：<b>orders.buyer_id = profiles.id</b>（不再產生 orders-only/unknown）。台灣時區顯示．最後活動 10 分鐘內視為「目前使用中」；這不是訂閱狀態。
+        合併鍵：<b>orders.buyer_id = profiles.id</b>（不再產生 orders-only/unknown）。台灣時區顯示．10 分鐘內視為「使用中」。
       </div>
 
       <div style="overflow-x:auto;">
@@ -283,7 +265,7 @@
               <th>Email</th>
               <th>顯示名稱</th>
               <th>最後登入</th>
-              <th>最後活動</th>
+              <th>最近在線</th>
               <th>裝置</th>
               <th>管理員</th>
               <th>狀態</th>
@@ -333,14 +315,12 @@ const main = async () => {
 
   const supa = BW.supa;
 
-  // admin guard：加 timeout，避免 requireAdmin 卡住造成整頁一直「讀取中」
+  // admin guard
   try{
-    if (typeof BW.requireAdmin === 'function') {
-      await withTimeout(BW.requireAdmin(), 5000, 'requireAdmin');
-    }
+    await BW.requireAdmin();
   }catch(e){
-    console.warn('[BookWide] requireAdmin timeout/failed, continue loading page:', e?.message || e);
-    // 若不是管理員，後面 Supabase/RLS 仍會擋住；但頁面不應永遠卡住。
+    console.error('[BookWide] requireAdmin failed:', e);
+    // requireAdmin 通常會自行 redirect；這裡就不硬做
   }
 
   // heartbeat（存在就啟動）
@@ -348,10 +328,9 @@ const main = async () => {
 
   // 顯示 admin email
   try{
-    const { data } = await withTimeout(supa.auth.getUser(), 5000, 'auth.getUser');
+    const { data } = await supa.auth.getUser();
     $('#adminEmail').textContent = data?.user?.email ? data.user.email : '—';
-  }catch(e){
-    console.warn('[BookWide] auth.getUser failed:', e?.message || e);
+  }catch(_){
     $('#adminEmail').textContent = '—';
   }
 
@@ -364,14 +343,6 @@ const main = async () => {
 
   const isValid = (d) => d && !isNaN(d.getTime());
   const nowMs = () => Date.now();
-
-  function withTimeout(promise, ms, label){
-    return Promise.race([
-      Promise.resolve(promise),
-      new Promise((_, reject) => setTimeout(() => reject(new Error((label || 'operation') + ' timeout')), ms))
-    ]);
-  }
-
 
   function computeStatus(row){
     const exp = row?.expires_at ? new Date(row.expires_at) : null;
@@ -396,7 +367,7 @@ const main = async () => {
 
       const online = (() => {
         try{
-          return BW.isOnlineWithin?.(r.last_seen_at, 10) ? badge('目前使用中','ok') : badge('目前離線','');
+          return BW.isOnlineWithin?.(r.last_seen_at, 10) ? badge('使用中','ok') : badge('離線','');
         }catch(_){
           return badge('—','');
         }
@@ -436,7 +407,7 @@ const main = async () => {
     metaText.textContent = '讀取中…';
     // 1) RPC
     try{
-      const vr = await withTimeout(supa.rpc('admin_users_overview'), 8000, 'admin_users_overview');
+      const vr = await supa.rpc('admin_users_overview');
       if (vr.error) throw vr.error;
       const rows = (vr.data || []).filter(x => x && x.id);
       metaText.textContent = `資料來源：admin_users_overview（${rows.length}）`;
@@ -447,7 +418,7 @@ const main = async () => {
 
     // 2) fallback profiles
     const cols = 'id, email, display_name, is_admin, is_paused, last_sign_in_at, last_seen_at, expires_at';
-    const r = await withTimeout(supa.from('profiles').select(cols), 8000, 'profiles.select');
+    const r = await supa.from('profiles').select(cols);
     if (r.error) throw r.error;
     const rows = (r.data || []).filter(x => x && x.id).map(x => ({...x, expire_source:'profiles'}));
     metaText.textContent = `資料來源：profiles（${rows.length}）`;
