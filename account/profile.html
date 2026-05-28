@@ -1174,7 +1174,7 @@ label{
           <div style="flex:1;min-width:0">
             <label>頭像</label>
             <input id="avatarFile" type="file" accept="image/*" class="input" />
-            <div class="hint">建議 JPG/PNG，系統會儲存為會員頭像</div>
+            <div class="hint">建議 JPG/PNG，系統會儲存為會員頭像</div><div id="avatarStatus" class="hint" style="margin-top:4px"></div>
           </div>
         </div>
 
@@ -1361,6 +1361,61 @@ label{
     ];
 
     const $ = (q, root = document) => root.querySelector(q);
+
+    function setAvatarCache(url) {
+      const v = String(url || '').trim();
+      if (!v) return;
+      try {
+        localStorage.setItem('avatar_url', v);
+        localStorage.setItem('profile_photo_url', v);
+        localStorage.setItem('bw_profile_photo_url', v);
+        const old = JSON.parse(localStorage.getItem('bw_user_profile') || '{}');
+        localStorage.setItem('bw_user_profile', JSON.stringify({ ...old, avatar_url: v, profile_photo_url: v, updated_at: new Date().toISOString() }));
+      } catch (_e) {}
+    }
+
+    function clearAvatarPreview() {
+      const img = $('#avatarPreview');
+      if (!img) return;
+      img.removeAttribute('src');
+    }
+
+    function setAvatarPreview(url) {
+      const img = $('#avatarPreview');
+      if (!img) return;
+      const v = String(url || '').trim();
+      if (!v) {
+        clearAvatarPreview();
+        return;
+      }
+      img.src = v;
+      setAvatarCache(v);
+    }
+
+    function setAvatarStatus(text, type = '') {
+      const el = $('#avatarStatus');
+      if (!el) return;
+      el.className = type === 'err' ? 'err' : type === 'ok' ? 'ok' : type === 'warn' ? 'warn' : 'hint';
+      el.textContent = text || '';
+    }
+
+    function validateAvatarFile(file) {
+      if (!file) return;
+      if (!/^image\//i.test(file.type || '')) {
+        throw new Error('頭像必須是圖片檔');
+      }
+      const max = 6 * 1024 * 1024;
+      if (file.size > max) {
+        throw new Error('頭像檔案太大，請小於 6MB');
+      }
+    }
+
+    function extFromFile(file) {
+      const raw = String(file?.name || '').split('.').pop() || '';
+      const ext = raw.toLowerCase();
+      return ext === 'png' ? 'png' : 'jpg';
+    }
+
     const msg = $('#msg');
     const debugBox = $('#debugBox');
     let selectedScenes = [];
@@ -1544,6 +1599,7 @@ label{
           renderLevelAssessment();
           setGuide('🔒 尚未登入：請先登入帳號，再進行訂閱與職業主題設定。');
           showMsg('warn', '未登入或登入狀態失效，請先回首頁重新登入');
+          setAvatarStatus('');
           setDebug('loadProfile: no user from auth.getUser()/getSession()');
           return;
         }
@@ -1586,7 +1642,7 @@ label{
         $('#line_id').value = data?.line_id ?? '';
         $('#wechat_id').value = data?.wechat_id ?? '';
         $('#address').value = data?.address ?? '';
-        $('#avatarPreview').src = data?.avatar_url || '';
+        setAvatarPreview(data?.avatar_url || '');
 
         const rawDomainCode = data?.domain_code ?? '';
         const domainCode = rawDomainCode === 'lifestyle' ? 'travel' : rawDomainCode;
@@ -1642,12 +1698,32 @@ label{
     }
 
     async function uploadAvatar(user, file) {
-      const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
-      const path = `${user.id}/avatar.${ext === 'png' ? 'png' : 'jpg'}`;
-      const up = await supabase.storage.from('avatars').upload(path, file, { upsert: true, contentType: file.type || 'image/jpeg' });
+      validateAvatarFile(file);
+
+      const ext = extFromFile(file);
+      const path = `${user.id}/avatar.${ext}`;
+      const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
+
+      setAvatarStatus('頭像上傳中…');
+
+      const up = await supabase.storage
+        .from('avatars')
+        .upload(path, file, {
+          upsert: true,
+          contentType,
+          cacheControl: '60'
+        });
+
       if (up.error) throw up.error;
+
       const { data } = supabase.storage.from('avatars').getPublicUrl(path);
-      return data?.publicUrl || null;
+      const publicUrl = data?.publicUrl || null;
+      if (!publicUrl) throw new Error('無法取得頭像公開網址');
+
+      const finalUrl = publicUrl + (publicUrl.includes('?') ? '&' : '?') + 'v=' + Date.now();
+      setAvatarPreview(finalUrl);
+      setAvatarStatus('頭像已上傳', 'ok');
+      return finalUrl;
     }
 
     function validateForm() {
@@ -1683,7 +1759,7 @@ label{
         let avatar_url = null;
         if (file) {
           avatar_url = await uploadAvatar(currentUser, file);
-          if (avatar_url) $('#avatarPreview').src = avatar_url;
+          if (avatar_url) setAvatarPreview(avatar_url);
         }
 
         const updateData = {
@@ -1717,6 +1793,9 @@ label{
         const { error: saveError } = await query;
         if (saveError) throw saveError;
 
+        if (avatar_url) setAvatarCache(avatar_url);
+        else if ($('#avatarPreview')?.src) setAvatarCache($('#avatarPreview').src);
+
         $('#onboarding_done_text').value = '已啟用學習控制台';
         applyProfileLock(true);
 
@@ -1744,6 +1823,24 @@ label{
     $('#btnRetakeLevel').addEventListener('click', () => {
       const next = encodeURIComponent('/account/profile.html?from=subscription');
       location.href = './level-survey.html?next=' + next;
+    });
+
+
+    $('#avatarFile')?.addEventListener('change', () => {
+      const file = $('#avatarFile').files?.[0];
+      if (!file) {
+        setAvatarStatus('');
+        return;
+      }
+      try {
+        validateAvatarFile(file);
+        const localUrl = URL.createObjectURL(file);
+        $('#avatarPreview').src = localUrl;
+        setAvatarStatus('已選擇照片，按「儲存」後才會正式上傳', 'warn');
+      } catch (e) {
+        $('#avatarFile').value = '';
+        setAvatarStatus(e.message || String(e), 'err');
+      }
     });
 
     $('#btnReload').addEventListener('click', loadProfile);
