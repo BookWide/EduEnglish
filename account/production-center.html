@@ -312,6 +312,10 @@ https://www.youtube.com/watch?v=..."></textarea>
         <img id="monkPreviewImage" alt="Monk preview">
       </div>
 
+      <div class="monk-auto-line" id="monkProgressBar">
+        目前進度：<span class="mono" id="monkProgressText">待命</span>
+      </div>
+
       <div class="monk-auto-line">
         自動：<span class="mono" id="monkAutoTitle">心靈問答｜—</span> ｜
         <span class="mono" id="monkAutoDirect">/heart.html?topic=—</span> ｜
@@ -1031,6 +1035,55 @@ error: ${data.last_error || "-"}`;
       if (el) el.textContent = text || "";
     }
 
+    let monkProgressTimer = null;
+
+    function renderMonkProgress(data) {
+      const el = document.getElementById("monkProgressText");
+      if (!el) return;
+      if (!data || (!data.status && !data.message)) {
+        el.textContent = "待命";
+        return;
+      }
+      const stageText = data.stage === "batch" ? "批量" : data.stage === "preview" ? "預覽" : "待命";
+      const statusMap = { idle: "待命", running: "進行中", done: "完成", error: "失敗" };
+      const statusText = statusMap[data.status] || (data.status || "待命");
+      const progressText = (data.total && Number(data.total) > 0) ? `${Number(data.current||0)}/${Number(data.total)}` : "—";
+      const msg = data.message || "";
+      const file = data.last_file ? ` ｜ ${String(data.last_file).split(/[\/]/).pop()}` : "";
+      el.textContent = `${statusText}｜${stageText}｜${progressText}｜${msg}${file}`;
+    }
+
+    async function fetchMonkProgress() {
+      const slug = cleanMonkSlug(document.getElementById("monkSlug")?.value || "");
+      if (!slug || !serverOnline) return;
+      try {
+        const res = await fetch(`${SERVER}/monk/progress?slug=${encodeURIComponent(slug)}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || (`HTTP ${res.status}`));
+        renderMonkProgress(data);
+        if (!data.running && (data.status === "done" || data.status === "error" || data.status === "idle")) {
+          stopMonkProgressPolling();
+        }
+      } catch (err) {
+        // keep silent; main request log already handles errors
+      }
+    }
+
+    function startMonkProgressPolling(startText = "已送出，等待主機回應...") {
+      stopMonkProgressPolling(false);
+      renderMonkProgress({status:"running", stage:"", current:0, total:0, message:startText});
+      fetchMonkProgress();
+      monkProgressTimer = setInterval(fetchMonkProgress, 1200);
+    }
+
+    function stopMonkProgressPolling(resetIdle = false) {
+      if (monkProgressTimer) {
+        clearInterval(monkProgressTimer);
+        monkProgressTimer = null;
+      }
+      if (resetIdle) renderMonkProgress({status:"idle", message:"待命"});
+    }
+
     function updateMonkLinks() {
       const slug = cleanMonkSlug(document.getElementById("monkSlug")?.value || "");
       const open = document.getElementById("monkOpenLink");
@@ -1275,6 +1328,7 @@ error: ${data.last_error || "-"}`;
       let payload;
       try { payload = getMonkPayload({force:true, regen:true}); } catch (e) { alert(e.message); return; }
       monkLog(force ? "重生 1 張預覽中..." : "產生 1 張預覽中...");
+      startMonkProgressPolling("已送出預覽要求，等待 OpenAI 回圖...");
       try {
         const res = await fetch(SERVER + "/monk/generate-preview", {
           method: "POST",
@@ -1289,9 +1343,13 @@ error: ${data.last_error || "-"}`;
           img.style.display = "block";
         }
         monkLog((data.log || []).join("\n") || JSON.stringify(data, null, 2));
+        if (data.progress) renderMonkProgress(data.progress); else await fetchMonkProgress();
+        stopMonkProgressPolling();
         refreshMonkRefStatus();
       } catch (err) {
         monkLog("預覽失敗：" + err.message);
+        renderMonkProgress({status:"error", message:"預覽失敗：" + err.message});
+        stopMonkProgressPolling();
       }
     }
 
@@ -1311,6 +1369,7 @@ error: ${data.last_error || "-"}`;
       try { payload = getMonkPayload(); } catch (e) { alert(e.message); return; }
       if (!confirm("確認目前預覽可以？\n\n接下來才會批量生成剩餘圖片，並依勾選執行 R2 / GitHub。")) return;
       monkLog("確認預覽，開始生成剩餘圖片...");
+      startMonkProgressPolling("已送出批量要求，等待主機開始跑圖...");
       try {
         const res = await fetch(SERVER + "/monk/accept-preview-batch", {
           method: "POST",
@@ -1320,10 +1379,14 @@ error: ${data.last_error || "-"}`;
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
         monkLog((data.log || []).join("\n") || JSON.stringify(data, null, 2));
+        if (data.progress) renderMonkProgress(data.progress); else await fetchMonkProgress();
+        stopMonkProgressPolling();
         updateMonkLinks();
         refreshMonkRefStatus();
       } catch (err) {
         monkLog("批量生成失敗：" + err.message);
+        renderMonkProgress({status:"error", message:"批量生成失敗：" + err.message});
+        stopMonkProgressPolling();
       }
     }
 
