@@ -96,6 +96,10 @@
     .monk-ref-line input[type="file"]{max-width:280px;color:#dbe7fb;font-size:12px}
     .monk-ref-line .btn{padding:9px 12px;border-radius:10px;font-size:13px}
     .monk-ref-list{margin-top:6px;color:#fcd34d;font-size:12px;line-height:1.35}
+    .monk-preview-line{margin-top:9px;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:#10203d;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .monk-preview-line .btn{padding:9px 12px;border-radius:10px;font-size:13px}
+    .monk-preview-note{font-size:12px;color:#fcd34d;line-height:1.35}
+    #monkPreviewImage{display:none;max-width:260px;border-radius:10px;border:1px solid var(--line);background:#081121}
     @media (max-width:900px){.monk-ref-line{grid-template-columns:1fr}.monk-ref-line input[type="file"]{max-width:100%}}
 
   </style>
@@ -227,7 +231,7 @@ https://www.youtube.com/watch?v=..."></textarea>
         </div>
         <div class="row">
           <button class="btn btn-secondary" type="button" onclick="loadMonkTopics()">讀取主題</button>
-          <button class="btn" type="button" onclick="createMonkTopic()">建立/更新 + R2 + GitHub</button>
+          <button class="btn btn-secondary" type="button" onclick="createMonkTopic()">直接建立（跳過預覽）</button>
         </div>
       </div>
 
@@ -275,6 +279,14 @@ https://www.youtube.com/watch?v=..."></textarea>
         </div>
         <input id="monkUserRefFiles" type="file" accept="image/*" multiple>
         <button class="btn btn-secondary" type="button" onclick="uploadMonkUserRefs()">上傳信徒照片</button>
+      </div>
+
+      <div class="monk-preview-line">
+        <button class="btn" type="button" onclick="generateMonkPreview(false)">先產 1 張預覽</button>
+        <button class="btn btn-secondary" type="button" onclick="generateMonkPreview(true)">重生預覽</button>
+        <button class="btn" style="background:#16a34a" type="button" onclick="acceptMonkPreviewBatch()">確認預覽，再生成剩餘 + R2</button>
+        <span class="monk-preview-note">先看角色與場景，OK 後才批量產圖，避免一次燒 OpenAI 額度。</span>
+        <img id="monkPreviewImage" alt="Monk preview">
       </div>
 
       <div class="monk-auto-line">
@@ -1084,30 +1096,22 @@ error: ${data.last_error || "-"}`;
       }
     }
 
-    async function createMonkTopic() {
-      if (!serverOnline) {
-        alert("主機目前無法連線，先按『測試主機』或確認 07 server 已啟動。");
-        return;
-      }
-
+    function getMonkPayload(extra = {}) {
       const slug = cleanMonkSlug(document.getElementById("monkSlug")?.value || "");
       const series = String(document.getElementById("monkSeries")?.value || "").trim();
       const title = monkAutoTitle(series);
       const display_category = String(document.getElementById("monkDisplayCategory")?.value || "").trim() || series;
       const difficulty_label = String(document.getElementById("monkDifficultyLabel")?.value || "中級").trim();
-      const status = "ready";
-
-      if (!slug) return alert("請先填主題英文代號 slug，例如 wealth-power");
-      if (!series) return alert("請先填主題名稱 series，例如 生財旺勢");
-
-      const payload = {
+      if (!slug) throw new Error("請先填主題英文代號 slug，例如 wealth-power");
+      if (!series) throw new Error("請先填主題名稱 series，例如 生財旺勢");
+      return {
         slug,
         series,
         title,
         display_category,
         difficulty_label,
         difficulty_level: difficulty_label === "入門" ? 1 : difficulty_label === "進階" ? 3 : 2,
-        status,
+        status: "ready",
         public: !!document.getElementById("monkPublished")?.checked,
         is_published: !!document.getElementById("monkPublished")?.checked,
         questions_json: `/data/monk/${slug}/${slug}_questions.json`,
@@ -1117,10 +1121,77 @@ error: ${data.last_error || "-"}`;
         user_ref_dir: `ads/monk/${slug}/_user_ref`,
         use_user_ref: true,
         run_r2: !!document.getElementById("monkRunR2")?.checked,
-        git_push: !!document.getElementById("monkGitPush")?.checked
+        git_push: !!document.getElementById("monkGitPush")?.checked,
+        ...extra
       };
+    }
 
-      monkLog("送出 Monk 主題任務中...");
+    async function generateMonkPreview(force=false) {
+      if (!serverOnline) {
+        alert("主機目前無法連線，先按『測試主機』或確認 07 server 已啟動。");
+        return;
+      }
+      let payload;
+      try { payload = getMonkPayload({force}); } catch (e) { alert(e.message); return; }
+      monkLog(force ? "重生 1 張預覽中..." : "產生 1 張預覽中...");
+      try {
+        const res = await fetch(SERVER + "/monk/generate-preview", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+        const img = document.getElementById("monkPreviewImage");
+        if (img && data.preview_data_url) {
+          img.src = data.preview_data_url;
+          img.style.display = "block";
+        }
+        monkLog((data.log || []).join("\n") || JSON.stringify(data, null, 2));
+      } catch (err) {
+        monkLog("預覽失敗：" + err.message);
+      }
+    }
+
+    async function acceptMonkPreviewBatch() {
+      if (!serverOnline) {
+        alert("主機目前無法連線，先按『測試主機』或確認 07 server 已啟動。");
+        return;
+      }
+      let payload;
+      try { payload = getMonkPayload(); } catch (e) { alert(e.message); return; }
+      if (!confirm("確認目前預覽可以？\n\n接下來才會批量生成剩餘圖片，並依勾選執行 R2 / GitHub。")) return;
+      monkLog("確認預覽，開始生成剩餘圖片...");
+      try {
+        const res = await fetch(SERVER + "/monk/accept-preview-batch", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+        monkLog((data.log || []).join("\n") || JSON.stringify(data, null, 2));
+        updateMonkLinks();
+      } catch (err) {
+        monkLog("批量生成失敗：" + err.message);
+      }
+    }
+
+    async function createMonkTopic() {
+      if (!serverOnline) {
+        alert("主機目前無法連線，先按『測試主機』或確認 07 server 已啟動。");
+        return;
+      }
+
+      let payload;
+      try {
+        payload = getMonkPayload();
+      } catch (e) {
+        alert(e.message);
+        return;
+      }
+
+      monkLog("直接建立 Monk 主題中（會跳過預覽；正式建議先用預覽流程）...");
       try {
         const res = await fetch(SERVER + "/monk/create-topic", {
           method: "POST",
