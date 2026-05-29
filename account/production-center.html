@@ -97,6 +97,12 @@
     .monk-ref-line .btn{padding:9px 12px;border-radius:10px;font-size:13px}
     .monk-ref-list{margin-top:6px;color:#fcd34d;font-size:12px;line-height:1.35}
     .monk-preview-line{margin-top:9px;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:#10203d;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .monk-question-line{margin-top:9px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#10203d;display:grid;grid-template-columns:120px 1fr auto;gap:10px;align-items:end}
+    .monk-question-line .label{font-size:12px;color:#cbd5e1;margin-bottom:4px}
+    .monk-question-line input,.monk-question-line textarea{width:100%;box-sizing:border-box;background:#0b1325;border:1px solid var(--line);color:#fff;border-radius:10px;padding:9px 10px;font-size:13px}
+    .monk-question-line textarea{min-height:40px;resize:vertical}
+    .monk-question-preview{white-space:pre-wrap;margin-top:8px;padding:9px;border:1px solid var(--line);border-radius:10px;background:#0b1325;color:#e5eefc;font-size:12px;line-height:1.45;max-height:160px;overflow:auto}
+    @media (max-width:900px){.monk-question-line{grid-template-columns:1fr}.monk-question-line .btn{width:100%}}
     .monk-preview-line .btn{padding:9px 12px;border-radius:10px;font-size:13px}
     .monk-preview-note{font-size:12px;color:#fcd34d;line-height:1.35}
     .monk-ref-summary{margin-top:8px;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#10203d;font-size:12px;color:#dbe7fb}
@@ -282,6 +288,19 @@ https://www.youtube.com/watch?v=..."></textarea>
         <label class="switch-row"><input type="checkbox" id="monkRunR2" checked><span>跑 17 送 R2</span></label>
         <label class="switch-row"><input type="checkbox" id="monkGitPush" checked><span>GitHub push</span></label>
       </div>
+
+      <div class="monk-question-line">
+        <div>
+          <div class="label">題數</div>
+          <input id="monkQuestionCount" type="number" min="4" max="30" value="20">
+        </div>
+        <div>
+          <div class="label">題庫風格</div>
+          <textarea id="monkQuestionStyle">白話搞笑、老和尚吐槽、財富觀念、短句、不要玄學、錯誤選項要荒謬好笑</textarea>
+        </div>
+        <button class="btn" type="button" onclick="generateMonkQuestions()">產生題庫 questions.json</button>
+      </div>
+      <div class="monk-question-preview" id="monkQuestionPreview">先產生 questions.json，滿意後再產圖。空題庫會被 07 擋下，不會亂燒 OpenAI 圖。</div>
 
       <div class="monk-ref-line">
         <div>
@@ -1305,6 +1324,8 @@ error: ${data.last_error || "-"}`;
         display_category,
         difficulty_label,
         difficulty_level: difficulty_label === "入門" ? 1 : difficulty_label === "進階" ? 3 : 2,
+        question_count: Number(document.getElementById("monkQuestionCount")?.value || 20),
+        question_style: String(document.getElementById("monkQuestionStyle")?.value || "").trim(),
         status: "ready",
         public: !!document.getElementById("monkPublished")?.checked,
         is_published: !!document.getElementById("monkPublished")?.checked,
@@ -1318,6 +1339,41 @@ error: ${data.last_error || "-"}`;
         git_push: !!document.getElementById("monkGitPush")?.checked,
         ...extra
       };
+    }
+
+    async function generateMonkQuestions() {
+      if (!serverOnline) {
+        alert("主機目前無法連線，先按『測試主機』或確認 07 server 已啟動。");
+        return;
+      }
+      let payload;
+      try { payload = getMonkPayload({overwrite_questions:true}); } catch (e) { alert(e.message); return; }
+      if (!confirm("要產生 / 覆蓋這個主題的 questions.json？\n\n這會呼叫 OpenAI 文字模型產題庫。")) return;
+      monkLog("開始產生題庫 questions.json...");
+      startMonkProgressPolling("已送出題庫生成要求，等待 OpenAI 回傳 JSON...");
+      try {
+        const res = await fetch(SERVER + "/monk/generate-questions", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
+        const prev = document.getElementById("monkQuestionPreview");
+        if (prev) {
+          const sample = (data.sample || []).map(x =>
+            `第${x.day}題｜${x.scene}\nQ：${x.zh}\n正解：${x.correct}\n和尚：${x.reply}`
+          ).join("\n\n");
+          prev.textContent = `已產生 ${data.question_count || 0} 題：${data.questions_json || ""}\n\n${sample}`;
+        }
+        monkLog((data.log || []).join("\n") || JSON.stringify(data, null, 2));
+        if (data.progress) renderMonkProgress(data.progress); else await fetchMonkProgress();
+        stopMonkProgressPolling();
+      } catch (err) {
+        monkLog("題庫生成失敗：" + err.message);
+        renderMonkProgress({status:"error", message:"題庫生成失敗：" + err.message});
+        stopMonkProgressPolling();
+      }
     }
 
     async function generateMonkPreview(force=false) {
