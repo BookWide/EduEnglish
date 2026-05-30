@@ -704,54 +704,91 @@ function bwCoinTopupUrl(){
 function readJsonSafe(v){
   try{return JSON.parse(v)}catch(e){return null}
 }
+function clearSupabaseAuthStorage(){
+  const remove = [];
+  for(let i=0;i<localStorage.length;i++){
+    const k = localStorage.key(i) || "";
+    if(/^sb-.*-auth-token$/.test(k)) remove.push(k);
+  }
+  remove.forEach(k=>localStorage.removeItem(k));
+}
+function decodeJwtPayload(token){
+  try{
+    const part = String(token||"").split(".")[1];
+    if(!part) return null;
+    const b64 = part.replace(/-/g,"+").replace(/_/g,"/");
+    const json = decodeURIComponent(Array.prototype.map.call(atob(b64), c => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2)).join(""));
+    return JSON.parse(json);
+  }catch(e){return null}
+}
+function isJwtExpired(token){
+  const p = decodeJwtPayload(token);
+  if(!p || !p.exp) return false;
+  return (p.exp * 1000) < (Date.now() + 30000);
+}
 function getSupabaseAccessToken(){
+  let best = "";
   for(let i=0;i<localStorage.length;i++){
     const k=localStorage.key(i) || "";
     if(!/^sb-.*-auth-token$/.test(k)) continue;
     const raw=localStorage.getItem(k) || "";
     const j=readJsonSafe(raw);
     if(!j) continue;
-    if(j.access_token) return j.access_token;
-    if(j.currentSession && j.currentSession.access_token) return j.currentSession.access_token;
-    if(j.session && j.session.access_token) return j.session.access_token;
+    const candidates = [
+      j.access_token,
+      j.currentSession && j.currentSession.access_token,
+      j.session && j.session.access_token
+    ].filter(Boolean);
+    for(const token of candidates){
+      if(token && !isJwtExpired(token)) return token;
+      if(token) best = token;
+    }
   }
-  return "";
+  return best && !isJwtExpired(best) ? best : "";
+}
+function redirectLoginBecauseTokenInvalid(message){
+  clearSupabaseAuthStorage();
+  alert(message || "登入已過期，請重新登入。");
+  location.href = bwLoginUrl();
 }
 async function deductHeartCoinBackend(block){
   const token=getSupabaseAccessToken();
   if(!token){
-    alert("請先登入 BookWide，才能進入扣金幣關卡。");
-    location.href=bwLoginUrl();
+    redirectLoginBecauseTokenInvalid("請先登入 BookWide，才能進入扣金幣關卡。");
     return false;
   }
-  let res=null, j=null;
+  let res=null, j=null, raw="";
   try{
     res=await fetch(HEART_DEDUCT_COIN_URL,{
       method:"POST",
       headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},
       body:JSON.stringify({topic_slug:HEART_TOPIC_SLUG,block_no:block,cost:1})
     });
-    j=await res.json().catch(()=>null);
+    raw=await res.text();
+    try{j=raw?JSON.parse(raw):null;}catch(e){j=null;}
   }catch(e){
     console.error(e);
     alert("扣金幣服務連線失敗，請稍後再試。");
     return false;
   }
+
+  const code = j && j.code ? String(j.code) : ("HTTP_"+(res && res.status));
+  const msg = j && j.message ? String(j.message) : raw;
+
   if(!res.ok || !j || !j.ok){
-    const code=j && j.code ? j.code : ("HTTP_"+(res && res.status));
     if(code==="NO_COINS"){
       alert("金幣不足，請先購買或取得金幣。");
       location.href=bwCoinTopupUrl();
       return false;
     }
-    if(code==="NO_LOGIN" || code==="INVALID_TOKEN"){
-      alert("登入狀態失效，請重新登入。");
-      location.href=bwLoginUrl();
+    if(code==="NO_LOGIN" || code==="INVALID_TOKEN" || code.startsWith("UNAUTHORIZED") || /invalid jwt|jwt|auth/i.test(msg)){
+      redirectLoginBecauseTokenInvalid("登入狀態失效，請重新登入後再扣金幣。");
       return false;
     }
-    alert((j && j.message) ? j.message : "扣金幣失敗，請稍後再試。");
+    alert(msg || "扣金幣失敗，請稍後再試。");
     return false;
   }
+
   if(typeof j.remaining_coins !== "undefined"){
     try{localStorage.setItem("bookwide_coin_balance", String(j.remaining_coins));}catch(e){}
   }
@@ -761,7 +798,7 @@ async function confirmPaidBlockIfNeeded(targetIndex){
   const block=paidBlockForIndex(targetIndex);
   if(!block || isPaidBlockUnlocked(block))return true;
 
-  const ok=confirm("心靈問答扣款確認\\n\\n"+paidBlockCostLabel(block)+"\\n\\n確認後才進入第 "+(targetIndex+1)+" 關。");
+  const ok=confirm("心靈問答扣款確認\n\n"+paidBlockCostLabel(block)+"\n\n確認後才進入第 "+(targetIndex+1)+" 關。");
   if(!ok){
     toast("已取消，停留目前關");
     return false;
@@ -825,8 +862,8 @@ function setFailed(a){localStorage.setItem("bw_heart_failed_"+HEART_TOPIC_SLUG,J
 function markFailed(day){const f=getFailed(); if(!f.includes(day)) setFailed([...f,day])}
 function completedCount(){return getDone().length}
 function formalCoinCost(){
-  // 正式上線：第5關進入 5~14 扣第1金；第15關進入 15~20 扣第2金。
-  // 不再用 completedCount/10，避免第13關仍顯示耗0金。
+  // 正式扣款：第5關扣第1金；第15關扣第2金。
+  // 不用 completedCount/10，避免已進入付費區仍顯示耗0金。
   let paid = 0;
   if(isPaidBlockUnlocked(1)) paid += 1;
   if(isPaidBlockUnlocked(2)) paid += 1;
@@ -846,7 +883,7 @@ function zenProgressText(){
 }
 function zenRewardText(day,totalDone){
   const cost=formalCoinCost();
-  if(totalDone>=20)return `${ZEN_LEVEL_NAME}完成：20句共消耗 ${cost} 個正式金幣。`;
+  if(totalDone>=20)return `${ZEN_LEVEL_NAME}完成：20句共消耗 ${cost} 個金幣。`;
   if(day>=15)return `已完成 ${totalDone}/${TOTAL}；目前已消耗 ${cost} 個金幣。`;
   if(day>=5)return `已完成 ${totalDone}/${TOTAL}；第5～14關已消耗 1 個金幣。`;
   return `已完成 ${totalDone}/${TOTAL}；第5關開始確認扣款。`;
@@ -1318,9 +1355,7 @@ function render(){
   // 如果還沒按「完成本關」就重整，會造成答案自動黏住。
   const completedDays = getDone();
   const isCompletedDay = completedDays.includes(l.day);
-
-  // 初次載入頁面時，不還原舊答案畫面，避免看到綠色答案與和尚開示黏住。
-  // 只有使用者自己往回看已完成題時，才還原舊答案。
+  // 初次載入不還原舊答案，避免綠色答案與和尚開示黏住；手動回看已完成題才還原。
   const pastAnswer = (isCompletedDay && !window.BW_HEART_FRESH_LOAD) ? getHeartAnswerByDay(l.day) : null;
   showMonkReply(null,false); answered=!!pastAnswer; correct=!!(pastAnswer && pastAnswer.is_correct); stopSpeech(); renderLessonLink(l);
   showMedia(photos.length?photos[idx%photos.length]:(HEART_TOPIC&&HEART_TOPIC.cover_url?HEART_TOPIC.cover_url:"")); $("stage").textContent=`第 ${idx+1} 關`; $("title").textContent=l.title; $("scene").textContent=l.scene;
@@ -1446,10 +1481,6 @@ loadHeartTopic()
   .then(loadPhotos)
   .then(async ()=>{
     if(idx >= lessons.length) idx = 0;
-
-    // 修正答案黏住：
-    // 重新進頁時一律跳到第一個「尚未完成」關卡。
-    // 如果 localStorage 已有舊答案紀錄，也不在初始畫面還原綠色答案與和尚開示。
     const firstTodo = firstUnfinishedIndex();
     const doneList = getDone();
     const allDone = doneList.length >= lessons.length;
@@ -1467,6 +1498,8 @@ loadHeartTopic()
     alert("心靈問答載入失敗：\n" + (e.message || e));
   });
 
+console.log("[BookWide] heart-v8-review-only-completed", HEART_TOPIC_SLUG);
+
 window.bwHeartResetThisTopic = function(){
   localStorage.removeItem("bw_heart_done_"+HEART_TOPIC_SLUG);
   localStorage.removeItem("bw_heart_failed_"+HEART_TOPIC_SLUG);
@@ -1476,7 +1509,7 @@ window.bwHeartResetThisTopic = function(){
   localStorage.removeItem("bw_heart_paid_block_"+HEART_TOPIC_SLUG+"_2");
   location.reload();
 };
-console.log("[BookWide] heart-no-sticky-v2", HEART_TOPIC_SLUG, "reset helper: bwHeartResetThisTopic()");
+console.log("[BookWide] heart-official-v3", HEART_TOPIC_SLUG, "reset helper: bwHeartResetThisTopic()");
 
 </script>
 </body>
