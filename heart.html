@@ -689,17 +689,94 @@ function unlockPaidBlock(block){
   if(!block)return;
   localStorage.setItem(MONK_PAY_PREFIX+block,"1");
 }
-function confirmPaidBlockIfNeeded(targetIndex){
+
+const HEART_DEDUCT_COIN_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/heart-deduct-coin";
+
+function bwReturnUrl(){
+  return encodeURIComponent(location.pathname + location.search + location.hash);
+}
+function bwLoginUrl(){
+  return "/login.html?redirect=" + bwReturnUrl();
+}
+function bwCoinTopupUrl(){
+  return "/account/subscription.html?redirect=" + bwReturnUrl();
+}
+function readJsonSafe(v){
+  try{return JSON.parse(v)}catch(e){return null}
+}
+function getSupabaseAccessToken(){
+  for(let i=0;i<localStorage.length;i++){
+    const k=localStorage.key(i) || "";
+    if(!/^sb-.*-auth-token$/.test(k)) continue;
+    const raw=localStorage.getItem(k) || "";
+    const j=readJsonSafe(raw);
+    if(!j) continue;
+    if(j.access_token) return j.access_token;
+    if(j.currentSession && j.currentSession.access_token) return j.currentSession.access_token;
+    if(j.session && j.session.access_token) return j.session.access_token;
+  }
+  return "";
+}
+async function deductHeartCoinBackend(block){
+  const token=getSupabaseAccessToken();
+  if(!token){
+    alert("請先登入 BookWide，才能進入扣金幣關卡。");
+    location.href=bwLoginUrl();
+    return false;
+  }
+  let res=null, j=null;
+  try{
+    res=await fetch(HEART_DEDUCT_COIN_URL,{
+      method:"POST",
+      headers:{"Content-Type":"application/json","Authorization":"Bearer "+token},
+      body:JSON.stringify({topic_slug:HEART_TOPIC_SLUG,block_no:block,cost:1})
+    });
+    j=await res.json().catch(()=>null);
+  }catch(e){
+    console.error(e);
+    alert("扣金幣服務連線失敗，請稍後再試。");
+    return false;
+  }
+  if(!res.ok || !j || !j.ok){
+    const code=j && j.code ? j.code : ("HTTP_"+(res && res.status));
+    if(code==="NO_COINS"){
+      alert("金幣不足，請先購買或取得金幣。");
+      location.href=bwCoinTopupUrl();
+      return false;
+    }
+    if(code==="NO_LOGIN" || code==="INVALID_TOKEN"){
+      alert("登入狀態失效，請重新登入。");
+      location.href=bwLoginUrl();
+      return false;
+    }
+    alert((j && j.message) ? j.message : "扣金幣失敗，請稍後再試。");
+    return false;
+  }
+  if(typeof j.remaining_coins !== "undefined"){
+    try{localStorage.setItem("bookwide_coin_balance", String(j.remaining_coins));}catch(e){}
+  }
+  return true;
+}
+async function confirmPaidBlockIfNeeded(targetIndex){
   const block=paidBlockForIndex(targetIndex);
   if(!block || isPaidBlockUnlocked(block))return true;
-  const ok=confirm("心靈問答扣款確認\\n\\n"+paidBlockCostLabel(block)+"\\n\\n確認後才進入第 "+(targetIndex+1)+" 句。");
-  if(ok){
-    unlockPaidBlock(block);
-    toast("已確認扣款區段");
-    return true;
+
+  const ok=confirm("心靈問答扣款確認
+
+"+paidBlockCostLabel(block)+"
+
+確認後才進入第 "+(targetIndex+1)+" 關。");
+  if(!ok){
+    toast("已取消，停留目前關");
+    return false;
   }
-  toast("已取消，停留目前句");
-  return false;
+
+  const charged = await deductHeartCoinBackend(block);
+  if(!charged) return false;
+
+  unlockPaidBlock(block);
+  toast("已扣金幣，已解鎖本區段");
+  return true;
 }
 
 
@@ -752,8 +829,8 @@ function setFailed(a){localStorage.setItem("bw_heart_failed_"+HEART_TOPIC_SLUG,J
 function markFailed(day){const f=getFailed(); if(!f.includes(day)) setFailed([...f,day])}
 function completedCount(){return getDone().length}
 function formalCoinCost(){
-  // 第5關進入 5~14 區段就算第1金；第15關進入 15~20 區段就算第2金。
-  // 不能只用 completedCount/10，否則會出現第13關仍顯示耗0金。
+  // 正式上線：第5關進入 5~14 扣第1金；第15關進入 15~20 扣第2金。
+  // 不再用 completedCount/10，避免第13關仍顯示耗0金。
   let paid = 0;
   if(isPaidBlockUnlocked(1)) paid += 1;
   if(isPaidBlockUnlocked(2)) paid += 1;
@@ -774,8 +851,8 @@ function zenProgressText(){
 function zenRewardText(day,totalDone){
   const cost=formalCoinCost();
   if(totalDone>=20)return `${ZEN_LEVEL_NAME}完成：20句共消耗 ${cost} 個正式金幣。`;
-  if(day>=15)return `已完成 ${totalDone}/${TOTAL}；目前已消耗 ${cost} 個正式金幣。`;
-  if(day>=5)return `已完成 ${totalDone}/${TOTAL}；第5～14關已消耗 1 個正式金幣。`;
+  if(day>=15)return `已完成 ${totalDone}/${TOTAL}；目前已消耗 ${cost} 個金幣。`;
+  if(day>=5)return `已完成 ${totalDone}/${TOTAL}；第5～14關已消耗 1 個金幣。`;
   return `已完成 ${totalDone}/${TOTAL}；第5關開始確認扣款。`;
 }
 function setPlaying(v){playing=v;document.body.classList.toggle("playing",v);$("play").textContent=v?"⏸":"▶";$("hint").textContent=v?"播放中":"點一下播放";duckBgm(v);if(!v)clearHeroWordHighlight()}
@@ -1070,7 +1147,7 @@ function renderLessonLink(l){
   }
   const label = (l && l.lesson_label) ? l.lesson_label : "先看星座補解影片";
   holder.style.display = "";
-  holder.innerHTML = `<div id="bwLessonLinkBox"><button id="bwLessonLinkBtn" type="button">▶ ${escapeHtml(label)}</button><span id="bwLessonLinkHint">先看 BookWide 內部 story 教材，再做星座問答。</span></div>`;
+  holder.innerHTML = `<div id="bwLessonLinkBox"><button id="bwLessonLinkBtn" type="button">▶ ${escapeHtml(label)}</button><span id="bwLessonLinkHint">先看 BookWide 內部 story 教材，再做主題問答。</span></div>`;
   const btn = $("bwLessonLinkBtn");
   if(btn) btn.onclick = (e)=>{ e.preventDefault(); e.stopPropagation(); location.href = url; };
 }
@@ -1329,16 +1406,16 @@ function firstUnfinishedIndex(){
   const i = lessons.findIndex(x => !d.includes(x.day));
   return i >= 0 ? i : Math.max(0, lessons.length - 1);
 }
-function nextStage(){
+async function nextStage(){
   if(!canLeaveCurrent()) return;
   const target=(idx+1)%lessons.length;
-  if(!confirmPaidBlockIfNeeded(target))return;
+  if(!(await confirmPaidBlockIfNeeded(target)))return;
   idx=target;render();scheduleAutoQuestion(520)
 }
-function prevStage(){
+async function prevStage(){
   // 已答過的題目要能回退閱讀；即使目前題尚未答，也允許往回看。
   const target=(idx-1+lessons.length)%lessons.length;
-  if(!confirmPaidBlockIfNeeded(target))return;
+  if(!(await confirmPaidBlockIfNeeded(target)))return;
   idx=target;render();scheduleAutoQuestion(520)
 }
 $("hero").onclick=e=>{if(e.target.tagName==="BUTTON")return; speakQuestion()};
@@ -1368,12 +1445,12 @@ setTimeout(tryAutoBgm,350);
 loadHeartTopic()
   .then(loadHeartLessons)
   .then(loadPhotos)
-  .then(()=>{
+  .then(async ()=>{
     if(idx >= lessons.length) idx = 0;
     const firstTodo = firstUnfinishedIndex();
     const doneList = getDone();
     if(lessons[idx] && !doneList.includes(lessons[idx].day) && idx !== firstTodo) idx = firstTodo;
-    if(!confirmPaidBlockIfNeeded(idx)) idx = firstTodo;
+    if(!(await confirmPaidBlockIfNeeded(idx))) idx = firstTodo;
     render();
     updateBgmButton();
     scheduleAutoQuestion(780);
