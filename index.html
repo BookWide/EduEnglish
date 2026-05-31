@@ -3119,5 +3119,76 @@ document.addEventListener("DOMContentLoaded", function(){
 });
 </script>
 
+import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.45.4";
+
+const corsHeaders = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
+function json(body: Record<string, unknown>, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json; charset=utf-8" },
+  });
+}
+
+serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (req.method !== "POST") return json({ ok: false, code: "METHOD_NOT_ALLOWED" }, 405);
+
+  const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
+  const anonKey = Deno.env.get("SUPABASE_ANON_KEY")!;
+  const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
+  const authHeader = req.headers.get("Authorization") || "";
+  if (!authHeader.startsWith("Bearer ")) {
+    return json({ ok: false, code: "NO_LOGIN", message: "請先登入" }, 401);
+  }
+
+  const userClient = createClient(supabaseUrl, anonKey, {
+    global: { headers: { Authorization: authHeader } },
+  });
+
+  const { data: userData, error: userErr } = await userClient.auth.getUser();
+  if (userErr || !userData?.user?.id) {
+    return json({ ok: false, code: "INVALID_TOKEN", message: "登入狀態失效，請重新登入" }, 401);
+  }
+
+  let payload: { claim_key?: string; guest_earned?: number; guest_spent?: number };
+  try {
+    payload = await req.json();
+  } catch {
+    return json({ ok: false, code: "BAD_JSON", message: "JSON 格式錯誤" }, 400);
+  }
+
+  const claim_key = String(payload.claim_key || "").trim();
+  const guest_earned = Math.max(0, Math.floor(Number(payload.guest_earned || 0)));
+  const guest_spent = Math.max(0, Math.floor(Number(payload.guest_spent || 0)));
+
+  if (!claim_key) {
+    return json({ ok: false, code: "BAD_REQUEST", message: "缺少 claim_key" }, 400);
+  }
+
+  const admin = createClient(supabaseUrl, serviceRoleKey);
+
+  const { data, error } = await admin.rpc("claim_guest_coins", {
+    p_user_id: userData.user.id,
+    p_claim_key: claim_key,
+    p_guest_earned: guest_earned,
+    p_guest_spent: guest_spent,
+  });
+
+  if (error) {
+    console.error("claim_guest_coins error", error);
+    return json({ ok: false, code: "SERVER_ERROR", message: error.message }, 500);
+  }
+
+  return json(data as Record<string, unknown>, 200);
+});
+
+
 </body></html> > > > >
 
