@@ -62,6 +62,7 @@ h1{font-size:26px;margin:0 0 6px}.sub{color:var(--muted);font-size:14px;line-hei
 const qs = new URLSearchParams(location.search);
 const slug = cleanSlug(qs.get('slug') || 'kumano-kodo');
 const base = `/data/travel-missions/${slug}`;
+const R2_BASE = 'https://pub-578e9e060a104f24b6865e26eb941648.r2.dev';
 let missionData = null, vocabData = null, photosData = null;
 let currentMissionId = '';
 let activeTab = 'sentences';
@@ -91,7 +92,7 @@ function renderHeader(){
 function renderMissions(){
   const list = document.getElementById('missionList');
   const ms = getMissions();
-  list.innerHTML = ms.map((m,i)=>`<button class="mission-btn ${m.id===currentMissionId?'active':''}" onclick="selectMission('${esc(m.id)}')"><b>${String(i+1).padStart(2,'0')}｜${esc(m.title||m.id)}</b><span>${esc(m.scene||'')}｜${(m.questions||[]).length || m.sentence_count || 0}句｜${doneSet.has(m.id)?'已完成':'未完成'}</span></button>`).join('');
+  list.innerHTML = ms.map((m,i)=>`<button class="mission-btn ${m.id===currentMissionId?'active':''}" onclick="selectMission('${esc(m.id)}')"><b>${String(i+1).padStart(2,'0')}｜${esc(m.title||m.id)}</b><span>${esc(m.scene||'')}｜${missionQuestions(m).length || m.sentence_count || 0}句｜${doneSet.has(m.id)?'已完成':'未完成'}</span></button>`).join('');
   const total = ms.length || 1, done = [...doneSet].filter(id=>ms.some(m=>m.id===id)).length;
   document.getElementById('progressBar').style.width = `${Math.round(done/total*100)}%`;
   document.getElementById('progressText').textContent = `完成 ${done} / ${ms.length}`;
@@ -101,24 +102,48 @@ function currentMission(){return getMissions().find(m=>m.id===currentMissionId) 
 function renderCurrent(){
   const m = currentMission();
   document.getElementById('missionTitle').textContent = m.title || 'Mission';
-  document.getElementById('missionMeta').textContent = `${m.scene||''}｜${m.sentence_count||((m.questions||[]).length)||0}句｜${m.vocab_count||0}單字`;
+  document.getElementById('missionMeta').textContent = `${m.scene||''}｜${m.sentence_count||missionQuestions(m).length||0}句｜${m.vocab_count||missionWords(m).length||0}單字`;
   renderPhoto(m); renderTabContent(m);
 }
+
+function missionQuestions(m){
+  const id = m?.id || '';
+  const top = missionData?.questions || [];
+  const nested = m?.questions || [];
+  return top.filter(q => q.mission_id === id).concat(nested.filter(q => !q.mission_id || q.mission_id === id));
+}
+function missionWords(m){
+  const id = m?.id || '';
+  const top = vocabData?.vocab || vocabData?.words || [];
+  const byMission = (vocabData?.missions || []).find(x => x.id === id)?.words || [];
+  const nested = m?.vocab || [];
+  return top.filter(w => w.mission_id === id).concat(byMission).concat(nested.filter(w => !w.mission_id || w.mission_id === id));
+}
+function normalizePhotoSrc(src){
+  let s = String(src || '').trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  s = s.replace(/^\/assets\/travel-missions\//, '/ads/travel-missions/');
+  if (s.startsWith('/ads/')) return R2_BASE + s;
+  if (s.startsWith('ads/')) return R2_BASE + '/' + s;
+  return s;
+}
+
 function renderPhoto(m){
   const box=document.getElementById('photoBox');
   const arr = photosData?.photos || photosData?.items || [];
   const hit = arr.find(p => p.mission_id===m.id || p.id===m.id) || arr[0];
-  const src = hit?.url || hit?.src || m.photo || '';
+  const src = normalizePhotoSrc(hit?.url || hit?.src || m.photo || '');
   if(src) box.outerHTML = `<img id="photoBox" class="photo" src="${esc(src)}" onerror="this.outerHTML='<div id=&quot;photoBox&quot; class=&quot;photo-fallback&quot;>Travel Mission</div>'">`;
   else box.outerHTML = `<div id="photoBox" class="photo-fallback">${esc(m.scene||'Travel Mission')}</div>`;
 }
 function renderTabContent(m){
   const box=document.getElementById('contentBox');
   if(activeTab==='sentences'){
-    const qs=m.questions || [];
+    const qs=missionQuestions(m);
     box.innerHTML = qs.length ? `<div class="qa">${qs.map((q,i)=>`<div class="qcard"><button class="speak" onclick="speakText('${esc(q.ja||q.en||q.zh||'')}')">朗讀</button><div class="qtitle">${i+1}. ${esc(q.title||q.scene||'情境句')}</div><div class="line"><span class="tag">EN</span>${esc(q.en||'')}</div><div class="line"><span class="tag">JA</span>${esc(q.ja||'')}</div><div class="line"><span class="tag">ZH</span>${esc(q.zh||'')}</div></div>`).join('')}</div>` : `<div class="warn">這個 Mission 還沒有 questions。</div>`;
   } else if(activeTab==='vocab'){
-    const words = (vocabData?.missions?.find(x=>x.id===m.id)?.words) || m.vocab || vocabData?.words || [];
+    const words = missionWords(m);
     box.innerHTML = words.length ? `<div class="vocab">${words.map(w=>`<div class="word"><b>${esc(w.en||w.word||'')}</b><small>日：${esc(w.ja||'')}</small><small>中：${esc(w.zh||w.meaning||'')}</small></div>`).join('')}</div>` : `<div class="warn">這個 Mission 還沒有 vocab。可先只跑 questions。</div>`;
   } else {
     box.innerHTML = `<div class="qcard"><div class="qtitle">${esc(m.title||'路線資訊')}</div><div class="line"><span class="tag">場景</span>${esc(m.scene||'')}</div><div class="line"><span class="tag">目的</span>${esc(m.goal||'出發前熟悉實際旅程會用到的句子、單字與互動。')}</div><div class="line"><span class="tag">檔案</span>${esc(base)}/${esc(slug)}_questions.json</div></div>`;
