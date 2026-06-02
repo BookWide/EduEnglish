@@ -24,9 +24,14 @@
     </div>
   </div>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
 <script>
 const R2_BASE='https://pub-578e9e060a104f24b6865e26eb941648.r2.dev';
 const SITE_BASE='https://bookwide.net';
+const SUPABASE_URL='https://jeajrwpmrgczimmrflxo.supabase.co';
+const SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+const BW_SUPA=(window.supa||(window.supabase&&window.supabase.createClient?window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY):null));
+if(BW_SUPA)window.supa=BW_SUPA;
 const qs=new URLSearchParams(location.search);const slug=cleanSlug(qs.get('slug')||'kumano-kodo');
 const isBookWideHost=/bookwide\.net$/i.test(location.hostname);
 const base=isBookWideHost?`/data/travel-missions/${slug}`:`${SITE_BASE}/data/travel-missions/${slug}`;
@@ -38,13 +43,61 @@ let unlockedSet=new Set(JSON.parse(localStorage.getItem(`bw_travel_unlocked_${sl
 function cleanSlug(v){return String(v||'').trim().toLowerCase().replace(/[^a-z0-9-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'')||'kumano-kodo'}
 function esc(s){return String(s??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;')}
 async function getJson(path){const r=await fetch(path,{cache:'no-store'});if(!r.ok)throw new Error(`${r.status} ${path}`);return await r.json()}async function tryJson(path){try{return await getJson(path)}catch{return null}}
-async function init(){document.getElementById('slugPill').textContent=slug;try{missionData=await getJson(`${base}/${slug}_questions.json`);vocabData=await tryJson(`${base}/${slug}_vocab.json`);photosData=await tryJson(`${base}/${slug}_photos.json`);renderHeader();syncMissionListMode();currentMissionId=(getMissions()[0]||{}).id||'';setActiveTab(activeTab);renderMissions();renderCurrent()}catch(e){document.getElementById('errorBox').innerHTML=`<div class="err">讀不到 Travel Mission JSON：\n${esc(e.message)}\n\n請確認檔案存在：\n${base}/${slug}_questions.json</div>`;document.getElementById('subtitle').textContent='讀取失敗'}}
+async function init(){document.getElementById('slugPill').textContent=slug;try{missionData=await getJson(`${base}/${slug}_questions.json`);vocabData=await tryJson(`${base}/${slug}_vocab.json`);photosData=await tryJson(`${base}/${slug}_photos.json`);renderHeader();syncMissionListMode();await syncTravelUnlocks();currentMissionId=(getMissions()[0]||{}).id||'';setActiveTab(activeTab);renderMissions();renderCurrent()}catch(e){document.getElementById('errorBox').innerHTML=`<div class="err">讀不到 Travel Mission JSON：\n${esc(e.message)}\n\n請確認檔案存在：\n${base}/${slug}_questions.json</div>`;document.getElementById('subtitle').textContent='讀取失敗'}}
 function getMissions(){return missionData?.missions||[]}function questionsFor(m){return (missionData?.questions||[]).filter(q=>q.mission_id===m.id)}function vocabFor(m){return (vocabData?.vocab||vocabData?.words||[]).filter(v=>v.mission_id===m.id)}
 function missionUnlocked(id){return unlockedSet.has(id)}
 function saveUnlocks(){localStorage.setItem(`bw_travel_unlocked_${slug}`,JSON.stringify([...unlockedSet]))}
-function guestCoins(){return Number(localStorage.getItem('bw_guest_coins')||'0')||0}
-function setGuestCoins(n){localStorage.setItem('bw_guest_coins',String(Math.max(0,Number(n)||0)))}
 function needMissionUnlock(index){return index>=BW_TRAVEL_FREE_SENTENCES && !missionUnlocked(currentMissionId)}
+const TRAVEL_DEDUCT_COIN_URL=SUPABASE_URL+'/functions/v1/travel-deduct-coin';
+function readJsonSafe(v){try{return JSON.parse(v)}catch(e){return null}}
+function decodeJwtPayload(token){try{const part=String(token||'').split('.')[1];if(!part)return null;const b64=part.replace(/-/g,'+').replace(/_/g,'/');const json=decodeURIComponent(Array.prototype.map.call(atob(b64),c=>'%'+('00'+c.charCodeAt(0).toString(16)).slice(-2)).join(''));return JSON.parse(json)}catch(e){return null}}
+function isJwtExpired(token){const p=decodeJwtPayload(token);if(!p||!p.exp)return false;return (p.exp*1000)<(Date.now()+30000)}
+function clearSupabaseAuthStorage(){const remove=[];try{for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i)||'';if(/^sb-.*-auth-token$/.test(k))remove.push(k)}remove.forEach(k=>localStorage.removeItem(k))}catch(e){}}
+async function getSupabaseAccessToken(){
+  try{
+    if(BW_SUPA&&BW_SUPA.auth&&BW_SUPA.auth.getSession){
+      const r=await BW_SUPA.auth.getSession();
+      const token=r&&r.data&&r.data.session&&r.data.session.access_token;
+      if(token&&!isJwtExpired(token))return token;
+    }
+  }catch(e){}
+  try{
+    for(let i=0;i<localStorage.length;i++){
+      const k=localStorage.key(i)||'';
+      if(!/^sb-.*-auth-token$/.test(k))continue;
+      const j=readJsonSafe(localStorage.getItem(k)||'')||{};
+      const arr=[j.access_token,j.currentSession&&j.currentSession.access_token,j.session&&j.session.access_token].filter(Boolean);
+      for(const token of arr){if(token&&!isJwtExpired(token))return token}
+    }
+  }catch(e){}
+  return '';
+}
+function bwLoginUrl(){return '/index.html?login=1&next='+encodeURIComponent(location.pathname+location.search)}
+function bwCoinTopupUrl(){return '/account/subscription.html'}
+function redirectLoginBecauseTokenInvalid(message){clearSupabaseAuthStorage();alert(message||'登入已過期，請重新登入。');location.href=bwLoginUrl()}
+async function callTravelCoinApi(payload){
+  const token=await getSupabaseAccessToken();
+  if(!token)return {ok:false,code:'NO_LOGIN',message:'請先登入 BookWide，才能使用正式金幣。'};
+  let res=null,j=null,raw='';
+  try{
+    res=await fetch(TRAVEL_DEDUCT_COIN_URL,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify(payload||{})});
+    raw=await res.text();
+    try{j=raw?JSON.parse(raw):null}catch(e){j=null}
+  }catch(e){return {ok:false,code:'NETWORK_ERROR',message:'扣金幣服務連線失敗，請稍後再試。'}}
+  if(!res.ok||!j)return {ok:false,code:'HTTP_'+(res&&res.status),message:(j&&j.message)||raw||'扣金幣服務回應異常。'};
+  return j;
+}
+async function syncTravelUnlocks(){
+  const token=await getSupabaseAccessToken();
+  if(!token)return;
+  try{
+    const j=await callTravelCoinApi({mode:'check',slug});
+    if(j&&j.ok&&Array.isArray(j.unlocked_mission_ids)){
+      j.unlocked_mission_ids.forEach(id=>id&&unlockedSet.add(String(id)));
+      saveUnlocks();
+    }
+  }catch(e){}
+}
 async function chargeMissionCoin(m){
   if(!m||!m.id)return false;
   if(missionUnlocked(m.id))return true;
@@ -53,23 +106,21 @@ async function chargeMissionCoin(m){
 
 確定扣金幣繼續？`);
   if(!ok)return false;
-  if(window.BW_TRAVEL_COIN_API&&typeof window.BW_TRAVEL_COIN_API.unlockMission==='function'){
-    try{const r=await window.BW_TRAVEL_COIN_API.unlockMission({slug,mission_id:m.id,cost:BW_TRAVEL_MISSION_COST});if(r&&r.ok){unlockedSet.add(m.id);saveUnlocks();renderMissions();return true}alert((r&&r.message)||'扣金幣失敗，請稍後再試。');return false}catch(e){alert('扣金幣失敗：'+(e.message||e));return false}
+  const j=await callTravelCoinApi({mode:'mission_once',slug,mission_id:m.id,cost:BW_TRAVEL_MISSION_COST,sentence_no:BW_TRAVEL_FREE_SENTENCES+1});
+  const code=String(j&&j.code||'');
+  const msg=String(j&&j.message||'');
+  if(!j||!j.ok){
+    if(code==='NO_LOGIN'||code==='INVALID_TOKEN'||/invalid jwt|jwt|auth/i.test(msg)){redirectLoginBecauseTokenInvalid('登入狀態失效，請重新登入後再扣金幣。');return false}
+    if(code==='NO_COINS'){alert(msg||'金幣不足，請先訂閱或取得金幣。');location.href=bwCoinTopupUrl();return false}
+    if(code==='NETWORK_ERROR'){alert(j.message);return false}
+    alert(msg||'扣金幣失敗，請稍後再試。');return false;
   }
-  const coins=guestCoins();
-  if(coins<BW_TRAVEL_MISSION_COST){alert(`金幣不足。需要 ${BW_TRAVEL_MISSION_COST} 金幣，目前 ${coins} 金幣。請先訂閱或取得金幣。`);return false}
-  setGuestCoins(coins-BW_TRAVEL_MISSION_COST);
+  if(typeof j.remaining_coins!=='undefined')try{localStorage.setItem('bookwide_coin_balance',String(j.remaining_coins))}catch(e){}
   unlockedSet.add(m.id);saveUnlocks();renderMissions();
-  alert(`已扣 ${BW_TRAVEL_MISSION_COST} 金幣，解鎖本 Mission 20 句。剩餘 ${guestCoins()} 金幣。`);
+  alert(j.already?`本 Mission 已解鎖，不重複扣金幣。`:`已扣 ${BW_TRAVEL_MISSION_COST} 金幣，解鎖本 Mission 20 句。${typeof j.remaining_coins!=='undefined'?' 剩餘 '+j.remaining_coins+' 金幣。':''}`);
   return true;
 }
 async function unlockCurrentMission(){const ok=await chargeMissionCoin(currentMission());if(ok)renderCurrent()}
-function jaKana(q){return q?.ja_kana||q?.ja_hiragana||q?.kana||q?.furigana||q?.ja_note||''}
-const RUBY_MAP={
-'熊野古道':'くまのこどう','熊野':'くまの','古道':'こどう','関西空港':'かんさいくうこう','関西機場':'かんさいくうこう','紀伊田辺':'きいたなべ','田辺':'たなべ','出発':'しゅっぱつ','準備':'じゅんび','任務':'にんむ','朝聖':'ちょうせい','護照':'ごしょう','行李':'にもつ','保険':'ほけん','換匯':'りょうがえ','入境':'にゅうこく','領行李':'にもつをうけとる','車票':'きっぷ','切符':'きっぷ','前往':'むかう','月台':'のりば','問路':'みちをきく','起點':'きてん','旅客服務中心':'りょかくサービスセンター','地図':'ちず','寄物':'にもつあずけ','補給':'ほきゅう','朝聖之路':'ちょうせいのみち','登山口':'とざんぐち','路線':'ルート','天気':'てんき','水源':'すいげん','熊野本宮大社':'くまのほんぐうたいしゃ','本宮':'ほんぐう','大社':'たいしゃ','參拜':'さんぱい','御守':'おまもり','御朱印':'ごしゅいん','温泉旅館':'おんせんりょかん','温泉':'おんせん','旅館':'りょかん','入住':'チェックイン','晩餐':'ゆうしょく','朝食':'ちょうしょく','那智大社':'なちたいしゃ','那智瀑布':'なちのたき','瀑布':'たき','拍照':'しゃしんをとる','紀念品':'おみやげ','回國':'きこく','購物':'かいもの','退稅':'めんぜい','登機':'とうじょう','飛行機':'ひこうき','搭乗口':'とうじょうぐち','遅延':'ちえん','予約':'よやく','案内所':'あんないじょ','休憩所':'きゅうけいじょ','雨具':'あまぐ','登山靴':'とざんぐつ','水筒':'すいとう','バス停':'バスてい','行きます':'いきます','行きたい':'いきたい','行く':'いく','買います':'かいます','お願いします':'おねがいします','教えて':'おしえて','あります':'あります','できます':'できます'};
-const RUBY_KEYS=Object.keys(RUBY_MAP).sort((a,b)=>b.length-a.length);
-function rubyJa(text){let s=String(text||''),out='';for(let i=0;i<s.length;){let hit='';for(const k of RUBY_KEYS){if(s.startsWith(k,i)){hit=k;break}}if(hit){out+=`<ruby>${esc(hit)}<rt>${esc(RUBY_MAP[hit])}</rt></ruby>`;i+=hit.length}else{out+=esc(s[i]);i++}}return out}
-function autoKana(text){let s=String(text||'');for(const k of RUBY_KEYS){s=s.split(k).join(RUBY_MAP[k])}return s}
 function renderHeader(){document.getElementById('title').textContent=missionData.title||'Travel Mission';document.getElementById('subtitle').textContent=missionData.subtitle||`${missionData.country||''}｜${missionData.days||''}｜${missionData.sentence_count||''}句｜${missionData.vocab_count||''}單字`}
 function renderMissions(){const ms=getMissions(),list=document.getElementById('missionList');list.innerHTML=ms.map((m,i)=>{const cnt=questionsFor(m).length||m.sentence_count||0;return `<button class="mission-btn ${m.id===currentMissionId?'active':''}" onclick="selectMission('${esc(m.id)}')"><b>${String(i+1).padStart(2,'0')}｜${esc(m.title||m.id)}${missionUnlocked(m.id)?'<span class="coin-status">已解鎖</span>':'<span class="coin-status">2句免費｜1金幣</span>'}</b><span>${esc(m.scene||'')}｜${cnt}句｜${doneSet.has(m.id)?'已完成':'未完成'}</span></button>`}).join('');const total=ms.length||1,done=[...doneSet].filter(id=>ms.some(m=>m.id===id)).length;document.getElementById('progressBar').style.width=`${Math.round(done/total*100)}%`;document.getElementById('progressText').textContent=`完成 ${done} / ${ms.length}`}
 function isMobileView(){return window.matchMedia('(max-width:850px)').matches}
