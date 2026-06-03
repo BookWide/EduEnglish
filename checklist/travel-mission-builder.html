@@ -105,6 +105,20 @@ input,select,textarea{width:100%;padding:11px 12px;border-radius:12px;border:1px
 
   <div class="card">
     <h2>5. 圖片與上傳命令</h2>
+    <div class="grid2" style="margin-bottom:12px">
+      <div class="field">
+        <label class="label">07 Server</label>
+        <input id="serverUrl" value="http://100.79.115.109:8787">
+      </div>
+      <div class="field">
+        <label class="label">主題照片自動化</label>
+        <div class="row">
+          <button class="btn green" onclick="generateTravelPhotos()">產生 10 張主題照片</button>
+          <button class="btn orange" onclick="uploadTravelR2()">只送 R2</button>
+          <button class="btn gray" onclick="saveJsonToServer()">先寫 JSON 到本機</button>
+        </div>
+      </div>
+    </div>
     <div class="grid2">
       <div>
         <div class="sectionTitle">圖片檔名固定</div>
@@ -457,9 +471,83 @@ function buildAll(){
  built.questions=buildQuestions(b);built.vocab=buildVocab(b);built.photos=buildPhotos(b);built.routes=buildRoutes(b);built.index=buildIndex(b);
  $('jsonOut').textContent=JSON.stringify(built.questions,null,2);
  $('photoOut').textContent=built.photos.photos.map((p,i)=>`${i+1}. via${String(i+1).padStart(2,'0')}.jpg｜${p.title}\n   ${p.prompt}`).join('\n\n')+`\n\ncover.jpg = via01.jpg`;
- $('cmdOut').textContent=`cd /d D:\\bookwide_cloudflare\npython 19upload_travel_mission_to_github_r2.py --slug ${b.slug} --skip-github --dry-run\npython 19upload_travel_mission_to_github_r2.py --slug ${b.slug} --skip-github --overwrite`;
+ $('cmdOut').textContent=`按上方按鈕：\n1) 先寫 JSON 到本機\n2) 產生 10 張主題照片\n3) 只送 R2\n\n手動備用：\ncd /d D:\\bookwide_cloudflare\npython 19upload_travel_mission_to_github_r2.py --slug ${b.slug} --skip-github --dry-run\npython 19upload_travel_mission_to_github_r2.py --slug ${b.slug} --skip-github --overwrite`;
  renderPath();
 }
+
+function serverBase(){
+  return String($('serverUrl')?.value || 'http://100.79.115.109:8787').trim().replace(/\/+$/,'');
+}
+function buildServerPayload(){
+  if(!built.questions) buildAll();
+  const b=base();
+  return {
+    slug:b.slug,
+    title:b.title,
+    questions:built.questions,
+    vocab:built.vocab,
+    photos:built.photos,
+    routes:built.routes,
+    index:built.index
+  };
+}
+async function postTravel(endpoint, payload){
+  const res = await fetch(serverBase()+endpoint, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(payload || {})
+  });
+  const data = await res.json().catch(()=>({}));
+  if(!res.ok || data.ok===false){
+    throw new Error(data.error || ('HTTP '+res.status));
+  }
+  return data;
+}
+function showServerResult(title, data){
+  const text = [
+    title,
+    '',
+    data.dir ? ('DIR: '+data.dir) : '',
+    data.log_file ? ('LOG: '+data.log_file) : '',
+    data.generated ? ('FILES: '+data.generated.join(', ')) : '',
+    '',
+    Array.isArray(data.log) ? data.log.join('\n') : (data.log || JSON.stringify(data,null,2))
+  ].filter(Boolean).join('\n');
+  $('cmdOut').textContent = text;
+}
+async function saveJsonToServer(){
+  buildAll();
+  $('cmdOut').textContent='寫入 JSON 到 07 server 中...';
+  try{
+    const data = await postTravel('/travel-mission/save-json', buildServerPayload());
+    showServerResult('JSON 已寫入本機', data);
+  }catch(e){
+    $('cmdOut').textContent='JSON 寫入失敗：'+e.message;
+  }
+}
+async function generateTravelPhotos(){
+  buildAll();
+  if(!confirm('確認產生 10 張一關一主題照？\n會覆蓋 ads/travel-missions/'+base().slug+'/via01.jpg～via10.jpg 與 cover.jpg')) return;
+  $('cmdOut').textContent='產生主題照片中，請等待...';
+  try{
+    const data = await postTravel('/travel-mission/generate-photos', buildServerPayload());
+    showServerResult('主題照片已產生', data);
+  }catch(e){
+    $('cmdOut').textContent='產圖失敗：'+e.message;
+  }
+}
+async function uploadTravelR2(){
+  buildAll();
+  if(!confirm('只送 R2，不送 GitHub？\nslug = '+base().slug)) return;
+  $('cmdOut').textContent='送 R2 中...';
+  try{
+    const data = await postTravel('/travel-mission/upload-r2', {slug:base().slug});
+    showServerResult('R2 上傳完成', data);
+  }catch(e){
+    $('cmdOut').textContent='R2 上傳失敗：'+e.message;
+  }
+}
+
 function download(filename,obj){const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json;charset=utf-8'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500)}
 function downloadOne(type){if(!built.questions)buildAll();const s=base().slug;const map={index:'travel-missions_index_item.json',questions:`${s}_questions.json`,vocab:`${s}_vocab.json`,photos:`${s}_photos.json`,routes:`${s}_routes.json`};download(map[type],built[type]);}
 function downloadAll(){['index','questions','vocab','photos','routes'].forEach((t,i)=>setTimeout(()=>downloadOne(t),i*220));}
