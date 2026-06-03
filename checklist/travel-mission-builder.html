@@ -17,7 +17,7 @@ input,select,textarea{width:100%;padding:11px 12px;border-radius:12px;border:1px
 .mission-list{display:grid;grid-template-columns:repeat(5,minmax(160px,1fr));gap:9px}.mission{background:#10203d;border:1px solid var(--line);border-radius:14px;padding:11px;cursor:pointer}.mission.active{border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.17) inset}.mission b{display:block;margin-bottom:6px}.mission small{color:var(--muted)}
 .out{background:#061020;border:1px solid #20324f;border-radius:12px;padding:12px;white-space:pre-wrap;font-family:Consolas,monospace;font-size:12px;max-height:420px;overflow:auto}.path{padding:10px 12px;background:#10203d;border:1px solid var(--line);border-radius:12px;color:#dbe7fb}
 .table-wrap{overflow:auto;border-radius:14px;border:1px solid var(--line)}table{width:100%;border-collapse:collapse;min-width:960px;background:var(--panel2)}th,td{padding:10px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}th{background:#1b2942;color:#dbe7fb}
-.bad{color:#fecaca}.ok{color:#bbf7d0}.sectionTitle{font-weight:900;margin:8px 0;color:#dbeafe}
+.bad{color:#fecaca}.ok{color:#bbf7d0}.sectionTitle{font-weight:900;margin:8px 0;color:#dbeafe}.save-status{display:inline-flex;align-items:center;min-height:38px;padding:8px 12px;border-radius:12px;background:#0d1a31;border:1px solid var(--line);color:#dbe7fb;font-size:13px}.save-status.ok{border-color:#22c55e;color:#bbf7d0}.save-status.bad{border-color:#ef4444;color:#fecaca}
 @media(max-width:1000px){.grid,.grid2,.grid3{grid-template-columns:1fr}.mission-list{grid-template-columns:1fr 1fr}}@media(max-width:640px){.mission-list{grid-template-columns:1fr}.title{font-size:23px}.card{padding:13px}}
 </style>
 </head>
@@ -71,7 +71,7 @@ input,select,textarea{width:100%;padding:11px 12px;border-radius:12px;border:1px
       <div class="field"><label class="label">照片主題 prompt，逗號分隔</label><input id="mPhoto"></div>
     </div>
     <div class="field"><label class="label">20 句素材（一行一組：英文 | 中文 | local；空白會自動產模板句）</label><textarea id="mLines"></textarea></div>
-    <div class="row"><button class="btn green" onclick="saveMissionEdit()">儲存 Mission 修改</button></div>
+    <div class="row"><button class="btn green" onclick="saveMissionEdit()">儲存 Mission 修改</button><button class="btn gray" onclick="saveDraft()">儲存本機草稿</button><button class="btn red" onclick="clearDraft()">清除草稿</button><span class="save-status" id="saveStatus">尚未儲存</span></div>
   </div>
 
   <div class="card">
@@ -112,6 +112,78 @@ const cleanSlug=v=>String(v||'').trim().toLowerCase().replace(/[^a-z0-9-]+/g,'-'
 const splitList=v=>String(v||'').split(/[，,]/).map(s=>s.trim()).filter(Boolean);
 
 let missions=[];
+
+const DRAFT_KEY='bw_travel_mission_builder_current_v3';
+function nowText(){const d=new Date();return d.toLocaleString('zh-TW',{hour12:false});}
+function setStatus(msg,type=''){
+  const el=$('saveStatus');
+  if(!el) return;
+  el.className='save-status'+(type?' '+type:'');
+  el.textContent=msg;
+}
+function snapshotDraft(){
+  return {
+    saved_at:new Date().toISOString(),
+    activeMission,
+    fields:{
+      slug:$('slug').value,title:$('title').value,sourceCat:$('sourceCat').value,sourceSlug:$('sourceSlug').value,
+      youtubeUrl:$('youtubeUrl').value,localLang:$('localLang').value,localLabel:$('localLabel').value,level:$('level').value,
+      missionCount:$('missionCount').value,perMissionSentences:$('perMissionSentences').value,perMissionVocab:$('perMissionVocab').value,
+      photoRatio:$('photoRatio').value,subtitle:$('subtitle').value
+    },
+    missions
+  };
+}
+function saveDraft(silent=false){
+  try{
+    const draft=snapshotDraft();
+    localStorage.setItem(DRAFT_KEY,JSON.stringify(draft));
+    const slug=cleanSlug(draft.fields.slug);
+    localStorage.setItem('bw_travel_mission_builder_'+slug,JSON.stringify(draft));
+    if(!silent) setStatus('已儲存到本機瀏覽器草稿：'+nowText(),'ok');
+    return true;
+  }catch(e){
+    console.error(e);
+    if(!silent) setStatus('本機草稿儲存失敗：'+(e&&e.message?e.message:e),'bad');
+    return false;
+  }
+}
+function restoreDraft(){
+  try{
+    const raw=localStorage.getItem(DRAFT_KEY);
+    if(!raw) return false;
+    const draft=JSON.parse(raw);
+    if(!draft || !Array.isArray(draft.missions) || !draft.fields) return false;
+    Object.keys(draft.fields).forEach(k=>{ if($(k)) $(k).value=draft.fields[k]; });
+    missions=draft.missions;
+    activeMission=Math.max(0,Math.min(Number(draft.activeMission)||0,missions.length-1));
+    renderMissions();
+    buildAll();
+    setStatus('已載入本機草稿：'+(draft.saved_at?new Date(draft.saved_at).toLocaleString('zh-TW',{hour12:false}):nowText()),'ok');
+    return true;
+  }catch(e){
+    console.error(e);
+    return false;
+  }
+}
+function clearDraft(){
+  try{
+    const slug=cleanSlug($('slug').value);
+    localStorage.removeItem(DRAFT_KEY);
+    localStorage.removeItem('bw_travel_mission_builder_'+slug);
+    setStatus('草稿已清除；目前畫面資料尚未刪除。','ok');
+  }catch(e){setStatus('清除草稿失敗','bad');}
+}
+function autoTemplateLines(m,count,lang){
+  const out=[];
+  for(let i=0;i<count;i++){
+    const en=fillerEN[i%fillerEN.length];
+    const zh=fillerZH[i%fillerZH.length];
+    const local=(lang==='it')?fillerIT[i%fillerIT.length]:en;
+    out.push([en,zh,local]);
+  }
+  return out;
+}
 function viaMissions(){
   return [
     {id:'m01',title:'抵達義大利',scene:'機場、車站、抵達義大利',topics:['抵達','車站','問路','行李','交通'],photo:'義大利車站或機場抵達，背包旅人剛到義大利',lines:[
@@ -265,8 +337,11 @@ function buildAll(){
 function download(filename,obj){const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json;charset=utf-8'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},500)}
 function downloadOne(type){if(!built.questions)buildAll();const s=base().slug;const map={index:'travel-missions_index_item.json',questions:`${s}_questions.json`,vocab:`${s}_vocab.json`,photos:`${s}_photos.json`,routes:`${s}_routes.json`};download(map[type],built[type]);}
 function downloadAll(){['index','questions','vocab','photos','routes'].forEach((t,i)=>setTimeout(()=>downloadOne(t),i*220));}
-['slug','title','sourceCat','sourceSlug','youtubeUrl','localLang','localLabel','level','missionCount','perMissionSentences','perMissionVocab','photoRatio','subtitle'].forEach(id=>$(id).addEventListener('input',buildAll));
-loadViaTemplate();
+['slug','title','sourceCat','sourceSlug','youtubeUrl','localLang','localLabel','level','missionCount','perMissionSentences','perMissionVocab','photoRatio','subtitle'].forEach(id=>{
+  $(id).addEventListener('input',()=>{buildAll();saveDraft(true);setStatus('基本資料已暫存到本機草稿','ok');});
+  $(id).addEventListener('change',()=>{buildAll();saveDraft(true);});
+});
+if(!restoreDraft()) loadViaTemplate();
 </script>
 </body>
 </html>
