@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Travel Mission Builder V13 通用騎行修正版｜BookWide</title>
+<title>Travel Mission Builder V14 通用騎行照片按鍵版｜BookWide</title>
 <style>
 :root{--bg:#071225;--panel:#13223b;--panel2:#1d3152;--line:#2f4669;--text:#fff;--muted:#b8c8e5;--blue:#3b82f6;--green:#16a34a;--orange:#f59e0b;--red:#ef4444}
 *{box-sizing:border-box}body{margin:0;font-family:Arial,"Microsoft JhengHei",sans-serif;background:var(--bg);color:var(--text)}
@@ -22,8 +22,8 @@ details{margin-top:12px;border:1px solid var(--line);border-radius:14px;backgrou
 </head>
 <body>
 <div class="wrap">
-  <div class="title">🌏 Travel Mission Builder｜V13 通用騎行修正版</div>
-  <div class="sub">貼 BookWide Player URL → 套任務骨架（朝聖／登山／騎行）→ 產固定 JSON。已修正 applyPlayerUrl / loadCyclingTemplate / saveMissionEdit / buildAll 未定義問題。</div>
+  <div class="title">🌏 Travel Mission Builder｜V14 通用騎行照片按鍵版</div>
+  <div class="sub">貼 BookWide Player URL → 套任務骨架（朝聖／登山／騎行）→ 產固定 JSON。已修正 applyPlayerUrl / loadCyclingTemplate / saveMissionEdit / buildAll，並補回產照片 / 寫 JSON / 只送 R2 按鍵。</div>
 
   <div class="card">
     <h2>1. 貼上已上架 Player 網址（只接影片）</h2>
@@ -116,6 +116,21 @@ details{margin-top:12px;border:1px solid var(--line);border-radius:14px;backgrou
 
   <div class="card">
     <h2>5. 圖片與上傳命令</h2>
+    <div class="grid2" style="margin-bottom:12px">
+      <div class="field">
+        <label class="label">07 Server</label>
+        <input id="serverUrl" value="http://100.79.115.109:8787">
+      </div>
+      <div class="field">
+        <label class="label">主題照片自動化</label>
+        <div class="row">
+          <button class="btn gray" onclick="saveJsonToServer()">先寫 JSON 到本機</button>
+          <button class="btn green" onclick="generateTravelPhotos()">產生 10 張主題照片</button>
+          <button class="btn orange" onclick="uploadTravelR2()">只送 R2</button>
+          <span class="status" id="photoStatus">等待操作</span>
+        </div>
+      </div>
+    </div>
     <div class="grid2">
       <div><div class="label">圖片 prompt / 檔名</div><div class="out" id="photoOut"></div></div>
       <div><div class="label">只送 R2，不送 GitHub</div><div class="out" id="cmdOut"></div></div>
@@ -221,8 +236,87 @@ function buildAll(){const b=base();built={questions:buildQuestions(b),vocab:buil
 function download(filename,obj){const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json;charset=utf-8'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove()},400)}
 function downloadOne(type){if(!built.questions)buildAll();const s=base().slug;const map={index:'travel-missions_index_item.json',questions:`${s}_questions.json`,vocab:`${s}_vocab.json`,photos:`${s}_photos.json`,routes:`${s}_routes.json`};download(map[type],built[type])}
 function downloadAll(){['index','questions','vocab','photos','routes'].forEach((t,i)=>setTimeout(()=>downloadOne(t),i*250))}
-const DRAFT_KEY='bw_travel_mission_builder_v13';
-function snapshotDraft(){return{fields:{sourcePlayerUrl:$('sourcePlayerUrl').value,slug:$('slug').value,title:$('title').value,sourceCat:$('sourceCat').value,sourceSlug:$('sourceSlug').value,youtubeUrl:$('youtubeUrl').value,localLang:$('localLang').value,localLabel:$('localLabel').value,level:$('level').value,missionCount:$('missionCount').value,perMissionSentences:$('perMissionSentences').value,perMissionVocab:$('perMissionVocab').value,photoRatio:$('photoRatio').value,subtitle:$('subtitle').value},missions,activeMission}}
+
+function setPhotoStatus(msg,type=''){
+  const el=$('photoStatus');
+  if(el){el.className='status '+(type||'');el.textContent=msg}
+}
+function serverBase(){
+  return String($('serverUrl')?.value||'').trim().replace(/\/+$/,'') || 'http://100.79.115.109:8787';
+}
+async function postTravelAction(path,payload){
+  const url=serverBase()+path;
+  const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const text=await res.text();
+  let data;try{data=JSON.parse(text)}catch(e){data={raw:text}}
+  if(!res.ok)throw new Error(data.error||data.message||text||('HTTP '+res.status));
+  return data;
+}
+function travelPayload(){
+  if(!built.questions)buildAll();
+  const b=base();
+  return {
+    slug:b.slug,
+    title:b.title,
+    local_lang:b.local_lang,
+    local_label:b.local_label,
+    source_cat:b.source_cat,
+    source_slug:b.source_slug,
+    player_url:b.player_url,
+    questions:built.questions,
+    vocab:built.vocab,
+    photos:built.photos,
+    routes:built.routes,
+    index_item:built.index,
+    skip_github:true
+  };
+}
+async function saveJsonToServer(){
+  buildAll();
+  const p=travelPayload();
+  setPhotoStatus('寫入 JSON 中...','');
+  try{
+    const data=await postTravelAction('/travel-mission/save-json',p);
+    setPhotoStatus('JSON 已寫入本機','ok');
+    $('cmdOut').textContent=(data.log||data.raw||JSON.stringify(data,null,2))+'';
+  }catch(e){
+    setPhotoStatus('JSON 寫入失敗：'+e.message,'bad');
+    $('cmdOut').textContent='如果 07 server 還沒接 API，請手動下載 JSON 放：\\n'+
+      `EduEnglish/data/travel-missions/${p.slug}/\\n\\n`+
+      `或在本機跑：\\npython 19upload_travel_mission_to_github_r2.py --slug ${p.slug} --skip-github --dry-run`;
+  }
+}
+async function generateTravelPhotos(){
+  buildAll();
+  const p=travelPayload();
+  setPhotoStatus('產生 10 張主題照片中...','');
+  try{
+    const data=await postTravelAction('/travel-mission/generate-photos',p);
+    setPhotoStatus('10 張主題照片已產生','ok');
+    $('photoOut').textContent=(data.log||data.raw||JSON.stringify(data,null,2))+'';
+  }catch(e){
+    setPhotoStatus('產照片失敗：'+e.message,'bad');
+    $('photoOut').textContent=built.photos.photos.map((x,i)=>`${i+1}. via${String(i+1).padStart(2,'0')}.jpg｜${x.title}\\n${x.prompt}`).join('\\n\\n')+
+      '\\n\\n07 server 若未接 /travel-mission/generate-photos，就先照上方 prompt 產圖後放：\\n'+
+      `D:\\bookwide_cloudflare\\ads\\travel-missions\\${p.slug}\\ncover.jpg = via01.jpg`;
+  }
+}
+async function uploadTravelR2(){
+  buildAll();
+  const p=travelPayload();
+  setPhotoStatus('只送 R2 中...','');
+  try{
+    const data=await postTravelAction('/travel-mission/upload-r2',p);
+    setPhotoStatus('R2 已上傳完成','ok');
+    $('cmdOut').textContent=(data.log||data.raw||JSON.stringify(data,null,2))+'';
+  }catch(e){
+    setPhotoStatus('R2 上傳失敗：'+e.message,'bad');
+    $('cmdOut').textContent=`cd /d D:\\bookwide_cloudflare\\npython 19upload_travel_mission_to_github_r2.py --slug ${p.slug} --skip-github --dry-run\\npython 19upload_travel_mission_to_github_r2.py --slug ${p.slug} --skip-github --overwrite`;
+  }
+}
+
+const DRAFT_KEY='bw_travel_mission_builder_v14';
+function snapshotDraft(){return{fields:{sourcePlayerUrl:$('sourcePlayerUrl').value,serverUrl:$('serverUrl')?.value||'',slug:$('slug').value,title:$('title').value,sourceCat:$('sourceCat').value,sourceSlug:$('sourceSlug').value,youtubeUrl:$('youtubeUrl').value,localLang:$('localLang').value,localLabel:$('localLabel').value,level:$('level').value,missionCount:$('missionCount').value,perMissionSentences:$('perMissionSentences').value,perMissionVocab:$('perMissionVocab').value,photoRatio:$('photoRatio').value,subtitle:$('subtitle').value},missions,activeMission}}
 function saveDraft(silent=false){try{localStorage.setItem(DRAFT_KEY,JSON.stringify(snapshotDraft()));if(!silent)setStatus('已儲存本機草稿','ok');return true}catch(e){if(!silent)setStatus('草稿儲存失敗','bad');return false}}
 function clearDraft(){localStorage.removeItem(DRAFT_KEY);setStatus('草稿已清除','ok')}
 function restoreDraft(){try{let d=JSON.parse(localStorage.getItem(DRAFT_KEY)||'null');if(!d)return false;Object.keys(d.fields||{}).forEach(k=>{if($(k))$(k).value=d.fields[k]});missions=d.missions||[];activeMission=d.activeMission||0;renderMissions();buildAll();setStatus('已載入本機草稿','ok');return true}catch(e){return false}}
