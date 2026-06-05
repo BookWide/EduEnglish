@@ -23,7 +23,7 @@ input,select,textarea{width:100%;padding:11px 12px;border-radius:12px;border:1px
 </head>
 <body>
 <div class="wrap">
-  <div class="title">🌏 Travel Mission Builder｜V21.26 API產圖抓回版</div>
+  <div class="title">🌏 Travel Mission Builder｜V21.28 07狀態檢查版</div>
   <div class="sub">通用版：先填 slug、title、語言；有專屬路線 profile 會自動套 10 Missions 與照片 prompt，沒有才用通用骨架。</div>
 
   <div class="card">
@@ -103,7 +103,7 @@ input,select,textarea{width:100%;padding:11px 12px;border-radius:12px;border:1px
       <button class="btn" onclick="downloadOne('routes')">下載 routes.json</button>
       <button class="btn orange" onclick="downloadAll()">全部 JSON 連續下載</button>
     </div>
-    <div class="warn" style="margin-top:10px">瀏覽器版只產 JSON；第 5 區已抓回 (16) 的 07 API 產圖呼叫；照片產後放 ads/travel-missions/&lt;slug&gt;/via01.jpg～via10.jpg；R2 只跑 19 --skip-github。</div>
+    <div class="warn" style="margin-top:10px">瀏覽器版只產 JSON；第 5 區只打 07：127.0.0.1:8787。按產圖前會先檢查 07 /status，若還是舊 v27 會直接提示，避免又產漸層測試圖。</div>
     <div class="out" id="jsonOut" style="margin-top:12px">等待產生...</div>
   </div>
 
@@ -1251,6 +1251,24 @@ function photoR2Payload(action=''){
     }
   };
 }
+async function get07Status(){
+  const url='http://127.0.0.1:8787/status';
+  try{
+    const r=await fetch(url,{method:'GET',cache:'no-store'});
+    const text=await r.text();
+    let data={};
+    try{ data=JSON.parse(text); }catch(e){ data={message:text}; }
+    if(!r.ok) return {ok:false,url,error:`${url} → ${r.status} ${(data && (data.error||data.message)) || text}`};
+    return {ok:true,url,data};
+  }catch(e){
+    return {ok:false,url,error:`${url} → ${e.message}`};
+  }
+}
+function isOld07TravelPlaceholderVersion(status){
+  const v=String(status?.version||'').toLowerCase();
+  // 舊版畫面顯示 07-real-domain-status-v27-travel-local-pron，這版會產漸層 fallback。
+  return v && !v.includes('v50') && !v.includes('no-placeholder');
+}
 async function postTravelBuilder(action,payload){
   const endpointMap={
     'generate-photos':'generate-photos',
@@ -1259,6 +1277,13 @@ async function postTravelBuilder(action,payload){
     'upload-r2':'upload-r2'
   };
   const endpoint=endpointMap[action]||action;
+  const status=await get07Status();
+  if(!status.ok){
+    return {ok:false,url:status.url,error:`07 沒連上：${status.error}`};
+  }
+  if(action==='generate-photos' && isOld07TravelPlaceholderVersion(status.data)){
+    return {ok:false,url:status.url,error:`你現在跑的是舊 07：${status.data.version || '(unknown)'}。這版會產漸層測試圖。請先用 07server_api_v50_travel_no_placeholder.py 取代舊 07 並重開 07RUN_SERVER，再按產圖。`};
+  }
   // 只打 07：避免瀏覽器去打相對路徑或 8000，造成誤判。
   const url=`http://127.0.0.1:8787/travel-mission/${endpoint}`;
   try{
@@ -1267,11 +1292,11 @@ async function postTravelBuilder(action,payload){
     let data={};
     try{ data=JSON.parse(text); }catch(e){ data={message:text}; }
     if(r.ok && data && data.ok!==false){
-      return {ok:true,url,data};
+      return {ok:true,url,data,status:status.data};
     }
-    return {ok:false,url,error:`${url} → ${r.status} ${(data && (data.error||data.message)) || text}`};
+    return {ok:false,url,error:`${url} → ${r.status} ${(data && (data.error||data.message)) || text}`,status:status.data};
   }catch(e){
-    return {ok:false,url,error:`${url} → ${e.message}`};
+    return {ok:false,url,error:`${url} → ${e.message}`,status:status.data};
   }
 }
 async function runTravelImageAction(action){
@@ -1283,15 +1308,16 @@ async function runTravelImageAction(action){
     'upload-r2':'只送 R2'
   };
   const label=labelMap[action]||action;
-  setImageStatus(label+' 執行中｜正在打 07：127.0.0.1:8787','');
+  setImageStatus(label+' 執行中｜先檢查 07 /status，再打 127.0.0.1:8787','');
   const res=await postTravelBuilder(action,photoR2Payload(action));
   if(res.ok){
     const msg=res.data?.log ? res.data.log.join ? res.data.log.join('\n') : res.data.log : (res.data?.message || JSON.stringify(res.data,null,2));
+    const ver=res.status?.version ? `\n07 VERSION：${res.status.version}` : '';
     setImageStatus(label+' 完成｜07 已接到','ok');
-    $('cmdOut').textContent = `${$('cmdOut').textContent}\n\n[${label}] OK via ${res.url}\n${msg}`;
+    $('cmdOut').textContent = `${$('cmdOut').textContent}\n\n[${label}] OK via ${res.url}${ver}\n${msg}`;
   }else{
-    setImageStatus('07 有回應但產圖失敗／或 07 沒接到','bad');
-    $('cmdOut').textContent = `${$('cmdOut').textContent}\n\n[${label}] 失敗：${res.error}\n注意：新版 07 不會再產漸層測試圖；請看 07 黑窗會印出 POST /travel-mission/generate-photos。`;
+    setImageStatus('07 沒接對／仍是舊版／或產圖失敗','bad');
+    $('cmdOut').textContent = `${$('cmdOut').textContent}\n\n[${label}] 失敗：${res.error}\n\n判斷：若黑窗 VERSION 還是 v27，表示你還在跑舊 07，舊 07 會產漸層測試圖；要換成 v50_no_placeholder 再重開。`;
   }
 }
 async function copyR2Command(){
