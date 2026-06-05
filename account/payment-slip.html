@@ -698,6 +698,7 @@ textarea{
 const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 const REQUEST_FUNCTION_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/subscription-request';
+const PAYUNI_CHECKOUT_FUNCTION_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/payuni-checkout';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: { persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
 });
@@ -822,11 +823,63 @@ async function initAuthEmail(showMessage=true){
 }
 
 
-function payuniComingSoon(){
-  alert('PAYUNi 審核與串接完成後，這裡會直接進入安全付款頁並自動開通會員。');
+async function startPayuniCheckout(){
+  const popup = window.open('', '_blank', 'noopener');
+  try{
+    const auth = await initAuthEmail(false);
+    if(!auth.ok || !auth.token || !auth.email){
+      if(popup) popup.close();
+      setSubmitStatus(`❌ 請先登入後再使用 PAYUNi 線上付款。<br><a class="btn" href="${loginUrl()}" style="display:inline-flex;margin-top:10px">前往登入 / 註冊</a>`, true);
+      return;
+    }
+    if(popup){
+      popup.document.open();
+      popup.document.write('<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;padding:24px">正在建立 PAYUNi 付款單，請稍候…</body>');
+      popup.document.close();
+    }
+    setSubmitStatus('⏳ 正在建立 PAYUNi 付款單…');
+    const res = await fetch(PAYUNI_CHECKOUT_FUNCTION_URL, {
+      method:'POST',
+      headers:{
+        'Content-Type':'application/json',
+        'Authorization':`Bearer ${auth.token}`,
+        'apikey':SUPABASE_ANON_KEY
+      },
+      body: JSON.stringify({
+        plan: planKey,
+        planLabel: label,
+        amount: amountNumber(),
+        days: daysNumber(),
+        coins: coinsNumber(),
+        referralCode: ref && ref !== '無' ? ref : '',
+        slipNo
+      })
+    });
+    const contentType = res.headers.get('content-type') || '';
+    const text = await res.text();
+    if(!res.ok){
+      let msg = text;
+      try{ msg = JSON.parse(text).message || JSON.parse(text).detail || text; }catch(_e){}
+      throw new Error(msg || `HTTP ${res.status}`);
+    }
+    if(!contentType.includes('text/html')) throw new Error(text || 'PAYUNi 回傳格式不是 HTML');
+    setSubmitStatus('✅ PAYUNi 付款頁已開啟，請在新分頁完成付款。');
+    if(popup){
+      popup.document.open();
+      popup.document.write(text);
+      popup.document.close();
+    }else{
+      const w = window.open('', '_blank', 'noopener');
+      if(w){ w.document.open(); w.document.write(text); w.document.close(); }
+      else alert('瀏覽器封鎖新分頁，請允許彈出視窗後重試。');
+    }
+  }catch(e){
+    if(popup) popup.close();
+    setSubmitStatus(`❌ PAYUNi 建單失敗：${String(e.message || e)}`, true);
+  }
 }
-$('payuniCheckout')?.addEventListener('click', payuniComingSoon);
-$('payuniCheckoutMain')?.addEventListener('click', payuniComingSoon);
+$('payuniCheckout')?.addEventListener('click', startPayuniCheckout);
+$('payuniCheckoutMain')?.addEventListener('click', startPayuniCheckout);
 
 $('copySlip').addEventListener('click', async ()=>{
   refreshReport();
