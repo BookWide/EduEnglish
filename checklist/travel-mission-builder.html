@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Travel Mission Builder V21.33 Roman Pron Verified｜BookWide</title>
+<title>Travel Mission Builder V21.35 Mission Auto｜BookWide</title>
 <style>
 :root{--bg:#071225;--panel:#13223b;--panel2:#1d3152;--line:#2f4669;--text:#fff;--muted:#b8c8e5;--blue:#3b82f6;--green:#16a34a;--orange:#f59e0b;--red:#ef4444;--chip:#0d1a31}
 *{box-sizing:border-box}body{margin:0;font-family:Arial,"Microsoft JhengHei",sans-serif;background:var(--bg);color:var(--text)}
@@ -23,8 +23,8 @@ input,select,textarea{width:100%;padding:11px 12px;border-radius:12px;border:1px
 </head>
 <body>
 <div class="wrap">
-  <div class="title">🌏 Travel Mission Builder｜V21.33 羅馬拼音讀音確認版</div>
-  <div class="sub">通用版：先填 slug、title、語言；有專屬路線 profile 會自動套 10 Missions 與照片 prompt，沒有才用通用骨架。</div>
+  <div class="title">🌏 Travel Mission Builder｜V21.35 Mission 自動切段版</div>
+  <div class="sub">通用版：先填 slug、title、語言；不再一片硬寫一組 profile；優先讀 Player 的 cues/index，自動切 10 Missions。</div>
 
   <div class="card">
     <h2>1. 貼上 Player 或 YouTube 網址（只接影片來源）</h2>
@@ -37,10 +37,10 @@ input,select,textarea{width:100%;padding:11px 12px;border-radius:12px;border:1px
       <button class="btn green" onclick="loadGenericCyclingTemplate()">通用單車</button>
       <button class="btn orange" onclick="resetByGenericTravel()">通用旅遊</button>
       <button class="btn gray" onclick="loadGenericTrekkingTemplate()">通用登山</button>
-      <button class="btn" onclick="applyRouteProfile()">依 slug 套專屬路線</button>
-      <span class="save-status ok" id="quickStatus">先填 slug / 任務名稱 / 語言，再貼 Player 或 YouTube URL；有專屬路線會自動套場景</span>
+      <button class="btn" onclick="applyRouteProfile()">依影片字幕切 Mission</button>
+      <span class="save-status ok" id="quickStatus">先填 slug / 任務名稱 / 語言，再貼 Player 或 YouTube URL；可用影片字幕自動切 Mission</span>
     </div>
-    <div class="bigHint">此版不會自動套しまなみ或 Camino。網址只當影片來源；任務名稱、slug、語言以你填的欄位為準。</div>
+    <div class="bigHint">此版不再為每支影片硬寫專屬 profile；貼 Player URL 後按「依影片字幕切 Mission」，會讀 /data/cat/slug/cues-*.json 自動切 10 Missions。</div>
 
     <details class="advanced">
       <summary>進階資料（通常不用改）</summary>
@@ -73,7 +73,7 @@ input,select,textarea{width:100%;padding:11px 12px;border-radius:12px;border:1px
       <button class="btn green" onclick="loadGenericCyclingTemplate()">通用單車骨架</button>
       <button class="btn orange" onclick="resetByGenericTravel()">通用旅遊骨架</button>
       <button class="btn gray" onclick="loadGenericTrekkingTemplate()">通用登山骨架</button>
-      <button class="btn" onclick="applyRouteProfile()">依 slug 套專屬路線</button>
+      <button class="btn" onclick="applyRouteProfile()">依影片字幕切 Mission</button>
     </div>
     <div class="mission-list" id="missionList"></div>
   </div>
@@ -928,29 +928,142 @@ const ROUTE_PROFILES={
 function cloneMissions(list){
   return JSON.parse(JSON.stringify(list||[]));
 }
+
+// V21.35：Mission 專屬，不再一支影片寫一組 ROUTE_PROFILES。
+// 優先讀 player 已產出的 cues/index，依字幕內容自動切 10 Missions。
 function getCurrentProfile(){
-  const slug=cleanSlug($('slug')?.value||'');
-  return ROUTE_PROFILES[slug]||null;
+  return null;
 }
-function applyRouteProfile(){
-  const slug=cleanSlug($('slug')?.value||'');
-  const p=ROUTE_PROFILES[slug];
-  if(!p){
-    setQuickStatus('沒有找到專屬路線：'+slug+'；先用通用骨架，或新增 ROUTE_PROFILES。','bad');
+function parseHmsToSec(t){
+  const m=String(t||'').match(/(\d{1,2}):(\d{2}):(\d{2})/);
+  if(!m) return 0;
+  return Number(m[1])*3600+Number(m[2])*60+Number(m[3]);
+}
+function uniqList(arr,limit=8){
+  const out=[]; const seen=new Set();
+  (arr||[]).forEach(x=>{const s=String(x||'').trim(); if(!s) return; const k=s.toLowerCase(); if(seen.has(k)) return; seen.add(k); out.push(s);});
+  return out.slice(0,limit);
+}
+function extractVideoSource(){
+  const p=parseSourceUrl($('sourcePlayerUrl')?.value||$('youtubeUrl')?.value||'');
+  const cat=String($('sourceCat')?.value||p.cat||'news').trim()||'news';
+  const slug=String($('sourceSlug')?.value||p.slug||'').trim();
+  return {cat,slug,url:p.url||String($('youtubeUrl')?.value||'')};
+}
+async function fetchJsonIfExists(url){
+  const r=await fetch(url,{cache:'no-store'});
+  if(!r.ok) throw new Error(url+' -> HTTP '+r.status);
+  return await r.json();
+}
+async function loadPlayerDataForMission(){
+  const src=extractVideoSource();
+  if(!src.slug) throw new Error('缺少 sourceSlug：請先貼 Player URL 或確認內部影片代號');
+  const base=`/data/${encodeURIComponent(src.cat)}/${encodeURIComponent(src.slug)}`;
+  const v='?v='+Date.now();
+  let index={};
+  try{ index=await fetchJsonIfExists(`${base}/index-${src.slug}.json${v}`); }catch(e){ index={}; }
+  const cues=await fetchJsonIfExists(`${base}/cues-${src.slug}.json${v}`);
+  if(!Array.isArray(cues) || !cues.length) throw new Error('cues JSON 空白或格式不是陣列');
+  return {src,index,cues};
+}
+function extractKeywordsFromText(text){
+  const raw=String(text||'');
+  const stop=new Set('Then This That There Here Welcome And The For With From About Into After Before During While Where What When How Does Do Can Could Would Should Have Has Had Will Were Was Are Is It We You They Our Your This One More Some Very Best Good Safe Long Short Need Want Please Thank Hello Video Travel Trip Mission Route Routes Cycling Bike Bikes Cyclists Country People Thing Things'.toLowerCase().split(/\s+/));
+  const hits=[];
+  const re=/[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ0-9'’.-]*(?:\s+[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ0-9'’.-]*){0,3}/g;
+  let m;
+  while((m=re.exec(raw))){
+    const x=m[0].trim().replace(/\s+/g,' ');
+    if(x.length<3) continue;
+    if(stop.has(x.toLowerCase())) continue;
+    hits.push(x);
+  }
+  const special=['Copenhagen','Danmark','Denmark','Hygge','Zealand','Møns Klint','Mons Klint','Møn','Ark Museum','Cold War Museum','Marstal','Warmshowers','Warm Shower','Kattegattleden','Reykjavik','Dolomites','Bolzano','Lago di Braies','Seceda','Tre Cime'];
+  special.forEach(k=>{ if(raw.toLowerCase().includes(k.toLowerCase())) hits.unshift(k); });
+  return uniqList(hits,8);
+}
+function classifyMissionTitle(chunk,idx,kind){
+  const text=chunk.map(c=>[c.en,c.zh,c.local,c.da,c.ja].filter(Boolean).join(' ')).join(' ').toLowerCase();
+  const kw=extractKeywordsFromText(chunk.map(c=>[c.en,c.local,c.da,c.ja].filter(Boolean).join(' ')).join(' '));
+  const key=kw[0]||'';
+  const n=String(idx+1).padStart(2,'0');
+  if(/copenhagen|arrival|arriving|airport|station|welcome/.test(text)) return `M${n} 抵達與起點準備`;
+  if(/assemble|luggage|suitcase|bike|bicycle|cycling|cycle/.test(text) && idx<3) return `M${n} 單車與裝備準備`;
+  if(/hygge|candle|family|home|meal|culture/.test(text)) return `M${n} 當地文化與生活`;
+  if(/route|map|facebook|plan|national cycle|kilomet/.test(text)) return `M${n} 路線規劃與導航`;
+  if(/weather|wind|rain|safe|safety/.test(text)) return `M${n} 天氣與安全`;
+  if(/coast|island|zealand|møn|mon|falster|lolland|village|countryside/.test(text)) return `M${n} 島嶼與鄉間道路`;
+  if(/cliff|klint|chalk|beach|nature|forest/.test(text)) return `M${n} 自然景點與拍照`;
+  if(/museum|history|cold war|maritime|ark/.test(text)) return `M${n} 博物館與歷史文化`;
+  if(/ferry|harbour|harbor|port|boat|marstal/.test(text)) return `M${n} 渡輪與海港交通`;
+  if(/warmshower|trust|host|home|accommodation|bed|hotel/.test(text)) return `M${n} 住宿與當地交流`;
+  if(idx>=8 || /finish|final|return|end|back/.test(text)) return `M${n} 完成旅程與回程`;
+  return `M${n} ${key ? key+' 重點任務' : '旅程重點任務'}`;
+}
+function buildMissionPhotoPrompt(m,kind,localLabel){
+  const base=kind==='cycling'?'單車旅行任務照片':'旅遊任務照片';
+  return `${base}；${m.title}；${m.scene}；${(m.topics||[]).join('、')}；真實旅遊攝影；不要文字、不要 logo、不要插畫`;
+}
+function makeMissionsFromCues(cues, indexObj){
+  const lang=String(indexObj.local_lang||$('localLang')?.value||'ja').trim()||'ja';
+  const label=String(indexObj.local_label||LOCAL_LABELS[lang]||$('localLabel')?.value||lang).trim();
+  const title=String(indexObj.title||$('title')?.value||'影片旅行任務').trim();
+  const kind=/cycling|cycle|bike|bicycle|單車|自行車/i.test(title+' '+String($('title')?.value||''))?'cycling':'travel';
+  const count=10;
+  const sorted=[...cues].filter(x=>x && (x.en||x.text||x.zh||x.local||x.ja)).sort((a,b)=>parseHmsToSec(a.time)-parseHmsToSec(b.time));
+  const per=Math.max(1,Math.ceil(sorted.length/count));
+  const out=[];
+  for(let i=0;i<count;i++){
+    const chunk=sorted.slice(i*per,(i+1)*per);
+    const use=chunk.length?chunk:sorted.slice(Math.max(0,sorted.length-1));
+    const keyText=use.map(c=>[c.en||c.text,c.local,c[lang],c.ja].filter(Boolean).join(' ')).join(' ');
+    const kws=extractKeywordsFromText(keyText);
+    const m={
+      id:'m'+String(i+1).padStart(2,'0'),
+      title:classifyMissionTitle(use,i,kind).replace(/^M\d+\s*/,''),
+      scene:kws.slice(0,5).join('、') || (kind==='cycling'?'單車路線、補給、導航、安全':'景點、交通、補給、住宿'),
+      topics:uniqList(kws.concat(kind==='cycling'?['單車','路線','補給','安全']:['景點','交通','問路','補給']),5),
+      photo:'',
+      lines:[]
+    };
+    m.lines=use.slice(0,20).map(c=>{
+      const en=String(c.en||c.text||'').trim();
+      const zh=String(c.zh||'').trim();
+      const local=String(c.local||c[lang]||c.ja||'').trim();
+      return [en,zh,local];
+    }).filter(x=>x[0]||x[1]||x[2]);
+    if(m.lines.length<20){
+      const fillers=autoTemplateLines(m,20-m.lines.length,lang);
+      m.lines=m.lines.concat(fillers);
+    }
+    m.photo=buildMissionPhotoPrompt(m,kind,label);
+    out.push(m);
+  }
+  return {missions:out,kind,lang,label,title};
+}
+async function applyMissionFromPlayerCues(){
+  try{
+    setQuickStatus('讀取 Player cues，依字幕自動切 10 Missions...','');
+    const {src,index,cues}=await loadPlayerDataForMission();
+    const made=makeMissionsFromCues(cues,index||{});
+    missions=made.missions;
+    if(made.lang){ $('localLang').value=made.lang; $('localLabel').value=made.label; }
+    if((!$('title').value.trim() || $('title').value==='新旅遊任務' || $('title').value==='單車旅行任務') && made.title) $('title').value=made.title;
+    if(!$('slug').value.trim() || $('slug').value==='travel-mission' || $('slug').value===src.slug) $('slug').value=cleanSlug((made.title||src.slug).replace(/youtube/ig,'')) || src.slug;
+    if(!$('subtitle').value.trim()) $('subtitle').value='10 Missions｜200句｜200單字';
+    activeMission=0; renderMissions(); buildAll(); saveDraft(true);
+    setQuickStatus(`已依影片字幕自動切 10 Missions：${src.cat}/${src.slug}｜不是一片硬寫一組`,'ok');
+    return true;
+  }catch(e){
+    console.error(e);
+    setQuickStatus('字幕切 Mission 失敗：'+(e&&e.message?e.message:e),'bad');
     return false;
   }
-  missions=cloneMissions(p.missions);
-
-  // V21.20：只要明確按「依 slug 套專屬路線」，title / local 語言 / subtitle 必須跟 profile 同步。
-  // 否則從 dolomites 切到 kattegattleden 時，JSON title、photos alt、R2 payload 會沿用上一個任務名。
-  $('title').value=p.title;
-  $('localLang').value=p.localLang;
-  $('localLabel').value=p.localLabel;
-  if(p.subtitle) $('subtitle').value=p.subtitle;
-
-  activeMission=0;renderMissions();buildAll();saveDraft(true);
-  setQuickStatus('已套專屬路線場景：'+slug+'｜名稱／語言／照片 prompt 已同步','ok');
-  return true;
+}
+async function applyRouteProfile(){
+  const ok=await applyMissionFromPlayerCues();
+  if(ok) return true;
+  return false;
 }
 
 function fillTemplateBasics(kind){
@@ -967,27 +1080,21 @@ function fillTemplateBasics(kind){
 }
 
 function loadGenericCyclingTemplate(){
-  const p=getCurrentProfile();
-  if(p && (p.kind==='cycling' || p.kind==='travel' || p.kind==='trekking')){ applyRouteProfile(); return; }
   missions=genericCyclingMissions();
   fillTemplateBasics('cycling');
   activeMission=0; renderMissions(); buildAll(); saveDraft(true);
-  setQuickStatus('已套通用單車骨架｜無專屬路線時才使用','ok');
+  setQuickStatus('已套單車 Mission 骨架｜如要依影片內容，按「依影片字幕切 Mission」','ok');
 }
 
 function loadGenericTrekkingTemplate(){
-  const p=getCurrentProfile();
-  if(p && (p.kind==='trekking' || p.kind==='travel' || p.kind==='cycling')){ applyRouteProfile(); return; }
   missions=genericTrekkingMissions();
   fillTemplateBasics('trekking');
   activeMission=0; renderMissions(); buildAll(); saveDraft(true);
-  setQuickStatus('已套通用登山骨架｜無專屬路線時才使用','ok');
+  setQuickStatus('已套登山 Mission 骨架｜如要依影片內容，按「依影片字幕切 Mission」','ok');
 }
 
 
 function resetByGenericTravel(){
-  const p=getCurrentProfile();
-  if(p){ applyRouteProfile(); return; }
   missions=[
     {id:'m01',title:'抵達目的地',scene:'機場、車站、行李、交通',topics:['抵達','機場','車站','行李','交通'],photo:'旅人抵達目的地，機場或車站，帶著行李準備開始旅程',lines:[]},
     {id:'m02',title:'行前準備與登記',scene:'預約、票券、文件、基本準備',topics:['預約','票券','文件','登記','準備'],photo:'旅遊櫃台辦理登記與文件確認，真實旅遊照片',lines:[]},
@@ -1002,7 +1109,7 @@ function resetByGenericTravel(){
   ];
   fillTemplateBasics('travel');
   activeMission=0;renderMissions();buildAll();saveDraft(true);
-  setQuickStatus('已套通用旅遊骨架｜不用每片改程式','ok');
+  setQuickStatus('已套旅遊 Mission 骨架｜如要依影片內容，按「依影片字幕切 Mission」','ok');
 }
 
 function base(){
