@@ -728,10 +728,8 @@ const p = PLAN[planKey] || PLAN.month;
 // ✅ URL email 只當舊版備援，不顯示、不送出；真正 Email 一律由 Supabase 登入帳號決定
 const urlEmailFallback = safe(qs.get('email'));
 const ref = safe(qs.get('ref'), '無');
-const PAYUNI_TEST10 = qs.get('paytest') === '1' || qs.get('test_amount') === '10';
-const labelBase = safe(qs.get('label'), p.label);
-const label = PAYUNI_TEST10 ? `${labelBase}（PAYUNi 測試 NT$10）` : labelBase;
-const amount = PAYUNI_TEST10 ? 'NT$10' : safe(qs.get('amount'), p.amount);
+const label = safe(qs.get('label'), p.label);
+const amount = safe(qs.get('amount'), p.amount);
 const days = safe(qs.get('days'), p.days);
 const coins = safe(qs.get('coins'), p.coins);
 const time = safe(qs.get('time'), taipeiNow());
@@ -743,7 +741,6 @@ $('email').textContent = '檢查登入中…';
 $('ref').textContent = ref || '無';
 $('label').textContent = label;
 $('amount').textContent = amount;
-if(PAYUNI_TEST10){ setTimeout(()=>setSubmitStatus('🧪 PAYUNi 測試模式：本次刷卡金額為 NT$10；成功後仍會依月繳方案開通 30 天並發 50 金幣，測完請刷退。'), 300); }
 $('days').textContent = days;
 $('coins').textContent = coins;
 $('planSummary').textContent = label;
@@ -779,7 +776,7 @@ function setSubmitStatus(html, isError=false){
   }
 }
 
-function amountNumber(){ if(PAYUNI_TEST10) return 10; return Number(String(amount).replace(/[^0-9]/g,'')) || (planKey==='year'?9600:planKey==='half'?5400:1000); }
+function amountNumber(){ return Number(String(amount).replace(/[^0-9]/g,'')) || (planKey==='year'?9600:planKey==='half'?5400:1000); }
 function daysNumber(){ return Number(String(days).replace(/[^0-9]/g,'')) || (planKey==='year'?365:planKey==='half'?180:30); }
 function coinsNumber(){ return Number(String(coins).replace(/[^0-9]/g,'')) || (planKey==='year'?720:planKey==='half'?330:50); }
 
@@ -827,20 +824,20 @@ async function initAuthEmail(showMessage=true){
 
 
 async function startPayuniCheckout(){
+  const popup = window.open('', '_blank', 'noopener');
   try{
     const auth = await initAuthEmail(false);
     if(!auth.ok || !auth.token || !auth.email){
+      if(popup) popup.close();
       setSubmitStatus(`❌ 請先登入後再使用 PAYUNi 線上付款。<br><a class="btn" href="${loginUrl()}" style="display:inline-flex;margin-top:10px">前往登入 / 註冊</a>`, true);
       return;
     }
-
-    const btnMain = $('payuniCheckoutMain');
-    const btnTop = $('payuniCheckout');
-    if(btnMain) btnMain.disabled = true;
-    if(btnTop) btnTop.disabled = true;
-
+    if(popup){
+      popup.document.open();
+      popup.document.write('<!doctype html><meta charset="utf-8"><body style="font-family:system-ui;padding:24px">正在建立 PAYUNi 付款單，請稍候…</body>');
+      popup.document.close();
+    }
     setSubmitStatus('⏳ 正在建立 PAYUNi 付款單…');
-
     const res = await fetch(PAYUNI_CHECKOUT_FUNCTION_URL, {
       method:'POST',
       headers:{
@@ -858,33 +855,26 @@ async function startPayuniCheckout(){
         slipNo
       })
     });
-
     const contentType = res.headers.get('content-type') || '';
     const text = await res.text();
-
     if(!res.ok){
       let msg = text;
-      try{
-        const j = JSON.parse(text);
-        msg = j.message || j.detail || j.error || text;
-      }catch(_e){}
+      try{ msg = JSON.parse(text).message || JSON.parse(text).detail || text; }catch(_e){}
       throw new Error(msg || `HTTP ${res.status}`);
     }
-
-    if(!contentType.includes('text/html')){
-      throw new Error(text || 'PAYUNi 回傳格式不是 HTML');
+    if(!contentType.includes('text/html')) throw new Error(text || 'PAYUNi 回傳格式不是 HTML');
+    setSubmitStatus('✅ PAYUNi 付款頁已開啟，請在新分頁完成付款。');
+    if(popup){
+      popup.document.open();
+      popup.document.write(text);
+      popup.document.close();
+    }else{
+      const w = window.open('', '_blank', 'noopener');
+      if(w){ w.document.open(); w.document.write(text); w.document.close(); }
+      else alert('瀏覽器封鎖新分頁，請允許彈出視窗後重試。');
     }
-
-    // 不再開新分頁。直接在目前分頁寫入 PAYUNi 自動送出表單，避免瀏覽器彈窗封鎖。
-    document.open();
-    document.write(text);
-    document.close();
-
   }catch(e){
-    const btnMain = $('payuniCheckoutMain');
-    const btnTop = $('payuniCheckout');
-    if(btnMain) btnMain.disabled = false;
-    if(btnTop) btnTop.disabled = false;
+    if(popup) popup.close();
     setSubmitStatus(`❌ PAYUNi 建單失敗：${String(e.message || e)}`, true);
   }
 }
