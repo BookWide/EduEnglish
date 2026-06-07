@@ -72,6 +72,217 @@ $("openPortal").onclick=()=>{closeModal("stage1Modal");openModal("portalModal")}
 $("tabEn").onclick=()=>{challengeMode="en";renderChallenge()};$("tabLocal").onclick=()=>{challengeMode="local";renderChallenge()};$("slowBtn").onclick=()=>{const l=lessons[idx];const sp=localSpeak(l.question||l);const t=challengeMode==="en"?l.en:(sp.text||l.en);speak(t,challengeMode==="en"?"en-US":sp.lang,.68)};$("passBtn").onclick=()=>{$("quizBox").scrollIntoView({behavior:"smooth",block:"nearest"})};$("checkBtn").onclick=()=>checkChallenge($("saidInput").value);
 $("recBtn").onclick=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){alert("這個瀏覽器沒有語音辨識，請在下方輸入你說的內容，再按檢查分數。");return}const rec=new SR();rec.lang=(challengeMode==="en"||useRoman())?"en-US":speechLang();rec.interimResults=false;rec.maxAlternatives=1;$("saidBox").textContent="正在聽...";$("scoreBox").classList.add("show");rec.onresult=e=>{const txt=e.results[0][0].transcript;$("saidInput").value=txt;checkChallenge(txt)};rec.onerror=e=>{$("saidBox").textContent="語音辨識失敗，請手動輸入。"};rec.start()};
 load().then(render);
+
+
+/* BW_ROMAN_VOICE_BRIDGE_V1 */
+(function(){
+  if(window.__BW_ROMAN_VOICE_BRIDGE_V1__) return;
+  window.__BW_ROMAN_VOICE_BRIDGE_V1__ = true;
+
+  const ROMAN_LANGS = new Set(["vi","th","ne"]);
+
+  function bwNormLang(lang){
+    lang = String(lang || "").toLowerCase();
+    if(lang.startsWith("vi")) return "vi";
+    if(lang.startsWith("th")) return "th";
+    if(lang.startsWith("ne")) return "ne";
+    if(lang.startsWith("ja")) return "ja";
+    if(lang.startsWith("zh")) return "zh";
+    if(lang.startsWith("en")) return "en";
+    return lang || "en";
+  }
+
+  function bwTtsLang(lang){
+    lang = bwNormLang(lang);
+    if(ROMAN_LANGS.has(lang)) return "en-US";
+    if(lang === "ja") return "ja-JP";
+    if(lang === "zh") return "zh-TW";
+    return "en-US";
+  }
+
+  function bwPickSelectLang(){
+    const sels = Array.from(document.querySelectorAll("select"));
+    for(const s of sels){
+      const v = bwNormLang(s.value);
+      if(v) return v;
+    }
+    return "ja";
+  }
+
+  function bwWalk(obj, fn, seen){
+    if(!obj || typeof obj !== "object") return;
+    seen = seen || new WeakSet();
+    if(seen.has(obj)) return;
+    seen.add(obj);
+    fn(obj);
+    if(Array.isArray(obj)){
+      obj.forEach(x => bwWalk(x, fn, seen));
+    }else{
+      Object.keys(obj).forEach(k => bwWalk(obj[k], fn, seen));
+    }
+  }
+
+  function bwBuildRomanMap(){
+    const map = new Map();
+    try{
+      const root = window.lessons || window.LESSONS || window.DATA || null;
+      bwWalk(root, function(o){
+        if(!o || typeof o !== "object") return;
+        const roman = o.roman && typeof o.roman === "object" ? o.roman : {};
+        ["vi","th","ne"].forEach(lang=>{
+          if(typeof o[lang] === "string" && o[lang].trim()){
+            const r = roman[lang] || o[lang + "_roman"] || "";
+            if(r) map.set(o[lang].trim(), String(r).trim());
+          }
+        });
+      });
+    }catch(e){}
+    return map;
+  }
+
+  let BW_ROMAN_MAP = null;
+  function bwRomanMap(){
+    if(!BW_ROMAN_MAP) BW_ROMAN_MAP = bwBuildRomanMap();
+    return BW_ROMAN_MAP;
+  }
+
+  window.bwRomanOf = function(obj, lang){
+    lang = bwNormLang(lang);
+    if(!obj || !ROMAN_LANGS.has(lang)) return "";
+    if(obj.roman && obj.roman[lang]) return String(obj.roman[lang]);
+    if(obj[lang + "_roman"]) return String(obj[lang + "_roman"]);
+    if(obj[lang]) return bwRomanMap().get(String(obj[lang]).trim()) || "";
+    return "";
+  };
+
+  window.bwSpeakPlain = function(text, lang, rate){
+    text = String(text || "").trim();
+    if(!text) return;
+    try{
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = lang || "en-US";
+      u.rate = rate || (window.RATE || 0.8);
+      speechSynthesis.speak(u);
+    }catch(e){ console.warn("bwSpeakPlain failed", e); }
+  };
+
+  window.bwSpeakText = function(obj, lang){
+    lang = bwNormLang(lang);
+    if(!obj) return;
+    let text = "";
+    if(typeof obj === "string"){
+      text = obj;
+    }else if(ROMAN_LANGS.has(lang)){
+      text = window.bwRomanOf(obj, lang) || obj.en || obj[lang] || "";
+    }else{
+      text = obj[lang] || obj.en || "";
+    }
+    if(!text) return;
+    window.bwSpeakPlain(text, bwTtsLang(lang), window.RATE || 0.8);
+  };
+
+  function bwCurrentLesson(){
+    try{
+      const arr = window.lessons || window.LESSONS || [];
+      let i = 0;
+      if(typeof window.idx !== "undefined") i = window.idx;
+      else if(typeof window.currentIndex !== "undefined") i = window.currentIndex;
+      else if(typeof window.lessonIndex !== "undefined") i = window.lessonIndex;
+      i = Math.max(0, Math.min(Number(i)||0, arr.length - 1));
+      return arr[i];
+    }catch(e){ return null; }
+  }
+
+  function bwSpeakCurrent(){
+    const lesson = bwCurrentLesson();
+    if(!lesson) return;
+    const lang = bwPickSelectLang();
+    try{ speechSynthesis.cancel(); }catch(e){}
+    window.bwSpeakText(lesson, "en");
+    setTimeout(()=>window.bwSpeakText(lesson, lang), 900);
+  }
+
+  function bwTextChoiceFromButton(btn){
+    const box = btn.closest(".choice,.choiceInner,button,li,div");
+    if(!box) return null;
+    const txt = (box.innerText || "").trim();
+    if(!txt) return null;
+    const lines = txt.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+    let en = "";
+    let roman = "";
+    for(const line of lines){
+      if(/^拼音\s*[:：]/.test(line)) roman = line.replace(/^拼音\s*[:：]\s*/, "").trim();
+      else if(!en && /[A-Za-z]/.test(line) && !/^拼音\s*[:：]/.test(line)) en = line.replace(/^[A-C]\.?\s*/, "").trim();
+    }
+    return {en, roman};
+  }
+
+  function bwSpeakChoiceButton(btn){
+    const lang = bwPickSelectLang();
+    const parsed = bwTextChoiceFromButton(btn);
+    if(!parsed) return false;
+    try{ speechSynthesis.cancel(); }catch(e){}
+    if(parsed.en) window.bwSpeakPlain(parsed.en, "en-US", window.RATE || 0.8);
+    const second = ROMAN_LANGS.has(lang) ? parsed.roman : "";
+    if(second) setTimeout(()=>window.bwSpeakPlain(second, "en-US", window.RATE || 0.8), 900);
+    return true;
+  }
+
+  try{
+    const oldSpeak = speechSynthesis.speak.bind(speechSynthesis);
+    speechSynthesis.speak = function(utter){
+      try{
+        if(utter && typeof utter.text === "string"){
+          const raw = utter.text.trim();
+          const lang = bwNormLang(utter.lang || bwPickSelectLang());
+          const mapped = bwRomanMap().get(raw);
+          if(mapped || ROMAN_LANGS.has(lang)){
+            utter.text = mapped || raw;
+            utter.lang = "en-US";
+            utter.rate = utter.rate || (window.RATE || 0.8);
+          }
+        }
+      }catch(e){}
+      return oldSpeak(utter);
+    };
+  }catch(e){}
+
+  document.addEventListener("click", function(ev){
+    const btn = ev.target.closest("button");
+    if(!btn) return;
+    const id = btn.id || "";
+    const cls = String(btn.className || "");
+
+    if(id === "play" || cls.includes("play")){
+      if(ROMAN_LANGS.has(bwPickSelectLang())){
+        ev.preventDefault();
+        ev.stopPropagation();
+        if(ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+        bwSpeakCurrent();
+      }
+      return;
+    }
+
+    if(cls.includes("choiceSpeak") || cls.includes("speak") || /🔊/.test(btn.innerText || "")){
+      if(ROMAN_LANGS.has(bwPickSelectLang())){
+        ev.preventDefault();
+        ev.stopPropagation();
+        if(ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+        bwSpeakChoiceButton(btn);
+      }
+    }
+  }, true);
+
+  document.addEventListener("change", function(ev){
+    if(ev.target && ev.target.tagName === "SELECT"){
+      setTimeout(()=>{ BW_ROMAN_MAP = bwBuildRomanMap(); }, 100);
+    }
+  }, true);
+
+  setTimeout(()=>{ BW_ROMAN_MAP = bwBuildRomanMap(); }, 500);
+  setTimeout(()=>{ BW_ROMAN_MAP = bwBuildRomanMap(); }, 1500);
+})();
+
 </script>
 </body>
 </html>
