@@ -2164,7 +2164,22 @@ function BW_vocabRomanization(v){
    }
    t/start = 句內相對秒數；若給 0~1 小數也可當比例處理。
 */
+function BW_ktvUnitsFromText(s){
+  const text = String(s || '').trim();
+  if(!text) return [];
+  // 日文/中文/韓文沒有空格，逐字亮色比整句不動好；英文等有空格語言照單字切。
+  if(/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(text)){
+    return Array.from(text).filter(ch => !/\s/.test(ch)).map((ch, idx) => ({ text:ch, t:null, i:idx }));
+  }
+  return text.split(/\s+/).filter(Boolean).map((w, idx) => ({ text:w, t:null, i:idx }));
+}
+
 function BW_normalizeKtvWords(cue){
+  const forcedText = String(cue?.ktv_text || cue?.ktvText || '').trim();
+  if(forcedText){
+    return BW_ktvUnitsFromText(forcedText);
+  }
+
   const raw = cue?.words || cue?.word_timings || cue?.wordTiming || cue?.ktv || cue?.lyrics_words || null;
   if(Array.isArray(raw) && raw.length){
     return raw.map((x, idx) => {
@@ -2176,13 +2191,9 @@ function BW_normalizeKtvWords(cue){
     }).filter(x => x.text);
   }
 
-  // 沒有逐字 timing 時，只切「單字」，不把空白也包成 span。
-  // 避免 KTV 模式把 My dear brother 變成 Mydearbrother。
-  return String(cue?.en || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((w, idx) => ({ text:w, t:null, i:idx }));
+  // 沒有逐字 timing 時，只切「單字」；日/中/韓自動逐字，KTV 才會跟著變色。
+  const sourceText = String(cue?.music_main || cue?.native || cue?.local || cue?.ja || cue?.en || '').trim();
+  return BW_ktvUnitsFromText(sourceText);
 }
 function BW_renderKtvLine(cue){
   if(!BW_KTV_ENABLED) return esc(cue?.en || '');
@@ -3358,7 +3369,8 @@ function BW_musicIsJapaneseCue(c){
 function BW_musicMainLine(c){
   if(cat !== 'music') return BW_renderKtvLine(c);
   const main = c.music_main || c.native || c.local || c.ja || c.en || '';
-  if(main && main !== c.en) return esc(main);
+  // Music 主行也走 KTV span；日文無空格時會逐字亮色，不再整句死白。
+  if(main) return BW_renderKtvLine({...c, ktv_text: main, en: main, words: null, word_timings: null, wordTiming: null, ktv: null, lyrics_words: null});
   return BW_renderKtvLine(c);
 }
 function BW_shouldShowMusicKana(c){
@@ -4107,15 +4119,23 @@ function BW_findCueIndexBySec(sec){
   }
   return idx;
 }
+function BW_talkPracticeText(item, cue){
+  const isJa = cat === 'music' && (BW_isJapaneseLocalCode(item?.local_lang || '') || (cue && BW_musicIsJapaneseCue(cue)));
+  if(isJa){
+    return String(item?.kana || cue?.kana || cue?.ja_kana || item?.local || item?.ja || cue?.local || cue?.ja || '').trim();
+  }
+  return String(item?.text || cue?.en || '').trim();
+}
 function BW_renderTalkKtvLine(item){
   if(cat !== 'music') return esc(item?.text || '');
   let cue = null;
   if(Number.isFinite(Number(item?.cueIndex)) && cues[Number(item.cueIndex)]) cue = cues[Number(item.cueIndex)];
   if(!cue && Number.isFinite(Number(item?.idx)) && cues[Number(item.idx)]) cue = cues[Number(item.idx)];
   if(!cue) cue = cues[BW_findCueIndexBySec(item?.sec)] || null;
-  const base = cue ? {...cue, en:(item?.text || cue.en || '')} : {en:(item?.text || '')};
+  const practice = BW_talkPracticeText(item, cue);
+  const base = cue ? {...cue, ktv_text: practice, en: practice, words:null, word_timings:null, wordTiming:null, ktv:null, lyrics_words:null} : {ktv_text:practice, en:practice};
   const words = BW_normalizeKtvWords(base);
-  if(!words.length) return esc(item?.text || '');
+  if(!words.length) return esc(practice || item?.text || '');
   return '<span class="talk-ktv-line">' + words.map((w, idx) => {
     const attrs = ['class="talk-ktv-word"','data-i="' + idx + '"'];
     if(w.t !== null && Number.isFinite(w.t)) attrs.push('data-t="' + String(w.t) + '"');
@@ -4159,27 +4179,39 @@ function normalizeTalkItem(item, idx){
     local_lang: BW_detectLocalLang(item),
     local_label: BW_localLabel(item),
     ja: BW_localText(item),      // 向下相容舊程式
+    kana: String(item.kana || item.ja_kana || item.furigana || '').trim(),
+    roman: String(item.roman || item.romaji || item.local_pron || item.ja_pron || '').trim(),
+    local_pron: String(item.local_pron || item.ja_pron || item.roman || item.romaji || '').trim(),
     time: typeof t === 'string' ? t : fmt(sec),
     sec
   };
 }
 function buildTalkItemsFromCuesForMusic(){
-  // MUSIC KTV：如果沒有 *.dialogue.json，就直接用 cues 當「跟唱」資料
-  // 不改原本資料結構，只在 Music 類別補一個 fallback。
+  // MUSIC KTV：一律用 cues 當「跟唱」時間軸，避免 dialogue.json 重整後與字幕秒數不對齊。
   if(cat !== 'music' || !Array.isArray(cues) || !cues.length) return [];
-  return cues.map((c, idx) => ({
-    idx,
-    cueIndex: idx,
-    role: 'Singer',
-    text: String(c.en || '').trim(),
-    zh: String(c.zh || '').trim(),
-    local: BW_localText(c),
-    local_lang: BW_detectLocalLang(c),
-    local_label: BW_localLabel(c),
-    ja: BW_localText(c),
-    time: fmt(Number(c.t) || 0),
-    sec: Number(c.t) || 0
-  })).filter(x => x.text || x.zh || x.ja);
+  return cues.map((c, idx) => {
+    const isJa = BW_musicIsJapaneseCue(c);
+    const localText = BW_localText(c);
+    const kanaText = String(c.kana || c.ja_kana || c.furigana || '').trim();
+    const romanText = String(c.roman || c.local_pron || c.ja_pron || '').trim();
+    return {
+      idx,
+      cueIndex: idx,
+      role: 'Singer',
+      // 日文歌主要練習用假名；非日文才用 roman / en。
+      text: isJa ? (kanaText || localText || String(c.en || '').trim()) : String(c.en || '').trim(),
+      zh: String(c.zh || '').trim(),
+      local: localText,
+      local_lang: BW_detectLocalLang(c),
+      local_label: BW_localLabel(c),
+      ja: localText,
+      kana: kanaText,
+      roman: romanText,
+      local_pron: romanText,
+      time: fmt(Number(c.t) || 0),
+      sec: Number(c.t) || 0
+    };
+  }).filter(x => x.text || x.zh || x.ja);
 }
 
 function buildTalkItemsFromCuesForMovie(){
@@ -4511,7 +4543,7 @@ function renderTalkCurrent(){
     <div style="font-size:20px;font-weight:700;margin-top:8px;line-height:1.55;">${BW_renderTalkKtvLine(item) || '—'}</div>
     <div style="margin-top:10px;color:#dce7ff;line-height:1.6;">${esc(item.zh) || '—'}</div>
     <div style="margin-top:6px;color:#c8d5ef;line-height:1.6;">${esc(item.local || item.ja) || '—'}</div>
-    ${(item.local_pron || item.ne_pron || item.ja_kana || item.kana)?`<div style="margin-top:4px;color:#fde68a;line-height:1.5;font-size:13px;">${BW_isJapaneseLocalCode(item.local_lang || BW_detectLocalLang(item)) ? '假名' : '羅馬拼音'}：${esc(item.local_pron || item.ne_pron || item.ja_kana || item.kana)}</div>`:''}
+    ${(() => { const isJa = BW_isJapaneseLocalCode(item.local_lang || BW_detectLocalLang(item)); const p = isJa ? (item.kana || '') : (item.local_pron || item.ne_pron || item.roman || ''); return p ? `<div style="margin-top:4px;color:#fde68a;line-height:1.5;font-size:13px;">${isJa ? '假名' : '羅馬拼音'}：${esc(p)}</div>` : ''; })()}
     ${helperHtml}`;
   if(talkCounter) talkCounter.textContent = `第 ${talkCurrentIdx+1}/${talkData.length} 句`;
   updateTalkSpeechBox(talkSpeechText?.textContent?.replace(/^辨識文字：/,'').trim() === '—' ? '' : (talkSpeechText?.textContent||'').replace(/^辨識文字：/,'').trim(), (talkSpeechScore?.textContent||'').replace(/^相似度：/,'').trim() || '—');
@@ -4528,10 +4560,10 @@ function renderTalkList(){
       <div style="font-family:ui-monospace,Consolas,monospace;color:rgba(255,255,255,.78);">${esc(item.time)}</div>
       <div><span class="chip">${esc(item.role)}</span></div>
       <div>
-        <div style="font-size:18px;line-height:1.55;">${esc(item.text) || '—'}</div>
+        <div style="font-size:18px;line-height:1.55;">${esc((cat === 'music' && BW_isJapaneseLocalCode(item.local_lang || BW_detectLocalLang(item))) ? (item.kana || item.local || item.ja || item.text) : item.text) || '—'}</div>
         <div style="margin-top:6px;color:#dce7ff;line-height:1.6;">${esc(item.zh) || ''}</div>
         <div style="margin-top:4px;color:#c8d5ef;line-height:1.6;">${esc(item.local || item.ja) || ''}</div>
-        ${(item.local_pron || item.ne_pron || item.ja_kana || item.kana)?`<div style="margin-top:3px;color:#fde68a;line-height:1.45;font-size:13px;">${BW_isJapaneseLocalCode(item.local_lang || BW_detectLocalLang(item)) ? '假名' : '羅馬拼音'}：${esc(item.local_pron || item.ne_pron || item.ja_kana || item.kana)}</div>`:''}
+        ${(() => { const isJa = BW_isJapaneseLocalCode(item.local_lang || BW_detectLocalLang(item)); const p = isJa ? (item.kana || '') : (item.local_pron || item.ne_pron || item.roman || ''); return p ? `<div style="margin-top:3px;color:#fde68a;line-height:1.45;font-size:13px;">${isJa ? '假名' : '羅馬拼音'}：${esc(p)}</div>` : ''; })()}
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
         <button class="btn sm talk-jump" data-idx="${idx}" type="button">跳句</button>
@@ -4574,6 +4606,32 @@ async function loadTalk(){
     hit = await fetchJsonFirstHit(fileCandidates);
     payload = hit.data;
   }catch(_e){}
+
+  // MUSIC 跟唱必須對齊 cues 時間軸；即使有 dialogue.json，也不要用整理後的 dialogue。
+  if(cat === 'music'){
+    const cueTalk = buildTalkItemsFromCuesForMusic();
+    if(cueTalk.length){
+      talkData = cueTalk;
+      if(talkStatus) talkStatus.textContent = 'MUSIC 跟唱：使用 cues 字幕逐句同步';
+      fillTalkRoleOptions();
+      talkCurrentIdx = findTalkCurrentIdx();
+      BW_updateLocalUI();
+      renderTalkCurrent();
+      renderTalkList();
+      if(!talkSyncTimer){
+        talkSyncTimer = setInterval(() => {
+          if(!talkData.length) return;
+          const idx = findTalkCurrentIdx();
+          if(idx !== talkCurrentIdx){
+            talkCurrentIdx = idx;
+            renderTalkCurrent();
+            highlightTalkRow();
+          }
+        }, 500);
+      }
+      return;
+    }
+  }
 
   if(!payload){
     const fallbackTalk = (cat === 'movie')
