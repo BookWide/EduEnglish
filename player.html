@@ -3350,6 +3350,41 @@ async function loadVideo(){
   if (!ok && youtubeId) await tryYouTubeFirst();
 }
 
+
+function BW_musicIsJapaneseCue(c){
+  const lang = String(c.local_lang || c.lang || '').toLowerCase();
+  return cat === 'music' && (lang === 'ja' || lang === 'jp' || String(c.local_label || '').includes('日'));
+}
+function BW_musicMainLine(c){
+  if(cat !== 'music') return BW_renderKtvLine(c);
+  const main = c.music_main || c.native || c.local || c.ja || c.en || '';
+  if(main && main !== c.en) return esc(main);
+  return BW_renderKtvLine(c);
+}
+function BW_shouldShowMusicKana(c){
+  if(!BW_musicIsJapaneseCue(c)) return false;
+  const k = String(c.kana || c.ja_kana || '').trim();
+  const main = String(c.music_main || c.native || c.local || '').trim();
+  if(!k) return false;
+  if(main && k === main) return false;
+  return true;
+}
+function BW_shouldShowMusicRoman(c){
+  if(cat !== 'music') return false;
+  if(BW_musicIsJapaneseCue(c)) return false; // 日文歌給台灣使用者看假名，不顯示羅馬拼音
+  const r = String(c.roman || c.local_pron || '').trim();
+  const main = String(c.music_main || c.native || '').trim();
+  if(!r) return false;
+  if(main && r.toLowerCase() === main.toLowerCase()) return false;
+  return true;
+}
+function BW_shouldShowMusicEnglish(c){
+  if(cat !== 'music') return false;
+  const main = String(c.music_main || c.native || '').trim();
+  const en = String(c.en || '').trim();
+  return !!(main && en && main !== en);
+}
+
 /* ==== 字幕 ==== */
 async function loadCues(){
   // 最終版：所有類別都統一走 cues.json，字幕維持前面 4 大分頁的顯示方式
@@ -3361,6 +3396,8 @@ async function loadCues(){
     cues=(Array.isArray(data)?data:(data.cues||[]))
       .map(x=>({
         t:toSec(x.time),
+        native:x.native||x.original||x.source_text||'',
+        roman:x.roman||x.romanization||x.romaji||'',
         en:x.en||x.text||'',
         en_tts:x.en_tts||x.enTts||x.tts_en||x.en||x.text||'',
         zh:x.zh||'',
@@ -3369,26 +3406,51 @@ async function loadCues(){
         local_label: BW_localLabel(x),
         ja: BW_localText(x),        // 向下相容舊程式
         jp: BW_localText(x),
-        kana:BW_localPronText(x),
-        local_pron:x.local_pron||x.ne_pron||x.ja_kana||x.kana||BW_localPronText(x),
+        kana:x.kana||x.ja_kana||x.furigana||'',
+        local_pron:x.local_pron||x.ne_pron||x.ja_pron||x.kana||BW_localPronText(x),
         lang:x.lang||x.local_lang||'',
         en_translation:x.en_translation||x.en_orig||x.english||'',
         source_url:x.source_url||'',
         words:x.words || x.word_timings || x.wordTiming || x.ktv || x.lyrics_words || null
-      }));
+      })).map(c=>{
+        if(cat === 'music'){
+          const localText = c.local || '';
+          const nativeText = c.native || localText || c.en || '';
+          const romanText = c.roman || c.local_pron || c.kana || '';
+          c.native = nativeText;
+          c.roman = romanText;
+          // Music 主字幕優先原文；英文仍保留在 en，中文仍保留在 zh。
+          if(nativeText && nativeText !== c.en){ c.music_main = nativeText; }
+        }
+        return c;
+      });
     if(cat === 'movie' && talkLoaded){
       BW_refreshMovieCueShadowTalk(true);
     }
     BW_updateLocalUI();
+    try{
+      const hdr = document.getElementById('subLangHeader');
+      if(hdr && cat === 'music'){
+        const first = cues.find(x => x && (x.native || x.local || x.en)) || {};
+        if(BW_musicIsJapaneseCue(first)){
+          hdr.textContent = '日文原文 / 假名 / English / 中文';
+        }else{
+          hdr.textContent = '原文 / Roman / English / 中文';
+        }
+      }
+    }catch(_e){}
     cuesBody.innerHTML=cues.map((c,i)=>`
       <tr data-i="${i}" style="position:relative">
         <td class="cue-time">${c.t?fmt(c.t):''}</td>
         <td class="cue-en">
-          <span class="en-line">${BW_renderKtvLine(c)}</span>
+          <span class="en-line">${BW_musicMainLine(c)}</span>
+          ${BW_shouldShowMusicKana(c)?`<div class="kana-line music-kana-line" data-lang="ja" data-label="假名">【假名】${esc(c.kana || c.ja_kana || '')}</div>`:''}
+          ${BW_shouldShowMusicRoman(c)?`<div class="kana-line music-roman-line" data-lang="${esc(c.local_lang||'')}" data-label="Roman">【Roman】${esc(c.roman || c.local_pron || '')}</div>`:''}
+          ${BW_shouldShowMusicEnglish(c)?`<div class="en-trans-line music-en-line">【EN】${esc(c.en)}</div>`:''}
           ${c.zh?`<div class="zh-line">【中文】${esc(c.zh)}</div>`:''}
-          ${(c.local && c.local!==c.en)?`<div class="ja-line local-line" data-lang="${esc(c.local_lang||'ja')}" data-label="${esc(c.local_label||'當地語')}">${BW_lineLabel(c.local_label)}${esc(c.local)}</div>`:''}
-          ${c.local_pron?`<div class="kana-line" data-lang="${esc(c.local_lang||'ja')}" data-label="${esc(c.local_label||'當地語')}">${BW_pronLabel(c.local_label, c.local_lang)}${esc(c.local_pron)}</div>`:''}
-          ${c.en_translation?`<div class="en-trans-line">${esc(c.en_translation)}</div>`:''}
+          ${(cat !== 'music' && c.local && c.local!==c.en)?`<div class="ja-line local-line" data-lang="${esc(c.local_lang||'ja')}" data-label="${esc(c.local_label||'當地語')}">${BW_lineLabel(c.local_label)}${esc(c.local)}</div>`:''}
+          ${(cat !== 'music' && c.local_pron)?`<div class="kana-line" data-lang="${esc(c.local_lang||'ja')}" data-label="${esc(c.local_label||'當地語')}">${BW_pronLabel(c.local_label, c.local_lang)}${esc(c.local_pron)}</div>`:''}
+          ${(cat !== 'music' && c.en_translation)?`<div class="en-trans-line">${esc(c.en_translation)}</div>`:''}
         </td>
       </tr>`).join('');
 
@@ -3439,7 +3501,19 @@ async function loadCues(){
     // 點文字：只用瀏覽器 TTS
     let lang='en-US',text='';
     const cue = cues[i] || {};
-    if(e.target.closest('.kana-line')){
+    if(e.target.closest('.music-kana-line')){
+      text = cue.native || cue.local || cue.ja || cue.kana || e.target.closest('.music-kana-line').textContent.replace(/^【[^】]+】/,'').trim();
+      lang = 'ja-JP';
+    }
+    else if(e.target.closest('.music-roman-line')){
+      text = cue.roman || cue.local_pron || e.target.closest('.music-roman-line').textContent.replace(/^【[^】]+】/,'').trim();
+      lang = 'en-US';
+    }
+    else if(e.target.closest('.music-en-line')){
+      text = cue.en || e.target.closest('.music-en-line').textContent.replace(/^【[^】]+】/,'').trim();
+      lang = 'en-US';
+    }
+    else if(e.target.closest('.kana-line')){
       text = cue.local_pron || cue.kana || e.target.closest('.kana-line').textContent.replace(/^【[^】]+】/,'').trim();
       lang = 'en-US';
     }
@@ -3449,6 +3523,15 @@ async function loadCues(){
       lang = (cue.local_pron || cue.kana) ? 'en-US' : BW_localTtsLang(el?.dataset?.lang || cue.local_lang || 'ja');
     }
     else if(e.target.closest('.zh-line')){lang='zh-TW';text=cue.zh || e.target.closest('.zh-line').textContent.replace(/^【[^】]+】/,'').trim();}
+    else if(cat === 'music' && (cue.music_main || cue.native) && (cue.music_main || cue.native) !== cue.en){
+      if(BW_musicIsJapaneseCue(cue)){
+        text = cue.music_main || cue.native || cue.local || '';
+        lang = 'ja-JP';
+      }else{
+        text = cue.roman || cue.local_pron || cue.music_main || cue.native || '';
+        lang = (cue.roman || cue.local_pron) ? 'en-US' : BW_localTtsLang(cue.local_lang || '');
+      }
+    }
     else{lang='en-US';text=cue.en_tts || cue.en || '';}
     if(!text) return;
     speakText(text,lang);
