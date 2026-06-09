@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V93 Music Talk Local Voice</title>
+<title>BookWide 播放器 V96 Music Lyrics/Talk Follow Fixed</title>
 
 <style>
 :root{
@@ -3126,7 +3126,7 @@ function handlePlaybackTick(){
   BW_updateTalkKtvHighlight();
 
   // 跟隨：勾選後，自動在句尾跳到下一句並持續播放
-  if(chkFollow && chkFollow.checked && !loopSentence){
+  if(cat !== 'music' && chkFollow && chkFollow.checked && !loopSentence){
     const [, e] = sentenceRange(i);
     const t = getCurrentPlaybackTime() + offset;
 
@@ -3363,20 +3363,49 @@ async function loadVideo(){
 
 
 function BW_musicIsJapaneseCue(c){
-  const lang = String(c.local_lang || c.lang || '').toLowerCase();
-  return cat === 'music' && (lang === 'ja' || lang === 'jp' || String(c.local_label || '').includes('日'));
+  const lang = String(c?.local_lang || c?.lang || '').toLowerCase();
+  return cat === 'music' && (lang === 'ja' || lang === 'jp' || String(c?.local_label || '').includes('日'));
+}
+function BW_musicIsKoreanCue(c){
+  const lang = String(c?.local_lang || c?.lang || '').toLowerCase();
+  return cat === 'music' && (lang === 'ko' || String(c?.local_label || '').includes('韓') || /[가-힯]/.test(String(c?.native || c?.local || c?.ko || '')));
+}
+function BW_hasLatinLetters(s){ return /[A-Za-z]/.test(String(s || '')); }
+function BW_hasNonLatinLyrics(s){ return /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0e00-\u0e7f\u0900-\u097f]/.test(String(s || '')); }
+function BW_musicIsEnglishCue(c){
+  if(cat !== 'music') return false;
+  const lang = BW_normLocalLang(c?.local_lang || c?.lang || '');
+  const native = String(c?.native || c?.music_main || '').trim();
+  const en = String(c?.en || '').trim();
+  if(lang === 'en' || lang === 'eng') return true;
+  if(native && en && native.toLowerCase() === en.toLowerCase()) return true;
+  if(native && BW_hasLatinLetters(native) && !BW_hasNonLatinLyrics(native)) return true;
+  if(!native && en) return true;
+  return false;
+}
+function BW_musicHeaderText(c){
+  if(!c || cat !== 'music') return '英文 / 中文 / 當地語';
+  if(BW_musicIsJapaneseCue(c)) return '日文原文 / 假名 / EN / 中文';
+  if(BW_musicIsKoreanCue(c)) return '韓文原文 / Roman / EN / 中文';
+  if(BW_musicIsEnglishCue(c)) return 'English / 中文 / 當地語';
+  return '原文 / Roman / EN / 中文';
+}
+function BW_musicMainText(c){
+  if(cat !== 'music') return String(c?.en || '').trim();
+  if(BW_musicIsEnglishCue(c)) return String(c?.en || c?.native || c?.music_main || '').trim();
+  return String(c?.music_main || c?.native || c?.local || c?.ja || c?.en || '').trim();
 }
 function BW_musicMainLine(c){
   if(cat !== 'music') return BW_renderKtvLine(c);
-  const main = c.music_main || c.native || c.local || c.ja || c.en || '';
-  // Music 主行也走 KTV span；日文無空格時會逐字亮色，不再整句死白。
+  const main = BW_musicMainText(c);
+  // Music 主行也走 KTV span；日/韓無空格時會逐字亮色，不再整句死白。
   if(main) return BW_renderKtvLine({...c, ktv_text: main, en: main, words: null, word_timings: null, wordTiming: null, ktv: null, lyrics_words: null});
   return BW_renderKtvLine(c);
 }
 function BW_shouldShowMusicKana(c){
   if(!BW_musicIsJapaneseCue(c)) return false;
-  const k = String(c.kana || c.ja_kana || '').trim();
-  const main = String(c.music_main || c.native || c.local || '').trim();
+  const k = String(c?.kana || c?.ja_kana || '').trim();
+  const main = BW_musicMainText(c);
   if(!k) return false;
   if(main && k === main) return false;
   return true;
@@ -3384,17 +3413,38 @@ function BW_shouldShowMusicKana(c){
 function BW_shouldShowMusicRoman(c){
   if(cat !== 'music') return false;
   if(BW_musicIsJapaneseCue(c)) return false; // 日文歌給台灣使用者看假名，不顯示羅馬拼音
-  const r = String(c.roman || c.local_pron || '').trim();
-  const main = String(c.music_main || c.native || '').trim();
+  if(BW_musicIsEnglishCue(c)) return false;  // 英文歌不要再把英文重複成 Roman 行
+  const r = String(c?.roman || c?.local_pron || '').trim();
+  const main = BW_musicMainText(c);
   if(!r) return false;
   if(main && r.toLowerCase() === main.toLowerCase()) return false;
   return true;
 }
 function BW_shouldShowMusicEnglish(c){
   if(cat !== 'music') return false;
-  const main = String(c.music_main || c.native || '').trim();
-  const en = String(c.en || '').trim();
+  if(BW_musicIsEnglishCue(c)) return false;  // 英文歌主行已是英文，不再多一行【EN】
+  const main = BW_musicMainText(c);
+  const en = String(c?.en || '').trim();
   return !!(main && en && main !== en);
+}
+function BW_musicExtraLocalHtml(c){
+  if(cat !== 'music' || !BW_musicIsEnglishCue(c)) return '';
+  const local = String(c?.local || c?.ja || c?.ko || '').trim();
+  const main = BW_musicMainText(c);
+  if(!local || local === main || local === String(c?.zh || '').trim()) return '';
+  const label = BW_musicIsJapaneseCue(c) ? '日文' : (BW_musicIsKoreanCue(c) ? '韓文' : (c.local_label || '當地語'));
+  return `<div class="ja-line local-line" data-lang="${esc(c.local_lang||'')}" data-label="${esc(label)}">【${esc(label)}】${esc(local)}</div>`;
+}
+function BW_normalizeMusicCueTimeline(){
+  if(cat !== 'music' || !Array.isArray(cues) || cues.length < 2) return;
+  const first = Number(cues[0]?.t || 0);
+  const last = Number(cues[cues.length - 1]?.t || 0);
+  // 有些舊/壞 JSON 只保留原影片尾段（例如第一句從 04:00 開始），前台會完全不同步。
+  // 這裡只做保守補救：第一句超過 30 秒、且全段長度短於 120 秒，才整體平移到 0。
+  if(first > 30 && (last - first) > 1 && (last - first) < 120){
+    cues.forEach(c => { c.t = Math.max(0, Number(c.t || 0) - first); c.__bw_time_shifted = first; });
+    console.warn('[BW MUSIC] cue timeline shifted by first cue', first);
+  }
 }
 
 /* ==== 字幕 ==== */
@@ -3436,6 +3486,9 @@ async function loadCues(){
         }
         return c;
       });
+    if(cat === 'music'){
+      try{ BW_normalizeMusicCueTimeline(); }catch(_e){}
+    }
     if(cat === 'movie' && talkLoaded){
       BW_refreshMovieCueShadowTalk(true);
     }
@@ -3444,11 +3497,7 @@ async function loadCues(){
       const hdr = document.getElementById('subLangHeader');
       if(hdr && cat === 'music'){
         const first = cues.find(x => x && (x.native || x.local || x.en)) || {};
-        if(BW_musicIsJapaneseCue(first)){
-          hdr.textContent = '日文原文 / 假名 / English / 中文';
-        }else{
-          hdr.textContent = '原文 / Roman / English / 中文';
-        }
+        hdr.textContent = BW_musicHeaderText(first);
       }
     }catch(_e){}
     cuesBody.innerHTML=cues.map((c,i)=>`
@@ -3460,6 +3509,7 @@ async function loadCues(){
           ${BW_shouldShowMusicRoman(c)?`<div class="kana-line music-roman-line" data-lang="${esc(c.local_lang||'')}" data-label="Roman">【Roman】${esc(c.roman || c.local_pron || '')}</div>`:''}
           ${BW_shouldShowMusicEnglish(c)?`<div class="en-trans-line music-en-line">【EN】${esc(c.en)}</div>`:''}
           ${c.zh?`<div class="zh-line">【中文】${esc(c.zh)}</div>`:''}
+          ${BW_musicExtraLocalHtml(c)}
           ${(cat !== 'music' && c.local && c.local!==c.en)?`<div class="ja-line local-line" data-lang="${esc(c.local_lang||'ja')}" data-label="${esc(c.local_label||'當地語')}">${BW_lineLabel(c.local_label)}${esc(c.local)}</div>`:''}
           ${(cat !== 'music' && c.local_pron)?`<div class="kana-line" data-lang="${esc(c.local_lang||'ja')}" data-label="${esc(c.local_label||'當地語')}">${BW_pronLabel(c.local_label, c.local_lang)}${esc(c.local_pron)}</div>`:''}
           ${(cat !== 'music' && c.en_translation)?`<div class="en-trans-line">${esc(c.en_translation)}</div>`:''}
@@ -4770,7 +4820,7 @@ async function loadTalk(){
     talkStatus.textContent = (cat === 'movie' && talkMode === 'shadow' && talkMovieCueShadowData.length)
       ? 'MOVIE 跟讀：使用 cues 字幕逐句同步；角色扮演仍用 dialogue.json'
       : ((cat === 'music' && talkMovieCueShadowData.length && talkDialogueData.length)
-        ? 'MUSIC Talk：韓文跟讀＋英文理解保留；角色扮演用 dialogue.json'
+        ? 'MUSIC Talk：原文跟讀＋英文理解保留；角色扮演用 dialogue.json'
         : `已載入 Talk：${(hit && hit.fileName) || ''}`);
   }
   BW_updateLocalUI();
@@ -4780,6 +4830,7 @@ async function loadTalk(){
   if(!talkSyncTimer){
     talkSyncTimer = setInterval(() => {
       if(!talkData.length) return;
+      if(cat === 'music' && talkMode !== 'shadow') return; // MUSIC 角色扮演不可被影片時間軸帶著跑文
       const idx = findTalkCurrentIdx();
       if(idx !== talkCurrentIdx){
         talkCurrentIdx = idx;
