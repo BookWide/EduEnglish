@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V100 Music Chinese Fixed</title>
+<title>BookWide 播放器 V101 Music English Old Format Restored</title>
 
 <style>
 :root{
@@ -3428,6 +3428,31 @@ function BW_hasEnglishWords(s){
 function BW_hasJapaneseScript(s){ return /[\u3040-\u30ff\u3400-\u9fff]/.test(String(s || '')); }
 function BW_hasKoreanScript(s){ return /[\uac00-\ud7af]/.test(String(s || '')); }
 function BW_hasNonLatinLyrics(s){ return /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0e00-\u0e7f\u0900-\u097f]/.test(String(s || '')); }
+
+/* === V101 MUSIC EN OLD FORMAT GUARD ===
+   舊英文歌 cues 常只有 en / zh / ja，沒有 local_lang。
+   V100 加入中文歌後，BW_detectLocalLang() 會因 zh 欄位把它誤判成中文歌。
+   這裡先在原始 JSON 階段強判斷：沒有 native/local、但 en 是英文且有 zh/ja 翻譯者，一律視為英文歌。 */
+function BW_musicRawIsOldEnglishCue(x){
+  if(cat !== 'music' || !x) return false;
+  const mode = String(x.lyrics_mode || '').trim().toLowerCase();
+  const directLang = BW_normLocalLang(x.local_lang || x.localLang || x.lang || '');
+  const label = String(x.local_label || x.localLabel || '').trim();
+  const en = String(x.en || x.text || '').trim();
+
+  if(mode === 'en_zh_ja') return true;
+  if(directLang === 'en' || directLang === 'eng' || label === '英文') return true;
+
+  // 已明確標成中文歌，而且有中文主詞/拼音，就不要搶回英文。
+  if(mode === 'zh_pinyin_en_ja' || BW_isChineseLocalCode(directLang) || label === '中文') return false;
+
+  const hasNative = String(x.native || x.original || x.source_text || x.local || x.music_main || '').trim();
+  const hasPron = String(x.pinyin || x.roman || x.romanization || x.romaji || x.local_pron || x.zh_pron || x.kana || '').trim();
+  const hasTranslation = String(x.zh || x.ja || x.jp || '').trim();
+
+  return !hasNative && !hasPron && BW_hasEnglishWords(en) && !!hasTranslation;
+}
+
 function BW_musicIsEnglishOldJaCue(c){
   if(cat !== 'music') return false;
   const lang = BW_normLocalLang(c?.local_lang || c?.lang || '');
@@ -3469,7 +3494,11 @@ function BW_musicIsChineseCue(c){
   const lang = BW_normLocalLang(c?.local_lang || c?.lang || '');
   const mode = String(c?.lyrics_mode || '').trim().toLowerCase();
   const label = String(c?.local_label || '').trim();
-  return cat === 'music' && (mode === 'zh_pinyin_en_ja' || BW_isChineseLocalCode(lang) || label === '中文');
+  const main = String(c?.music_main || c?.native || c?.local || c?.zh || '').trim();
+  const hasZhMain = /[\u3400-\u9fff]/.test(main);
+  const hasPinyin = String(c?.pinyin || c?.roman || c?.local_pron || '').trim();
+  if(mode === 'zh_pinyin_en_ja') return cat === 'music' && hasZhMain;
+  return cat === 'music' && hasZhMain && !!hasPinyin && (BW_isChineseLocalCode(lang) || label === '中文');
 }
 function BW_musicHeaderText(c){
   if(!c || cat !== 'music') return '英文 / 中文 / 當地語';
@@ -3563,18 +3592,20 @@ async function loadCues(){
     cues=(Array.isArray(data)?data:(data.cues||[]))
       .map(x=>({
         t:toSec(x.time),
-        native:x.native||x.original||x.source_text||'',
-        roman:x.roman||x.romanization||x.romaji||'',
+        native:BW_musicRawIsOldEnglishCue(x) ? (x.en||x.text||'') : (x.native||x.original||x.source_text||''),
+        roman:BW_musicRawIsOldEnglishCue(x) ? '' : (x.roman||x.romanization||x.romaji||''),
+        pinyin:x.pinyin||x.zh_pron||'',
+        lyrics_mode:x.lyrics_mode || (BW_musicRawIsOldEnglishCue(x) ? 'en_zh_ja' : ''),
         en:x.en||x.text||'',
         en_tts:x.en_tts||x.enTts||x.tts_en||x.en||x.text||'',
         zh:x.zh||'',
-        local: BW_localText(x),
-        local_lang: BW_detectLocalLang(x),
-        local_label: BW_localLabel(x),
-        ja: BW_localText(x),        // 向下相容舊程式
-        jp: BW_localText(x),
+        local: BW_musicRawIsOldEnglishCue(x) ? '' : BW_localText(x),
+        local_lang: BW_musicRawIsOldEnglishCue(x) ? 'en' : BW_detectLocalLang(x),
+        local_label: BW_musicRawIsOldEnglishCue(x) ? '英文' : BW_localLabel(x),
+        ja: BW_musicRawIsOldEnglishCue(x) ? (x.ja||'') : BW_localText(x),        // 向下相容舊程式
+        jp: BW_musicRawIsOldEnglishCue(x) ? (x.ja||x.jp||'') : BW_localText(x),
         kana:x.kana||x.ja_kana||x.furigana||'',
-        local_pron:x.local_pron||x.ne_pron||x.ja_pron||x.kana||BW_localPronText(x),
+        local_pron:BW_musicRawIsOldEnglishCue(x) ? '' : (x.local_pron||x.ne_pron||x.ja_pron||x.kana||BW_localPronText(x)),
         lang:x.lang||x.local_lang||'',
         en_translation:x.en_translation||x.en_orig||x.english||'',
         source_url:x.source_url||'',
