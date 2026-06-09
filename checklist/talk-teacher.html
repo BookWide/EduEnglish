@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>Talk AI 老師影片（D-ID 批量）｜BookWide Admin</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#f4f6fb; --card:#fff; --ink:#0f172a; --muted:#64748b; --line:#e5e7eb;
+      --brand:#2563eb; --ok:#16a34a; --warn:#d97706; --err:#dc2626; --radius:14px;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans TC","PingFang TC","Microsoft JhengHei",sans-serif;background:var(--bg);color:var(--ink);}
+    header{padding:18px 22px;font-size:18px;font-weight:700;background:#fff;border-bottom:1px solid var(--line);}
+    main{max-width:1100px;margin:24px auto;padding:0 16px;}
+    .card{background:var(--card);border-radius:var(--radius);padding:18px;margin-bottom:18px;border:1px solid var(--line);}
+    h2{margin:0 0 12px;font-size:16px;}
+    .row{display:grid;grid-template-columns:180px 1fr;gap:12px;margin-bottom:10px;align-items:center;}
+    input, textarea{width:100%;padding:8px 10px;border-radius:10px;border:1px solid var(--line);font-size:14px;}
+    textarea{min-height:110px}
+    .btn{padding:10px 14px;border-radius:12px;border:0;cursor:pointer;font-size:14px;background:var(--brand);color:#fff;}
+    .btn.secondary{background:#e5e7eb;color:#111827;}
+    .btn.warn{background:var(--warn);}
+    .muted{color:var(--muted)}
+    .ok{color:var(--ok)}
+    .err{color:var(--err)}
+    pre{margin:12px 0 0;font-size:12px;white-space:pre-wrap}
+    .links a{display:inline-block;margin:6px 10px 0 0;font-size:12px}
+  </style>
+</head>
+<body>
+<header>Talk AI 老師影片批量產生（D-ID｜走 Supabase Edge Function，免 CORS）</header>
+
+<main>
+  <div class="card">
+    <h2>① 基本設定</h2>
+    <div class="row">
+      <label>老師圖片 URL</label>
+      <input id="img" value="https://jeajrwpmrgczimmrflxo.supabase.co/storage/v1/object/public/talk/teacher.png">
+    </div>
+    <div class="row">
+      <label>Voice ID</label>
+      <input id="voice" value="en-US-JennyNeural">
+    </div>
+    <div class="row">
+      <label>Edge Function URL</label>
+      <input id="fn" value="https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/talk-did">
+    </div>
+    <p class="muted">
+      ✅ 這頁面只打你自己的 Function，所以 GitHub Pages 不會再出現 CORS。
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>② 情境開場句（每行一支影片）</h2>
+    <textarea id="scripts">Restaurant Order (A1)|Welcome! Are you ready to order?
+Coffee Shop (A1)|Welcome to our cafe! What would you like today?
+Hotel Check-in (A1)|Hello, welcome to our hotel. May I have your passport?
+Business Meeting (A2)|Good morning everyone. Thank you for joining today.
+Airport (A2)|Excuse me, may I see your boarding pass?</textarea>
+    <p class="muted">格式：<code>情境名稱|老師要說的英文句</code></p>
+  </div>
+
+  <div class="card">
+    <h2>③ 批量產生</h2>
+    <button class="btn warn" onclick="start()">開始批量產生</button>
+    <button class="btn secondary" onclick="clearAll()">清空紀錄</button>
+    <pre id="log"></pre>
+    <div class="links" id="links"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id)=>document.getElementById(id);
+function logLine(t){ $("log").textContent += t + "\n"; }
+function clearAll(){ $("log").textContent=""; $("links").innerHTML=""; }
+
+async function postCreate(fnUrl, source_url, text, voice_id){
+  const res = await fetch(fnUrl, {
+    method:"POST",
+    headers:{ "Content-Type":"application/json" },
+    body: JSON.stringify({ source_url, text, voice_id, provider_type:"microsoft" })
+  });
+  const j = await res.json().catch(()=>({}));
+  if(!res.ok || !j.ok) throw new Error(j.error || ("HTTP "+res.status));
+  return j.created;
+}
+
+async function getStatus(fnUrl, id){
+  const res = await fetch(fnUrl + "?id=" + encodeURIComponent(id));
+  const j = await res.json().catch(()=>({}));
+  if(!res.ok || !j.ok) throw new Error(j.error || ("HTTP "+res.status));
+  return j.talk;
+}
+
+async function waitReady(fnUrl, id, tries=40){
+  // 40 次 * 3 秒 ≈ 2 分鐘（你可改）
+  for(let i=0;i<tries;i++){
+    const talk = await getStatus(fnUrl, id);
+    const st = talk?.status || "";
+    if(st === "done" || talk?.result_url){
+      return talk;
+    }
+    if(st === "error"){
+      throw new Error("D-ID status=error");
+    }
+    await new Promise(r=>setTimeout(r, 3000));
+  }
+  throw new Error("Timeout waiting D-ID done");
+}
+
+async function start(){
+  clearAll();
+
+  const fnUrl = $("fn").value.trim();
+  const img = $("img").value.trim();
+  const voice = $("voice").value.trim() || "en-US-JennyNeural";
+  const lines = $("scripts").value.trim().split("\n").map(s=>s.trim()).filter(Boolean);
+
+  for(const line of lines){
+    if(!line.includes("|")) continue;
+    const [title, text] = line.split("|");
+    logLine("▶ 建立：" + title);
+
+    try{
+      const created = await postCreate(fnUrl, img, text, voice);
+      const id = created?.id;
+      logLine("  ✔ 已送出 id=" + id);
+
+      const talk = await waitReady(fnUrl, id);
+      const url = talk?.result_url || "";
+      logLine("  ✔ 完成：" + (url ? "有影片" : "無 result_url"));
+
+      if(url){
+        const a = document.createElement("a");
+        a.href = url;
+        a.target = "_blank";
+        a.textContent = "下載/開啟 MP4：" + title;
+        $("links").appendChild(a);
+        $("links").appendChild(document.createElement("br"));
+      }
+    }catch(e){
+      logLine("  ✖ 失敗：" + (e.message || e));
+    }
+  }
+
+  logLine("\n✅ 全部完成（或部分失敗，請看上面 log）");
+}
+</script>
+</body>
+</html>
+

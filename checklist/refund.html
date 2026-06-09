@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>退費申請管理｜BookWide Admin</title>
+  <style>
+    :root{
+      --bg:#f4f6fb; --card:#fff; --muted:#6b7280; --border:#e5e7eb; --brand:#2563eb;
+      --radius:16px; --shadow:0 10px 30px rgba(15,23,42,.08);
+    }
+    *{box-sizing:border-box;}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans TC","Microsoft JhengHei",sans-serif;background:var(--bg);color:#111827;}
+    .wrap{max-width:1200px;margin:24px auto 80px;padding:0 16px;}
+    header{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:12px;}
+    h1{margin:0;font-size:22px;}
+    .sub{color:var(--muted);font-size:13px;margin-top:6px;line-height:1.6;}
+    .admin{color:var(--muted);font-size:13px;text-align:right;}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px;}
+    .toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-bottom:10px;}
+    .left,.right{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
+    input{height:36px;padding:0 12px;border-radius:12px;border:1px solid var(--border);outline:none;min-width:260px;background:#fff;}
+    button,a.btn{height:36px;padding:0 12px;border-radius:12px;border:1px solid var(--brand);background:var(--brand);color:#fff;font-weight:700;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:8px;}
+    button.secondary,a.btn.secondary{background:#fff;color:var(--brand);}
+    table{width:100%;border-collapse:collapse;font-size:14px;}
+    th,td{padding:10px 8px;border-bottom:1px solid var(--border);vertical-align:top;}
+    th{color:var(--muted);font-size:12px;text-align:left;white-space:nowrap;}
+    td small{color:var(--muted);}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace;}
+    .pill{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;border:1px solid var(--border);background:#fff;color:var(--muted);font-size:12px;}
+    .bad{color:#b91c1c;font-weight:700;}
+    .empty{padding:18px;color:var(--muted);text-align:center;}
+    .toast{margin-top:10px;font-size:13px;color:var(--muted);}
+    footer{margin-top:12px;color:var(--muted);font-size:12px;text-align:right;}
+    @media(max-width:720px){input{min-width:160px;} th:nth-child(3),td:nth-child(3){display:none;}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>退費申請管理</h1>
+      <div class="sub">讀取 <span class="mono">public.refund_requests</span>（只給管理員）。可搜尋、匯出 CSV。</div>
+    </div>
+    <div class="admin">管理員：<span id="adminEmail">檢查中…</span></div>
+  </header>
+
+  <div class="card">
+    <div class="toolbar">
+      <div class="left">
+        <input id="q" placeholder="搜尋：email / 訂單號 / 付款方式 / 原因" />
+        <span class="pill">顯示 <b id="count">0</b> 筆</span>
+      </div>
+      <div class="right">
+        <button class="secondary" id="refresh">重新整理</button>
+        <button class="secondary" id="export">匯出 CSV</button>
+        <a class="btn secondary" href="/admin.html">回主控台</a>
+      </div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+
+    <div style="overflow:auto">
+      <table>
+        <thead>
+          <tr>
+            <th style="min-width:160px">時間</th>
+            <th style="min-width:220px">Email</th>
+            <th style="min-width:160px">訂單號</th>
+            <th style="min-width:120px">付款方式</th>
+            <th>退費原因</th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          <tr><td colspan="5" class="empty">讀取中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <footer>BookWide Admin · checklist/refund.html · v20251216</footer>
+  </div>
+</div>
+
+<script src="https://unpkg.com/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
+<script>
+  const SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
+  const SUPABASE_ANON =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
+  const supa = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
+
+  async function requireAdmin() {
+    const { data: { session } } = await supa.auth.getSession();
+    if (!session) { alert("請先登入"); location.href = "/index.html"; throw new Error("no-session"); }
+
+    const { data: profile, error } = await supa
+      .from("profiles")
+      .select("email, is_admin, is_paused")
+      .eq("id", session.user.id)
+      .single();
+
+    if (error || !profile) { alert("找不到使用者資料"); location.href = "/index.html"; throw new Error("no-profile"); }
+    if (!profile.is_admin || profile.is_paused) { alert("您沒有後台管理權限"); location.href = "/index.html"; throw new Error("not-admin"); }
+    document.getElementById("adminEmail").textContent = profile.email;
+  }
+
+  const tbody = document.getElementById("tbody");
+  const q = document.getElementById("q");
+  const toast = document.getElementById("toast");
+  const count = document.getElementById("count");
+  let rows = [];
+
+  function fmtTime(ts){ try{ return new Date(ts).toLocaleString(); }catch(_e){ return ts || ""; } }
+  function esc(s){ return String(s??"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+  function render(){
+    const kw = (q.value||"").trim().toLowerCase();
+    const filtered = !kw ? rows : rows.filter(r=>{
+      const blob = `${r.email||""} ${r.order_no||""} ${r.pay_method||""} ${r.reason||""}`.toLowerCase();
+      return blob.includes(kw);
+    });
+    count.textContent = String(filtered.length);
+    if(filtered.length===0){ tbody.innerHTML = `<tr><td colspan="5" class="empty">沒有符合的資料</td></tr>`; return; }
+
+    tbody.innerHTML = filtered.map(r=>`
+      <tr>
+        <td><span class="mono">${esc(fmtTime(r.created_at))}</span><br><small class="mono">${esc(r.id||"")}</small></td>
+        <td>${esc(r.email||"")}</td>
+        <td class="mono">${esc(r.order_no||"")}</td>
+        <td>${esc(r.pay_method||"")}</td>
+        <td>${esc(r.reason||"")}</td>
+      </tr>
+    `).join("");
+  }
+
+  async function load(){
+    toast.textContent = "讀取中…";
+    const { data, error } = await supa
+      .from("refund_requests")
+      .select("id, created_at, email, order_no, pay_method, reason")
+      .order("created_at",{ascending:false})
+      .limit(200);
+    if(error){
+      console.error(error);
+      toast.innerHTML = `<span class="bad">讀取失敗：</span><span class="mono">${esc(error.message||String(error))}</span>`;
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">讀取失敗</td></tr>`;
+      return;
+    }
+    rows = data || [];
+    toast.textContent = `已載入 ${rows.length} 筆。`;
+    render();
+  }
+
+  function toCSV(list){
+    const header = ["created_at","email","order_no","pay_method","reason","id"];
+    const lines = [header.join(",")];
+    for(const r of list){
+      const row = header.map(k=>{
+        const v = (r[k] ?? "").toString().replace(/"/g,'""');
+        return `"${v}"`;
+      });
+      lines.push(row.join(","));
+    }
+    return lines.join("\n");
+  }
+
+  document.getElementById("refresh").addEventListener("click", load);
+  q.addEventListener("input", render);
+  document.getElementById("export").addEventListener("click", ()=>{
+    const kw = (q.value||"").trim().toLowerCase();
+    const filtered = !kw ? rows : rows.filter(r=>{
+      const blob = `${r.email||""} ${r.order_no||""} ${r.pay_method||""} ${r.reason||""}`.toLowerCase();
+      return blob.includes(kw);
+    });
+    const csv = toCSV(filtered);
+    const blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `refund_requests_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  });
+
+  (async ()=>{ await requireAdmin(); await load(); })();
+</script>
+</body>
+</html>
