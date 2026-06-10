@@ -540,6 +540,57 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
 .voiceNote{font-size:10px;color:#cbd5e1;margin:3px 0 4px;font-weight:800}
 @media(max-width:640px){.monkVoiceBtn{width:24px;height:18px;font-size:9px}.voiceNote{font-size:9px;margin:2px 0 3px}}
 </style>
+
+<style id="bw-chat-lab-speak-gate-11-20-v1">
+.speakGate{
+  display:none;
+  margin:6px 0;
+  padding:9px 10px;
+  border-radius:14px;
+  border:1px solid rgba(34,197,94,.38);
+  background:linear-gradient(135deg,rgba(34,197,94,.14),rgba(59,130,246,.12));
+  color:#eaf3ff;
+}
+.speakGate.show{display:block}
+.speakGate b{display:block;font-size:13px;margin-bottom:4px}
+.speakGate .target{
+  margin:6px 0;
+  padding:7px 9px;
+  border-radius:10px;
+  background:rgba(15,31,56,.72);
+  font-weight:900;
+  line-height:1.35;
+}
+.speakGate .gateBtns{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.speakGate button{
+  border:1px solid rgba(96,165,250,.35);
+  background:rgba(59,130,246,.18);
+  color:#dbeafe;
+  border-radius:999px;
+  padding:6px 10px;
+  font-size:12px;
+  font-weight:950;
+}
+.speakGate button.primary{
+  border:0;
+  background:linear-gradient(135deg,#22c55e,#60a5fa);
+  color:#fff;
+}
+.speakGate .scoreLine{
+  margin-top:6px;
+  color:#fde68a;
+  font-size:12px;
+  font-weight:900;
+}
+@media(max-width:640px){
+  .speakGate{margin:4px 0!important;padding:7px 8px!important;border-radius:12px!important}
+  .speakGate b{font-size:12px!important}
+  .speakGate .target{padding:6px 8px!important;font-size:11.5px!important}
+  .speakGate button{padding:5px 8px!important;font-size:11px!important}
+  .speakGate .scoreLine{font-size:11px!important}
+}
+</style>
+
 </head>
 <body>
 <div class="toast" id="toast"></div>
@@ -560,7 +611,7 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
   <section class="mini"><span id="stage">第 1 關</span><span id="done">0/20</span><span class="coin" id="coins">遊客金幣 0</span><span id="nextCoin">完成10題送2金</span></section>
   <section class="card">
     <div class="titleRow"><div class="title"><b id="title"></b><span id="scene"></span></div><div class="ctrls"><button class="ctrl" id="prev" type="button">‹</button><button class="ctrl play" id="play" type="button">▶</button><button class="ctrl" id="music" type="button">♫</button><button class="ctrl" id="next" type="button">›</button></div></div>
-    <section class="quiz"><div class="q" id="quizQ">選出最合理的回答：</div><div id="lessonLinkHolder"></div><div class="choices" id="choices"></div><div class="monkReply" id="monkReply"></div><button class="complete" id="complete" type="button">先答題</button><button class="reportBtn" id="reportPdf" type="button" hidden>生成我的問答 PDF</button></section>
+    <section class="quiz"><div class="q" id="quizQ">選出最合理的回答：</div><div id="lessonLinkHolder"></div><div id="speakGate" class="speakGate"></div><div class="choices" id="choices"></div><div class="monkReply" id="monkReply"></div><button class="complete" id="complete" type="button">先答題</button><button class="reportBtn" id="reportPdf" type="button" hidden>生成我的問答 PDF</button></section>
   </section>
 </main>
 <div class="modal" id="reward"><div class="box"><h2 id="rewardTitle">完成！</h2><p id="rewardText"></p><button id="rewardOk" type="button">收下，進下一關</button></div></div>
@@ -1335,6 +1386,141 @@ function showMonkReply(l, ok, c=null){
   box.classList.add("show");
 }
 
+
+/* === Chat Lab 11-20 跟讀門檻 v1：11-20 需跟讀 >35% 才進題 === */
+const BW_CHAT_SPEAK_THRESHOLD = 35;
+let bwChatRec = null;
+function bwChatSpeakGateKey(day){
+  return "bw_chat_lab_speak_gate_" + HEART_TOPIC_SLUG + "_" + String(day);
+}
+function bwChatSpeakGateRequired(l){
+  const day = Number((l && l.day) || (idx + 1));
+  return day >= 11 && day <= 20;
+}
+function bwChatSpeakGateUnlocked(l){
+  if(!bwChatSpeakGateRequired(l)) return true;
+  return localStorage.getItem(bwChatSpeakGateKey(l.day)) === "1";
+}
+function bwChatUnlockSpeakGate(l){
+  if(!l) return;
+  localStorage.setItem(bwChatSpeakGateKey(l.day), "1");
+}
+function bwNormWords(s){
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9'\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+function bwSpeechScore(target, said){
+  const a = bwNormWords(target);
+  const b = bwNormWords(said);
+  if(!a.length || !b.length) return 0;
+  const pool = [...b];
+  let hit = 0;
+  for(const w of a){
+    const at = pool.indexOf(w);
+    if(at >= 0){
+      hit++;
+      pool.splice(at, 1);
+    }
+  }
+  return Math.max(0, Math.min(100, Math.round(hit / a.length * 100)));
+}
+function bwShowChoicesAfterSpeakGate(){
+  const gate = $("speakGate");
+  const choices = $("choices");
+  const complete = $("complete");
+  if(gate){ gate.classList.remove("show"); gate.innerHTML = ""; }
+  if(choices) choices.style.display = "";
+  if(complete) complete.style.display = "";
+}
+function bwRenderSpeakGate(l){
+  const gate = $("speakGate");
+  const choices = $("choices");
+  const complete = $("complete");
+  if(!gate || !choices || !complete) return;
+
+  if(!bwChatSpeakGateRequired(l) || bwChatSpeakGateUnlocked(l)){
+    bwShowChoicesAfterSpeakGate();
+    return;
+  }
+
+  choices.style.display = "none";
+  complete.style.display = "";
+  complete.classList.remove("ready");
+  complete.textContent = "先完成跟讀挑戰";
+  showMonkReply(null, false);
+
+  const target = String((l && l.en) || "").trim();
+  gate.classList.add("show");
+  gate.innerHTML = `
+    <b>🎙 11–20 跟讀挑戰｜分數超過 ${BW_CHAT_SPEAK_THRESHOLD}% 才能進題</b>
+    <div class="target">${escapeHtml(target)}</div>
+    <div class="gateBtns">
+      <button type="button" id="bwSpeakListen">🔊 先聽一句</button>
+      <button type="button" class="primary" id="bwSpeakStart">🎙 我來跟讀</button>
+      <button type="button" id="bwSpeakFallback">語辨不可用，先進題</button>
+    </div>
+    <div class="scoreLine" id="bwSpeakScore">先聽，再按「我來跟讀」。</div>
+  `;
+
+  const listen = $("bwSpeakListen");
+  const start = $("bwSpeakStart");
+  const fallback = $("bwSpeakFallback");
+  const scoreLine = $("bwSpeakScore");
+
+  if(listen) listen.onclick = e => {
+    e.preventDefault(); e.stopPropagation();
+    speakQuestion("en");
+  };
+
+  if(fallback) fallback.onclick = e => {
+    e.preventDefault(); e.stopPropagation();
+    bwChatUnlockSpeakGate(l);
+    toast("此裝置語辨不穩，先放行進題");
+    render();
+  };
+
+  if(start) start.onclick = e => {
+    e.preventDefault(); e.stopPropagation();
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if(!SR){
+      if(scoreLine) scoreLine.textContent = "此瀏覽器不支援語音辨識，請按「語辨不可用，先進題」。";
+      return;
+    }
+    try{
+      stopSpeech();
+      if(bwChatRec) bwChatRec.abort();
+      bwChatRec = new SR();
+      bwChatRec.lang = "en-US";
+      bwChatRec.interimResults = false;
+      bwChatRec.maxAlternatives = 1;
+      if(scoreLine) scoreLine.textContent = "正在聽你跟讀…";
+      bwChatRec.onresult = ev => {
+        const said = Array.from(ev.results || []).map(r => r[0] && r[0].transcript).filter(Boolean).join(" ");
+        const sc = bwSpeechScore(target, said);
+        if(sc >= BW_CHAT_SPEAK_THRESHOLD){
+          bwChatUnlockSpeakGate(l);
+          if(scoreLine) scoreLine.textContent = `跟讀分數 ${sc}%｜通過，進入做題。`;
+          toast(`跟讀通過：${sc}%`);
+          setTimeout(()=>render(), 500);
+        }else{
+          if(scoreLine) scoreLine.textContent = `跟讀分數 ${sc}%｜未達 ${BW_CHAT_SPEAK_THRESHOLD}%：${said || "沒有聽到內容"}`;
+          toast("再跟讀一次，超過35%才進題");
+        }
+      };
+      bwChatRec.onerror = () => {
+        if(scoreLine) scoreLine.textContent = "語音辨識失敗；手機若不穩，可按「語辨不可用，先進題」。";
+      };
+      bwChatRec.onend = () => {};
+      bwChatRec.start();
+    }catch(err){
+      if(scoreLine) scoreLine.textContent = "語音辨識啟動失敗；可按「語辨不可用，先進題」。";
+    }
+  };
+}
+
 function render(){
   idx=Math.max(0,Math.min(idx,Math.max(0,lessons.length-1))); localStorage.setItem("bw_chat_lab_idx_"+HEART_TOPIC_SLUG,idx);
   const l=lessons[idx];
@@ -1420,9 +1606,11 @@ function render(){
       box.classList.add("show");
     }
   }
+  bwRenderSpeakGate(l);
 }
 function complete(){
   const l=lessons[idx]; const d=getDone();
+  if(bwChatSpeakGateRequired(l) && !bwChatSpeakGateUnlocked(l)){toast("先完成跟讀 >35% 才能進題");return}
   if(!answered){toast("先選一個答案");return}
   if(!correct){toast("要先選出正確答案，才能進下一關");return}
   if(!d.includes(l.day))setDone([...d,l.day]);
