@@ -960,11 +960,22 @@ async function loadPhotos(){
   photos = [];
   try{
     const j = await fetchJsonAny([HEART_PHOTOS_URL + "?v=" + Date.now()]);
+
+    // RENQING PHOTO FIX:
+    // photos.json 是 stagePhotos 1~8，每關固定一張。
+    // 舊版只在 loadPhotos 當下抓「當前關」的一張圖，
+    // 後面 currentPhotoForLesson(stage-1) 會拿不到第2關以後的圖，
+    // 結果第2關仍顯示第1關照片。
+    // 這裡一次攤平成 [stage01, stage02, ... stage08]，讓每關固定對應。
     if(isRenqingSeries() && j.stagePhotos){
-      const st = String(currentRenqingStageNo());
-      const arr = Array.isArray(j.stagePhotos[st]) ? j.stagePhotos[st] : [];
+      const arr = [];
+      for(let s=1; s<=RENQING_STAGE_TOTAL; s++){
+        const list = Array.isArray(j.stagePhotos[String(s)]) ? j.stagePhotos[String(s)] : [];
+        if(list[0]) arr.push(list[0]);
+      }
       if(arr.length) photos = arr.filter(Boolean);
     }
+
     if(!photos.length && Array.isArray(j.photos) && j.photos.length) photos = j.photos.filter(Boolean);
   }catch(e){
     photos = [];
@@ -1844,6 +1855,29 @@ function firstUnfinishedIndex(){
 }
 async function nextStage(){
   if(!canLeaveCurrent()) return;
+
+  // RENQING FIX:
+  // 使用者答對後可能直接按右箭頭，沒有按「答對了，完成本題」。
+  // 舊版會直接跳到下一題，導致第20題沒有寫入 done，
+  // 因此每關完成後不會跳出 Music / Story / Movie 休息選單。
+  if(isRenqingSeries()){
+    const l = lessons[idx];
+    const d = getDone();
+    if(l && correct && !d.includes(l.day)){
+      setDone([...d, l.day]);
+      const nd = getDone();
+      const doneEl = $("done"); if(doneEl) doneEl.textContent = `${nd.length}/${TOTAL}`;
+      const coinsEl = $("coins"); if(coinsEl) coinsEl.textContent = `耗${coinCount()}金`;
+      const nextCoinEl = $("nextCoin"); if(nextCoinEl) nextCoinEl.textContent = zenProgressText();
+
+      // 如果剛好完成本關 20 題，先彈出休息選單，不准直接滑到下一關。
+      if(showRenqingStageBreakIfNeeded(nd.length)){
+        updateReportButton();
+        return;
+      }
+    }
+  }
+
   const target=(idx+1)%lessons.length;
   if(!(await confirmPaidBlockIfNeeded(target)))return;
   idx=target;render();scheduleAutoQuestion(520)
