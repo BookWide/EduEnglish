@@ -1,14 +1,13 @@
-這包只新增 seo/ 資料夾，不改任何正式教材。
+這是 seo/ 集中入口頁 v2。
 
-放置到 GitHub：
-EduEnglish/seo/movie-english.html
-EduEnglish/seo/music-english.html
-EduEnglish/seo/youtube-english.html
-EduEnglish/seo/english-shadowing.html
-EduEnglish/seo/english-subtitles.html
-EduEnglish/seo/sitemap-seo.xml
+新增兩頁：
+seo/korean-songs.html
+seo/japanese-songs.html
 
-Search Console 送：
+覆蓋：
+seo/sitemap-seo.xml
+
+Search Console 重新送：
 https://bookwide.net/seo/sitemap-seo.xml
 
 不動：
