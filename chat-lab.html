@@ -1014,12 +1014,17 @@ function addGuestCoinsOnce(key, n){
 
 
 function grantGuestVideoPass(stage){
-  // 簡化版：遊客金幣只當獎勵顯示；看片用通行證，不在 player 逐片扣遊客金幣。
+  // 簡化版：遊客金幣只當獎勵顯示；看片用通行證。
+  // 但舊 player 若還沒改成讀 bw_guest_pass，這裡也補寫幾個相容 key，避免「進了影片館仍顯示 0」。
+  const now = new Date().toISOString();
   localStorage.setItem("bw_guest_pass", "1");
+  localStorage.setItem("bw_guest_video_pass", "1");
+  localStorage.setItem("bw_guest_trial_pass", "1");
+  localStorage.setItem("bw_guest_can_watch", "1");
   localStorage.setItem("bw_guest_pass_from", "chat-lab");
   localStorage.setItem("bw_guest_pass_topic", HEART_TOPIC_SLUG);
   localStorage.setItem("bw_guest_pass_stage", String(stage || 1));
-  localStorage.setItem("bw_guest_pass_updated_at", new Date().toISOString());
+  localStorage.setItem("bw_guest_pass_updated_at", now);
 }
 
 function applyChatLabStageRewards(day,totalDone){
@@ -1638,6 +1643,11 @@ function bwShowChoicesAfterSpeakGate(){
   if(gate){ gate.classList.remove("show"); gate.innerHTML = ""; }
   if(choices) choices.style.display = "";
   if(complete) complete.style.display = "";
+  // 第11–20題剛通過跟讀時，只開放選項；不要把舊答案/錯答黏上。
+  const l = lessons[idx];
+  if(l && bwChatSpeakGateRequired(l) && !getDone().includes(l.day)){
+    bwChatResetAnswerBeforeQuiz();
+  }
 }
 function bwRenderSpeakGate(l){
   const gate = $("speakGate");
@@ -1958,13 +1968,14 @@ loadHeartTopic()
     const firstTodo = firstUnfinishedIndex();
     const doneList = getDone();
     const allDone = doneList.length >= lessons.length;
-    if(!allDone) idx = firstTodo;
+    const needStage1Guide = doneList.length >= 10 && doneList.length < lessons.length && !bwChatHasStage1Choice();
+    if(!allDone) idx = needStage1Guide ? Math.max(0, Math.min(9, lessons.length - 1)) : firstTodo;
 
-    if(!(await confirmPaidBlockIfNeeded(idx))) idx = firstTodo;
+    if(!(await confirmPaidBlockIfNeeded(idx))) idx = needStage1Guide ? Math.max(0, Math.min(9, lessons.length - 1)) : firstTodo;
     window.BW_HEART_FRESH_LOAD = true;
     render();
     window.BW_HEART_FRESH_LOAD = false;
-    // 保險：已完成10題但尚未選 A/B 時，重新整理或回來也要顯示引導，不可直接落在第11題。
+    // 保險：已完成10題但尚未選 A/B 時，停在第10題畫面開引導，不可直接落在第11題。
     bwShowStage1GuideIfNeeded();
     updateBgmButton();
     scheduleAutoQuestion(780);
@@ -1990,6 +2001,9 @@ window.bwHeartResetThisTopic=function(){
   localStorage.removeItem("bw_guest_pass_topic");
   localStorage.removeItem("bw_guest_pass_stage");
   localStorage.removeItem("bw_guest_pass_updated_at");
+  localStorage.removeItem("bw_guest_video_pass");
+  localStorage.removeItem("bw_guest_trial_pass");
+  localStorage.removeItem("bw_guest_can_watch");
   location.reload();
 };
 console.log("[BookWide] heart-topic-once-charge-v5", HEART_TOPIC_SLUG);
@@ -2062,10 +2076,10 @@ function bindChatLabAirportModals(){
   const startStage2 = $("startStage2");
   const backStage1 = $("backStage1");
   const finishPortal = $("finishPortal");
-  if(openPortal) openPortal.onclick = ()=>{ bwChatSetStage1Choice("portal"); bwCloseModal("stage1Modal"); bwOpenModal("portalModal"); };
+  if(openPortal) openPortal.onclick = ()=>{ grantGuestVideoPass(1); bwChatSetStage1Choice("portal"); bwCloseModal("stage1Modal"); bwOpenModal("portalModal"); };
   if(startStage2) startStage2.onclick = ()=>{ bwChatSetStage1Choice("stage2"); bwGoStage2(); };
   if(backStage1) backStage1.onclick = ()=>{ bwCloseModal("portalModal"); bwOpenModal("stage1Modal"); };
-  if(finishPortal) finishPortal.onclick = ()=>{ bwCloseModal("finishModal"); bwOpenModal("portalModal"); };
+  if(finishPortal) finishPortal.onclick = ()=>{ grantGuestVideoPass(2); bwCloseModal("finishModal"); bwOpenModal("portalModal"); };
 }
 
 
@@ -2105,8 +2119,9 @@ function bwCleanBadJwtBeforeIndex(){
   }catch(e){}
 }
 function bwGoIndexCat(cat){
+  grantGuestVideoPass(Number(localStorage.getItem("bw_guest_pass_stage") || 1));
   bwCleanBadJwtBeforeIndex();
-  location.href = './index.html?cat=' + encodeURIComponent(cat || 'story');
+  location.href = './index.html?cat=' + encodeURIComponent(cat || 'story') + '&guest_pass=1&from=chat-lab';
 }
 document.addEventListener('click', function(ev){
   const a = ev.target && ev.target.closest && ev.target.closest('[data-cat-portal]');
