@@ -61,22 +61,73 @@ const $=id=>document.getElementById(id);function esc(s){return String(s||"").rep
 function scoreText(a,b){a=normalize(a);b=normalize(b);if(!a||!b)return 0;const aw=a.split(" "),bw=b.split(" ");let hit=0;for(const w of aw){if(bw.includes(w))hit++}let ratio=hit/Math.max(aw.length,1);if(a.length>3&&b.includes(a))ratio=Math.max(ratio,.75);return Math.round(Math.min(100,ratio*100))}
 function fetchJson(u){return fetch(u+(u.includes("?")?"&":"?")+"v="+Date.now(),{cache:"no-store"}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()})}
 async function load(){try{let data=await fetchJson(PHOTO_JSON);let a=Array.isArray(data)?data:data.photos;if(Array.isArray(a)&&a.length)photos=a.filter(Boolean)}catch(e){console.warn("photos fallback",e)}try{let data=await fetchJson(LESSON_JSON);let a=Array.isArray(data)?data:data.lessons;if(Array.isArray(a)&&a.length&&a[0]&&a[0].question&&a[0].question.it&&a[0].choices&&a[0].choices[0]&&a[0].choices[0].it)lessons=a.slice(0,TOTAL)}catch(e){console.warn("lessons fallback",e)}}
-function setCoins(n){let cur=Number(localStorage.getItem("bw_guest_coins")||0);localStorage.setItem("bw_guest_coins",String(cur+n))}
+const BW_GUEST_REWARD_PREFIX="shopping";
+function bwGuestInt(key, fallback=0){const n=Number(localStorage.getItem(key));return Number.isFinite(n)?Math.max(0,Math.floor(n)):fallback}
+function bwGuestWalletSnapshot(){
+  const hasEarned=localStorage.getItem("bw_guest_earned_coins")!==null;
+  const hasSpent=localStorage.getItem("bw_guest_spent_coins")!==null;
+  const legacyRaw=localStorage.getItem("bw_guest_coins");
+  const hasLegacy=legacyRaw!==null;
+  let earned=bwGuestInt("bw_guest_earned_coins",0);
+  let spent=bwGuestInt("bw_guest_spent_coins",0);
+  const legacy=Number.isFinite(Number(legacyRaw))?Math.max(0,Math.floor(Number(legacyRaw))):0;
+  if(!hasEarned&&!hasSpent&&hasLegacy){earned=legacy;spent=0;}
+  else{
+    const bal=Math.max(0,earned-spent);
+    if(hasLegacy&&legacy>bal) earned=legacy+spent;
+  }
+  if(spent>earned) spent=earned;
+  const balance=Math.max(0,earned-spent);
+  localStorage.setItem("bw_guest_earned_coins",String(earned));
+  localStorage.setItem("bw_guest_spent_coins",String(spent));
+  localStorage.setItem("bw_guest_coins",String(balance));
+  return {earned,spent,balance};
+}
+function setCoins(n){
+  const add=Math.max(0,Math.floor(Number(n)||0));
+  if(!add) return 0;
+  const snap=bwGuestWalletSnapshot();
+  const earned=snap.earned+add;
+  const spent=Math.min(snap.spent,earned);
+  const balance=Math.max(0,earned-spent);
+  localStorage.setItem("bw_guest_earned_coins",String(earned));
+  localStorage.setItem("bw_guest_spent_coins",String(spent));
+  localStorage.setItem("bw_guest_coins",String(balance));
+  localStorage.setItem("bw_guest_coin_updated_at",new Date().toISOString());
+  return add;
+}
+function ensureGuestRewardTotal(expected){
+  expected=Math.max(0,Math.floor(Number(expected)||0));
+  const paidKey="bw_"+BW_GUEST_REWARD_PREFIX+"_reward_paid_coins";
+  const bonusKey="bw_"+BW_GUEST_REWARD_PREFIX+"_bonus";
+  const paid=bwGuestInt(paidKey,0);
+  const add=Math.max(0,expected-paid);
+  if(add>0){
+    setCoins(add);
+    localStorage.setItem(paidKey,String(expected));
+  }
+  const oldBonus=bwGuestInt(bonusKey,0);
+  if(oldBonus<expected) localStorage.setItem(bonusKey,String(expected));
+  if(expected>=2) localStorage.setItem("bw_"+BW_GUEST_REWARD_PREFIX+"_stage1_bonus","1");
+  if(expected>=4) localStorage.setItem("bw_"+BW_GUEST_REWARD_PREFIX+"_stage2_bonus","1");
+  bwGuestWalletSnapshot();
+  return add;
+}
 function speak(t,l,rate=RATE,onDone){if(!t){onDone&&onDone();return}try{speechSynthesis.cancel()}catch(e){}const u=new SpeechSynthesisUtterance(String(t));u.lang=l;u.rate=rate;u.pitch=1;u.onend=()=>onDone&&onDone();u.onerror=()=>onDone&&onDone();speechSynthesis.speak(u)}
 function speakSeq(items){try{speechSynthesis.cancel()}catch(e){}let i=0;function next(){if(i>=items.length)return;const it=items[i++];if(!it||!it.text){next();return}const u=new SpeechSynthesisUtterance(String(it.text));u.lang=it.lang||"en-US";u.rate=it.rate||RATE;u.pitch=1;u.onend=()=>setTimeout(next,220);u.onerror=()=>setTimeout(next,220);speechSynthesis.speak(u)}next()}
 function renderHeroWords(text){const words=String(text||"").split(/(\s+)/);$("heroEn").innerHTML=words.map(w=>/\s+/.test(w)?w:`<span class="heroWord">${esc(w)}</span>`).join("")}
 function highlightHero(){const words=[...document.querySelectorAll(".heroWord")];words.forEach(w=>w.classList.remove("on"));let i=0;const timer=setInterval(()=>{words.forEach(w=>w.classList.remove("on"));if(i>=words.length){clearInterval(timer);return}words[i++].classList.add("on")},260)}
 function playQuestion(){const l=lessons[idx],lo=local(l.question||l);highlightHero();speak(l.en,"en-US",RATE,()=>{if(lo){$("heroLocal").classList.add("on");speak(lo,speechLang(),RATE,()=>$("heroLocal").classList.remove("on"))}})}
 function stage2Needed(){return idx>=10}function isChallengePassed(){return !stage2Needed()||passed[idx]}
-function render(){if(idx>9&&!stage2Unlocked)idx=0;const l=lessons[idx]||lessons[0],lo=local(l.question||l);answered=false;renderHeroWords(l.en);$("heroLocal").textContent=lo;$("heroLocal").style.display=lo?"block":"none";$("headerSub").textContent=`第 ${idx+1} 關｜英文＋${cfg().label}｜中文只顯示`;$("miniStage").textContent=`第 ${idx+1} 關`;$("miniDone").textContent=`${Math.min(idx,20)}/20`;$("miniCoins").textContent=`金${Number(localStorage.getItem("bw_shopping_bonus")||0)}`;$("miniNextCoin").textContent=idx<10?"完成10題送2金":"跟讀>35%";$("miniBadge").textContent=idx<10?"第1關":"第2關";$("title").textContent=l.title||"Shopping English + Local";$("scene").textContent=l.scene||"購物";$("photo").src=photos[idx%photos.length]||photos[0];renderChallenge();renderQuiz();}
+function render(){if(idx>9&&!stage2Unlocked)idx=0;const l=lessons[idx]||lessons[0],lo=local(l.question||l);answered=false;renderHeroWords(l.en);$("heroLocal").textContent=lo;$("heroLocal").style.display=lo?"block":"none";$("headerSub").textContent=`第 ${idx+1} 關｜英文＋${cfg().label}｜中文只顯示`;$("miniStage").textContent=`第 ${idx+1} 關`;$("miniDone").textContent=`${Math.min(idx,20)}/20`;$("miniCoins").textContent=`金${Math.max(Number(localStorage.getItem("bw_shopping_bonus")||0),Number(localStorage.getItem("bw_shopping_reward_paid_coins")||0))}`;$("miniNextCoin").textContent=idx<10?"完成10題送2金":"跟讀>35%";$("miniBadge").textContent=idx<10?"第1關":"第2關";$("title").textContent=l.title||"Shopping English + Local";$("scene").textContent=l.scene||"購物";$("photo").src=photos[idx%photos.length]||photos[0];renderChallenge();renderQuiz();}
 function renderChallenge(){const box=$("speakBox"),quiz=$("quizBox"),l=lessons[idx];if(!stage2Needed()){box.classList.remove("show");quiz.style.display="block";return}box.classList.add("show");const done=passed[idx];quiz.style.display=done?"block":"none";$("challengeTop").textContent=`任務 ${idx+1} / 20｜先慢速聽，再開口說。分數超過 ${PASS_SCORE} 才可做題。｜本 Mission 已解鎖`;$("tabEn").classList.toggle("on",challengeMode==="en");$("tabLocal").classList.toggle("on",challengeMode!=="en");const target=challengeMode==="en"?l.en:(local(l.question||l)||l.en);const targetLocal=challengeMode==="en"?(local(l.question||l)||""):l.en;$("challengeTarget").textContent=target;$("challengeLocal").textContent=targetLocal;$("challengeLocal").style.display=targetLocal?"block":"none";$("challengeZh").textContent=(l.question&&l.question.zh)||l.zh||"";$("challengeRef").textContent=challengeMode==="en"?((l.question&&l.question.zh)||l.zh||""):l.en;$("passBtn").style.display=done?"inline-block":"none";$("scoreBox").classList.remove("show");}
 function renderQuiz(){const l=lessons[idx],answers=(l.answers||l.choices||[]).slice(0,3);$("quizQ").textContent=`「${l.en}」選合理回答：`;$("completeBtn").textContent="先答題";$("completeBtn").classList.remove("ready");$("choices").innerHTML=answers.map((a,i)=>{let al=local(a);return `<button class="choice" type="button" data-i="${i}" data-c="${a.correct?'1':'0'}"><div class="choiceInner"><span class="choiceNo">${String.fromCharCode(65+i)}.</span><span class="choiceText"><span class="choiceEn">${esc(a.en||"")}</span>${al?`<span class="choiceLocal">${esc(al)}</span>`:""}<span class="choiceZh">${esc(a.zh||"")}</span></span><span class="choiceSpeak">🔊</span></div></button>`}).join("");document.querySelectorAll(".choice").forEach(b=>{b.onclick=e=>{const a=answers[Number(b.dataset.i)],al=local(a),seq=[{text:a.en,lang:"en-US"}];if(al)seq.push({text:al,lang:speechLang()});if(e.target.classList.contains("choiceSpeak")){speakSeq(seq);return}if(stage2Needed()&&!passed[idx])return;document.querySelectorAll(".choice").forEach(x=>x.disabled=true);b.classList.add(b.dataset.c==="1"?"correct":"wrong");speakSeq(seq);if(b.dataset.c==="1"){answered=true;$("completeBtn").textContent="完成本關";$("completeBtn").classList.add("ready")}else{$('completeBtn').textContent="答錯，請重整再試"}}})}
 function checkChallenge(text){const l=lessons[idx];const target=challengeMode==="en"?l.en:(local(l.question||l)||l.en);const sc=scoreText(target,text);$("saidBox").textContent=text||"尚未取得內容";$("scoreText").textContent=`分數：${sc} / 100（需超過 ${PASS_SCORE}）`;$("scoreBox").classList.add("show");if(sc>PASS_SCORE){passed[idx]=true;$("passBtn").style.display="inline-block";$("scoreText").textContent+=`｜通過，可以進入答題`;renderQuiz();$("quizBox").style.display="block"}}
 function openModal(id){$(id).classList.add("show")}function closeModal(id){$(id).classList.remove("show")}
 $("localSelect").onchange=render;$("play").onclick=playQuestion;$("hero").onclick=playQuestion;
 $("prev").onclick=()=>{if(idx>0){idx--;render()}};$("next").onclick=()=>{if(!answered){alert("本關還沒完成，不能跳下一關");return}if(idx===9||idx===19)return;if(idx<9||stage2Unlocked){idx++;render()}};$("photoPrev").onclick=e=>{e.stopPropagation();$("prev").click()};$("photoNext").onclick=e=>{e.stopPropagation();$("next").click()};
-$("completeBtn").onclick=()=>{if(!answered||!$("completeBtn").classList.contains("ready"))return;if(idx<9){idx++;render();return}if(idx===9){if(!localStorage.getItem("bw_shopping_stage1_bonus")){setCoins(2);localStorage.setItem("bw_shopping_stage1_bonus","1");localStorage.setItem("bw_shopping_bonus",String(Number(localStorage.getItem("bw_shopping_bonus")||0)+2))}openModal("stage1Modal");render();return}if(idx<19){idx++;render();return}if(idx===19){if(!localStorage.getItem("bw_shopping_stage2_bonus")){setCoins(2);localStorage.setItem("bw_shopping_stage2_bonus","1");localStorage.setItem("bw_shopping_bonus",String(Number(localStorage.getItem("bw_shopping_bonus")||0)+2))}openModal("finishModal");render();return}};
-$("openPortal").onclick=()=>{closeModal("stage1Modal");openModal("portalModal")};$("backStage1").onclick=()=>{closeModal("portalModal");openModal("stage1Modal")};$("startStage2").onclick=()=>{stage2Unlocked=true;idx=10;closeModal("stage1Modal");render()};$("finishPortal").onclick=()=>{closeModal("finishModal");openModal("portalModal")};
+$("completeBtn").onclick=()=>{if(!answered||!$("completeBtn").classList.contains("ready"))return;if(idx<9){idx++;render();return}if(idx===9){ensureGuestRewardTotal(2);openModal("stage1Modal");render();return}if(idx<19){idx++;render();return}if(idx===19){ensureGuestRewardTotal(4);openModal("finishModal");render();return}};
+$("openPortal").onclick=()=>{ensureGuestRewardTotal(2);closeModal("stage1Modal");openModal("portalModal")};$("backStage1").onclick=()=>{closeModal("portalModal");openModal("stage1Modal")};$("startStage2").onclick=()=>{stage2Unlocked=true;idx=10;closeModal("stage1Modal");render()};$("finishPortal").onclick=()=>{ensureGuestRewardTotal(4);closeModal("finishModal");openModal("portalModal")};
 $("tabEn").onclick=()=>{challengeMode="en";renderChallenge()};$("tabLocal").onclick=()=>{challengeMode="local";renderChallenge()};$("slowBtn").onclick=()=>{const l=lessons[idx];const t=challengeMode==="en"?l.en:(local(l.question||l)||l.en);speak(t,challengeMode==="en"?"en-US":speechLang(),.68)};$("passBtn").onclick=()=>{$("quizBox").scrollIntoView({behavior:"smooth",block:"nearest"})};$("checkBtn").onclick=()=>checkChallenge($("saidInput").value);
 $("recBtn").onclick=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){alert("這個瀏覽器沒有語音辨識，請在下方輸入你說的內容，再按檢查分數。");return}const rec=new SR();rec.lang=challengeMode==="en"?"en-US":speechLang();rec.interimResults=false;rec.maxAlternatives=1;$("saidBox").textContent="正在聽...";$("scoreBox").classList.add("show");rec.onresult=e=>{const txt=e.results[0][0].transcript;$("saidInput").value=txt;checkChallenge(txt)};rec.onerror=e=>{$("saidBox").textContent="語音辨識失敗，請手動輸入。"};rec.start()};
 load().then(render);
