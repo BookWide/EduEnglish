@@ -962,12 +962,49 @@ function getFailed(){try{return JSON.parse(localStorage.getItem("bw_chat_lab_fai
 function setFailed(a){localStorage.setItem("bw_chat_lab_failed_"+HEART_TOPIC_SLUG,JSON.stringify([...new Set(a)]))}
 function markFailed(day){const f=getFailed(); if(!f.includes(day)) setFailed([...f,day])}
 function completedCount(){return getDone().length}
-function guestCoinTotal(){ return Number(localStorage.getItem("bw_chat_lab_bonus") || 0); }
+function bwGuestLocalInt(key, fallback=0){
+  const n = Number(localStorage.getItem(key));
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
+}
+function bwGuestWalletSnapshot(){
+  // 對齊 player.html V45：earned / spent 分帳；避免 player 進頁後把 bw_guest_coins 又校回 0。
+  const hasEarned = localStorage.getItem("bw_guest_earned_coins") !== null;
+  const hasSpent = localStorage.getItem("bw_guest_spent_coins") !== null;
+  const legacyRaw = localStorage.getItem("bw_guest_coins");
+  const hasLegacyBalance = legacyRaw !== null;
+  let earned = bwGuestLocalInt("bw_guest_earned_coins", 0);
+  let spent = bwGuestLocalInt("bw_guest_spent_coins", 0);
+  const legacyBalance = Number.isFinite(Number(legacyRaw)) ? Math.max(0, Math.floor(Number(legacyRaw))) : 0;
+  if(!hasEarned && !hasSpent && hasLegacyBalance){
+    earned = legacyBalance;
+    spent = 0;
+  }else{
+    // 若舊 bw_guest_coins 比 earned-spent 還高，保留舊餘額，避免舊流程獎勵被 player 清掉。
+    const currentBalance = Math.max(0, earned - spent);
+    if(hasLegacyBalance && legacyBalance > currentBalance){
+      earned = legacyBalance + spent;
+    }
+  }
+  if(spent > earned) spent = earned;
+  const balance = Math.max(0, earned - spent);
+  localStorage.setItem("bw_guest_earned_coins", String(earned));
+  localStorage.setItem("bw_guest_spent_coins", String(spent));
+  localStorage.setItem("bw_guest_coins", String(balance));
+  return {earned, spent, balance};
+}
+function guestCoinTotal(){ return bwGuestWalletSnapshot().balance; }
 function addGuestCoinsOnce(key, n){
   if(localStorage.getItem(key)==="1") return false;
-  const cur = Number(localStorage.getItem("bw_guest_coins") || 0);
-  localStorage.setItem("bw_guest_coins", String(cur + n));
-  localStorage.setItem("bw_chat_lab_bonus", String(guestCoinTotal() + n));
+  const snap = bwGuestWalletSnapshot();
+  const add = Math.max(0, Math.floor(Number(n) || 0));
+  const earned = snap.earned + add;
+  const spent = Math.min(snap.spent, earned);
+  const balance = Math.max(0, earned - spent);
+  localStorage.setItem("bw_guest_earned_coins", String(earned));
+  localStorage.setItem("bw_guest_spent_coins", String(spent));
+  localStorage.setItem("bw_guest_coins", String(balance));
+  localStorage.setItem("bw_chat_lab_bonus", String(Number(localStorage.getItem("bw_chat_lab_bonus") || 0) + add));
+  localStorage.setItem("bw_guest_coin_updated_at", new Date().toISOString());
   localStorage.setItem(key,"1");
   return true;
 }
@@ -1431,6 +1468,8 @@ function buildHeartReportHtml(coverUrl=''){
   </div>
 </div>
 
+
+<!-- fixed v5: chat-lab writes bw_guest_earned_coins / bw_guest_spent_coins for player V45 -->
 </body></html>`;
 }
 
@@ -1938,6 +1977,8 @@ window.bwHeartResetThisTopic=function(){
   location.reload();
 };
 console.log("[BookWide] heart-topic-once-charge-v5", HEART_TOPIC_SLUG);
+window.BW_chatLabGuestCoinSnapshot = function(){ return bwGuestWalletSnapshot(); };
+
 
 
 /* 進入答題按鈕保險：只開放選項，不自動標答案 */
