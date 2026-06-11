@@ -993,10 +993,21 @@ function bwGuestWalletSnapshot(){
   return {earned, spent, balance};
 }
 function guestCoinTotal(){ return bwGuestWalletSnapshot().balance; }
-function addGuestCoinsOnce(key, n){
-  if(localStorage.getItem(key)==="1") return false;
+
+function bwChatLabRewardPaidKey(){
+  return "bw_chat_lab_reward_paid_coins_" + HEART_TOPIC_SLUG;
+}
+function bwChatLabExpectedRewardCoins(){
+  const done = getDone();
+  let expected = 0;
+  if(done.length >= 10) expected += 2;
+  if(done.length >= TOTAL || done.includes(20)) expected += 2;
+  return expected;
+}
+function bwAddGuestCoinsRaw(n){
   const snap = bwGuestWalletSnapshot();
   const add = Math.max(0, Math.floor(Number(n) || 0));
+  if(!add) return false;
   const earned = snap.earned + add;
   const spent = Math.min(snap.spent, earned);
   const balance = Math.max(0, earned - spent);
@@ -1005,8 +1016,47 @@ function addGuestCoinsOnce(key, n){
   localStorage.setItem("bw_guest_coins", String(balance));
   localStorage.setItem("bw_chat_lab_bonus", String(Number(localStorage.getItem("bw_chat_lab_bonus") || 0) + add));
   localStorage.setItem("bw_guest_coin_updated_at", new Date().toISOString());
-  localStorage.setItem(key,"1");
   return true;
+}
+function bwSyncChatLabGuestReward(){
+  // 新版以「本主題已實發幾枚」為準，不再只靠舊 stage flag。
+  // 這可修掉：舊 flag 已被寫入，但 wallet 沒同步，導致進 player 顯示遊客金幣 0。
+  const expected = bwChatLabExpectedRewardCoins();
+  if(!expected) return 0;
+  const paidKey = bwChatLabRewardPaidKey();
+  let paid = Number(localStorage.getItem(paidKey) || 0);
+  if(!Number.isFinite(paid) || paid < 0) paid = 0;
+
+  const snap = bwGuestWalletSnapshot();
+  const oldStage1 = localStorage.getItem("bw_chat_lab_reward_stage1_" + HEART_TOPIC_SLUG) === "1";
+  const oldStage2 = localStorage.getItem("bw_chat_lab_reward_stage2_" + HEART_TOPIC_SLUG) === "1";
+
+  // 舊版已經有發到 wallet 的情況：補登 paidKey，避免重複加。
+  if(paid === 0 && ((oldStage1 && expected <= 2) || (oldStage1 && oldStage2 && expected <= 4)) && snap.earned >= expected){
+    localStorage.setItem(paidKey, String(expected));
+    return 0;
+  }
+
+  const need = Math.max(0, expected - paid);
+  if(!need) return 0;
+  bwAddGuestCoinsRaw(need);
+  localStorage.setItem(paidKey, String(expected));
+
+  // 同步保留舊 flag，避免舊程式碼或舊頁誤判。
+  if(expected >= 2) localStorage.setItem("bw_chat_lab_reward_stage1_" + HEART_TOPIC_SLUG, "1");
+  if(expected >= 4) localStorage.setItem("bw_chat_lab_reward_stage2_" + HEART_TOPIC_SLUG, "1");
+  return need;
+}
+function addGuestCoinsOnce(key, n){
+  // 保留舊函式給舊呼叫點使用；實際同步改走 paidKey，避免 stage flag 卡死。
+  const before = bwGuestWalletSnapshot().balance;
+  const expectedBefore = Number(localStorage.getItem(bwChatLabRewardPaidKey()) || 0);
+  const added = bwSyncChatLabGuestReward();
+  if(added > 0){
+    localStorage.setItem(key,"1");
+    return true;
+  }
+  return false;
 }
 
 
@@ -1028,16 +1078,9 @@ function grantGuestVideoPass(stage){
 }
 
 function applyChatLabStageRewards(day,totalDone){
-  let added = 0;
-  if(totalDone >= 10){
-    grantGuestVideoPass(1);
-    if(addGuestCoinsOnce("bw_chat_lab_reward_stage1_" + HEART_TOPIC_SLUG, 2)) added += 2;
-  }
-  if(day === 20 || totalDone >= TOTAL){
-    grantGuestVideoPass(2);
-    if(addGuestCoinsOnce("bw_chat_lab_reward_stage2_" + HEART_TOPIC_SLUG, 2)) added += 2;
-  }
-  return added;
+  if(totalDone >= 10) grantGuestVideoPass(1);
+  if(day === 20 || totalDone >= TOTAL) grantGuestVideoPass(2);
+  return bwSyncChatLabGuestReward();
 }
 
 function topicCoinCost(){ return 0; }
@@ -1993,6 +2036,9 @@ window.bwHeartResetThisTopic=function(){
   localStorage.removeItem("bw_chat_lab_answers_"+HEART_TOPIC_SLUG);
   localStorage.removeItem("bw_chat_lab_idx_"+HEART_TOPIC_SLUG);
   localStorage.removeItem("bw_chat_lab_stage1_choice_"+HEART_TOPIC_SLUG);
+  localStorage.removeItem("bw_chat_lab_reward_stage1_" + HEART_TOPIC_SLUG);
+  localStorage.removeItem("bw_chat_lab_reward_stage2_" + HEART_TOPIC_SLUG);
+  localStorage.removeItem("bw_chat_lab_reward_paid_coins_" + HEART_TOPIC_SLUG);
   localStorage.removeItem("bw_heart_paid_block_"+HEART_TOPIC_SLUG+"_1");
   localStorage.removeItem("bw_heart_paid_block_"+HEART_TOPIC_SLUG+"_2");
   localStorage.removeItem("bw_heart_paid_block_"+HEART_TOPIC_SLUG+"_topic");
@@ -2007,7 +2053,13 @@ window.bwHeartResetThisTopic=function(){
   location.reload();
 };
 console.log("[BookWide] heart-topic-once-charge-v5", HEART_TOPIC_SLUG);
-window.BW_chatLabGuestCoinSnapshot = function(){ return bwGuestWalletSnapshot(); };
+window.BW_chatLabGuestCoinSnapshot = function(){
+  return Object.assign(bwGuestWalletSnapshot(), {
+    expected_from_chat_lab: bwChatLabExpectedRewardCoins(),
+    paid_from_chat_lab: Number(localStorage.getItem(bwChatLabRewardPaidKey()) || 0),
+    topic: HEART_TOPIC_SLUG
+  });
+};
 window.BW_chatLabGuestPassSnapshot = function(){
   return {
     pass: localStorage.getItem("bw_guest_pass") === "1",
@@ -2076,10 +2128,10 @@ function bindChatLabAirportModals(){
   const startStage2 = $("startStage2");
   const backStage1 = $("backStage1");
   const finishPortal = $("finishPortal");
-  if(openPortal) openPortal.onclick = ()=>{ grantGuestVideoPass(1); bwChatSetStage1Choice("portal"); bwCloseModal("stage1Modal"); bwOpenModal("portalModal"); };
+  if(openPortal) openPortal.onclick = ()=>{ bwSyncChatLabGuestReward(); grantGuestVideoPass(1); bwChatSetStage1Choice("portal"); bwCloseModal("stage1Modal"); bwOpenModal("portalModal"); };
   if(startStage2) startStage2.onclick = ()=>{ bwChatSetStage1Choice("stage2"); bwGoStage2(); };
   if(backStage1) backStage1.onclick = ()=>{ bwCloseModal("portalModal"); bwOpenModal("stage1Modal"); };
-  if(finishPortal) finishPortal.onclick = ()=>{ grantGuestVideoPass(2); bwCloseModal("finishModal"); bwOpenModal("portalModal"); };
+  if(finishPortal) finishPortal.onclick = ()=>{ bwSyncChatLabGuestReward(); grantGuestVideoPass(2); bwCloseModal("finishModal"); bwOpenModal("portalModal"); };
 }
 
 
@@ -2119,9 +2171,11 @@ function bwCleanBadJwtBeforeIndex(){
   }catch(e){}
 }
 function bwGoIndexCat(cat){
+  bwSyncChatLabGuestReward();
   grantGuestVideoPass(Number(localStorage.getItem("bw_guest_pass_stage") || 1));
   bwCleanBadJwtBeforeIndex();
-  location.href = './index.html?cat=' + encodeURIComponent(cat || 'story') + '&guest_pass=1&from=chat-lab';
+  // 不帶 guest_coins 參數，避免 index 觸發 JWT；金幣只放 localStorage wallet。
+  location.href = './index.html?cat=' + encodeURIComponent(cat || 'story') + '&from=chat-lab';
 }
 document.addEventListener('click', function(ev){
   const a = ev.target && ev.target.closest && ev.target.closest('[data-cat-portal]');
