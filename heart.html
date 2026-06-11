@@ -563,7 +563,7 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
 <main class="app">
   <section class="top"><div class="brand"><div class="logo">📘</div><div><b>BookWide</b><span>情商問答｜第5題確認扣款｜正式金幣</span></div></div><a href="./account/learning-dashboard.html">控制台</a></section>
   <section class="hero" id="hero" aria-label="點擊播放">
-    <img id="photo" alt="BookWide monk photo"><video id="mediaVideo" muted loop playsinline preload="metadata"></video>
+    <img id="photo" alt="BookWide monk photo"><video id="mediaVideo" playsinline preload="metadata"></video>
     <button class="nav prev" id="photoPrev" type="button">‹</button><button class="nav next" id="photoNext" type="button">›</button>
     <div class="hint" id="hint">點一下播放</div>
     <div class="sub">
@@ -1444,16 +1444,11 @@ function speakAnswerLang(text,lang){if(!bgmUserOff)startBgm(true);
 
 let autoQuestionTimer=null;
 function scheduleAutoQuestion(delay=520){
+  // BW HEART v15:
+  // 進入頁面、切題、返回頁面都不再自動朗讀英文。
+  // 需要使用者手動點播放鍵或各語言喇叭。
   clearTimeout(autoQuestionTimer);
-  // RENQING LITE v14:
-  // renqing-chat 題目很長，切題後自動朗讀會造成大量 speechSynthesis + highlight 重繪。
-  // 改成手動按播放，頁面明顯輕很多；其他主題維持原自動朗讀。
-  if(isRenqingSeries()) return;
-  autoQuestionTimer=setTimeout(()=>{
-    if(document.hidden)return;
-    if(playing)return;
-    speakQuestion();
-  },delay);
+  return;
 }
 
 let BW_waveRaf=0;
@@ -1516,31 +1511,80 @@ function isVideoMedia(url,item=null){
   const type=(item&&typeof item==="object"?String(item.type||item.kind||""):"").toLowerCase();
   return type==="video"||type==="mp4"||/\.(mp4|webm|mov)(\?|#|$)/i.test(String(url||""));
 }
+function fallbackImageUrl(url){
+  return String(url || "").replace(/\.(mp4|webm|mov)(\?.*)?$/i, ".png$2");
+}
 function showMedia(item){
   const url=normalizeMediaUrl(item);
   const img=$("photo"), video=$("mediaVideo");
   if(!img||!video||!url)return;
+
+  const showImage = (src)=>{
+    try{ video.pause(); }catch(e){}
+    video.removeAttribute("src");
+    video.load();
+    video.style.display="none";
+    img.style.display="block";
+    img.src=src;
+    $("hint").textContent="點一下播放";
+  };
+
   if(isVideoMedia(url,item)){
     img.style.display="none";
     video.style.display="block";
+    video.onerror=function(){
+      showImage(fallbackImageUrl(url));
+    };
+    video.onended=function(){
+      setPlaying(false);
+      $("hint").textContent="影片已播完";
+    };
     if(video.getAttribute("src")!==url){
       video.pause();
       video.src=url;
       video.load();
     }
-    video.muted=true;
-    video.loop=true;
+    video.muted=false;      // MP4 原音可播放
+    video.volume=1;
+    video.loop=false;       // 只播一次，不循環
     video.playsInline=true;
-    video.play().catch(()=>{});
+    video.pause();          // 進頁不自動播，需點影片/播放鍵
+    setPlaying(false);
+    $("hint").textContent="點一下播放影片";
   }else{
-    video.pause();
-    video.removeAttribute("src");
-    video.load();
-    video.style.display="none";
-    img.style.display="block";
-    img.src=url;
+    showImage(url);
   }
 }
+
+function isCurrentVideoMedia(){
+  const video=$("mediaVideo");
+  return !!(video && video.style.display !== "none" && video.getAttribute("src"));
+}
+function toggleCurrentVideo(){
+  const video=$("mediaVideo");
+  if(!isCurrentVideoMedia() || !video) return false;
+  if(!video.paused && !video.ended){
+    video.pause();
+    setPlaying(false);
+    $("hint").textContent="影片已暫停";
+    return true;
+  }
+  if(video.ended){
+    try{ video.currentTime=0; }catch(e){}
+  }
+  stopSpeech();
+  video.muted=false;
+  video.volume=1;
+  video.loop=false;
+  video.play().then(()=>{
+    setPlaying(true);
+    $("hint").textContent="影片播放中";
+  }).catch(()=>{
+    $("hint").textContent="再點一下播放影片聲音";
+  });
+  return true;
+}
+
 
 
 function currentDeviceForLesson(){
@@ -1941,10 +1985,16 @@ async function prevStage(){
   if(!(await confirmPaidBlockIfNeeded(target)))return;
   idx=target;render();scheduleAutoQuestion(520)
 }
-$("hero").onclick=e=>{if(e.target.tagName==="BUTTON")return; speakQuestion()};
+$("hero").onclick=e=>{if(e.target.tagName==="BUTTON")return; if(toggleCurrentVideo())return;};
 const heroSpeakJa=$("heroSpeakJa"); if(heroSpeakJa) heroSpeakJa.onclick=e=>{e.preventDefault();e.stopPropagation();speakQuestion("ja")};
 const heroSpeakZh=$("heroSpeakZh"); if(heroSpeakZh) heroSpeakZh.onclick=e=>{e.preventDefault();e.stopPropagation();speakQuestion("zh")};
-$("play").onclick=()=>playing?stopSpeech():speakQuestion();
+$("play").onclick=()=>{
+  if(isCurrentVideoMedia()){
+    toggleCurrentVideo();
+    return;
+  }
+  playing ? stopSpeech() : speakQuestion();
+};
 $("next").onclick=nextStage;$("prev").onclick=prevStage;$("photoNext").onclick=nextStage;$("photoPrev").onclick=prevStage;$("complete").onclick=complete;
 $("rewardOk").onclick=()=>{ if(isRenqingSeries()) return renqingGoNextHard(); resetRenqingRewardButtons();$("reward").classList.remove("show");nextStage()};
 $("music").onclick=toggleBgm;
