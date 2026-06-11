@@ -70,7 +70,94 @@ let idx=0, challengeMode="en", passed={}, answered=false, stage2Unlocked=false;f
 function scoreText(a,b){a=normalize(a);b=normalize(b);if(!a||!b)return 0;const aw=a.split(" "),bw=b.split(" ");let hit=0;for(const w of aw){if(bw.includes(w))hit++}let ratio=hit/Math.max(aw.length,1);if(a.length>3&&b.includes(a))ratio=Math.max(ratio,.75);return Math.round(Math.min(100,ratio*100))}
 function fetchJson(u){return fetch(u+(u.includes("?")?"&":"?")+"v="+Date.now(),{cache:"no-store"}).then(r=>{if(!r.ok)throw new Error(r.status);return r.json()})}
 async function load(){try{let data=await fetchJson(PHOTO_JSON);let a=Array.isArray(data)?data:data.photos;if(Array.isArray(a)&&a.length)photos=a.filter(Boolean)}catch(e){console.warn("photos fallback",e)}try{let data=await fetchJson(LESSON_JSON);let a=Array.isArray(data)?data:data.lessons;if(Array.isArray(a)&&a.length)lessons=a.slice(0,TOTAL)}catch(e){console.warn("lessons fallback",e)}}
-function setCoins(n){let cur=Number(localStorage.getItem("bw_guest_coins")||0);localStorage.setItem("bw_guest_coins",String(cur+n))}
+function bwGuestLocalInt(key, fallback=0){
+  const n = Number(localStorage.getItem(key));
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
+}
+function bwGuestWalletSnapshot(){
+  // 對齊新版 player：遊客金幣用 earned / spent 分帳；舊版只寫 bw_guest_coins 會被 player 校回 0。
+  const legacyRaw = localStorage.getItem("bw_guest_coins");
+  const hasEarned = localStorage.getItem("bw_guest_earned_coins") !== null;
+  const hasSpent = localStorage.getItem("bw_guest_spent_coins") !== null;
+  let earned = bwGuestLocalInt("bw_guest_earned_coins", 0);
+  let spent = bwGuestLocalInt("bw_guest_spent_coins", 0);
+  const legacyBalance = Number.isFinite(Number(legacyRaw)) ? Math.max(0, Math.floor(Number(legacyRaw))) : 0;
+  if(!hasEarned && !hasSpent && legacyRaw !== null){
+    earned = legacyBalance;
+    spent = 0;
+  }
+  if(spent > earned) spent = earned;
+  const balance = Math.max(0, earned - spent);
+  localStorage.setItem("bw_guest_earned_coins", String(earned));
+  localStorage.setItem("bw_guest_spent_coins", String(spent));
+  localStorage.setItem("bw_guest_coins", String(balance));
+  return {earned, spent, balance};
+}
+function bwSetGuestWallet(earned, spent){
+  earned = Math.max(0, Math.floor(Number(earned)||0));
+  spent = Math.max(0, Math.floor(Number(spent)||0));
+  if(spent > earned) spent = earned;
+  const balance = Math.max(0, earned - spent);
+  localStorage.setItem("bw_guest_earned_coins", String(earned));
+  localStorage.setItem("bw_guest_spent_coins", String(spent));
+  localStorage.setItem("bw_guest_coins", String(balance));
+  localStorage.setItem("bw_guest_coin_updated_at", new Date().toISOString());
+  return {earned, spent, balance};
+}
+function bwDirectionsRewardPaidKey(){
+  return "bw_directions_reward_paid_coins";
+}
+function bwDirectionsPaidCoins(){
+  return Math.max(0, Math.floor(Number(localStorage.getItem(bwDirectionsRewardPaidKey()) || 0) || 0));
+}
+function bwAddGuestCoinsRaw(n){
+  const add = Math.max(0, Math.floor(Number(n)||0));
+  if(!add) return bwGuestWalletSnapshot();
+  const snap = bwGuestWalletSnapshot();
+  const r = bwSetGuestWallet(snap.earned + add, snap.spent);
+  const oldBonus = Number(localStorage.getItem("bw_directions_bonus") || 0);
+  localStorage.setItem("bw_directions_bonus", String(oldBonus + add));
+  return r;
+}
+function setCoins(n){
+  return bwAddGuestCoinsRaw(n);
+}
+function syncDirectionsGuestCoins(expected){
+  // expected=2/4 是「本 directions 應累計發出的金幣」。
+  // 用 paidKey 記錄本頁已實發，避免舊 stage flag 卡住，也避免只把餘額補到 2 而不是真正 +2。
+  expected = Math.max(0, Math.floor(Number(expected)||0));
+  const paid = bwDirectionsPaidCoins();
+  const delta = Math.max(0, expected - paid);
+  let r = bwGuestWalletSnapshot();
+  if(delta > 0){
+    r = bwAddGuestCoinsRaw(delta);
+    localStorage.setItem(bwDirectionsRewardPaidKey(), String(expected));
+  }else if(paid < expected){
+    localStorage.setItem(bwDirectionsRewardPaidKey(), String(expected));
+  }
+  if(expected >= 2) localStorage.setItem("bw_directions_stage1_bonus","1");
+  if(expected >= 4) localStorage.setItem("bw_directions_stage2_bonus","1");
+  return r;
+}
+function syncDirectionsCoinsFromFlags(){
+  let expected = bwDirectionsPaidCoins();
+  if(localStorage.getItem("bw_directions_stage1_bonus")==="1") expected = Math.max(expected,2);
+  if(localStorage.getItem("bw_directions_stage2_bonus")==="1") expected = Math.max(expected,4);
+  if(expected) return syncDirectionsGuestCoins(expected);
+  return bwGuestWalletSnapshot();
+}
+function BW_directionsGuestCoinSnapshot(){
+  const snap = bwGuestWalletSnapshot();
+  return {
+    earned:snap.earned,
+    spent:snap.spent,
+    balance:snap.balance,
+    paid_from_directions:bwDirectionsPaidCoins(),
+    stage1:localStorage.getItem("bw_directions_stage1_bonus")==="1",
+    stage2:localStorage.getItem("bw_directions_stage2_bonus")==="1"
+  };
+}
+
 function speak(t,l,rate=RATE,onDone){if(!t){onDone&&onDone();return}try{speechSynthesis.cancel()}catch(e){}const u=new SpeechSynthesisUtterance(String(t));u.lang=l;u.rate=rate;u.pitch=1;u.onend=()=>onDone&&onDone();u.onerror=()=>onDone&&onDone();speechSynthesis.speak(u)}
 function speakSeq(items){try{speechSynthesis.cancel()}catch(e){}let i=0;function next(){if(i>=items.length)return;const it=items[i++];if(!it||!it.text){next();return}const u=new SpeechSynthesisUtterance(String(it.text));u.lang=it.lang||"en-US";u.rate=it.rate||RATE;u.pitch=1;u.onend=()=>setTimeout(next,220);u.onerror=()=>setTimeout(next,220);speechSynthesis.speak(u)}next()}
 function renderHeroWords(text){const words=String(text||"").split(/(\s+)/);$("heroEn").innerHTML=words.map(w=>/\s+/.test(w)?w:`<span class="heroWord">${esc(w)}</span>`).join("")}
@@ -84,8 +171,8 @@ function checkChallenge(text){const l=lessons[idx];const target=challengeMode===
 function openModal(id){$(id).classList.add("show")}function closeModal(id){$(id).classList.remove("show")}
 $("localSelect").onchange=render;$("play").onclick=playQuestion;$("hero").onclick=playQuestion;
 $("prev").onclick=()=>{if(idx>0){idx--;render()}};$("next").onclick=()=>{if(!answered){alert("本關還沒完成，不能跳下一關");return}if(idx===9||idx===19)return;if(idx<9||stage2Unlocked){idx++;render()}};$("photoPrev").onclick=e=>{e.stopPropagation();$("prev").click()};$("photoNext").onclick=e=>{e.stopPropagation();$("next").click()};
-$("completeBtn").onclick=()=>{if(!answered||!$("completeBtn").classList.contains("ready"))return;if(idx<9){idx++;render();return}if(idx===9){if(!localStorage.getItem("bw_directions_stage1_bonus")){setCoins(2);localStorage.setItem("bw_directions_stage1_bonus","1");localStorage.setItem("bw_directions_bonus",String(Number(localStorage.getItem("bw_directions_bonus")||0)+2))}openModal("stage1Modal");render();return}if(idx<19){idx++;render();return}if(idx===19){if(!localStorage.getItem("bw_directions_stage2_bonus")){setCoins(2);localStorage.setItem("bw_directions_stage2_bonus","1");localStorage.setItem("bw_directions_bonus",String(Number(localStorage.getItem("bw_directions_bonus")||0)+2))}openModal("finishModal");render();return}};
-$("openPortal").onclick=()=>{closeModal("stage1Modal");openModal("portalModal")};$("backStage1").onclick=()=>{closeModal("portalModal");openModal("stage1Modal")};$("startStage2").onclick=()=>{stage2Unlocked=true;idx=10;closeModal("stage1Modal");render()};$("finishPortal").onclick=()=>{closeModal("finishModal");openModal("portalModal")};
+$("completeBtn").onclick=()=>{if(!answered||!$("completeBtn").classList.contains("ready"))return;if(idx<9){idx++;render();return}if(idx===9){localStorage.setItem("bw_directions_stage1_bonus","1");syncDirectionsGuestCoins(2);openModal("stage1Modal");render();return}if(idx<19){idx++;render();return}if(idx===19){localStorage.setItem("bw_directions_stage2_bonus","1");syncDirectionsGuestCoins(4);openModal("finishModal");render();return}};
+$("openPortal").onclick=()=>{syncDirectionsCoinsFromFlags();closeModal("stage1Modal");openModal("portalModal")};$("backStage1").onclick=()=>{closeModal("portalModal");openModal("stage1Modal")};$("startStage2").onclick=()=>{syncDirectionsCoinsFromFlags();stage2Unlocked=true;idx=10;closeModal("stage1Modal");render()};$("finishPortal").onclick=()=>{syncDirectionsCoinsFromFlags();closeModal("finishModal");openModal("portalModal")};
 $("tabEn").onclick=()=>{challengeMode="en";renderChallenge()};$("tabLocal").onclick=()=>{challengeMode="local";renderChallenge()};$("slowBtn").onclick=()=>{const l=lessons[idx];const t=challengeMode==="en"?l.en:(localSpeakText(l.question||l)||l.en);speak(t,challengeMode==="en"?"en-US":speechLang(),.68)};$("passBtn").onclick=()=>{$("quizBox").scrollIntoView({behavior:"smooth",block:"nearest"})};$("checkBtn").onclick=()=>checkChallenge($("saidInput").value);
 $("recBtn").onclick=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){alert("這個瀏覽器沒有語音辨識，請在下方輸入你說的內容，再按檢查分數。");return}const rec=new SR();rec.lang="en-US";rec.interimResults=false;rec.maxAlternatives=1;$("saidBox").textContent="正在聽...";$("scoreBox").classList.add("show");rec.onresult=e=>{const txt=e.results[0][0].transcript;$("saidInput").value=txt;checkChallenge(txt)};rec.onerror=e=>{$("saidBox").textContent="語音辨識失敗，請手動輸入。"};rec.start()};
 load().then(render);
