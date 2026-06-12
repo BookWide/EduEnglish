@@ -873,9 +873,38 @@ async function startPayuniCheckout(){
       throw new Error(text || 'PAYUNi 回傳格式不是 HTML');
     }
 
-    // 不再開新分頁。直接在目前分頁寫入 PAYUNi 自動送出表單，避免瀏覽器彈窗封鎖。
+    // 手機 Safari / Chrome 有時不會執行 PAYUNi 回傳頁裡的自動送出 script。
+    // 所以寫入同頁後，再補一段強制送出第一個 form，確保能進到信用卡付款頁。
+    const autoSubmitScript = `
+<script>
+(function(){
+  function submitPayuniForm(){
+    try{
+      var f = document.querySelector('form');
+      if(!f) return;
+      f.setAttribute('target','_self');
+      if(typeof f.submit === 'function'){
+        f.submit();
+      }else{
+        var btn = f.querySelector('button,input[type="submit"]');
+        if(btn) btn.click();
+      }
+    }catch(e){}
+  }
+  if(document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', function(){ setTimeout(submitPayuniForm, 120); });
+  }else{
+    setTimeout(submitPayuniForm, 120);
+  }
+  setTimeout(submitPayuniForm, 650);
+})();
+<\/script>`;
+    const payuniHtml = /<\/body>/i.test(text)
+      ? text.replace(/<\/body>/i, autoSubmitScript + '</body>')
+      : text + autoSubmitScript;
+
     document.open();
-    document.write(text);
+    document.write(payuniHtml);
     document.close();
 
   }catch(e){
@@ -886,8 +915,25 @@ async function startPayuniCheckout(){
     setSubmitStatus(`❌ PAYUNi 建單失敗：${String(e.message || e)}`, true);
   }
 }
-$('payuniCheckout')?.addEventListener('click', startPayuniCheckout);
-$('payuniCheckoutMain')?.addEventListener('click', startPayuniCheckout);
+function bindPayuniButton(id){
+  const el = $(id);
+  if(!el) return;
+  let busy = false;
+  const run = (e)=>{
+    if(e){
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    if(busy) return;
+    busy = true;
+    Promise.resolve(startPayuniCheckout()).finally(()=>{ busy = false; });
+  };
+  el.addEventListener('click', run, {passive:false});
+  el.addEventListener('touchend', run, {passive:false});
+  el.addEventListener('pointerup', run, {passive:false});
+}
+bindPayuniButton('payuniCheckout');
+bindPayuniButton('payuniCheckoutMain');
 
 $('copySlip').addEventListener('click', async ()=>{
   refreshReport();
