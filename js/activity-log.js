@@ -1,7 +1,4 @@
 (function () {
-  // Supabase Edge Function: activity-log
-  var ACTIVITY_LOG_ENDPOINT = "https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/activity-log";
-
   function getGuestId() {
     var id = localStorage.getItem("bw_guest_id");
     if (!id) {
@@ -23,13 +20,6 @@
     try {
       if (!eventName) return;
       detail = detail || {};
-
-      // 防止同一頁重整狂洗 enter：30 秒內同事件只送一次
-      var dedupeKey = "bw_track_" + eventName + "_" + location.pathname;
-      var last = Number(sessionStorage.getItem(dedupeKey) || 0);
-      if (Date.now() - last < 30000 && /_enter$/.test(eventName)) return;
-      sessionStorage.setItem(dedupeKey, String(Date.now()));
-
       var payload = {
         event_name: eventName,
         page: location.pathname,
@@ -39,7 +29,13 @@
         created_at: new Date().toISOString()
       };
 
-      await fetch(ACTIVITY_LOG_ENDPOINT, {
+      // 防止同一頁重整狂洗 enter：30 秒內同事件只送一次
+      var dedupeKey = "bw_track_" + eventName + "_" + location.pathname;
+      var last = Number(sessionStorage.getItem(dedupeKey) || 0);
+      if (Date.now() - last < 30000 && /_enter$/.test(eventName)) return;
+      sessionStorage.setItem(dedupeKey, String(Date.now()));
+
+      await fetch("https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/activity-log", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
