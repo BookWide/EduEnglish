@@ -1,5 +1,5 @@
 // Cloudflare Worker: /api/activity-log
-// 環境變數：SUPABASE_URL、SUPABASE_SERVICE_ROLE_KEY
+// 環境變數：SUP_URL、SERVICE_ROLE_KEY
 export default {
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -22,11 +22,11 @@ export default {
         detail: body.detail && typeof body.detail === "object" ? body.detail : {}
       };
 
-      const res = await fetch(`${env.SUPABASE_URL}/rest/v1/user_activity_logs`, {
+      const res = await fetch(`${env.SUP_URL}/rest/v1/user_activity_logs`, {
         method: "POST",
         headers: {
-          "apikey": env.SUPABASE_SERVICE_ROLE_KEY,
-          "Authorization": `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+          "apikey": env.SERVICE_ROLE_KEY,
+          "Authorization": `Bearer ${env.SERVICE_ROLE_KEY}`,
           "Content-Type": "application/json",
           "Prefer": "return=minimal"
         },
