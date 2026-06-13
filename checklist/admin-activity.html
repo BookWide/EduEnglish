@@ -32,7 +32,7 @@ th{color:#c7d2fe;background:rgba(59,130,246,.12)}td{color:#eaf3ff}.muted{color:v
 <body>
 <div class="wrap">
   <div class="top">
-    <div class="brand"><b>BookWide 活動追蹤後台</b><span>只看「有沒有人用、哪支值得投放」，不顯示個人明細</span></div>
+    <div class="brand"><b>BookWide 活動追蹤後台</b><span>只看「有沒有人用、哪支值得投放」，go.html 會自動歸回原主題，不顯示個人明細</span></div>
     <div class="tools">
       <span id="adminEmail" class="admin">檢查管理員中…</span>
       <select id="days">
@@ -57,7 +57,7 @@ th{color:#c7d2fe;background:rgba(59,130,246,.12)}td{color:#eaf3ff}.muted{color:v
   <div class="two">
     <div class="card section">
       <h2>哪幾頁有人打開</h2>
-      <p class="desc">用來判斷 Google / LINE / FB 丟出去後，有沒有真的進站。</p>
+      <p class="desc">用來判斷 Google / LINE / FB 丟出去後，有沒有真的進站；go.html?a=shopping 會顯示為 /shopping.html。</p>
       <table><thead><tr><th>頁面</th><th>次數</th><th>狀態</th></tr></thead><tbody id="pageRows"></tbody></table>
     </div>
     <div class="card section">
@@ -137,19 +137,105 @@ async function loadData(){
   }
 }
 
+
+function readObjPath(obj, path){
+  try{ return path.split('.').reduce((a,k)=>a && a[k], obj); }catch(e){ return ''; }
+}
+function firstNonEmpty(obj, keys){
+  for(const k of keys){
+    const v = k.includes('.') ? readObjPath(obj,k) : obj[k];
+    if(v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim();
+  }
+  return '';
+}
+function parseUrlMaybe(raw){
+  try{ return new URL(String(raw || ''), location.origin); }catch(e){ return null; }
+}
+function cleanAd(v){
+  return String(v || '').replace(/[^a-z0-9_-]/gi,'').toLowerCase();
+}
+function extractAd(row){
+  const direct = firstNonEmpty(row, [
+    'ad','slug','topic','lesson_slug','asset_slug',
+    'meta.ad','meta.slug','payload.ad','payload.slug','props.ad','properties.ad',
+    'detail.ad','detail.slug'
+  ]);
+  if(direct && !direct.includes('/') && !direct.includes('.html')) return cleanAd(direct);
+
+  const raw = firstNonEmpty(row, ['page','url','href','path','name','source_url','meta.page','payload.page','properties.page']);
+  const u = parseUrlMaybe(raw);
+  if(u){
+    const ad = u.searchParams.get('a') || u.searchParams.get('ad') || u.searchParams.get('slug') || u.searchParams.get('topic');
+    if(ad) return cleanAd(ad);
+  }
+  return '';
+}
+function normalizePageName(row){
+  const raw = firstNonEmpty(row, ['page','url','href','path','name','source_url']);
+  const u = parseUrlMaybe(raw);
+  const path = u ? u.pathname : raw;
+  const ad = extractAd(row);
+
+  if(/\/go\.html$/i.test(path)){
+    return ad ? '/' + ad + '.html' : '';   // 無 a= 的 go.html 不顯示
+  }
+  if(/\/bw-situation-common\.html$/i.test(path)){
+    return ad ? '/' + ad + '.html' : '';   // 舊 common 無 ad 不顯示
+  }
+  return path || '';
+}
+function normalizeEventName(row){
+  const rawName = firstNonEmpty(row, ['event_name','name','event']);
+  const ad = extractAd(row);
+  if(/^go_(enter|finish_10|finish_20)$/i.test(rawName) && ad){
+    return rawName.replace(/^go/i, ad);
+  }
+  if(/^bw-situation-common_(enter|finish_10|finish_20)$/i.test(rawName) && ad){
+    return rawName.replace(/^bw-situation-common/i, ad);
+  }
+  return rawName;
+}
+function addCount(map, key, count){
+  if(!key) return;
+  if(key === '/go.html' || key === '/bw-situation-common.html') return;
+  if(/^go_enter$|^bw-situation-common_enter$/i.test(key)) return;
+  map.set(key, (map.get(key) || 0) + (Number(count) || 0));
+}
+function aggregateRows(rows, keyFn){
+  const map = new Map();
+  (rows || []).forEach(x => addCount(map, keyFn(x), x.count));
+  return [...map.entries()]
+    .map(([name,count]) => ({name, page:name, event_name:name, count}))
+    .sort((a,b)=>b.count-a.count);
+}
+function normalizeFunnelRow(x){
+  let slug = cleanAd(x.slug || x.ad || x.name || '');
+  if(slug === 'go' || slug === 'bw-situation-common') slug = cleanAd(x.ad || x.topic || '');
+  return {...x, slug};
+}
+
 function render(data){
   $('m_total').textContent = data.metrics.total_events || 0;
   $('m_guests').textContent = data.metrics.guests || 0;
   $('m_enter').textContent = data.metrics.enter_events || 0;
   $('m_finish').textContent = data.metrics.finish_events || 0;
 
-  const byPage = (data.by_page || []).filter(x => (x.page || x.name || "").startsWith("/"));
-  const byEventAll = data.by_event || [];
+  const byPageRaw = (data.by_page || []).filter(x => {
+    const raw = String(x.page || x.name || x.url || "");
+    return raw.startsWith("/") || raw.includes("go.html") || raw.includes("bw-situation-common.html");
+  });
+  const byPage = aggregateRows(byPageRaw, normalizePageName);
+
+  const byEventAll = aggregateRows(data.by_event || [], normalizeEventName);
   const byEvent = byEventAll.filter(x => {
     const n = x.event_name || x.name || "";
-    return /_enter$|_finish_10$|_finish_20$|register|subscription|reward/.test(n);
+    return /_enter$|_finish_10$|_finish_20$|register|subscription|reward/.test(n)
+      && !/^go_enter$|^bw-situation-common_enter$/i.test(n);
   });
-  const funnel = data.funnel || [];
+
+  const funnel = (data.funnel || [])
+    .map(normalizeFunnelRow)
+    .filter(x => x.slug && x.slug !== 'go' && x.slug !== 'bw-situation-common');
 
   const maxPage = Math.max(1, ...byPage.map(x=>x.count));
   $('pageRows').innerHTML = byPage.map(x=>`<tr><td>${safe(x.page || x.name)}</td><td>${x.count}</td><td>${statusBadge(x.count)}</td></tr>`).join('');
