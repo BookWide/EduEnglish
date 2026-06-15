@@ -251,8 +251,8 @@ body.postPrintMode .postImage{height:390px!important;max-height:390px!important}
     <button id="postModeA" type="button">答案版</button>
     <button id="postModeL" type="button">導流版</button>
     <button id="copyPostText" type="button">複製文案</button>
-    <button id="downloadPostVideo" type="button">下載合成短視頻</button>
-    <button id="sharePostVideo" type="button">分享合成短視頻</button>
+    <button id="downloadPostVideo" type="button">下載有聲短視頻</button>
+    <button id="sharePostVideo" type="button">分享有聲短視頻</button>
     <button id="printPostCard" type="button">列印</button>
     <button id="closePostModal" class="closePost" type="button">關閉</button>
   </div>
@@ -1000,7 +1000,7 @@ function loadCleanVideoFromURL(url){
 }
 async function makeCompositePostVideoBlob(){
   const hint=$("postExportHint"); 
-  if(hint){hint.textContent="正在合成短視頻...";hint.classList.add("show")}
+  if(hint){hint.textContent="正在合成有聲短視頻...";hint.classList.add("show")}
 
   const canvas=document.createElement("canvas");
   canvas.width=1080; canvas.height=1350;
@@ -1009,8 +1009,7 @@ async function makeCompositePostVideoBlob(){
   const urlsToRevoke=[];
   let still=null, video=null, hasVideo=false;
 
-  // 重點：用 fetch(cors) → blob → objectURL 載入媒體。
-  // 不直接 draw R2 URL / DOM 圖，避免 Canvas is not origin-clean。
+  // 用 fetch(cors) → blob → objectURL，避免 canvas origin-clean 問題。
   try{
     const pngObj=await fetchAsObjectURL(postPngUrl());
     urlsToRevoke.push(pngObj);
@@ -1024,6 +1023,8 @@ async function makeCompositePostVideoBlob(){
     const mp4Obj=await fetchAsObjectURL(postMp4Url());
     urlsToRevoke.push(mp4Obj);
     video=await loadCleanVideoFromURL(mp4Obj);
+    video.muted=false;          // 合成影片要收原 MP4 聲音
+    video.volume=1;
     hasVideo=true;
   }catch(e){
     hasVideo=false;
@@ -1032,17 +1033,40 @@ async function makeCompositePostVideoBlob(){
   const firstMedia=(hasVideo && video && video.readyState>=2) ? video : still;
   drawCompositePostFrame(ctx, firstMedia, __postMode!=="question");
 
-  let stream=null, rec=null, chunks=[];
+  let videoStream=null, mixedStream=null, rec=null, chunks=[];
+  let audioCtx=null, dest=null;
+
   try{
-    stream=canvas.captureStream(30);
-    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp8") ? "video/webm;codecs=vp8" :
-                 (MediaRecorder.isTypeSupported("video/webm") ? "video/webm" : "");
-    rec = mime ? new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:4500000})
-               : new MediaRecorder(stream,{videoBitsPerSecond:4500000});
+    videoStream=canvas.captureStream(30);
+
+    // 重點：把 MP4 的聲音混進 MediaRecorder。
+    // 沒 MP4 或瀏覽器限制 audio 時，就退回無聲影片，不讓下載失敗。
+    mixedStream=new MediaStream();
+    videoStream.getVideoTracks().forEach(t=>mixedStream.addTrack(t));
+
+    if(hasVideo && video){
+      try{
+        audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+        await audioCtx.resume();
+        const source=audioCtx.createMediaElementSource(video);
+        dest=audioCtx.createMediaStreamDestination();
+        source.connect(dest);
+        // 不接到 speakers，避免產生回音；只錄進影片。
+        dest.stream.getAudioTracks().forEach(t=>mixedStream.addTrack(t));
+      }catch(audioErr){
+        // 無法取音軌時仍輸出無聲合成影片
+      }
+    }
+
+    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus") ? "video/webm;codecs=vp8,opus" :
+                 (MediaRecorder.isTypeSupported("video/webm;codecs=vp8") ? "video/webm;codecs=vp8" :
+                 (MediaRecorder.isTypeSupported("video/webm") ? "video/webm" : ""));
+    rec = mime ? new MediaRecorder(mixedStream,{mimeType:mime,videoBitsPerSecond:4500000})
+               : new MediaRecorder(mixedStream,{videoBitsPerSecond:4500000});
   }catch(e){
     if(hint)hint.classList.remove("show");
     urlsToRevoke.forEach(u=>URL.revokeObjectURL(u));
-    throw new Error("瀏覽器不支援 canvas 錄影："+e.message);
+    throw new Error("瀏覽器不支援 canvas/audio 錄影："+e.message);
   }
 
   rec.ondataavailable=e=>{ if(e.data && e.data.size) chunks.push(e.data); };
@@ -1051,12 +1075,12 @@ async function makeCompositePostVideoBlob(){
     rec.onerror=e=>reject(e.error||e);
   });
 
-  const tracks=stream.getVideoTracks ? stream.getVideoTracks() : [];
-  const track=tracks && tracks[0];
+  const vtracks=videoStream.getVideoTracks ? videoStream.getVideoTracks() : [];
+  const track=vtracks && vtracks[0];
 
   rec.start(250);
 
-  // 先強制送幾張畫面，避免空檔
+  // 先送幾張畫面，避免空檔
   for(let i=0;i<6;i++){
     drawCompositePostFrame(ctx, firstMedia, __postMode!=="question");
     if(track && track.requestFrame)try{track.requestFrame()}catch(e){}
@@ -1093,6 +1117,8 @@ async function makeCompositePostVideoBlob(){
   const blob=await done;
 
   try{if(track)track.stop()}catch(e){}
+  try{if(mixedStream)mixedStream.getTracks().forEach(t=>t.stop())}catch(e){}
+  try{if(audioCtx)audioCtx.close()}catch(e){}
   urlsToRevoke.forEach(u=>URL.revokeObjectURL(u));
   if(hint)hint.classList.remove("show");
 
