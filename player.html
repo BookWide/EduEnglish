@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>BookWide 播放器 V105 Music Chinese Header Fix</title>
+<title>BookWide 播放器 V106 Zh Music Japanese TTS Fix</title>
 
 <style>
 :root{
@@ -4341,7 +4341,15 @@ async function loadAI(){
       const {sampleEn,sampleZh,sampleLocal}=getSamples(t);
       let text='',langCode='en-US';
       if(currentLang==='zh'){text=sampleZh||sampleEn||sampleLocal;langCode='zh-TW';}
-      else if(currentLang==='ja'){text=sampleLocal||sampleEn||sampleZh;langCode=BW_localTtsLang(BW_detectLocalLang(t));}
+      else if(currentLang==='ja'){
+        const lcode = BW_detectLocalLang(t);
+        if(cat === 'music' && BW_isChineseLocalCode(lcode)){
+          text = String(t.ja || t.jp || t.translation_ja || sampleLocal || sampleEn || sampleZh || '').trim();
+          langCode = 'ja-JP';
+        }else{
+          text=sampleLocal||sampleEn||sampleZh;langCode=BW_localTtsLang(lcode);
+        }
+      }
       else {text=sampleEn||sampleZh||sampleLocal;langCode='en-US';}
       if(text) speakText(text,langCode,AI_SLOW_RATE);
     };
@@ -4480,6 +4488,29 @@ function BW_talkSpeakCurrent(item){
   const text = BW_talkTargetText(item);
   return speakText(text, BW_talkSpeakLang(item));
 }
+function BW_talkAltLocalLabel(item){
+  const lang = item ? (item.local_lang || BW_detectLocalLang(item)) : '';
+  if(cat === 'music' && BW_isChineseLocalCode(lang)) return '日文';
+  return item?.local_label || BW_localLabel(item || {}) || '當地語';
+}
+function BW_talkAltLocalText(item){
+  if(!item) return '';
+  const lang = item.local_lang || BW_detectLocalLang(item);
+  // 中文歌右側第四行是日文意思；按「日文」時要讀 ja，不可讀 local/zh 中文。
+  if(cat === 'music' && BW_isChineseLocalCode(lang)){
+    return String(item.ja || item.jp || item.translation_ja || '').trim();
+  }
+  return String(item.local || item.ja || item.text || '').trim();
+}
+function BW_talkAltLocalTtsLang(item){
+  const lang = item ? (item.local_lang || BW_detectLocalLang(item)) : '';
+  if(cat === 'music' && BW_isChineseLocalCode(lang)) return 'ja-JP';
+  return BW_localTtsLang(lang || 'ja');
+}
+function BW_talkSpeakAltLocal(item){
+  const text = BW_talkAltLocalText(item);
+  if(text) return speakText(text, BW_talkAltLocalTtsLang(item));
+}
 function BW_renderTalkKtvLine(item){
   if(cat !== 'music') return esc(item?.text || '');
   let cue = null;
@@ -4534,7 +4565,8 @@ function normalizeTalkItem(item, idx){
     local: BW_localText(item),
     local_lang: BW_detectLocalLang(item),
     local_label: BW_localLabel(item),
-    ja: BW_localText(item),      // 向下相容舊程式
+    // V106：保留真正 ja（日文翻譯）。中文歌 local/zh 是中文，不能覆蓋 ja，否則「日文」按鈕會用中文去讀。
+    ja: String(item.ja || item.jp || item.answer_ja || BW_localText(item)).trim(),
     kana: String(item.kana || item.ja_kana || item.furigana || '').trim(),
     roman: String(item.roman || item.romaji || item.local_pron || item.ja_pron || '').trim(),
     local_pron: String(item.local_pron || item.ja_pron || item.roman || item.romaji || '').trim(),
@@ -4548,10 +4580,12 @@ function buildTalkItemsFromCuesForMusic(){
   return cues.map((c, idx) => {
     const isEn = BW_musicIsEnglishCue(c);
     const isJa = BW_musicIsJapaneseCue(c);
+    const isZh = BW_musicIsChineseCue(c) || BW_isChineseLocalCode(c.local_lang || c.lang || BW_detectLocalLang(c));
     const localText = BW_localText(c) || String(c.native || '').trim();
     const langCode = isEn ? 'en' : BW_detectLocalLang(c);
     const kanaText = String(c.kana || c.ja_kana || c.furigana || '').trim();
-    const romanText = String(c.roman || c.local_pron || c.ko_pron || c.ja_pron || '').trim();
+    const romanText = String(c.pinyin || c.roman || c.local_pron || c.zh_pron || c.ko_pron || c.ja_pron || '').trim();
+    const jaText = String(c.ja || c.jp || c.translation_ja || '').trim();
     const enText = String(c.en || '').trim();
     const practiceText = isEn ? enText : (isJa
       ? (kanaText || localText || enText)
@@ -4568,8 +4602,10 @@ function buildTalkItemsFromCuesForMusic(){
       local: localText,
       local_lang: langCode,
       local_label: isEn ? '英文' : BW_localLabel(c),
-      ja: localText,
+      // V106：中文歌 ja 是日文意思；不能再塞中文原詞。
+      ja: isZh ? jaText : (jaText || localText),
       kana: kanaText,
+      pinyin: isZh ? romanText : '',
       roman: romanText,
       local_pron: romanText,
       // V98：Talk item 也必須保留 native，避免韓文/日文因只有 en 而被誤判成英文歌。
@@ -4998,13 +5034,13 @@ function renderTalkList(){
         <button class="btn sm talk-jump" data-idx="${idx}" type="button">跳句</button>
         <button class="btn sm talk-en" data-idx="${idx}" type="button">英</button>
         <button class="btn sm talk-zh" data-idx="${idx}" type="button">中</button>
-        <button class="btn sm talk-ja" data-idx="${idx}" type="button">${esc(item.local_label || BW_localLabel(item))}</button>
+        <button class="btn sm talk-ja" data-idx="${idx}" type="button">${esc(BW_talkAltLocalLabel(item))}</button>
       </div>
     </div>`).join('');
   $$('#talkList .talk-jump').forEach(btn => btn.addEventListener('click', () => setTalkCurrent(Number(btn.dataset.idx||0), true)));
   $$('#talkList .talk-en').forEach(btn => btn.addEventListener('click', () => { const x=talkData[Number(btn.dataset.idx||0)]||{}; speakText(x.en_tts || x.en || x.text || '', 'en-US'); }));
   $$('#talkList .talk-zh').forEach(btn => btn.addEventListener('click', () => speakText(talkData[Number(btn.dataset.idx||0)]?.zh || '', 'zh-TW')));
-  $$('#talkList .talk-ja').forEach(btn => btn.addEventListener('click', () => { const x=talkData[Number(btn.dataset.idx||0)]||{}; speakText(x.local || x.ja || x.text || '', BW_localTtsLang(x.local_lang || BW_detectLocalLang(x) || 'ja')); }));
+  $$('#talkList .talk-ja').forEach(btn => btn.addEventListener('click', () => { const x=talkData[Number(btn.dataset.idx||0)]||{}; BW_talkSpeakAltLocal(x); }));
   highlightTalkRow();
 }
 async function loadTalk(){
@@ -5125,7 +5161,7 @@ btnTalkSpeakMic?.addEventListener('click', ()=>{ if(cat === 'music') startTalkRe
 btnTalkStopMic?.addEventListener('click', ()=>{ if(cat === 'music') BW_stopAllTalkAndMedia(); else stopTalkRecognition(); });
 btnTalkSpeakLine?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) BW_talkSpeakCurrent(item); });
 btnTalkSpeakZh?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.zh || '', 'zh-TW'); });
-btnTalkSpeakJa?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) speakText(item.local || item.ja || item.text || '', BW_localTtsLang(item.local_lang || BW_detectLocalLang(item) || 'ja')); });
+btnTalkSpeakJa?.addEventListener('click', ()=>{ const item=talkData[talkCurrentIdx]; if(item) BW_talkSpeakAltLocal(item); });
 btnTalkPrev?.addEventListener('click', ()=> setTalkCurrent(talkCurrentIdx - 1, true));
 btnTalkNext?.addEventListener('click', ()=> setTalkCurrent(talkCurrentIdx + 1, true));
 talkRateRange?.addEventListener('input', ()=>{
