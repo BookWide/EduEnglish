@@ -973,9 +973,8 @@ async function makeCompositePostVideoBlob(){
   const hint=$("postExportHint"); 
   if(hint){hint.textContent="正在合成短視頻...";hint.classList.add("show")}
 
-  // 先確保貼文預覽媒體已經掛上前台 DOM。
   try{ setPostMedia(); }catch(e){}
-  await new Promise(r=>setTimeout(r,650));
+  await new Promise(r=>setTimeout(r,900));
 
   const canvas=document.createElement("canvas");
   canvas.width=1080; canvas.height=1350;
@@ -983,35 +982,35 @@ async function makeCompositePostVideoBlob(){
 
   const domImg=$("postImg");
   const domVid=$("postVideo");
+
   let still=domImg && domImg.complete && domImg.naturalWidth ? domImg : null;
   let hasVideo=!!(domVid && domVid.readyState>=2 && domVid.videoWidth);
 
-  // 若前台 img 還沒 ready，等一下；不再重新 new Image 載 R2。
   if(!still && domImg){
     try{
       await new Promise((resolve,reject)=>{
-        const t=setTimeout(()=>reject(new Error("前台圖片等待逾時")),3500);
-        domImg.onload=()=>{clearTimeout(t);resolve()};
-        domImg.onerror=()=>{clearTimeout(t);reject(new Error("前台圖片載入失敗"))};
+        const t=setTimeout(()=>reject(new Error("前台圖片等待逾時")),4500);
+        const done=()=>{clearTimeout(t);resolve()};
+        domImg.addEventListener("load",done,{once:true});
+        domImg.addEventListener("error",()=>{clearTimeout(t);reject(new Error("前台圖片載入失敗"))},{once:true});
       });
       if(domImg.complete && domImg.naturalWidth)still=domImg;
     }catch(e){}
   }
 
-  // 若前台 video 還沒 ready，等一下；不再重新建 video 載 R2。
   if(!hasVideo && domVid){
     try{
       await new Promise((resolve,reject)=>{
-        const t=setTimeout(()=>reject(new Error("前台 MP4 等待逾時")),3500);
-        domVid.onloadeddata=()=>{clearTimeout(t);resolve()};
-        domVid.onerror=()=>{clearTimeout(t);reject(new Error("前台 MP4 載入失敗"))};
+        const t=setTimeout(()=>reject(new Error("前台 MP4 等待逾時")),4500);
+        const done=()=>{clearTimeout(t);resolve()};
+        domVid.addEventListener("loadeddata",done,{once:true});
+        domVid.addEventListener("error",()=>{clearTimeout(t);reject(new Error("前台 MP4 載入失敗"))},{once:true});
         try{domVid.load()}catch(e){}
       });
       hasVideo=!!(domVid.readyState>=2 && domVid.videoWidth);
     }catch(e){}
   }
 
-  // 最低限度：如果前台圖片真的還失敗，用 hero 圖片補，不要整個失敗。
   if(!still){
     const hero=$("photo");
     if(hero && hero.complete && hero.naturalWidth)still=hero;
@@ -1019,26 +1018,41 @@ async function makeCompositePostVideoBlob(){
 
   if(!still && !hasVideo){
     if(hint)hint.classList.remove("show");
-    throw new Error("前台圖片/MP4 都尚未載入，請先等貼文預覽圖出現後再下載。");
+    throw new Error("前台圖片/MP4 都尚未載入。請先等貼文預覽上方圖片出現後再下載。");
   }
+
+  const firstMedia=(hasVideo && domVid && domVid.readyState>=2) ? domVid : still;
+  drawCompositePostFrame(ctx, firstMedia, __postMode!=="question");
 
   let stream=null, rec=null, chunks=[];
   try{
     stream=canvas.captureStream(30);
-    const mime=MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9" :
-               (MediaRecorder.isTypeSupported("video/webm;codecs=vp8") ? "video/webm;codecs=vp8" : "video/webm");
-    rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:5500000});
+    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp8") ? "video/webm;codecs=vp8" :
+                 (MediaRecorder.isTypeSupported("video/webm") ? "video/webm" : "");
+    rec = mime ? new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:4500000})
+               : new MediaRecorder(stream,{videoBitsPerSecond:4500000});
   }catch(e){
     if(hint)hint.classList.remove("show");
     throw new Error("瀏覽器不支援 canvas 錄影："+e.message);
   }
 
-  rec.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data)};
+  rec.ondataavailable=e=>{ if(e.data && e.data.size) chunks.push(e.data); };
   const done=new Promise((resolve,reject)=>{
     rec.onstop=()=>resolve(new Blob(chunks,{type:rec.mimeType||"video/webm"}));
     rec.onerror=e=>reject(e.error||e);
   });
-  rec.start(200);
+
+  const tracks=stream.getVideoTracks ? stream.getVideoTracks() : [];
+  const track=tracks && tracks[0];
+
+  rec.start(250);
+
+  // 先強制送幾張畫面，避免部分 Chrome 錄到空檔
+  for(let i=0;i<6;i++){
+    drawCompositePostFrame(ctx, firstMedia, __postMode!=="question");
+    if(track && track.requestFrame)try{track.requestFrame()}catch(e){}
+    await new Promise(r=>setTimeout(r,80));
+  }
 
   const dur=7200, freezeAt=4600, t0=performance.now();
 
@@ -1056,17 +1070,26 @@ async function makeCompositePostVideoBlob(){
       const t=now-t0;
       const media=(hasVideo && t<freezeAt && domVid.readyState>=2) ? domVid : (still || domVid);
       drawCompositePostFrame(ctx,media,__postMode!=="question");
+      if(track && track.requestFrame)try{track.requestFrame()}catch(e){}
       if(t<dur)requestAnimationFrame(loop);
       else resolve();
     }
     requestAnimationFrame(loop);
   });
 
-  try{if(domVid)domVid.pause()}catch(e){}
-  try{rec.stop()}catch(e){}
+  // stop 前再強制取資料，避免 blob size 0
+  try{ if(rec.state==="recording") rec.requestData(); }catch(e){}
+  await new Promise(r=>setTimeout(r,450));
+  try{ if(rec.state!=="inactive") rec.stop(); }catch(e){}
   const blob=await done;
+
+  try{ if(domVid) domVid.pause(); }catch(e){}
+  try{ if(track) track.stop(); }catch(e){}
   if(hint)hint.classList.remove("show");
-  if(!blob || !blob.size)throw new Error("錄製結果是空檔案");
+
+  if(!blob || !blob.size){
+    throw new Error("錄製結果是空檔案。請用 Chrome/Edge 桌機版測試，並先打開貼文預覽讓圖片/MP4 完全顯示後再按下載。");
+  }
   return blob;
 }
 async function downloadCompositePostVideo(){
@@ -1079,7 +1102,7 @@ async function downloadCompositePostVideo(){
     setTimeout(()=>URL.revokeObjectURL(a.href),5000);
   }catch(e){
     const hint=$("postExportHint"); if(hint)hint.classList.remove("show");
-    alert("合成短視頻失敗：\n"+(e&&e.message?e.message:e)+"\n\n請先確認貼文預覽上方圖片/MP4 已顯示，再按下載。");
+    alert("合成短視頻失敗：\n"+(e&&e.message?e.message:e)+"\n\n請先打開「貼文」預覽，等上方圖片/MP4 完全顯示，再按下載合成短視頻。");
   }
 }
 async function shareCompositePostVideo(){
