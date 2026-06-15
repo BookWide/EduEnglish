@@ -970,48 +970,78 @@ function drawCompositePostFrame(ctx,media,answerMode){
   }
 }
 async function makeCompositePostVideoBlob(){
-  const hint=$("postExportHint"); if(hint){hint.textContent="正在合成短視頻...";hint.classList.add("show")}
+  const hint=$("postExportHint"); 
+  if(hint){hint.textContent="正在合成短視頻...";hint.classList.add("show")}
+
   const canvas=document.createElement("canvas");
   canvas.width=1080; canvas.height=1350;
   const ctx=canvas.getContext("2d");
 
   const pngUrl=postPngUrl();
   const mp4Url=postMp4Url();
-  let still=await loadExportImage(pngUrl);
+
+  let still=null;
+  try{
+    still=await loadExportImage(pngUrl);
+  }catch(e){
+    if(hint)hint.classList.remove("show");
+    throw new Error("PNG 載入失敗："+pngUrl);
+  }
+
   let video=null, hasVideo=false;
   try{
     video=await loadExportVideo(mp4Url);
     hasVideo=true;
   }catch(e){
+    // MP4 讀不到時不要失敗，至少輸出完整文字卡短視頻
     hasVideo=false;
   }
 
-  const stream=canvas.captureStream(30);
-  const mime=MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9" : "video/webm";
-  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:5500000});
-  const chunks=[];
+  let stream=null, rec=null, chunks=[];
+  try{
+    stream=canvas.captureStream(30);
+    const mime=MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9" :
+               (MediaRecorder.isTypeSupported("video/webm;codecs=vp8") ? "video/webm;codecs=vp8" : "video/webm");
+    rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:5500000});
+  }catch(e){
+    if(hint)hint.classList.remove("show");
+    throw new Error("瀏覽器不支援錄製 canvas："+e.message);
+  }
+
   rec.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data)};
-  const done=new Promise(resolve=>{rec.onstop=()=>resolve(new Blob(chunks,{type:mime}))});
+  const done=new Promise((resolve,reject)=>{
+    rec.onstop=()=>resolve(new Blob(chunks,{type:rec.mimeType||"video/webm"}));
+    rec.onerror=e=>reject(e.error||e);
+  });
   rec.start(200);
 
-  const dur=7200, freezeAt=4600, start=performance.now();
+  const dur=7200, freezeAt=4600, t0=performance.now();
+
   if(hasVideo){
-    try{video.currentTime=0; await video.play()}catch(e){hasVideo=false}
+    try{
+      video.currentTime=0;
+      await video.play();
+    }catch(e){
+      hasVideo=false;
+    }
   }
+
   await new Promise(resolve=>{
     function loop(now){
-      const t=now-start;
-      const media=(hasVideo && t<freezeAt) ? video : still;
+      const t=now-t0;
+      const media=(hasVideo && t<freezeAt && video.readyState>=2) ? video : still;
       drawCompositePostFrame(ctx,media,__postMode!=="question");
       if(t<dur)requestAnimationFrame(loop);
       else resolve();
     }
     requestAnimationFrame(loop);
   });
+
   try{if(video)video.pause()}catch(e){}
-  rec.stop();
+  try{rec.stop()}catch(e){}
   const blob=await done;
   if(hint)hint.classList.remove("show");
+  if(!blob || !blob.size)throw new Error("錄製結果是空檔案");
   return blob;
 }
 async function downloadCompositePostVideo(){
@@ -1024,7 +1054,7 @@ async function downloadCompositePostVideo(){
     setTimeout(()=>URL.revokeObjectURL(a.href),5000);
   }catch(e){
     const hint=$("postExportHint"); if(hint)hint.classList.remove("show");
-    alert("合成短視頻失敗：R2 需要允許 CORS 讀取圖片/MP4，或請確認同名 PNG/MP4 都存在。");
+    alert("合成短視頻失敗：\n"+(e&&e.message?e.message:e)+"\n\n若是 PNG/MP4 載入失敗，再檢查 R2 CORS 或同名檔案。");
   }
 }
 async function shareCompositePostVideo(){
@@ -1043,7 +1073,7 @@ async function shareCompositePostVideo(){
     }
   }catch(e){
     const hint=$("postExportHint"); if(hint)hint.classList.remove("show");
-    alert("分享合成短視頻失敗：R2 需要允許 CORS 讀取圖片/MP4。");
+    alert("分享合成短視頻失敗：\n"+(e&&e.message?e.message:e));
   }
 }
 
