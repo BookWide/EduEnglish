@@ -222,6 +222,11 @@ body.postPrintMode .postImage{height:390px!important;max-height:390px!important}
   background:#fff!important;
 }
 
+
+/* composite video export final */
+.postExportHint{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:500;background:rgba(15,23,42,.96);color:#fff;border:1px solid rgba(147,197,253,.45);border-radius:16px;padding:14px 18px;font-weight:950;box-shadow:0 24px 80px rgba(0,0,0,.45);display:none}
+.postExportHint.show{display:block}
+
 </style>
 </head>
 <body>
@@ -246,8 +251,8 @@ body.postPrintMode .postImage{height:390px!important;max-height:390px!important}
     <button id="postModeA" type="button">答案版</button>
     <button id="postModeL" type="button">導流版</button>
     <button id="copyPostText" type="button">複製文案</button>
-    <button id="downloadPostVideo" type="button">下載MP4</button>
-    <button id="sharePostVideo" type="button">分享MP4</button>
+    <button id="downloadPostVideo" type="button">下載合成短視頻</button>
+    <button id="sharePostVideo" type="button">分享合成短視頻</button>
     <button id="printPostCard" type="button">列印</button>
     <button id="closePostModal" class="closePost" type="button">關閉</button>
   </div>
@@ -836,6 +841,213 @@ async function downloadCurrentMp4Direct(){
 }
 
 function postCorrectChoice(l){return (l.choices||l.answers||[]).find(c=>c.correct)||((l.choices||l.answers||[])[0]||{})}
+
+function loadExportImage(url){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.crossOrigin="anonymous";
+    img.onload=()=>resolve(img);
+    img.onerror=()=>reject(new Error("image load failed"));
+    img.src=url;
+  });
+}
+function loadExportVideo(url){
+  return new Promise((resolve,reject)=>{
+    const v=document.createElement("video");
+    v.crossOrigin="anonymous";
+    v.muted=true;
+    v.playsInline=true;
+    v.preload="auto";
+    v.onloadeddata=()=>resolve(v);
+    v.onerror=()=>reject(new Error("video load failed"));
+    v.src=url;
+    try{v.load()}catch(e){}
+    setTimeout(()=>reject(new Error("video timeout")),4500);
+  });
+}
+function drawFitContain(ctx,media,x,y,w,h){
+  const mw=media.videoWidth||media.naturalWidth||media.width||w;
+  const mh=media.videoHeight||media.naturalHeight||media.height||h;
+  const r=Math.min(w/mw,h/mh);
+  const dw=mw*r, dh=mh*r;
+  ctx.fillStyle="#fff"; ctx.fillRect(x,y,w,h);
+  ctx.drawImage(media,x+(w-dw)/2,y+(h-dh)/2,dw,dh);
+}
+function rr(ctx,x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+function textWrap(ctx,text,x,y,maxW,lineH,maxLines){
+  text=String(text||"");
+  const arr=text.split("");
+  let line="", lines=[];
+  for(const ch of arr){
+    const t=line+ch;
+    if(ctx.measureText(t).width>maxW && line){lines.push(line);line=ch}
+    else line=t;
+  }
+  if(line)lines.push(line);
+  if(maxLines)lines=lines.slice(0,maxLines);
+  for(let i=0;i<lines.length;i++)ctx.fillText(lines[i],x,y+i*lineH);
+  return y+lines.length*lineH;
+}
+function drawCompositePostFrame(ctx,media,answerMode){
+  const W=1080,H=1350;
+  const l=lessons[idx]||{}, q=l.question||l, choices=(l.choices||l.answers||[]).slice(0,3), good=postCorrectChoice(l);
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle="#fff"; ctx.fillRect(0,0,W,H);
+
+  const imgH=500;
+  drawFitContain(ctx,media,0,0,W,imgH);
+
+  const g=ctx.createLinearGradient(0,imgH-170,0,imgH);
+  g.addColorStop(0,"rgba(0,0,0,0)");
+  g.addColorStop(1,"rgba(0,0,0,.45)");
+  ctx.fillStyle=g; ctx.fillRect(0,imgH-170,W,170);
+  ctx.fillStyle="#fff";
+  ctx.font="900 58px system-ui, Microsoft JhengHei, Noto Sans TC";
+  ctx.fillText("BookWide",48,imgH-72);
+  ctx.font="800 28px system-ui, Microsoft JhengHei, Noto Sans TC";
+  ctx.fillText("12生肖冷笑話",50,imgH-35);
+
+  let y=imgH+45;
+  ctx.fillStyle="#2563eb";
+  ctx.font="900 28px system-ui, Microsoft JhengHei, Noto Sans TC";
+  ctx.fillText(answerMode ? "答案揭曉" : "留言猜 A / B / C",50,y);
+  y+=58;
+
+  ctx.fillStyle="#0f172a";
+  ctx.font="900 58px system-ui, Microsoft JhengHei, Noto Sans TC";
+  y=textWrap(ctx,q.zh||l.zh||"",50,y,980,62,2)+16;
+
+  ctx.fillStyle="#334155";
+  ctx.font="800 30px system-ui, Microsoft JhengHei, Noto Sans TC";
+  y=textWrap(ctx,"EN "+(q.en||l.en||""),50,y,980,36,2);
+  y=textWrap(ctx,"JA "+(q.ja||l.ja||""),50,y,980,36,2);
+  y=textWrap(ctx,"ZH "+(q.zh||l.zh||""),50,y,980,36,2)+14;
+
+  choices.forEach((c,i)=>{
+    const isGood=answerMode && c.correct;
+    ctx.fillStyle=isGood ? "#dcfce7" : "#eff6ff";
+    ctx.strokeStyle=isGood ? "#22c55e" : "#bfdbfe";
+    ctx.lineWidth=3;
+    rr(ctx,50,y,980,104,22); ctx.fill(); ctx.stroke();
+    ctx.fillStyle="#0f172a";
+    ctx.font="900 31px system-ui, Microsoft JhengHei, Noto Sans TC";
+    ctx.fillText(String.fromCharCode(65+i)+". "+(c.en||""),78,y+38);
+    ctx.fillStyle="#334155";
+    ctx.font="800 23px system-ui, Microsoft JhengHei, Noto Sans TC";
+    ctx.fillText("JA "+(c.ja||""),78,y+68);
+    ctx.fillText("ZH "+(c.zh||""),78,y+94);
+    y+=116;
+  });
+
+  if(answerMode){
+    ctx.fillStyle="#fffbeb";
+    ctx.strokeStyle="#f59e0b";
+    ctx.lineWidth=3;
+    rr(ctx,50,y+4,980,112,20); ctx.fill(); ctx.stroke();
+    ctx.fillStyle="#111827";
+    ctx.font="900 28px system-ui, Microsoft JhengHei, Noto Sans TC";
+    ctx.fillText("答案："+(good.zh||good.en||""),78,y+42);
+    ctx.font="800 24px system-ui, Microsoft JhengHei, Noto Sans TC";
+    textWrap(ctx,"和尚："+String(l.correct_reply_zh||l.funny_reply_zh||"").replace(/^答對！\s*/,""),78,y+76,920,29,2);
+  }else{
+    ctx.strokeStyle="#cbd5e1";
+    ctx.setLineDash([8,8]);
+    ctx.beginPath();ctx.moveTo(50,H-76);ctx.lineTo(1030,H-76);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle="#475569";
+    ctx.font="900 26px system-ui, Microsoft JhengHei, Noto Sans TC";
+    ctx.fillText("你猜哪一個？留言👇",50,H-35);
+    ctx.fillStyle="#2563eb";
+    ctx.fillText("BookWide",880,H-35);
+  }
+}
+async function makeCompositePostVideoBlob(){
+  const hint=$("postExportHint"); if(hint){hint.textContent="正在合成短視頻...";hint.classList.add("show")}
+  const canvas=document.createElement("canvas");
+  canvas.width=1080; canvas.height=1350;
+  const ctx=canvas.getContext("2d");
+
+  const pngUrl=postPngUrl();
+  const mp4Url=postMp4Url();
+  let still=await loadExportImage(pngUrl);
+  let video=null, hasVideo=false;
+  try{
+    video=await loadExportVideo(mp4Url);
+    hasVideo=true;
+  }catch(e){
+    hasVideo=false;
+  }
+
+  const stream=canvas.captureStream(30);
+  const mime=MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9" : "video/webm";
+  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:5500000});
+  const chunks=[];
+  rec.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data)};
+  const done=new Promise(resolve=>{rec.onstop=()=>resolve(new Blob(chunks,{type:mime}))});
+  rec.start(200);
+
+  const dur=7200, freezeAt=4600, start=performance.now();
+  if(hasVideo){
+    try{video.currentTime=0; await video.play()}catch(e){hasVideo=false}
+  }
+  await new Promise(resolve=>{
+    function loop(now){
+      const t=now-start;
+      const media=(hasVideo && t<freezeAt) ? video : still;
+      drawCompositePostFrame(ctx,media,__postMode!=="question");
+      if(t<dur)requestAnimationFrame(loop);
+      else resolve();
+    }
+    requestAnimationFrame(loop);
+  });
+  try{if(video)video.pause()}catch(e){}
+  rec.stop();
+  const blob=await done;
+  if(hint)hint.classList.remove("show");
+  return blob;
+}
+async function downloadCompositePostVideo(){
+  try{
+    const blob=await makeCompositePostVideoBlob();
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download=`bookwide-monk-funny-card-${String(idx+1).padStart(2,"0")}.webm`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+  }catch(e){
+    const hint=$("postExportHint"); if(hint)hint.classList.remove("show");
+    alert("合成短視頻失敗：R2 需要允許 CORS 讀取圖片/MP4，或請確認同名 PNG/MP4 都存在。");
+  }
+}
+async function shareCompositePostVideo(){
+  try{
+    const blob=await makeCompositePostVideoBlob();
+    const file=new File([blob],`bookwide-monk-funny-card-${String(idx+1).padStart(2,"0")}.webm`,{type:blob.type||"video/webm"});
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file],title:"BookWide 12生肖冷笑話",text:postTextForMode(__postMode||"question")});
+    }else{
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob);
+      a.download=file.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+      alert("這個瀏覽器不能直接分享影片，已改成下載合成短視頻。");
+    }
+  }catch(e){
+    const hint=$("postExportHint"); if(hint)hint.classList.remove("show");
+    alert("分享合成短視頻失敗：R2 需要允許 CORS 讀取圖片/MP4。");
+  }
+}
+
+
 function postTextForMode(mode){
   const l=lessons[idx]||{}, q=l.question||l, choices=(l.choices||l.answers||[]).slice(0,3), good=postCorrectChoice(l);
   const lines=[];
@@ -1112,8 +1324,8 @@ if($("copyPostText"))$("copyPostText").onclick=copyPostText;
 if($("printPostCard"))$("printPostCard").onclick=printPostPreview;
 if($("closePostModal"))$("closePostModal").onclick=closePostPreview;
 
-if($("downloadPostVideo"))$("downloadPostVideo").onclick=downloadPostVideo;
-if($("sharePostVideo"))$("sharePostVideo").onclick=sharePostVideo;
+if($("downloadPostVideo"))$("downloadPostVideo").onclick=downloadCompositePostVideo;
+if($("sharePostVideo"))$("sharePostVideo").onclick=shareCompositePostVideo;
 load().then(()=>{if(IS_FUNNY_ZODIAC){$("localSelect").value="zh"}render();autoPlayOnEnter();});
 
 
