@@ -973,28 +973,53 @@ async function makeCompositePostVideoBlob(){
   const hint=$("postExportHint"); 
   if(hint){hint.textContent="正在合成短視頻...";hint.classList.add("show")}
 
+  // 先確保貼文預覽媒體已經掛上前台 DOM。
+  try{ setPostMedia(); }catch(e){}
+  await new Promise(r=>setTimeout(r,650));
+
   const canvas=document.createElement("canvas");
   canvas.width=1080; canvas.height=1350;
   const ctx=canvas.getContext("2d");
 
-  const pngUrl=postPngUrl();
-  const mp4Url=postMp4Url();
+  const domImg=$("postImg");
+  const domVid=$("postVideo");
+  let still=domImg && domImg.complete && domImg.naturalWidth ? domImg : null;
+  let hasVideo=!!(domVid && domVid.readyState>=2 && domVid.videoWidth);
 
-  let still=null;
-  try{
-    still=await loadExportImage(pngUrl);
-  }catch(e){
-    if(hint)hint.classList.remove("show");
-    throw new Error("PNG 載入失敗："+pngUrl);
+  // 若前台 img 還沒 ready，等一下；不再重新 new Image 載 R2。
+  if(!still && domImg){
+    try{
+      await new Promise((resolve,reject)=>{
+        const t=setTimeout(()=>reject(new Error("前台圖片等待逾時")),3500);
+        domImg.onload=()=>{clearTimeout(t);resolve()};
+        domImg.onerror=()=>{clearTimeout(t);reject(new Error("前台圖片載入失敗"))};
+      });
+      if(domImg.complete && domImg.naturalWidth)still=domImg;
+    }catch(e){}
   }
 
-  let video=null, hasVideo=false;
-  try{
-    video=await loadExportVideo(mp4Url);
-    hasVideo=true;
-  }catch(e){
-    // MP4 讀不到時不要失敗，至少輸出完整文字卡短視頻
-    hasVideo=false;
+  // 若前台 video 還沒 ready，等一下；不再重新建 video 載 R2。
+  if(!hasVideo && domVid){
+    try{
+      await new Promise((resolve,reject)=>{
+        const t=setTimeout(()=>reject(new Error("前台 MP4 等待逾時")),3500);
+        domVid.onloadeddata=()=>{clearTimeout(t);resolve()};
+        domVid.onerror=()=>{clearTimeout(t);reject(new Error("前台 MP4 載入失敗"))};
+        try{domVid.load()}catch(e){}
+      });
+      hasVideo=!!(domVid.readyState>=2 && domVid.videoWidth);
+    }catch(e){}
+  }
+
+  // 最低限度：如果前台圖片真的還失敗，用 hero 圖片補，不要整個失敗。
+  if(!still){
+    const hero=$("photo");
+    if(hero && hero.complete && hero.naturalWidth)still=hero;
+  }
+
+  if(!still && !hasVideo){
+    if(hint)hint.classList.remove("show");
+    throw new Error("前台圖片/MP4 都尚未載入，請先等貼文預覽圖出現後再下載。");
   }
 
   let stream=null, rec=null, chunks=[];
@@ -1005,7 +1030,7 @@ async function makeCompositePostVideoBlob(){
     rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:5500000});
   }catch(e){
     if(hint)hint.classList.remove("show");
-    throw new Error("瀏覽器不支援錄製 canvas："+e.message);
+    throw new Error("瀏覽器不支援 canvas 錄影："+e.message);
   }
 
   rec.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data)};
@@ -1019,8 +1044,8 @@ async function makeCompositePostVideoBlob(){
 
   if(hasVideo){
     try{
-      video.currentTime=0;
-      await video.play();
+      domVid.currentTime=0;
+      await domVid.play();
     }catch(e){
       hasVideo=false;
     }
@@ -1029,7 +1054,7 @@ async function makeCompositePostVideoBlob(){
   await new Promise(resolve=>{
     function loop(now){
       const t=now-t0;
-      const media=(hasVideo && t<freezeAt && video.readyState>=2) ? video : still;
+      const media=(hasVideo && t<freezeAt && domVid.readyState>=2) ? domVid : (still || domVid);
       drawCompositePostFrame(ctx,media,__postMode!=="question");
       if(t<dur)requestAnimationFrame(loop);
       else resolve();
@@ -1037,7 +1062,7 @@ async function makeCompositePostVideoBlob(){
     requestAnimationFrame(loop);
   });
 
-  try{if(video)video.pause()}catch(e){}
+  try{if(domVid)domVid.pause()}catch(e){}
   try{rec.stop()}catch(e){}
   const blob=await done;
   if(hint)hint.classList.remove("show");
@@ -1054,7 +1079,7 @@ async function downloadCompositePostVideo(){
     setTimeout(()=>URL.revokeObjectURL(a.href),5000);
   }catch(e){
     const hint=$("postExportHint"); if(hint)hint.classList.remove("show");
-    alert("合成短視頻失敗：\n"+(e&&e.message?e.message:e)+"\n\n若是 PNG/MP4 載入失敗，再檢查 R2 CORS 或同名檔案。");
+    alert("合成短視頻失敗：\n"+(e&&e.message?e.message:e)+"\n\n請先確認貼文預覽上方圖片/MP4 已顯示，再按下載。");
   }
 }
 async function shareCompositePostVideo(){
