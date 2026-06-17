@@ -298,12 +298,12 @@
 
         <div class="field-row">
           <div>
-            <label for="apiKey">OpenAI API Key</label>
+            <label for="apiKey">OpenAI API Key（第一次輸入後自動記住）</label>
             <div style="display:flex;gap:6px;align-items:center;">
               <input id="apiKey" type="text" placeholder="sk-..." />
               <button id="toggleKey" type="button" class="btn btn-sm btn-ghost">顯示</button>
             </div>
-            <div class="hint">此 Key 只存於瀏覽器的 localStorage，不會上傳到伺服器。</div>
+            <div class="hint">輸入一次後會自動記住；下次打開同一網域/本機頁面會自動帶入。Key 只存在你的瀏覽器，不會送到 BookWide 伺服器。</div><div class="status" id="status-apiKey">尚未讀取 Key。</div>
           </div>
           <div>
             <label for="model">模型（預設 gpt-4.1-mini）</label>
@@ -331,6 +331,36 @@
               <option value="pro">pro</option>
             </select>
             <div class="hint">用在 <code>data/{category}/{slug}/...</code> 與 index.json。</div>
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div>
+            <label for="localLang">第三語 / 當地語言</label>
+            <select id="localLang">
+              <option value="ja" selected>ja｜日文</option>
+              <option value="en">en｜英文歌（英/中/日）</option>
+              <option value="zh">zh｜中文歌（中/拼音/英/日）</option>
+              <option value="ko">ko｜韓文</option>
+              <option value="th">th｜泰文</option>
+              <option value="ne">ne｜尼泊爾文</option>
+              <option value="it">it｜義大利文</option>
+              <option value="da">da｜丹麥文</option>
+              <option value="vi">vi｜越文</option>
+              <option value="fr">fr｜法文</option>
+              <option value="es">es｜西班牙文</option>
+            </select>
+            <div class="hint">對齊 02 的 BW_LOCAL_LANG。music 會依此固定輸出格式。</div>
+          </div>
+          <div>
+            <label for="indexDifficulty">index difficulty_level</label>
+            <select id="indexDifficulty">
+              <option value="1">1｜簡單</option>
+              <option value="2" selected>2｜一般</option>
+              <option value="3">3｜進階</option>
+              <option value="4">4｜困難</option>
+            </select>
+            <div class="hint">index 會自動補 duration_sec / dialogue / speaking。</div>
           </div>
         </div>
 
@@ -486,6 +516,23 @@
           </div>
         </div>
 
+        <!-- 2.7 speaking -->
+        <div class="block">
+          <h3>2.7 跟讀 speaking JSON（用 SRT 直接產生）</h3>
+          <div class="tagline">
+            不呼叫 GPT、不花 Token。產生 <code id="nameSpeaking">speaking-.json</code>，供 player 跟讀 / shadow 使用。
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-primary" id="btnSpeaking" type="button" onclick="handleGenerateSpeaking()">
+              用 SRT 產生 speaking JSON
+            </button>
+          </div>
+          <div class="status" id="status-speaking">尚未產生。</div>
+          <div class="btn-row">
+            <button class="btn btn-sm btn-ghost" id="downloadSpeaking" type="button" disabled>下載 speaking-*.json</button>
+          </div>
+        </div>
+
 <!-- 3. Prompt + JSON 預覽 -->
         <div class="block">
           <h3>3. GPT 提示詞與結果預覽</h3>
@@ -536,13 +583,71 @@
     const apiKeyInput = $('#apiKey');
     const toggleKeyBtn = $('#toggleKey');
 
-    // API Key 暫存 localStorage + 顯示/隱藏
+    // API Key：輸入一次後自動記住。多 key 名稱相容舊版工具，避免每次重填。
+    const API_KEY_STORAGE_KEYS = [
+      'bw_json_api_key',
+      'bookwide_openai_api_key',
+      'BOOKWIDE_OPENAI_API_KEY',
+      'openai_api_key',
+      'openaiApiKey'
+    ];
+
+    function readStoredApiKey(){
+      // 1) 允許使用者在同資料夾頁面或 Console 預先設定 window.BOOKWIDE_OPENAI_API_KEY
+      if (window.BOOKWIDE_OPENAI_API_KEY && String(window.BOOKWIDE_OPENAI_API_KEY).trim()) {
+        return String(window.BOOKWIDE_OPENAI_API_KEY).trim();
+      }
+      // 2) localStorage：主要保存位置
+      try {
+        for (const k of API_KEY_STORAGE_KEYS) {
+          const v = localStorage.getItem(k);
+          if (v && v.trim()) return v.trim();
+        }
+      } catch(e) {}
+      // 3) sessionStorage：localStorage 被瀏覽器擋住時備援
+      try {
+        for (const k of API_KEY_STORAGE_KEYS) {
+          const v = sessionStorage.getItem(k);
+          if (v && v.trim()) return v.trim();
+        }
+      } catch(e) {}
+      return '';
+    }
+
+    function saveStoredApiKey(v){
+      const key = String(v || '').trim();
+      if (!key) return;
+      try { for (const k of API_KEY_STORAGE_KEYS) localStorage.setItem(k, key); } catch(e) {}
+      try { for (const k of API_KEY_STORAGE_KEYS) sessionStorage.setItem(k, key); } catch(e) {}
+      const st = document.getElementById('status-apiKey');
+      if (st) { st.textContent = 'API Key 已記住；下次不必重填。'; st.className = 'status ok'; }
+    }
+
+    function getApiKey(){
+      const fieldKey = (apiKeyInput && apiKeyInput.value || '').trim();
+      if (fieldKey) { saveStoredApiKey(fieldKey); return fieldKey; }
+      const stored = readStoredApiKey();
+      if (stored && apiKeyInput) {
+        apiKeyInput.value = stored;
+        saveStoredApiKey(stored);
+        return stored;
+      }
+      return '';
+    }
+
     if (apiKeyInput) {
-      const savedKey = localStorage.getItem('bw_json_api_key') || '';
-      if (savedKey) apiKeyInput.value = savedKey;
-      apiKeyInput.addEventListener('input', () => {
-        localStorage.setItem('bw_json_api_key', apiKeyInput.value.trim());
-      });
+      const savedKey = readStoredApiKey();
+      if (savedKey) {
+        apiKeyInput.value = savedKey;
+        const st = document.getElementById('status-apiKey');
+        if (st) { st.textContent = '已自動帶入已保存的 API Key。'; st.className = 'status ok'; }
+        saveStoredApiKey(savedKey);
+      } else {
+        const st = document.getElementById('status-apiKey');
+        if (st) { st.textContent = '第一次使用才需要輸入；之後會自動記住。'; st.className = 'status'; }
+      }
+      apiKeyInput.addEventListener('input', () => saveStoredApiKey(apiKeyInput.value));
+      apiKeyInput.addEventListener('change', () => saveStoredApiKey(apiKeyInput.value));
       apiKeyInput.type = 'password';
     }
     if (toggleKeyBtn && apiKeyInput) {
@@ -717,12 +822,12 @@
     }
 
     async function handleGenerateDialogue(){
-      const apiKey = (document.getElementById('apiKey').value || '').trim();
+      const apiKey = getApiKey();
       const model  = document.getElementById('model').value;
       const slug = (document.getElementById('slug').value || '').trim();
       const cat  = catSel ? catSel.value : '';
 
-      if (!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
+      if (!apiKey){ alert('第一次使用請輸入 OpenAI API Key；輸入後會自動記住，下次不必重填。'); return; }
       if (!slug){ alert('請先填寫影片 slug。'); return; }
       if (!srtSegments.length){ alert('請先上傳並解析 SRT 檔。'); return; }
 
@@ -1157,11 +1262,11 @@ youtube_id: ${youtubeId}`;
 
       if (kind === 'speaking') { await handleGenerateSpeaking(); return; }
 
-      const apiKey = ($('#apiKey').value || '').trim();
+      const apiKey = getApiKey();
       const model  = $('#model').value;
       const slug   = ($('#slug').value || '').trim();
       const cat    = catSel ? catSel.value : '';
-      if (!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
+      if (!apiKey){ alert('第一次使用請輸入 OpenAI API Key；輸入後會自動記住，下次不必重填。'); return; }
       if (!slug){ alert('請先填寫影片 slug。'); return; }
 
       // 沒有 SRT 的處理：
@@ -1467,10 +1572,10 @@ youtube_id: ${youtubeId}`;
     let generatingAll = false;
     async function handleGenerateAll(){
       if (generatingAll) return;
-      const apiKey = ($('#apiKey').value || '').trim();
+      const apiKey = getApiKey();
       const slug   = ($('#slug').value || '').trim();
       const cat    = catSel ? catSel.value : '';
-      if (!apiKey){ alert('請先輸入 OpenAI API Key。'); return; }
+      if (!apiKey){ alert('第一次使用請輸入 OpenAI API Key；輸入後會自動記住，下次不必重填。'); return; }
       if (!slug){ alert('請先填寫影片 slug。'); return; }
 
       // 一鍵模式下：非 PRO 類別仍然強制要有 SRT；PRO 可允許無 SRT
@@ -1540,6 +1645,194 @@ youtube_id: ${youtubeId}`;
       }, 2000);
     }
     updateOutputDirStatus('尚未選擇輸出資料夾，現在仍會用下載方式。', false);
+
+
+    // ====== V20260617：對齊 02core_generate_pipeline_v22 單支修補用途 ======
+    function bwGetLocalLang(){
+      const el = document.getElementById('localLang');
+      return (el ? el.value : 'ja').trim().toLowerCase() || 'ja';
+    }
+    function bwGetLocalLabel(){
+      const map = {ja:'日文', jp:'日文', en:'英文', zh:'中文', ko:'韓文', th:'泰文', ne:'尼泊爾文', hi:'印地文', it:'義大利文', da:'丹麥文', vi:'越文', fr:'法文', es:'西班牙文', de:'德文'};
+      return map[bwGetLocalLang()] || bwGetLocalLang();
+    }
+    function bwLocalInstruction(){
+      const lang = bwGetLocalLang();
+      const label = bwGetLocalLabel();
+      return [
+        `本教材的第三語/當地語言是 ${label}（代碼 ${lang}）。`,
+        `所有原本日文欄位 ja / answer_ja / ja_example / ja物件，內容都必須改放自然的${label}，作為舊播放器相容。`,
+        `同時每筆也要寫 local_lang='${lang}', local_label='${label}', local=同一段${label}文字，並盡量加上 ${lang}=同一段${label}文字。`,
+        `每筆只要有 local / ${lang} / ja 當地語文字，就必須同時輸出 local_pron 與 ${lang}_pron。`,
+        'local_pron / <lang>_pron 是給前台朗讀用的「羅馬拼音」，必須使用 Latin letters；不可使用 IPA，不可加 /.../。',
+        '拉丁字母語言可直接用去重音後的當地語原文作 local_pron；非拉丁文字必須產生可讓中文使用者照讀的 Latin romanization；日文才可用 kana。'
+      ].join('\n');
+    }
+    function bwExtractYouTubeId(url){
+      try{
+        const u = new URL(url);
+        if (u.hostname.includes('youtu.be')) return u.pathname.replace(/^\//,'').split('/')[0] || '';
+        return u.searchParams.get('v') || '';
+      }catch(e){ return ''; }
+    }
+    function bwMusicFormatNote(){
+      const lang = bwGetLocalLang();
+      const label = bwGetLocalLabel();
+      if (lang === 'en') return [
+        '【Music 格式鎖定：英文歌】',
+        '這首歌必須使用舊英中日格式：en / zh / ja。',
+        "每筆必須：native=en；roman=''；local=en；local_lang='en'；local_label='英文'；lyrics_mode='en_zh_ja'。",
+        'ja 必須是自然日文意思，不可空白，不可照抄英文，不可放中文。zh 必須是繁體中文意思。'
+      ].join('\n');
+      if (lang === 'ja' || lang === 'jp') return [
+        '【Music 格式鎖定：日文歌】',
+        '這首歌必須使用：native(日文原文) / kana(假名) / en / zh。',
+        "每筆必須：roman=''；local=native；ja=native；local_pron=kana；local_lang='ja'；local_label='日文'；lyrics_mode='ja_kana_en_zh'。"
+      ].join('\n');
+      if (lang === 'zh' || lang === 'zh-tw' || lang === 'zh-cn' || lang === 'cn') return [
+        '【Music 格式鎖定：中文歌】',
+        '這首歌必須使用：native/zh(中文原詞) / pinyin(漢語拼音) / en / ja(日文意思)。',
+        "每筆必須：native=中文原詞；zh=native；pinyin=漢語拼音；roman=pinyin；local=native；local_pron=pinyin；local_lang='zh'；local_label='中文'；lyrics_mode='zh_pinyin_en_ja'。",
+        'ja 必須是自然日文意思，不可空白，不可照抄中文；en 必須是自然英文意思。'
+      ].join('\n');
+      return [
+        `【Music 格式鎖定：${label}歌】`,
+        '這首歌必須使用：native(原文) / roman(Latin romanization) / en / zh。',
+        `每筆必須：local=native；ja=native；${lang}=native；local_pron=roman；${lang}_pron=roman；local_lang='${lang}'；local_label='${label}'；lyrics_mode='native_roman_en_zh'。`
+      ].join('\n');
+    }
+    function bwApplyIndexPatch(obj, slug, cat){
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) obj = {};
+      const srcInput = document.getElementById('videoSourceInput');
+      const youtubeUrl = srcInput ? (srcInput.value || '').trim() : '';
+      const youtubeId = bwExtractYouTubeId(youtubeUrl);
+      const diffEl = document.getElementById('indexDifficulty');
+      const diff = diffEl ? Number(diffEl.value) : 2;
+      obj.category = cat || obj.category || '';
+      obj.slug = slug;
+      obj.video = obj.video || getPublicVideoUrl(cat, slug);
+      obj.cover = obj.cover || getPublicCoverUrl(cat, slug, 'jpg');
+      obj.youtube_url = youtubeUrl || obj.youtube_url || '';
+      obj.youtube_id = youtubeId || obj.youtube_id || '';
+      obj.cues = { zh: `./cues-${slug}.json` };
+      obj.vocab = `./vocab-${slug}.json`;
+      obj.quiz = `./quiz-${slug}.json`;
+      obj.ai = `./ai-${slug}.json`;
+      obj.dialogue = `./${slug}.dialogue.json`;
+      obj.speaking = `./speaking-${slug}.json`;
+      obj.duration_sec = computeDurationSecFromSrt();
+      obj.difficulty_level = Number.isFinite(diff) ? diff : 2;
+      obj.is_public = true;
+      if (!obj.title) obj.title = slug;
+      return obj;
+    }
+    function bwNormalizeMusicCues(obj, cat){
+      if (cat !== 'music' || !Array.isArray(obj)) return obj;
+      const lang = bwGetLocalLang();
+      const label = bwGetLocalLabel();
+      for (const d of obj){
+        if (!d || typeof d !== 'object') continue;
+        if (lang === 'en'){
+          d.en = d.en || d.native || d.text || '';
+          d.native = d.en;
+          d.local = d.en;
+          d.roman = '';
+          d.local_pron = '';
+          d.local_lang = 'en'; d.local_label = '英文'; d.lyrics_mode = 'en_zh_ja';
+          d.zh = d.zh || '';
+          d.ja = d.ja || '';
+        }else if (lang === 'ja' || lang === 'jp'){
+          d.native = d.native || d.ja || d.local || d.text || '';
+          d.ja = d.native;
+          d.local = d.native;
+          d.roman = '';
+          d.kana = d.kana || d.local_pron || d.ja_pron || '';
+          d.local_pron = d.kana;
+          d.ja_pron = d.kana;
+          d.local_lang = 'ja'; d.local_label = '日文'; d.lyrics_mode = 'ja_kana_en_zh';
+        }else if (lang === 'zh'){
+          d.native = d.native || d.zh || d.local || d.text || '';
+          d.zh = d.native;
+          d.pinyin = d.pinyin || d.roman || d.local_pron || d.zh_pron || '';
+          d.roman = d.pinyin;
+          d.local = d.native;
+          d.local_pron = d.pinyin;
+          d.zh_pron = d.pinyin;
+          d.local_lang = 'zh'; d.local_label = '中文'; d.lyrics_mode = 'zh_pinyin_en_ja';
+          d.en = d.en || '';
+          d.ja = d.ja || '';
+        }else{
+          d.native = d.native || d.local || d[lang] || d.ja || d.text || '';
+          d.roman = d.roman || d.local_pron || d[`${lang}_pron`] || '';
+          d.local = d.native; d.ja = d.native; d[lang] = d.native;
+          d.local_pron = d.roman; d[`${lang}_pron`] = d.roman;
+          d.local_lang = lang; d.local_label = label; d.lyrics_mode = 'native_roman_en_zh';
+        }
+      }
+      return obj;
+    }
+
+    // 覆蓋舊 buildChatPayload：讓瀏覽器版 prompt 與 02 V49 產檔規格接近
+    buildChatPayload = function(kind, model, slug){
+      const cat = catSel ? catSel.value : '';
+      const srtSample = srtSegments.map(x => `${x.time} ${x.text}`).join('\n');
+      const localNote = bwLocalInstruction();
+      const srcInput = document.getElementById('videoSourceInput');
+      const youtubeUrl = srcInput ? (srcInput.value || '').trim() : '';
+      const youtubeId = bwExtractYouTubeId(youtubeUrl);
+      const videoUrl = getPublicVideoUrl(cat, slug);
+      const coverUrl = getPublicCoverUrl(cat, slug, 'jpg');
+      let systemMsg = '';
+      let userMsg = '';
+
+      if (kind === 'cues'){
+        if (cat === 'music'){
+          systemMsg = `你是一個只會輸出 JSON 的系統。請把音樂字幕整理成 Music cues JSON。\n輸入字幕是原唱/原聲辨識結果，可能是日文、韓文、中文或其他當地語，不一定是英文。\n輸出必須是 JSON 陣列。\n嚴格規則：只能輸出 JSON，不可加說明；time 必須沿用字幕時間；en/zh 必須存在；不要根據聽不清楚片段亂編。\n${bwMusicFormatNote()}`;
+          userMsg = `以下是音樂字幕。\n${localNote}\n請輸出 Music cues JSON：\n${srtSample}`;
+        }else{
+          systemMsg = `你是一個只會輸出 JSON 的系統。請把英文字幕轉成三語 cues JSON。\n輸出 JSON 陣列，每筆含 time,en,zh,ja,local_lang,local_label,local,local_pron。\n非日文 local_pron 必須是 Latin romanization，不可使用 IPA /.../。`;
+          userMsg = `以下是影片字幕。\n${localNote}\n請輸出 cues JSON：\n${srtSample}`;
+        }
+      }else if (kind === 'quiz'){
+        systemMsg = `你是一個只會輸出 JSON 的系統。根據影片字幕產生固定 40 題 quiz JSON：理解內容/細節理解/字彙與片語/延伸口說，各 10 題。\n輸出 JSON 陣列；每題含 section,type,question,options,answer,answer_en,answer_zh,answer_ja,answer_local,answer_local_pron,explanation_zh。`;
+        userMsg = `以下是影片字幕。\n${localNote}\n請輸出 quiz JSON：\n${srtSample}`;
+      }else if (kind === 'vocab'){
+        systemMsg = `你是一個只會輸出 JSON 的系統。根據影片字幕挑出 15~25 筆重點字彙/片語，輸出 JSON 陣列。\n每筆必須含 time,word,ipa,kk,pos,zh,en,en_example,zh_example,ja,kana,romaji,local,local_pron,ja_example,local_example,local_example_pron。\nlocal_pron 不可使用 IPA，不可加 /.../。`;
+        userMsg = `以下是影片字幕。\n${localNote}\n請輸出完整 vocab JSON：\n${srtSample}`;
+      }else if (kind === 'ai'){
+        systemMsg = `你是一個只會輸出 JSON 的系統。根據影片情境產生 AI 練習，輸出 JSON 陣列。\n每筆含 title,prompt,hint,sample,ja,local,local_pron,zh。`;
+        userMsg = `以下是影片字幕。\n${localNote}\n請依情境輸出 ai JSON：\n${srtSample}`;
+      }else if (kind === 'index'){
+        systemMsg = `你是一個只會輸出 JSON 的系統。請輸出單一 BookWide index JSON 物件。\n必須含 title,category,slug,video,cover,youtube_url,youtube_id,cues,vocab,quiz,ai,domain_code,role_codes,lesson_type,scene_tags,order,is_public。\n只能輸出 JSON。`;
+        userMsg = `category: ${cat}\nslug: ${slug}\nvideo: ${videoUrl}\ncover: ${coverUrl}\nyoutube_url: ${youtubeUrl}\nyoutube_id: ${youtubeId}`;
+      }else{
+        throw new Error(`未知 kind: ${kind}`);
+      }
+      return { model, messages:[{role:'system',content:systemMsg},{role:'user',content:userMsg}], temperature:0.2 };
+    };
+
+    // 覆蓋舊 dialogue prompt：補 local/local_pron，對齊 02 的 Talk 用法
+    buildDialoguePayloadFromSrt = function(slug, category, model){
+      const srcInput = document.getElementById('videoSourceInput');
+      const source_url = srcInput ? (srcInput.value || '').trim() : '';
+      const lines = srtSegments.map(s => `${s.time} ${String(s.text || '').trim()}`).filter(Boolean).join('\n');
+      const systemMsg = `你是 BookWide 的雙語（繁體中文/當地語）口語對話編輯器。請只輸出合法 JSON，不要解釋，不要程式碼框。\n格式：{ "meta": {"slug":"...","category":"...","source_url":"...","mode":"srt"}, "dialogue": [{"role":"teacher|student","text":"英文","zh":"繁體中文","ja":"當地語（舊欄位相容）","local":"當地語","local_pron":"羅馬拼音","time":"00:00:00"}] }`;
+      const userMsg = `slug: ${slug}\ncategory: ${category || ''}\nsource_url: ${source_url}\n\n${bwLocalInstruction()}\n\n以下是字幕：\n${lines}`;
+      return { model, messages:[{role:'system',content:systemMsg},{role:'user',content:userMsg}], temperature:0.2 };
+    };
+
+    // 攔截 output 前補 schema；不改原流程，只補單支修補必要欄位
+    const __bwOldOutputJson = outputJson;
+    outputJson = async function(kind, slug, obj){
+      const cat = catSel ? catSel.value : '';
+      if (kind === 'index') obj = bwApplyIndexPatch(obj, slug, cat);
+      if (kind === 'cues') obj = bwNormalizeMusicCues(obj, cat);
+      savedJson[kind] = obj;
+      return __bwOldOutputJson(kind, slug, obj);
+    };
+
+    if (typeof updateFileNames === 'function') updateFileNames();
+
   </script>
 </body>
 </html>
