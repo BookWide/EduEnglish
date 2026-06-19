@@ -1790,8 +1790,31 @@ youtube_id: ${youtubeId}`;
           systemMsg = `你是一個只會輸出 JSON 的系統。請把音樂字幕整理成 Music cues JSON。\n輸入字幕是原唱/原聲辨識結果，可能是日文、韓文、中文或其他當地語，不一定是英文。\n輸出必須是 JSON 陣列。\n嚴格規則：只能輸出 JSON，不可加說明；time 必須沿用字幕時間；en/zh 必須存在；不要根據聽不清楚片段亂編。\n${bwMusicFormatNote()}`;
           userMsg = `以下是音樂字幕。\n${localNote}\n請輸出 Music cues JSON：\n${srtSample}`;
         }else{
-          systemMsg = `你是一個只會輸出 JSON 的系統。請把英文字幕轉成三語 cues JSON。\n輸出 JSON 陣列，每筆含 time,en,zh,ja,local_lang,local_label,local,local_pron。\n非日文 local_pron 必須是 Latin romanization，不可使用 IPA /.../。`;
-          userMsg = `以下是影片字幕。\n${localNote}\n請輸出 cues JSON：\n${srtSample}`;
+          systemMsg = `你是一個只會輸出 JSON 的系統。請把英文影片字幕轉成 BookWide 三語 cues JSON。
+
+【非 music 固定格式，不能依 localLang 改寫】
+輸出必須是 JSON 陣列，每筆只要下列欄位即可：
+{
+  "time": "00:00:00",
+  "en": "英文原句",
+  "zh": "繁體中文翻譯",
+  "ja": "自然日文翻譯",
+  "local_lang": "ja",
+  "local_label": "日文",
+  "local": "同 ja 的自然日文翻譯",
+  "local_pron": "日文假名或可留空"
+}
+
+嚴格規則：
+- ja 必須是日文翻譯，絕對不可照抄 en。
+- local_lang 固定輸出 ja。
+- local_label 固定輸出 日文。
+- local 固定等於 ja。
+- 不要輸出 en_pron。
+- 不要輸出 native / roman，除非必要。
+- 只能輸出 JSON，不可加說明，不可包程式碼框。`;
+          userMsg = `以下是英文影片字幕。請輸出 en / zh / ja 三語 cues JSON：
+${srtSample}`;
         }
       }else if (kind === 'quiz'){
         systemMsg = `你是一個只會輸出 JSON 的系統。根據影片字幕產生固定 40 題 quiz JSON：理解內容/細節理解/字彙與片語/延伸口說，各 10 題。\n輸出 JSON 陣列；每題含 section,type,question,options,answer,answer_en,answer_zh,answer_ja,answer_local,answer_local_pron,explanation_zh。`;
@@ -1821,12 +1844,44 @@ youtube_id: ${youtubeId}`;
       return { model, messages:[{role:'system',content:systemMsg},{role:'user',content:userMsg}], temperature:0.2 };
     };
 
+    function bwFixNonMusicCuesJa(obj){
+      const cat = catSel ? catSel.value : '';
+      if (cat === 'music' || !Array.isArray(obj)) return obj;
+      let bad = [];
+      for (let i=0;i<obj.length;i++){
+        const d = obj[i];
+        if (!d || typeof d !== 'object') continue;
+        const en = String(d.en || '').trim();
+        const ja = String(d.ja || '').trim();
+        const enRaw = en.replace(/\s+/g,'').toLowerCase();
+        const jaRaw = ja.replace(/\s+/g,'').toLowerCase();
+        d.local_lang = 'ja';
+        d.local_label = '日文';
+        if (ja && jaRaw !== enRaw){
+          d.local = ja;
+          if (!('local_pron' in d)) d.local_pron = '';
+        }else{
+          bad.push(i+1);
+        }
+        delete d.en_pron;
+        if (d.native && String(d.native).trim() === en) delete d.native;
+        if (d.roman && String(d.roman).trim() === en) delete d.roman;
+      }
+      if (bad.length){
+        throw new Error('cues 仍有 ja 缺失或照抄英文：第 ' + bad.slice(0,20).join(',') + ' 行。分類 story/news/movie/pro 時，會固定要求日文；請重新按一次產生 cues。');
+      }
+      return obj;
+    }
+
     // 攔截 output 前補 schema；不改原流程，只補單支修補必要欄位
     const __bwOldOutputJson = outputJson;
     outputJson = async function(kind, slug, obj){
       const cat = catSel ? catSel.value : '';
       if (kind === 'index') obj = bwApplyIndexPatch(obj, slug, cat);
-      if (kind === 'cues') obj = bwNormalizeMusicCues(obj, cat);
+      if (kind === 'cues') {
+        obj = bwNormalizeMusicCues(obj, cat);
+        obj = bwFixNonMusicCuesJa(obj);
+      }
       savedJson[kind] = obj;
       return __bwOldOutputJson(kind, slug, obj);
     };
