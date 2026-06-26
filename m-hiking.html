@@ -865,32 +865,39 @@ function groupBy(arr,keyFn){let m=new Map(); for(const x of arr){let k=keyFn(x);
 
 function photoOrgStorageKey(name){return 'bookwide_hiking_'+name}
 function getPersonNames(){
-  try{return JSON.parse(localStorage.getItem(photoOrgStorageKey('person_names')))||{person_a:'人物A',person_b:'人物B',person_c:'人物C',group:'團體照',landscape:'風景／路標',other:'其他'}}catch(e){return {person_a:'人物A',person_b:'人物B',person_c:'人物C',group:'團體照',landscape:'風景／路標',other:'其他'}}
+  // 簡化版：只分「個人獨照」與「團體照」。不做人名 A/B/C，避免越整越亂。
+  return {solo:'個人獨照', group:'團體照'};
 }
-function setPersonNames(names){localStorage.setItem(photoOrgStorageKey('person_names'),JSON.stringify(names||{}))}
-function getPersonMap(){try{return JSON.parse(localStorage.getItem(photoOrgStorageKey('person_map')))||{}}catch(e){return {}}}
-function setPersonMap(map){localStorage.setItem(photoOrgStorageKey('person_map'),JSON.stringify(map||{}))}
-function assignPhotoPerson(url,group){let m=getPersonMap(); m[url]=group; setPersonMap(m); renderPhotoOrganizer('people')}
-function renamePersonGroup(group,input){let names=getPersonNames(); names[group]=input.value.trim()||names[group]||group; setPersonNames(names); renderPhotoOrganizer('people')}
+function setPersonNames(names){}
+function getPersonMap(){try{return JSON.parse(localStorage.getItem(photoOrgStorageKey('person_map_simple')))||{}}catch(e){return {}}}
+function setPersonMap(map){localStorage.setItem(photoOrgStorageKey('person_map_simple'),JSON.stringify(map||{}))}
+function normalizeSimplePhotoGroup(g){return g==='group'?'group':'solo'}
+function assignPhotoPerson(url,group){let m=getPersonMap(); m[url]=normalizeSimplePhotoGroup(group); setPersonMap(m); renderPhotoOrganizer(state.personFilter||'solo')}
+function renamePersonGroup(group,input){}
 function groupPhotosByPerson(items){
-  const names=getPersonNames(), map=getPersonMap();
-  const keys=['person_a','person_b','person_c','group','landscape','other'];
-  const out={}; keys.forEach(k=>out[k]=[]);
-  for(const it of items){let g=map[it.url]||'other'; if(!out[g]) out[g]=[]; out[g].push(it.url)}
+  const names=getPersonNames(), rawMap=getPersonMap();
+  const keys=['solo','group'];
+  const out={solo:[],group:[]};
+  const map={};
+  for(const it of items){
+    let g=normalizeSimplePhotoGroup(rawMap[it.url]);
+    map[it.url]=g;
+    out[g].push(it.url);
+  }
   return {names,map,out,keys};
 }
-function renderPersonClassify(){
+function renderPersonClassify(activeView){
   const org=buildPhotoOrganization();
   const data=groupPhotosByPerson(org.items);
-  const active=state.personFilter||'all';
+  const active=(activeView==='group'||state.personFilter==='group')?'group':'solo';
+  state.personFilter=active;
   const label=k=>escHtml(data.names[k]||k);
   const count=k=>data.out[k]?data.out[k].length:0;
-  const filterBtns=`<div class="person-filter"><button class="${active==='all'?'active':''}" onclick="state.personFilter='all';renderPhotoOrganizer('people')">全部 ${org.items.length}</button>${data.keys.map(k=>`<button class="${active===k?'active':''}" onclick="state.personFilter='${k}';renderPhotoOrganizer('people')">${label(k)} ${count(k)}</button>`).join('')}</div>`;
-  const rename=`<div class="person-grid">${data.keys.map(k=>`<div class="person-card"><b>${label(k)}</b><input value="${escHtml(data.names[k]||'')}" onchange="renamePersonGroup('${k}',this)" placeholder="改名，例如：翠琴"></div>`).join('')}</div>`;
-  const items=(active==='all'?org.items:org.items.filter(x=>(data.map[x.url]||'other')===active));
-  const buttons=(u)=>data.keys.map(k=>`<button class="${(data.map[u]||'other')===k?'active':''}" onclick="event.stopPropagation();assignPhotoPerson('${String(u).replace(/'/g,'%27')}','${k}')">${label(k)}</button>`).join('');
+  const filterBtns=`<div class="person-filter"><button class="${active==='solo'?'active':''}" onclick="state.personFilter='solo';renderPhotoOrganizer('solo')">個人獨照 ${count('solo')}</button><button class="${active==='group'?'active':''}" onclick="state.personFilter='group';renderPhotoOrganizer('group')">團體照 ${count('group')}</button></div>`;
+  const items=org.items.filter(x=>(data.map[x.url]||'solo')===active);
+  const buttons=(u)=>`<button class="${(data.map[u]||'solo')==='solo'?'active':''}" onclick="event.stopPropagation();assignPhotoPerson('${String(u).replace(/'/g,'%27')}','solo')">個人獨照</button><button class="${(data.map[u]||'solo')==='group'?'active':''}" onclick="event.stopPropagation();assignPhotoPerson('${String(u).replace(/'/g,'%27')}','group')">團體照</button>`;
   const grid=`<div class="org-photo-row">${items.map(x=>`<div class="org-photo" onclick="openPhotoModal('${String(x.url).replace(/'/g,'%27')}')"><img src="${escHtml(x.url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"><div class="person-actions">${buttons(x.url)}</div></div>`).join('')}</div>`;
-  return `<div class="notice">這版先做「手動人物分類」：群友最想找自己的照片，所以先把照片點到人物A/B/C、團體照、風景。改名後會存到本機，也會寫進下載的 photo-groups.json。</div>${filterBtns}${rename}<h3>照片分類</h3>${grid}`;
+  return `<div class="notice"><b>簡化分類：</b>只分兩類：個人獨照、團體照。預設全部先放「個人獨照」，看到合照再點「團體照」即可。</div>${filterBtns}<h3>${label(active)}</h3>${grid}`;
 }
 function buildPhotoOrganization(){
   const items=collectAlbumPhotoItems();
@@ -902,19 +909,28 @@ function buildPhotoOrganization(){
   for(const b of buckets){
     const arr=b.items.map(x=>({...x,num:photoNum(x.url)})).filter(x=>x.num!==null).sort((a,b)=>a.num-b.num);
     let cur=[];
+    const pushBurst=()=>{
+      if(cur.length>=3){
+        // 90% 精簡：連拍只留約 10%，至少留 1 張；只是產生候選，不會動 R2 原圖。
+        const keepN=Math.max(1, Math.ceil(cur.length*0.10));
+        const keep=cur.filter((_,idx)=> idx===0 || idx%Math.max(1,Math.floor(cur.length/keepN))===0).slice(0,keepN).map(x=>x.url);
+        const keepSet=new Set(keep);
+        burst.push({id:`burst_${n++}`,type:'疑似連拍｜90%可刪候選',items:cur,keep,remove_suggested:cur.map(x=>x.url).filter(u=>!keepSet.has(u))});
+      }
+    };
     for(const it of arr){
-      if(!cur.length || it.num-cur[cur.length-1].num<=2){cur.push(it)}else{if(cur.length>=3) burst.push({id:`burst_${n++}`,type:'疑似連拍',items:cur,keep:cur.slice(0,2).map(x=>x.url),remove_suggested:cur.slice(2).map(x=>x.url)});cur=[it]}
+      if(!cur.length || it.num-cur[cur.length-1].num<=2){cur.push(it)}else{pushBurst();cur=[it]}
     }
-    if(cur.length>=3) burst.push({id:`burst_${n++}`,type:'疑似連拍',items:cur,keep:cur.slice(0,2).map(x=>x.url),remove_suggested:cur.slice(2).map(x=>x.url)});
+    pushBurst();
   }
-  // 只有「完全重複／同檔名重複」才列為建議刪；疑似連拍只列為建議整理，不刪。
-  const deleteGroups=[...exact,...byName];
-  const organizeGroups=[...burst];
-  const dupGroups=[...deleteGroups,...organizeGroups];
+  // 真正重複與 90% 連拍精簡都放在「刪除候選」，但不會自動刪原圖；要下載 photo-groups.json 後再人工確認。
+  const deleteGroups=[...exact,...byName,...burst];
+  const organizeGroups=[];
+  const dupGroups=[...deleteGroups];
   const removeSet=new Set(deleteGroups.flatMap(g=>g.remove_suggested||[]));
-  const organizeSet=new Set(organizeGroups.flatMap(g=>(g.items||[]).map(x=>x.url)));
+  const organizeSet=new Set();
   const kept=items.filter(x=>!removeSet.has(x.url));
-  const featured=items.slice(0,20).map(x=>x.url);
+  const featured=kept.slice(0,20).map(x=>x.url);
   const personData=groupPhotosByPerson(items);
   const eventGroups=groupBy(items,x=>x.event_id).map(g=>({
     event_id:g.key,
@@ -922,14 +938,14 @@ function buildPhotoOrganization(){
     route_name:g.items[0]?.route||'',
     original_count:g.items.length,
     kept_count:g.items.filter(x=>!removeSet.has(x.url)).length,
-    cover_url:g.items[0]?.url||'',
-    featured:g.items.slice(0,20).map(x=>x.url),
+    cover_url:(g.items.find(x=>!removeSet.has(x.url))||g.items[0])?.url||'',
+    featured:g.items.filter(x=>!removeSet.has(x.url)).slice(0,20).map(x=>x.url),
     duplicate_groups:dupGroups.filter(d=>d.items.some(it=>it.event_id===g.key)).map(d=>({id:d.id,type:d.type,keep:d.keep,remove_suggested:d.remove_suggested})),
     people_groups:personData.keys.map(k=>{
-      const photos=g.items.map(x=>x.url).filter(u=>(personData.map[u]||'other')===k);
+      const photos=g.items.map(x=>x.url).filter(u=>(personData.map[u]||'solo')===k);
       return {id:k,label:personData.names[k]||k,name:personData.names[k]||'',count:photos.length,cover_url:photos[0]||'',photos};
     }),
-    other_groups:{group_photos:[],landscape_photos:[],sign_photos:[],uncategorized:g.items.map(x=>x.url).filter(u=>(personData.map[u]||'other')==='other')}
+    other_groups:{group_photos:[],landscape_photos:[],sign_photos:[],uncategorized:g.items.map(x=>x.url).filter(u=>(personData.map[u]||'solo')==='other')}
   }));
   state.photoOrganization={items,dupGroups,deleteGroups,organizeGroups,removeSet,organizeSet,kept,featured,eventGroups};
   return state.photoOrganization;
@@ -942,7 +958,7 @@ function togglePhotoOrganizer(force){
 function renderOrgThumbs(urls,keepSet=new Set(),removeSet=new Set(),organizeSet=new Set()){
   urls=[...new Set((urls||[]).filter(isImageUrl))];
   if(!urls.length) return '<div class="empty" style="padding:18px">沒有照片。</div>';
-  return `<div class="org-photo-row">${urls.map(u=>`<div class="org-photo" onclick="openPhotoModal('${String(u).replace(/'/g,'%27')}')"><img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'">${keepSet.has(u)?'<span class="keep-badge">保留</span>':''}${removeSet.has(u)?'<span class="del-badge">建議刪</span>':''}${(!removeSet.has(u)&&organizeSet.has(u))?'<span class="org-badge">疑似連拍</span>':''}</div>`).join('')}</div>`;
+  return `<div class="org-photo-row">${urls.map(u=>`<div class="org-photo" onclick="openPhotoModal('${String(u).replace(/'/g,'%27')}')"><img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'">${keepSet.has(u)?'<span class="keep-badge">保留</span>':''}${removeSet.has(u)?'<span class="del-badge">可刪候選</span>':''}${(!removeSet.has(u)&&organizeSet.has(u))?'<span class="org-badge">疑似連拍</span>':''}</div>`).join('')}</div>`;
 }
 function renderPhotoOrganizer(view='summary'){
   const org=buildPhotoOrganization();
@@ -951,21 +967,21 @@ function renderPhotoOrganizer(view='summary'){
   const tab=(id,label)=>`<button class="org-tab ${view===id?'active':''}" onclick="renderPhotoOrganizer('${id}')">${label}</button>`;
   let body='';
   if(view==='summary'){
-    body=`<div class="org-summary"><div class="org-stat"><b>${original}</b>原始照片</div><div class="org-stat"><b>${dupCount}</b>真正重複建議刪</div><div class="org-stat"><b>${organizeCount}</b>疑似連拍待整理</div><div class="org-stat"><b>${org.eventGroups.length}</b>活動分組</div></div><div class="notice">照片不自動大量刪除。只有完全重複／同檔名重複才標「建議刪」；疑似連拍只標「建議整理」。群友要找自己的照片，請到「人物分類」手動把照片點到人物A/B/C並改名。</div>`;
+    body=`<div class="org-summary"><div class="org-stat"><b>${original}</b>原始照片</div><div class="org-stat"><b>${dupCount}</b>刪除候選</div><div class="org-stat"><b>${kept}</b>建議保留</div><div class="org-stat"><b>${org.eventGroups.length}</b>活動分組</div></div><div class="notice"><b>90% 重複精簡模式：</b>連拍群組只留約 10% 當代表，其餘標為「可刪候選」。系統不會動原圖，只產生 photo-groups.json；主辦人確認後再處理 R2。群友找照片最重要：只分「個人獨照」和「團體照」，不要做人名 A/B/C。</div>`;
   }else if(view==='featured'){
     body=`<h3>精選照片</h3><p class="small">每場先抓前 20 張當精選，不再一口氣炸出全部照片。</p>${org.eventGroups.map(g=>`<div class="dup-group"><div class="dup-head">${escHtml(g.date)}｜${escHtml(g.route_name)}｜精選 ${g.featured.length} 張 / 原始 ${g.original_count} 張</div>${renderOrgThumbs(g.featured)}</div>`).join('')}`;
   }else if(view==='duplicates'){
-    body=org.dupGroups.length?org.dupGroups.map(g=>`<div class="dup-group"><div class="dup-head">${escHtml(g.type)}｜${g.items.length} 張｜${g.type==='疑似連拍'?'建議整理，不自動刪':'建議保留 '+g.keep.length+' 張'}</div>${renderOrgThumbs(g.items.map(x=>x.url),new Set(g.keep),new Set(g.remove_suggested),g.type==='疑似連拍'?new Set(g.items.map(x=>x.url)):new Set())}</div>`).join(''):'<div class="empty">目前沒有抓到完全重複或疑似連拍。若照片內容很像但檔名不連續，需要第二版用影像相似度。</div>';
+    body=org.dupGroups.length?org.dupGroups.map(g=>`<div class="dup-group"><div class="dup-head">${escHtml(g.type)}｜${g.items.length} 張｜${g.type.includes('90%')?'90%可刪候選｜建議保留 '+g.keep.length+' 張':'建議保留 '+g.keep.length+' 張'}</div>${renderOrgThumbs(g.items.map(x=>x.url),new Set(g.keep),new Set(g.remove_suggested),g.type==='疑似連拍'?new Set(g.items.map(x=>x.url)):new Set())}</div>`).join(''):'<div class="empty">目前沒有抓到完全重複或疑似連拍。若照片內容很像但檔名不連續，需要第二版用影像相似度。</div>';
   }else if(view==='people'){
-    body=renderPersonClassify();
+    body=renderPersonClassify('solo');
   }else{
     body=`<h3>全部照片</h3><p class="small">全部展開只在需要檢查時使用。</p>${renderOrgThumbs(org.items.map(x=>x.url))}`;
   }
-  panel.innerHTML=`<div class="toolbar"><div><h2 style="margin:0">照片整理</h2><div class="small">不動原圖，只產生整理建議與 photo-groups.json。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="org-tabs">${tab('summary','總覽')}${tab('featured','精選')}${tab('duplicates','重複／連拍')}${tab('people','人物分類')}${tab('all','全部照片')}</div><div>${body}</div>`;
+  panel.innerHTML=`<div class="toolbar"><div><h2 style="margin:0">照片整理</h2><div class="small">不動原圖，只產生整理建議與 photo-groups.json。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="org-tabs">${tab('summary','總覽')}${tab('solo','個人獨照')}${tab('group','團體照')}${tab('duplicates','90%刪重')}${tab('all','全部照片')}</div><div>${body}</div>`;
 }
 function photoGroupsJson(){
   const org=buildPhotoOrganization();
-  return {albums:org.eventGroups,summary:{original_count:org.items.length,kept_count:org.kept.length,duplicate_delete_suggested_count:org.removeSet.size,near_burst_organize_count:org.organizeSet?org.organizeSet.size:0,generated_at:new Date().toISOString(),note:'前端整理建議：不刪原圖。只有完全重複／同檔名重複才建議刪；疑似連拍只建議整理；人物分類為主辦人手動指定。'}};
+  return {albums:org.eventGroups,summary:{original_count:org.items.length,kept_count:org.kept.length,duplicate_delete_suggested_count:org.removeSet.size,near_burst_organize_count:org.organizeSet?org.organizeSet.size:0,generated_at:new Date().toISOString(),note:'前端整理建議：不刪原圖。完全重複與疑似連拍採 90% 精簡候選；分類只保留個人獨照與團體照，群友先找個人獨照即可。'}};
 }
 function downloadPhotoGroups(){downloadJson('photo-groups.json',photoGroupsJson())}
 
