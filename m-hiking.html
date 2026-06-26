@@ -162,14 +162,51 @@ function calendarRecommendedRoutes({city,time,lev,weather}){
 function strictDatabaseRoutes({city,time,lev,weather}){
   return filterRoutes({city,time:time==='all'?'half':time,lev,weather});
 }
+function albumVisitCountForRoute(r){
+  if(!r) return 0;
+  let name=String(r.name_zh||'');
+  let dates=new Set();
+  for(let a of (state.albums||[])){
+    let rid=String(a.route_id||a.routeId||'');
+    let rn=String(a.route||a.route_name||a.name||'');
+    if(rid===r.id || (rn && (rn===name || rn.includes(name) || name.includes(rn)))){ if(a.date) dates.add(a.date); else dates.add(a.id||a.url||rn); }
+  }
+  return dates.size;
+}
+function commonRouteScore(r){
+  let txt=[r.name_zh,r.city,r.area,(r.tags||[]).join(' '),r.notice,r.rain_policy].join(' ');
+  let score=albumVisitCountForRoute(r)*100;
+  const common=[['大坑',40],['知高圳',38],['雪蓮',34],['三汀山',32],['聚興山',30],['新田',28],['頭嵙',26],['咬人狗坑',24],['暗影山',20],['萬里長城',18],['挑水古道',16],['藤山',15],['清水岩',14],['鳴鳳',12],['獨立山',10]];
+  for(const [kw,pts] of common){ if(txt.includes(kw)) score+=pts; }
+  if(r.city==='台中') score+=12;
+  if(/新手|常走|近郊|短|好停|好撤退|半天/.test(txt)) score+=8;
+  if(rainOk(r)) score+=3;
+  return score;
+}
+function uniqueRoutes(arr){
+  let seen=new Set(), out=[];
+  for(let r of arr){ if(!r||!r.id||seen.has(r.id)) continue; seen.add(r.id); out.push(r); }
+  return out;
+}
+function topCommonRoutes({time,lev,weather},exclude=[]){
+  let skip=new Set(exclude.map(r=>r&&r.id).filter(Boolean));
+  let pool=strictDatabaseRoutes({city:'all',time,lev,weather}).filter(r=>!skip.has(r.id));
+  return pool.sort((a,b)=>commonRouteScore(b)-commonRouteScore(a)).slice(0,5);
+}
 function applyFilters(){
   let d=parseDate($('fDate').value||localDate(nextSaturday())); selectWeekByDate(d);
   let city='all', time=$('fTime').value, lev=$('fLevel').value, weather=$('fWeather').value;
-  let arr=calendarRecommendedRoutes({city,time,lev,weather});
-  let stage='54 週年曆推薦';
+  let primary=calendarRecommendedRoutes({city,time,lev,weather});
+  let db=strictDatabaseRoutes({city,time,lev,weather}).sort((a,b)=>commonRouteScore(b)-commonRouteScore(a));
+  let arr=uniqueRoutes([...primary, ...db]).slice(0,5);
+  let stage='54 週年曆主推＋常走備選，最多 5 條';
+  if(!primary.length && arr.length){ stage='本週年曆沒有完全符合，改列常走備選，最多 5 條'; }
   if(!arr.length){
-    stage='年曆這週沒有完全符合，改列資料庫符合條件';
-    arr=strictDatabaseRoutes({city,time,lev,weather});
+    // 還是不要丟一大串：只放寬天氣或難度，最多 5 條，讓主辦人少選。
+    let relaxed=filterRoutes({city:'all',time:time==='all'?'half':time,lev,weather,relaxWeather:true,relaxLevel:true})
+      .sort((a,b)=>commonRouteScore(b)-commonRouteScore(a));
+    arr=uniqueRoutes(relaxed).slice(0,5);
+    stage='沒有完全符合，改列最接近的常走備選，最多 5 條';
   }
   state.filtered=arr;
   renderRoutes(arr,stage);
@@ -252,7 +289,7 @@ function coverUrl(r){
 function renderRoutes(arr,stage='完全符合'){
   $('routeCount').textContent=arr.length;
   let note='';
-  if(arr.length){ note=`<div class="match-note">目前顯示：<b>${stage}</b>。主辦人仍可自行挑選，系統只做提醒。</div>`; }
+  if(arr.length){ note=`<div class="match-note">目前顯示：<b>${stage}</b>。不再丟一大串給主辦人；先看這幾條常走線，再按「選這條」或「產公告」。</div>`; }
   $('routeList').innerHTML=arr.length? note+arr.map(routeCard).join(''):'<div class="card empty">這週年曆與資料庫沒有符合條件。請改半天／全天、A／C 或在 routes.json 補路線。</div>';
 }
 function renderWeekPlans(){let w=state.currentWeek; if(!w){$('weekInfo').textContent='沒有年曆資料';$('planGrid').innerHTML='';return} $('weekInfo').innerHTML=`第 ${w.week} 週｜${w.date}<br>${w.theme||w.season_note||''}`; let opts=w.options||[]; state.currentPlans=opts.map(o=>state.routes.find(r=>r.id===o.route_id)).filter(Boolean); $('planGrid').innerHTML=opts.map(o=>{let r=state.routes.find(x=>x.id===o.route_id); return `<div class="plan" onclick="chooseRoute('${o.route_id}')"><b>${o.label}</b><div class="small">${r?`${r.name_zh}<br>${r.city||''}｜${levelName(r.level)}｜${r.duration_hours||''}小時`:'未找到路線'}</div></div>`}).join('')}
