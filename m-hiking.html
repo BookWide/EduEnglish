@@ -53,7 +53,7 @@
 2：集合工廠學府宮
 第一台車
 1一天奇
-2一阿芫一已繳1300元"></textarea><div class="btns"><button class="btn" onclick="parseLineActivity()">解析活動紀錄</button><button class="btn secondary" onclick="parseLine()">只整理名單</button><button class="btn secondary" onclick="copyLineResult()">複製結果</button><button class="btn gold" onclick="saveLineActivityRecord()">存成去過紀錄</button></div></div>
+2一阿芫一已繳1300元"></textarea><div class="btns"><button class="btn" onclick="parseLineActivity()">解析活動紀錄</button><button class="btn secondary" onclick="parseLine()">只整理名單</button><button class="btn secondary" onclick="copyLineResult()">複製結果</button><button class="btn gold" onclick="saveLineActivityRecord()">存成去過紀錄＋補路線庫</button><button class="btn secondary" onclick="downloadRoutes()">下載 routes.json</button></div></div>
   <div class="card"><h2>整理結果</h2><div id="lineResult" class="empty">尚未整理。</div></div>
  </div>
 </section>
@@ -532,10 +532,74 @@ function parseLineActivity(){
   const copy=`【活動紀錄】\n日期：${date}\n路線：${routeName}\n交通：${vehicleLine||'未填'}\n集合：${meetingTime||''} ${meetingPlace||''}\n人數：${members.length} 人\n已繳：${paidCount} 人\n裝備提醒：${equipLines.join('／')||'未填'}\n\n名單：\n${members.map((m,i)=>`${i+1}. ${m.name}${m.paid?'／已繳'+(m.amount||''):''}`).join('\n')}`;
   $('lineResult').innerHTML=`<div class="notice"><b>已解析：</b>${routeName}｜${date}｜${members.length}人｜已繳 ${paidCount}人<br>按「存成去過紀錄」後，會加入相簿紀錄；之後可下載 event-photos.json 覆蓋 GitHub 的 /assets/hiking/event-photos.json。</div>${table}<div class="copybox" id="lineCopy">${copy}</div>`;
 }
+
+function safeSlug(s){
+  return String(s||'route').toLowerCase()
+    .replace(/[^a-z0-9\u4e00-\u9fa5]+/g,'_')
+    .replace(/^_+|_+$/g,'')
+    .slice(0,80) || 'route';
+}
+function inferRouteMetaFromLine(a){
+  const raw=[a.routeName,a.vehicleLine,a.meetingTime,a.meetingPlace,a.raw].join(' ');
+  const name=String(a.routeName||'未命名路線').replace(/[🏔🎡🚗🅿️]/g,'').trim() || '未命名路線';
+  let city='台中', area='', level='C', duration='3-4', total='4-6', tags=['LINE回存','常走'];
+  if(/眠月|阿里山/.test(raw)){city='嘉義'; area='阿里山'; level='C'; duration='6-8'; total='10-12'; tags.push('全天','巴士');}
+  else if(/大坑|日光/.test(raw)){city='台中'; area='北屯'; duration='2-4'; total='4-6'; tags.push('半天','台中');}
+  else if(/三汀|咬人狗坑/.test(raw)){city='台中'; area='太平'; duration='3-4'; total='4-6'; tags.push('半天','台中');}
+  else if(/知高圳|雪蓮|望高寮/.test(raw)){city='台中'; area='烏日／大肚'; duration='2-4'; total='4-6'; level='A'; tags.push('半天','台中');}
+  else if(/合歡|武嶺|雪山|八仙|惠蓀|杉林溪|奮瑞|獨立山/.test(raw)){duration='4-6'; total='8-10'; tags.push('全天');}
+  if(/一日|1日|巴士|遊覽車|早上?\s*[45]點/.test(raw)){tags=tags.filter(t=>t!=='半天'); if(!tags.includes('全天')) tags.push('全天'); if(total==='4-6') total='8-10'; if(duration==='2-4') duration='4-6';}
+  const isFull=/全天|一日|1日|巴士|遊覽車|早上?\s*[45]點/.test(tags.join(' ')+raw) || Math.max(...durationNums(total))>6;
+  const slot=isFull?'full_good':'half_good';
+  return {name,city,area,level,duration,total,tags:[...new Set(tags)],slot};
+}
+function findRouteByActivity(a){
+  const nm=String(a.routeName||'').replace(/[🏔🎡🚗🅿️]/g,'').replace(/一日遊|半日遊/g,'').trim();
+  return (state.routes||[]).find(r=>{
+    const rn=String(r.name_zh||'').replace(/[🏔🎡🚗🅿️]/g,'').trim();
+    return nm && (nm.includes(rn) || rn.includes(nm));
+  });
+}
+function upsertRouteFromActivity(a){
+  let hit=findRouteByActivity(a);
+  if(hit) return {route:hit, created:false};
+  const meta=inferRouteMetaFromLine(a);
+  const id=('line_'+safeSlug(meta.city+'_'+meta.area+'_'+meta.name)).slice(0,90);
+  hit=(state.routes||[]).find(r=>r.id===id);
+  if(hit) return {route:hit, created:false};
+  const route={
+    id,
+    name_zh:meta.name,
+    city:meta.city,
+    area:meta.area,
+    level:meta.level,
+    duration_hours:meta.duration,
+    activity_hours_total_estimate:meta.total,
+    option_slot:meta.slot,
+    option_label:(meta.slot.startsWith('full')?'全天':'半天')+'｜天氣好',
+    rain_ok:false,
+    good_weather_ok:true,
+    rain_policy:'天氣好可走；有雨請主辦人改短線或山下備案。',
+    notice:'由 LINE 活動紀錄自動補入，主辦人可再微調時間、難度與集合資訊。',
+    tags:meta.tags,
+    source:'line_activity'
+  };
+  state.routes.unshift(route);
+  return {route, created:true};
+}
+function downloadRoutes(){
+  let blob=new Blob([JSON.stringify({routes:state.routes},null,2)],{type:'application/json'});
+  let a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='routes.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
 function saveLineActivityRecord(){
   if(!state.lastLineActivity) parseLineActivity();
   const a=state.lastLineActivity; if(!a) return;
-  const route=(state.routes||[]).find(r=>a.routeName.includes(r.name_zh)||String(r.name_zh||'').includes(a.routeName.replace(/一日遊|半日遊/g,'')));
+  const routeResult=upsertRouteFromActivity(a);
+  const route=routeResult.route;
   const record={
     id:'event_'+Date.now(),
     event_id:(a.date+'_'+a.routeName).replace(/[^\w\u4e00-\u9fa5-]+/g,'_'),
@@ -557,7 +621,8 @@ function saveLineActivityRecord(){
   state.albums.unshift(record);
   renderHistoryBoard();
   renderAlbum();
-  $('lineResult').innerHTML += `<div class="notice"><b>已存成去過紀錄。</b> 接著到「相簿」下載 event-photos.json，再覆蓋 /assets/hiking/event-photos.json。</div>`;
+  applyFilters();
+  $('lineResult').innerHTML += `<div class="notice"><b>已存成去過紀錄${routeResult.created?'，並補進 routes.json':''}。</b><br>接著下載：<br>1）相簿頁的 event-photos.json → 覆蓋 /assets/hiking/event-photos.json<br>2）本頁的 routes.json → 覆蓋 /assets/hiking/routes.json 或 /data/hiking/routes.json</div>`;
 }
 
 function parseLine(){let lines=($('lineText').value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean); let rows=[]; for(let l of lines){let raw=l; l=l.replace(/^\d+[\.、\-\s]*/,''); let paid=/已繳|繳|匯|1300|\$/.test(l); let car=/開車|自駕|可載|車/.test(l); let people=(l.match(/(\d+)人/)||[])[1]||'1'; let name=l.replace(/已繳.*|繳.*|開車.*|自駕.*|可載.*|\d+人.*/g,'').trim(); rows.push({name:name||raw,people,car:car?'有車/提到車':'',paid:paid?'已繳/提到費用':''})} $('lineResult').innerHTML=rows.length?`<div class="table"><table><tr><th>#</th><th>姓名</th><th>人數</th><th>交通</th><th>繳費</th></tr>${rows.map((r,i)=>`<tr><td>${i+1}</td><td>${r.name}</td><td>${r.people}</td><td>${r.car}</td><td>${r.paid}</td></tr>`).join('')}</table></div><div class="copybox" id="lineCopy">【目前報名名單】\n${rows.map((r,i)=>`${i+1}. ${r.name}／${r.people}人${r.car?'／'+r.car:''}${r.paid?'／'+r.paid:''}`).join('\n')}\n\n目前共：${rows.reduce((a,b)=>a+Number(b.people||1),0)} 人</div>`:'<div class="empty">沒有可整理資料。</div>'}
@@ -658,7 +723,7 @@ function renderAlbum(routeId){
     });
   }
   let title=routeId?(state.routes.find(x=>x.id===routeId)?.name_zh||'指定路線'):'全部活動照片';
-  let header=`<div class="card"><div class="toolbar"><h2 style="margin:0">${escHtml(title)}</h2><button class="btn secondary" onclick="state.albumRouteId=null;renderAlbum()">看全部相簿</button></div><div class="small">有 R2 圖片網址就直接排成縮圖；點照片可放大。共用照片清單：${Array.isArray(state.hikingPhotos)?state.hikingPhotos.length:0} 張（讀 /assets/hiking/photos.json）。</div></div>`;
+  let header=`<div class="card"><div class="toolbar"><h2 style="margin:0">${escHtml(title)}</h2><button class="btn secondary" onclick="state.albumRouteId=null;renderAlbum()">看全部相簿</button></div><div class="small">有 R2 圖片網址會對到活動；照片預設隱藏，按「顯示照片」才展開，點照片可放大。共用照片清單：${Array.isArray(state.hikingPhotos)?state.hikingPhotos.length:0} 張（讀 /assets/hiking/photos.json）。</div></div>`;
   if(!arr.length){$('albumList').innerHTML=header+'<div class="card empty">這條路線目前沒有活動相簿。</div>';return}
   $('albumList').innerHTML=header+arr.map((a,idx)=>{
     let urls=albumPhotoUrls(a);
@@ -666,17 +731,28 @@ function renderAlbum(routeId){
     let cover=albumCoverUrl(a);
     let people=a.people_count?`｜人數 ${a.people_count}`:'';
     let paid=typeof a.paid_count!=='undefined'?`｜已繳 ${a.paid_count}`:'';
-    let meta=`${escHtml(a.date||'')}${people}${paid}<br>${escHtml(a.note||a.title||'')}${open?`<br><a href="${escHtml(open)}" target="_blank">開啟相簿／資料夾</a>`:''}`;
+    let albumId='albumPhotos_'+idx;
+    let manualOpen=open && !String(open).includes('/assets/hiking/photos.json') ? `<br><a href="${escHtml(open)}" target="_blank">開啟外部相簿／資料夾</a>` : '';
+    let meta=`${escHtml(a.date||'')}${people}${paid}<br>${escHtml(a.note||a.title||'')}${manualOpen}`;
     let grid='';
+    let toggle='';
     if(urls.length){
-      grid=`<div class="photo-grid">${urls.map(u=>`<div class="photo-tile" onclick="openPhotoModal('${String(u).replace(/'/g,"%27")}')"><img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"></div>`).join('')}</div>`;
+      toggle=`<button class="btn secondary" style="padding:7px 12px;margin-top:8px" onclick="toggleAlbumPhotos('${albumId}',this)">顯示照片（${urls.length}張）</button>`;
+      grid=`<div id="${albumId}" class="photo-grid" style="display:none">${urls.map(u=>`<div class="photo-tile" onclick="openPhotoModal('${String(u).replace(/'/g,"%27")}')"><img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"></div>`).join('')}</div>`;
     }else if(cover){
-      grid=`<div class="photo-grid"><div class="photo-tile" onclick="openPhotoModal('${String(cover).replace(/'/g,"%27")}')"><img src="${escHtml(cover)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"></div></div>`;
+      toggle=`<button class="btn secondary" style="padding:7px 12px;margin-top:8px" onclick="toggleAlbumPhotos('${albumId}',this)">顯示照片（1張）</button>`;
+      grid=`<div id="${albumId}" class="photo-grid" style="display:none"><div class="photo-tile" onclick="openPhotoModal('${String(cover).replace(/'/g,"%27")}')"><img src="${escHtml(cover)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"></div></div>`;
     }else{
       grid='<div class="empty" style="padding:18px">尚未貼照片網址；可先保留紀錄，之後再補 R2 相簿連結或代表照片。</div>';
     }
-    return `<div class="album-card"><div class="album-head"><div><div class="album-title">${escHtml(a.route||a.route_name||'活動相簿')}</div><div class="album-meta">${meta}<br>照片：${urls.length} 張</div></div></div>${grid}</div>`;
+    return `<div class="album-card"><div class="album-head"><div><div class="album-title">${escHtml(a.route||a.route_name||'活動相簿')}</div><div class="album-meta">${meta}<br>照片：${urls.length} 張<br>${toggle}</div></div></div>${grid}</div>`;
   }).join('')
+}
+function toggleAlbumPhotos(id,btn){
+  const el=$(id); if(!el) return;
+  const hidden=el.style.display==='none' || !el.style.display;
+  el.style.display=hidden?'grid':'none';
+  if(btn) btn.textContent=hidden?'隱藏照片':'顯示照片'+(btn.textContent.match(/（.*?）/)?.[0]||'');
 }
 function downloadAlbums(){let blob=new Blob([JSON.stringify({photos:state.albums},null,2)],{type:'application/json'}); let a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='event-photos.json';a.click();URL.revokeObjectURL(a.href)}
 init();
