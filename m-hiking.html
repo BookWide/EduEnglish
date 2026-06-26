@@ -69,6 +69,7 @@
 <div id="photoModal" class="photo-modal" onclick="closePhotoModal()"><button class="photo-close" onclick="closePhotoModal(event)">關閉</button><img id="photoModalImg" alt="活動照片"></div>
 <script>
 const DATA_PATH='/data/hiking/';
+const DATA_PATHS=['/data/hiking/','/assets/hiking/'];
 const tabs=[['sec-find','找路線'],['sec-line','LINE整理'],['sec-album','相簿'],['sec-post','公告']];
 const state={routes:[],calendar:[],photos:[],albums:[],selected:null,currentWeek:null,currentPlans:[],filtered:[],albumRouteId:null};
 const fallback={routes:[{id:'demo_dakeng',name_zh:'大坑步道',city:'台中',area:'北屯',level:'A',duration_hours:'2-3',option_slot:'half_clear',option_label:'半天｜天氣穩',tags:['半天','新手','台中'],rain_policy:'小雨可走，雨大縮短',downhill_backup:['大坑午餐','咖啡'],notice:'示範資料，請上傳 routes.json'}],calendar:[]};
@@ -78,7 +79,24 @@ function localDate(d){return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.
 function parseDate(s){let [y,m,d]=s.split('-').map(Number);return new Date(y,m-1,d)}
 function nextSaturday(d=new Date()){let x=new Date(d.getFullYear(),d.getMonth(),d.getDate());let add=(6-x.getDay()+7)%7;return new Date(x.getFullYear(),x.getMonth(),x.getDate()+add)}
 function dateKey(d){return pad(d.getMonth()+1)+'-'+pad(d.getDate())}
-async function fetchJson(name,key){try{let r=await fetch(DATA_PATH+name+'?v='+Date.now(),{cache:'no-store'}); if(!r.ok) throw new Error(name); let j=await r.json(); return j[key]||j;}catch(e){return fallback[key]||[]}}
+async function fetchJson(name,key){
+  let emptyCandidate=null;
+  for(const base of DATA_PATHS){
+    try{
+      let r=await fetch(base+name+'?v='+Date.now(),{cache:'no-store'});
+      if(!r.ok) throw new Error(name);
+      let j=await r.json();
+      let val=(j&&key&&j[key]!==undefined)?j[key]:j;
+      if(Array.isArray(val)){
+        if(val.length || name!=='photos.json') return val;
+        emptyCandidate=val;
+        continue;
+      }
+      return val||[];
+    }catch(e){}
+  }
+  return emptyCandidate || fallback[key] || [];
+}
 async function init(){renderTabs(); state.routes=await fetchJson('routes.json','routes'); state.calendar=await fetchJson('calendar-2026.json','calendar'); state.photos=await fetchJson('photos.json','photos'); state.albums=await fetchJson('event-photos.json','photos'); setupFilters(); let sat=nextSaturday(new Date()); $('fDate').value=localDate(sat); $('aDate').value=localDate(sat); $('fTime').value='half'; $('fLevel').value='A'; $('fWeather').value='stable'; selectWeekByDate(sat); applyFilters(); renderAlbum(); renderHistoryBoard(); $('todayText').textContent='今天 '+localDate(new Date());}
 function renderTabs(){let box=$('tabs');box.innerHTML=tabs.map((t,i)=>`<button class="tab ${i?'':'active'}" onclick="show('${t[0]}',this)">${t[1]}</button>`).join('')}
 function show(id,btn){document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));$(id).classList.add('active');document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active')}
@@ -265,23 +283,45 @@ function goThisWeek(){let sat=nextSaturday(new Date());$('fDate').value=localDat
 
 
 function routeKeyFromAlbum(a){
+  if(typeof a==='string') return '';
   let rid=String(a.route_id||a.routeId||'').trim();
   if(rid) return 'id:'+rid;
   let rn=String(a.route||a.route_name||a.name||'').trim();
   return rn?'name:'+rn:'';
 }
-function routeLabelFromAlbum(a){return String(a.route||a.route_name||a.name||a.title||'未命名路線').trim()}
-function isImageUrl(x){return typeof x==='string' && /\.(jpg|jpeg|png|webp|gif)(\?|#|$)/i.test(x)}
-function albumPhotoUrls(a){
-  let list=[];
-  if(Array.isArray(a.photo_urls)) list=list.concat(a.photo_urls);
-  if(Array.isArray(a.photos)) list=list.concat(a.photos);
-  if(a.url) list.push(a.url);
-  if(a.cover_url) list.push(a.cover_url);
-  return [...new Set(list.map(x=>String(x||'').trim()).filter(isImageUrl))];
+function routeLabelFromAlbum(a){return typeof a==='string'?'共用照片':String(a.route||a.route_name||a.name||a.title||'未命名路線').trim()}
+function isImageUrl(x){return typeof x==='string' && /\.(jpg|jpeg|png)(\?|#|$)/i.test(x.trim())}
+function normalizePhotoUrl(x){
+  if(typeof x==='string') return x.trim();
+  if(!x) return '';
+  return String(x.url||x.image_url||x.src||x.href||x.cover_url||'').trim();
 }
-function albumCoverUrl(a){return String(a.cover_url||a.url||(Array.isArray(a.photo_urls)&&a.photo_urls[0])||(Array.isArray(a.photos)&&a.photos[0])||'').trim()}
-function albumOpenUrl(a){return String(a.album_url||a.folder_url||a.gallery_url||albumCoverUrl(a)||'').trim()}
+function albumPhotoUrls(a){
+  if(typeof a==='string') return isImageUrl(a)?[a.trim()]:[];
+  let list=[];
+  if(Array.isArray(a?.photo_urls)) list=list.concat(a.photo_urls);
+  if(Array.isArray(a?.photos)) list=list.concat(a.photos);
+  if(a?.url) list.push(a.url);
+  if(a?.image_url) list.push(a.image_url);
+  if(a?.src) list.push(a.src);
+  if(a?.cover_url) list.push(a.cover_url);
+  return [...new Set(list.map(normalizePhotoUrl).filter(isImageUrl))];
+}
+function commonPhotoUrls(){return [...new Set((state.photos||[]).map(normalizePhotoUrl).filter(isImageUrl))]}
+function photoRecordsForRoute(routeId){
+  let r=state.routes.find(x=>x.id===routeId); if(!r) return [];
+  let name=String(r.name_zh||'').trim();
+  return (state.photos||[]).filter(p=>typeof p==='object' && p).filter(p=>{
+    let rid=String(p.route_id||p.routeId||'').trim();
+    let rn=String(p.route||p.route_name||p.name||'').trim();
+    return (rid&&rid===routeId)||(rn&&(rn===name||rn.includes(name)||name.includes(rn)));
+  });
+}
+function albumCoverUrl(a){
+  if(typeof a==='string') return isImageUrl(a)?a.trim():'';
+  return String(a?.cover_url||a?.url||a?.image_url||a?.src||(Array.isArray(a?.photo_urls)&&a.photo_urls[0])||(Array.isArray(a?.photos)&&a.photos[0])||'').trim()
+}
+function albumOpenUrl(a){return typeof a==='string'?a.trim():String(a?.album_url||a?.folder_url||a?.gallery_url||albumCoverUrl(a)||'').trim()}
 function daysBetweenDates(a,b){
   let da=normDateStr(a), db=normDateStr(b);
   if(!da || !db) return 9999;
@@ -376,11 +416,12 @@ function coverUrl(r){
   let arr=state.photos||[];
   let name=String(r.name_zh||'').trim();
   let p=arr.find(x=>{
+    if(typeof x==='string') return false;
     let rid=String(x.route_id||x.routeId||'').trim();
-    let rn=String(x.route||x.route_name||'').trim();
+    let rn=String(x.route||x.route_name||x.name||'').trim();
     return (rid&&rid===r.id) || (rn&&(rn===name||rn.includes(name)||name.includes(rn)));
   });
-  return p?(p.url||p.image_url||p.src||''):'';
+  return p?normalizePhotoUrl(p):'';
 }
 function renderRoutes(arr,stage='完全符合'){
   $('routeCount').textContent=arr.length;
@@ -588,7 +629,7 @@ function escHtml(v){return String(v||'').replace(/[&<>"']/g,function(c){return {
 function openPhotoModal(url){$('photoModalImg').src=url;$('photoModal').classList.add('active')}
 function closePhotoModal(ev){if(ev){ev.stopPropagation()}$('photoModal').classList.remove('active')}
 function renderAlbum(routeId){
-  let arr=state.albums||[];
+  let arr=(state.albums||[]).slice();
   if(routeId){
     let r=state.routes.find(x=>x.id===routeId);
     arr=arr.filter(a=>{
@@ -596,10 +637,19 @@ function renderAlbum(routeId){
       let rn=String(a.route||a.route_name||'');
       return rid===routeId || (r&&rn&&(rn===r.name_zh||rn.includes(r.name_zh)||r.name_zh.includes(rn)));
     });
+    let prs=photoRecordsForRoute(routeId);
+    if(prs.length){
+      arr.unshift({record_type:'photo_list',route_id:routeId,route_name:r?.name_zh||'指定路線',route:r?.name_zh||'指定路線',photo_urls:prs.map(normalizePhotoUrl).filter(isImageUrl),note:'路線照片清單'});
+    }
+  }else{
+    let common=commonPhotoUrls();
+    if(common.length){
+      arr.unshift({record_type:'photo_list',route:'共用照片清單',route_name:'共用照片清單',photo_urls:common,note:`讀取 photos.json，共 ${common.length} 張 jpg/png 圖片`});
+    }
   }
   let title=routeId?(state.routes.find(x=>x.id===routeId)?.name_zh||'指定路線'):'全部活動照片';
-  let header=`<div class="card"><div class="toolbar"><h2 style="margin:0">${escHtml(title)}</h2><button class="btn secondary" onclick="state.albumRouteId=null;renderAlbum()">看全部相簿</button></div><div class="small">有 R2 圖片網址就直接排成縮圖；點照片可放大。沒有照片時仍保留活動紀錄。</div></div>`;
-  if(!arr.length){$('albumList').innerHTML=header+'<div class="card empty">這條路線目前沒有活動相簿。</div>';return}
+  let header=`<div class="card"><div class="toolbar"><h2 style="margin:0">${escHtml(title)}</h2><button class="btn secondary" onclick="state.albumRouteId=null;renderAlbum()">看全部相簿</button></div><div class="small">可讀 photos.json 或 event-photos.json 的 jpg／jpeg／png；縮圖排列，點照片可放大。</div></div>`;
+  if(!arr.length){$('albumList').innerHTML=header+'<div class="card empty">目前沒有照片。請先上傳 photos.json 或在相簿頁貼 R2 圖片網址。</div>';return}
   $('albumList').innerHTML=header+arr.map((a,idx)=>{
     let urls=albumPhotoUrls(a);
     let open=albumOpenUrl(a);
