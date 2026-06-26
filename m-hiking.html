@@ -80,6 +80,25 @@ function parseDate(s){let [y,m,d]=s.split('-').map(Number);return new Date(y,m-1
 function nextSaturday(d=new Date()){let x=new Date(d.getFullYear(),d.getMonth(),d.getDate());let add=(6-x.getDay()+7)%7;return new Date(x.getFullYear(),x.getMonth(),x.getDate()+add)}
 function dateKey(d){return pad(d.getMonth()+1)+'-'+pad(d.getDate())}
 async function fetchJson(name,key){
+  // photos.json 只做容錯合併：/data/hiking/ 和 /assets/hiking/ 都讀，jpg/jpeg/png 都留下。
+  // 避免其中一邊有舊檔，後面新增的照片被擋掉。
+  if(name==='photos.json'){
+    const merged=[], seen=new Set();
+    for(const base of DATA_PATHS){
+      try{
+        let r=await fetch(base+name+'?v='+Date.now(),{cache:'no-store'});
+        if(!r.ok) continue;
+        let j=await r.json();
+        let val=(j&&key&&j[key]!==undefined)?j[key]:j;
+        if(!Array.isArray(val)) continue;
+        for(const item of val){
+          const k=typeof item==='string'?item:JSON.stringify(item);
+          if(!seen.has(k)){seen.add(k); merged.push(item);}
+        }
+      }catch(e){}
+    }
+    return merged;
+  }
   let emptyCandidate=null;
   for(const base of DATA_PATHS){
     try{
@@ -88,7 +107,7 @@ async function fetchJson(name,key){
       let j=await r.json();
       let val=(j&&key&&j[key]!==undefined)?j[key]:j;
       if(Array.isArray(val)){
-        if(val.length || name!=='photos.json') return val;
+        if(val.length) return val;
         emptyCandidate=val;
         continue;
       }
@@ -651,7 +670,10 @@ function renderAlbum(routeId){
     }
   }
 
-  const common=routeId?[]:commonPhotoUrls();
+  // 全部相簿：直接展開 photos.json。
+  // 指定某條路線：若該活動紀錄有 photos_json 指向共用照片清單，也要展開，避免點進路線後照片消失。
+  const hasPhotoJsonPointer=arr.some(a=>a&&a.photos_json);
+  const common=(!routeId||hasPhotoJsonPointer)?commonPhotoUrls():[];
   const albumUrls=arr.flatMap(albumPhotoUrls);
   const allUrls=[...new Set([...common,...albumUrls].map(normalizePhotoUrl).filter(isImageUrl))];
   const headerBtn=routeId?`<button class="btn secondary" onclick="state.albumRouteId=null;renderAlbum()">回全部照片</button>`:'';
@@ -667,7 +689,8 @@ function renderAlbum(routeId){
       let open=albumOpenUrl(a);
       let people=a.people_count?`｜人數 ${a.people_count}`:'';
       let paid=typeof a.paid_count!=='undefined'?`｜已繳 ${a.paid_count}`:'';
-      let meta=`${escHtml(a.date||'')}${people}${paid}<br>${escHtml(a.note||a.title||'')}${open?`<br><a href="${escHtml(open)}" target="_blank">開啟相簿／資料夾</a>`:''}`;
+      let pointerNote=(!urls.length&&a.photos_json)?'<br>照片清單已在上方展開。':'';
+      let meta=`${escHtml(a.date||'')}${people}${paid}<br>${escHtml(a.note||a.title||'')}${open?`<br><a href="${escHtml(open)}" target="_blank">開啟相簿／資料夾</a>`:''}${pointerNote}`;
       return `<div class="album-card"><div class="album-head"><div><div class="album-title">${escHtml(a.route||a.route_name||'活動相簿')}</div><div class="album-meta">${meta}<br>照片：${urls.length} 張</div></div></div>${photoGridHtml(urls)}</div>`;
     }).join('');
   }
