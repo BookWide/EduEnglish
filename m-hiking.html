@@ -59,7 +59,7 @@
 </section>
 
 <section id="sec-album" class="section">
- <div class="card"><h2>活動相簿</h2><p class="small">照片不用整理得很細：先存活動日期、路線、相簿連結，代表照片可貼 1～3 張。之後路線卡就會顯示「去過紀錄」。</p><div class="filters"><div class="field"><label>日期</label><input id="aDate" type="date"></div><div class="field"><label>路線</label><input id="aRoute" placeholder="例如：改大坑1號體能步道"></div><div class="field"><label>相簿連結 / R2資料夾</label><input id="aAlbumUrl" placeholder="https://... 相簿或資料夾連結"></div><div class="field"><label>代表照片</label><input id="aCoverUrl" placeholder="https://...jpg，可空白"></div><div class="field"><label>備註</label><input id="aNote" placeholder="路況／集合／天氣"></div></div><div class="field" style="margin-top:10px"><label>其他照片網址（可貼多行，可空白）</label><textarea id="aPhotoUrls" placeholder="https://.../416668_0.jpg&#10;https://.../416669_0.jpg"></textarea></div><div class="btns"><button class="btn" onclick="saveAlbum()">加入相簿紀錄</button><button class="btn gold" onclick="downloadAlbums()">下載 event-photos.json</button></div></div><div id="albumList" class="route-list"></div>
+ <div class="card"><h2>活動相簿</h2><p class="small">照片不用整理得很細：先存活動日期、路線、相簿連結，代表照片可貼 1～3 張。之後路線卡就會顯示「去過紀錄」。</p><div class="filters"><div class="field"><label>日期</label><input id="aDate" type="date"></div><div class="field"><label>路線</label><input id="aRoute" placeholder="例如：改大坑1號體能步道"></div><div class="field"><label>相簿連結 / R2資料夾</label><input id="aAlbumUrl" placeholder="https://... 相簿或資料夾連結"></div><div class="field"><label>代表照片</label><input id="aCoverUrl" placeholder="https://...jpg，可空白"></div><div class="field"><label>備註</label><input id="aNote" placeholder="路況／集合／天氣"></div></div><div class="field" style="margin-top:10px"><label>其他照片網址（可貼多行，可空白）</label><textarea id="aPhotoUrls" placeholder="https://.../416668_0.jpg&#10;https://.../416669_0.jpg"></textarea></div><div class="btns"><button class="btn secondary" onclick="autoLoadR2Photos()">自動抓 R2 照片</button><button class="btn" onclick="saveAlbum()">加入相簿紀錄</button><button class="btn gold" onclick="downloadAlbums()">下載 event-photos.json</button></div><div class="small" id="r2AutoHint" style="margin-top:8px">17 上傳後，把照片清單 JSON 放到 /data/hiking/r2-photos/日期.json 或 /assets/hiking/日期/photos.json，這裡可自動帶入。</div></div><div id="albumList" class="route-list"></div>
 </section>
 
 <section id="sec-post" class="section">
@@ -491,6 +491,58 @@ function saveLineActivityRecord(){
 
 function parseLine(){let lines=($('lineText').value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean); let rows=[]; for(let l of lines){let raw=l; l=l.replace(/^\d+[\.、\-\s]*/,''); let paid=/已繳|繳|匯|1300|\$/.test(l); let car=/開車|自駕|可載|車/.test(l); let people=(l.match(/(\d+)人/)||[])[1]||'1'; let name=l.replace(/已繳.*|繳.*|開車.*|自駕.*|可載.*|\d+人.*/g,'').trim(); rows.push({name:name||raw,people,car:car?'有車/提到車':'',paid:paid?'已繳/提到費用':''})} $('lineResult').innerHTML=rows.length?`<div class="table"><table><tr><th>#</th><th>姓名</th><th>人數</th><th>交通</th><th>繳費</th></tr>${rows.map((r,i)=>`<tr><td>${i+1}</td><td>${r.name}</td><td>${r.people}</td><td>${r.car}</td><td>${r.paid}</td></tr>`).join('')}</table></div><div class="copybox" id="lineCopy">【目前報名名單】\n${rows.map((r,i)=>`${i+1}. ${r.name}／${r.people}人${r.car?'／'+r.car:''}${r.paid?'／'+r.paid:''}`).join('\n')}\n\n目前共：${rows.reduce((a,b)=>a+Number(b.people||1),0)} 人</div>`:'<div class="empty">沒有可整理資料。</div>'}
 function copyLineResult(){let el=$('lineCopy'); if(el) navigator.clipboard.writeText(el.textContent)}
+
+async function tryFetchJsonFile(url){
+  try{
+    let r=await fetch(url+'?v='+Date.now(),{cache:'no-store'});
+    if(!r.ok) return null;
+    return await r.json();
+  }catch(e){return null}
+}
+function datePathVariants(d){
+  d=normDateStr(d||'');
+  if(!d) return [];
+  let [y,m,day]=d.split('-');
+  let m1=String(Number(m)), d1=String(Number(day));
+  return [
+    `/data/hiking/r2-photos/${d}.json`,
+    `/data/hiking/photo-${d}.json`,
+    `/assets/hiking/${d}/photos.json`,
+    `/assets/hiking/${y}.${m1}.${d1}/photos.json`,
+    `/assets/hiking/${y}.${m}.${day}/photos.json`,
+    `/assets/hiking/${y}${m}${day}/photos.json`
+  ];
+}
+function extractPhotoUrlsFromJson(j){
+  if(!j) return [];
+  let arr=[];
+  if(Array.isArray(j)) arr=j;
+  else if(Array.isArray(j.photos)) arr=j.photos;
+  else if(Array.isArray(j.urls)) arr=j.urls;
+  return arr.map(x=>{
+    if(typeof x==='string') return x;
+    return x.url||x.image_url||x.src||x.href||'';
+  }).map(x=>String(x||'').trim()).filter(isImageUrl);
+}
+async function autoLoadR2Photos(){
+  let d=($('aDate')&&$('aDate').value)||($('fDate')&&$('fDate').value)||'';
+  let paths=datePathVariants(d);
+  let hint=$('r2AutoHint');
+  if(hint) hint.textContent='正在找 R2 照片清單...';
+  for(const path of paths){
+    let j=await tryFetchJsonFile(path);
+    let urls=extractPhotoUrlsFromJson(j);
+    if(urls.length){
+      $('aPhotoUrls').value=urls.join('\n');
+      if(!$('aCoverUrl').value) $('aCoverUrl').value=urls[0];
+      if(!$('aAlbumUrl').value) $('aAlbumUrl').value=path;
+      if(hint) hint.textContent=`已抓到 ${urls.length} 張：${path}`;
+      return;
+    }
+  }
+  if(hint) hint.textContent='找不到照片清單。請確認 17 產出的 photos.json 已上傳到 /data/hiking/r2-photos/日期.json 或 /assets/hiking/日期/photos.json。';
+}
+
 function saveAlbum(){
   let photoUrls=($('aPhotoUrls')?.value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
   let cover=($('aCoverUrl')?.value||'').trim();
