@@ -72,6 +72,11 @@ function renderTabs(){let box=$('tabs');box.innerHTML=tabs.map((t,i)=>`<button c
 function show(id,btn){document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));$(id).classList.add('active');document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active')}
 function setupFilters(){
 }
+function normDateStr(v){
+  if(!v) return '';
+  return String(v).trim().replace(/\//g,'-').replace(/(\d{4})-(\d{1,2})-(\d{1,2})/, function(_,y,m,d){return y+'-'+String(m).padStart(2,'0')+'-'+String(d).padStart(2,'0')});
+}
+function selectedFilterDate(){return normDateStr(($('fDate')&&$('fDate').value)||'')}
 function slotTime(slot,dur){
   // 時間歸類優先看實際時數：6 小時內歸半天，超過 6 小時才算全天。
   // 避免資料標成全天，但實際只有 4-6 小時，造成主辦人找不到半天路線。
@@ -218,6 +223,7 @@ function topCommonRoutes({time,lev,weather},exclude=[]){
 function applyFilters(){
   let d=parseDate($('fDate').value||localDate(nextSaturday()));
   selectWeekByDate(d);
+  renderHistoryBoard();
   let time=$('fTime').value, lev=$('fLevel').value, weather=$('fWeather').value, keyword=($('fKeyword')?$('fKeyword').value:'');
 
   // 1. 先拿 54 週年曆本週推薦，但它也必須符合目前篩選。
@@ -253,9 +259,18 @@ function routeKeyFromAlbum(a){
   return rn?'name:'+rn:'';
 }
 function routeLabelFromAlbum(a){return String(a.route||a.route_name||a.name||'未命名路線').trim()}
-function albumRankings(){
+function daysBetweenDates(a,b){
+  let da=normDateStr(a), db=normDateStr(b);
+  if(!da || !db) return 9999;
+  let ta=new Date(da+'T00:00:00').getTime();
+  let tb=new Date(db+'T00:00:00').getTime();
+  return Math.round((ta-tb)/86400000);
+}
+function albumRankings(dateFilter, windowDays=2){
   let map=new Map();
+  let wanted=normDateStr(dateFilter||'');
   for(let a of (state.albums||[])){
+    if(wanted && Math.abs(daysBetweenDates(a.date, wanted))>windowDays) continue;
     let key=routeKeyFromAlbum(a); if(!key) continue;
     if(!map.has(key)) map.set(key,{key,route_id:String(a.route_id||a.routeId||''),name:routeLabelFromAlbum(a),photos:0,events:new Set(),dates:new Set(),url:'',last:''});
     let o=map.get(key); if(a.url) o.photos++; if(a.event_id) o.events.add(a.event_id); else if(a.date) o.events.add(a.date); if(a.date) o.dates.add(a.date); if(!o.url && a.url) o.url=a.url; if(a.date && (!o.last || a.date>o.last)) o.last=a.date;
@@ -264,7 +279,7 @@ function albumRankings(){
   return arr;
 }
 function openHistoryItem(key){
-  let item=albumRankings().find(x=>x.key===key); if(!item) return;
+  let item=albumRankings(selectedFilterDate()).find(x=>x.key===key) || albumRankings().find(x=>x.key===key); if(!item) return;
   let r=null;
   if(item.route_id) r=state.routes.find(x=>x.id===item.route_id);
   if(!r) r=state.routes.find(x=>x.name_zh===item.name || item.name.includes(x.name_zh) || String(x.name_zh||'').includes(item.name));
@@ -272,9 +287,13 @@ function openHistoryItem(key){
 }
 function renderHistoryBoard(){
   let box=$('historyBoard'); if(!box) return;
-  let arr=albumRankings().slice(0,3);
-  if(!arr.length){box.innerHTML='<div class="empty" style="grid-column:1/-1">目前還沒有活動相簿。上傳照片到 event-photos.json 後，這裡會像排行榜一樣顯示去過路線。</div>';return;}
-  box.innerHTML=arr.map((x,i)=>`<div class="history-item" onclick="openHistoryItem('${x.key.replace(/'/g,'&#39;')}')"><div class="history-thumb">${x.url?`<img src="${x.url}" onerror="this.remove()">`:'相簿'}</div><div><div class="history-title">${x.name}</div><div class="history-meta">去過 ${x.events?x.events.size:(x.dates.size||1)} 次｜${x.photos} 張照片${x.last?`<br>最近：${x.last}`:''}</div></div><div class="rank-badge">${i+1}</div></div>`).join('');
+  let date=selectedFilterDate();
+  let arr=albumRankings(date,2).slice(0,5);
+  if(!arr.length){
+    box.innerHTML='<div class="empty" style="grid-column:1/-1">這個日期前後 2 天目前沒有活動紀錄。先到「LINE 整理」貼舊公告，存成 event-photos.json 後就會對齊顯示。</div>';
+    return;
+  }
+  box.innerHTML=arr.map((x,i)=>`<div class="history-item" onclick="openHistoryItem('${x.key.replace(/'/g,'&#39;')}')"><div class="history-thumb">${x.url?`<img src="${x.url}" onerror="this.remove()">`:'相簿'}</div><div><div class="history-title">${x.name}</div><div class="history-meta">${date?'前後 2 天':'去過'} ${x.events?x.events.size:(x.dates.size||1)} 次｜${x.photos} 張照片${x.last?`<br>日期：${x.last}`:''}</div></div><div class="rank-badge">${i+1}</div></div>`).join('');
 }
 
 function routeAlbums(r){
@@ -405,7 +424,7 @@ function parseLineActivity(){
   const meetingTime=(timeLine.match(/早上?\s*\d+點\d*分?|\d+點\d*分?/ )||[''])[0];
   const meetingPlace=placeLine.replace(/^\d+[：:]?/,'').replace(/集合地點|集合/g,'').trim();
   const equipLines=lines.filter(l=>/帶|身份證|頭燈|手電筒|雨鞋|防水|保暖|雨具|中餐|水|水果|點心/.test(l)).slice(0,8);
-  const memberLines=lines.filter(l=>/^\d+\s*[\.、．：:一\-]/.test(l) && !/集合時間|集合地點|早餐|晚餐|沒有|帶/.test(l));
+  const memberLines=lines.filter(l=>/^\d+\s*[\.、．：:一\-]/.test(l) && !/集合|集合時間|集合地點|早餐|晚餐|沒有|泡茶|泡咖啡|帶|身份證|頭燈|手電筒|中餐|水|水果|點心|雨鞋|防水|保暖/.test(l));
   const members=memberLines.map(l=>({
     raw:l,
     name:cleanNameFromSignupLine(l),
