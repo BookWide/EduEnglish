@@ -700,11 +700,50 @@ function cleanNameFromSignupLine(line){
   s=s.replace(/開車.*|自駕.*|可載.*|搭車.*|車$/g,'');
   return s.replace(/[\s一\-]+$/,'').replace(/^[\s一\-]+/,'').trim();
 }
+function stripDatePrefixFromRouteLine(line){
+  let s=String(line||'').trim();
+  s=s.replace(/^\d{4}[-\/年.]\d{1,2}[-\/月.]\d{1,2}\s*[日號]?\s*[（(]?[一二三四五六日天][）)]?\s*/,'');
+  s=s.replace(/^\d{1,2}[-\/月.]\d{1,2}\s*[日號]?\s*[（(]?[一二三四五六日天][）)]?\s*/,'');
+  s=s.replace(/^[一二三四五六七八九十]{1,3}月\s*\d{1,2}日\s*/,'');
+  s=s.replace(/^[📍🚩🏔🎡\s]+/,'');
+  s=s.replace(/^路線\s*[：:]/,'');
+  return s.trim();
+}
+function isBadRouteLine(line){
+  const s=String(line||'').trim();
+  if(!s) return true;
+  if(/^\d+\s*[：:.、]/.test(s)) return true;
+  if(/集合|地圖|請攜帶|報名|姓名|人數|開車|搭車|可載|備註|天氣提醒|雨具|飲水|午餐|頭燈|防滑|已繳|第\d+台車/.test(s)) return true;
+  if(/小雨|雨大|豪雨|颱風|取消|改山下|周邊|用餐/.test(s)) return true;
+  if(/地區|難度|活動時間|時間基準/.test(s)) return true;
+  return false;
+}
+function looksLikeRouteName(line){
+  const s=stripDatePrefixFromRouteLine(line);
+  if(isBadRouteLine(s)) return false;
+  return /山|步道|古道|線|溫泉|隨意繞|望高寮|知高圳|大坑|眠月|合歡|新田|聚興|三汀|頭嵙|雪蓮|登山/.test(s);
+}
+function extractRouteNameFromLineText(lines){
+  // 1. 優先讀公告第一行：2026-06-27（六）大坑日光溫泉隨意繞
+  for(const l of lines){
+    const after=stripDatePrefixFromRouteLine(l);
+    if(after!==l && looksLikeRouteName(after)) return after.replace(/\s+/g,'').trim();
+  }
+  // 2. 讀「路線：xxx」
+  for(const l of lines){
+    const m=String(l).match(/路線\s*[：:]\s*(.+)$/);
+    if(m && looksLikeRouteName(m[1])) return stripDatePrefixFromRouteLine(m[1]).replace(/\s+/g,'').trim();
+  }
+  // 3. 讀一般路線行，但排除天氣／備註／集合等句子
+  for(const l of lines){
+    if(looksLikeRouteName(l)) return stripDatePrefixFromRouteLine(l).replace(/\s+/g,'').trim();
+  }
+  return '路線待補';
+}
 function parseLineActivity(){
   const raw=$('lineText').value||'';
   const lines=raw.split(/\n+/).map(x=>x.trim()).filter(Boolean);
-  const routeLine=lines.find(l=>/線|山|步道|古道|一日遊|半日/.test(l) && !/集合|帶|早餐|晚餐|第\d+台車|已繳/.test(l)) || lines[0] || '未命名路線';
-  const routeName=routeLine.replace(/\s+/g,'').replace(/一日遊|半日遊/g,m=>m).trim();
+  const routeName=extractRouteNameFromLineText(lines);
   const dateLine=lines.find(l=>/(\d{1,2}|[一二三四五六七八九十]{1,3})月\s*\d{1,2}日|\d{1,2}\/\d{1,2}/.test(l)) || '';
   const date=parseChineseDateFromLine(dateLine||raw);
   const vehicleLine=lines.find(l=>/巴士|車|自駕|共乘|遊覽車/.test(l) && !/^\d+/.test(l) && !/第\d+台車|集合/.test(l)) || '';
@@ -729,10 +768,18 @@ function parseLineActivity(){
 }
 function normalizeRouteName(name){
   return String(name||'')
-    .replace(/[🏔📍🚗✅🌧🔴🟢⭐★☆\s]/g,'')
-    .replace(/改|活動|行程|集合|報名|一日遊|半日遊|1日遊|半天|全天|體能|步道群/g,'')
+    .replace(/[🏔📍🚗✅🌧🔴🟢⭐★☆📌\s]/g,'')
+    .replace(/^\d{4}[-\/年.]\d{1,2}[-\/月.]\d{1,2}[日號]?[（(]?[一二三四五六日天]?[）)]?/,'')
+    .replace(/^\d{1,2}[-\/月.]\d{1,2}[日號]?[（(]?[一二三四五六日天]?[）)]?/,'')
+    .replace(/改|活動|行程|集合|報名|一日遊|半日遊|1日遊|半天|全天|體能|步道群|登山步道|步道/g,'')
     .replace(/[()（）\[\]【】]/g,'')
     .trim();
+}
+function isValidBackfillRouteName(name){
+  const n=normalizeRouteName(name);
+  if(!n || n==='路線待補' || n.length<2) return false;
+  if(/小雨|雨大|天氣|備註|集合|報名|姓名|人數|開車|搭車|用餐|周邊/.test(name)) return false;
+  return /山|坑|圳|古道|線|溫泉|寮|步道|眠月|合歡|聚興|新田|大坑|知高/.test(name);
 }
 function slugifyRoute(name){
   const map={'台中':'taichung','大坑':'dakeng','眠月':'mianyue','三汀':'santing','知高圳':'zhigaozhen','聚興':'juxing','新田':'xintian'};
@@ -740,16 +787,26 @@ function slugifyRoute(name){
   for(const k in map){ if(String(name||'').includes(k)){ key=map[k]; break; } }
   return key;
 }
-function findRouteFromLineName(routeName){
+function findRouteFromLineName(routeName, date){
   const clean=normalizeRouteName(routeName);
+  if(!clean) return null;
+  // 若這天已經有「預定行程」，優先用預定行程的 route_id，避免公告回存時又用文字亂猜。
+  const d=normDateStr(date||'');
+  const planned=(state.events||[]).find(e=>normDateStr(e.date)===d && e.route_id);
+  if(planned){
+    const pr=(state.routes||[]).find(r=>r.id===planned.route_id);
+    if(pr) return pr;
+  }
   return (state.routes||[]).find(r=>{
     const rn=normalizeRouteName(r.name_zh);
     return rn && clean && (rn===clean || rn.includes(clean) || clean.includes(rn));
-  });
+  }) || null;
 }
 function upsertRouteFromLineActivity(a){
-  let route=findRouteFromLineName(a.routeName);
-  if(route) return {route, created:false};
+  let route=findRouteFromLineName(a.routeName, a.date);
+  if(route) return {route, created:false, matched:true};
+  // 解析不到真正路線名稱時，只存活動紀錄，不補進 routes.json，避免產生「5/23（六）」這種假路線。
+  if(!isValidBackfillRouteName(a.routeName)) return {route:null, created:false, matched:false, skipped:true};
   const idBase=(a.date+'_'+slugifyRoute(a.routeName)+'_'+normalizeRouteName(a.routeName)).replace(/[^\w\u4e00-\u9fa5-]+/g,'_').slice(0,80);
   const newRoute={
     id:idBase || ('line_'+Date.now()),
@@ -795,8 +852,8 @@ function saveLineActivityRecord(){
     record_type:'event_record',
     date:a.date,
     route_id:route?route.id:'',
-    route_name:route?route.name_zh:a.routeName,
-    route:a.routeName,
+    route_name:route?route.name_zh:(isValidBackfillRouteName(a.routeName)?a.routeName:'路線待補'),
+    route:route?route.name_zh:a.routeName,
     people_count:a.members.length,
     paid_count:a.paidCount,
     vehicle:a.vehicleLine,
@@ -812,7 +869,8 @@ function saveLineActivityRecord(){
   renderHistoryBoard();
   renderAlbum();
   applyFilters();
-  $('lineResult').innerHTML += `<div class="notice"><b>已存成去過紀錄。</b> ${up.created?'路線庫也已補入新路線。':'路線庫已存在，沒有重複新增。'}<br>接著下載 event-photos.json；若有補新路線，再下載 routes.json 覆蓋 GitHub。</div>`;
+  const alignMsg = up.created ? '找不到既有路線，已補進 routes.json。' : (up.route ? '已對齊既有 routes.json，沒有重複新增路線。' : '沒有抓到可靠路線名稱，只存活動紀錄，路線待補。');
+  $('lineResult').innerHTML += `<div class="notice"><b>已存成去過紀錄。</b> ${alignMsg}<br>接著下載 event-photos.json；若有補新路線，再下載 routes.json 覆蓋 GitHub。</div>`;
 }
 function downloadJson(filename,obj){
   const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json'});
