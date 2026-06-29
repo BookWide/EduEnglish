@@ -116,6 +116,7 @@ const DATA_PATH='/data/hiking/';
 const DATA_PATHS=['/data/hiking/','/assets/hiking/'];
 const PHOTO_PATHS=['/assets/hiking/'];
 const tabs=[['sec-find','找路線'],['sec-line','LINE整理'],['sec-album','相簿'],['sec-post','公告']];
+const LINE_PROTECT_PASSWORD='bwline2026'; // LINE整理前端密碼；要改密碼改這裡。
 const state={routes:[],calendar:[],photos:[],albums:[],selected:null,currentWeek:null,currentPlans:[],filtered:[],albumRouteId:null};
 const fallback={routes:[{id:'demo_dakeng',name_zh:'大坑步道',city:'台中',area:'北屯',level:'A',duration_hours:'2-3',option_slot:'half_clear',option_label:'半天｜天氣穩',tags:['半天','新手','台中'],rain_policy:'小雨可走，雨大縮短',downhill_backup:['大坑午餐','咖啡'],notice:'示範資料，請上傳 routes.json'}],calendar:[]};
 function $(id){return document.getElementById(id)}
@@ -162,8 +163,20 @@ async function fetchJson(name,key){
   return emptyCandidate || fallback[key] || [];
 }
 async function init(){renderTabs(); state.routes=await fetchJson('routes.json','routes'); state.calendar=await fetchJson('calendar-2026.json','calendar'); state.photos=await fetchJson('photos.json','photos'); state.albums=await fetchJson('event-photos.json','photos'); setupFilters(); let sat=nextSaturday(new Date()); $('fDate').value=localDate(sat); $('aDate').value=localDate(sat); $('fTime').value='half'; $('fLevel').value='A'; $('fWeather').value='stable'; selectWeekByDate(sat); applyFilters(); renderAlbum(); renderHistoryBoard(); $('todayText').textContent='今天 '+localDate(new Date());}
-function renderTabs(){let box=$('tabs');box.innerHTML=tabs.map((t,i)=>`<button class="tab ${i?'':'active'}" onclick="show('${t[0]}',this)">${t[1]}</button>`).join('')}
+function renderTabs(){let box=$('tabs');box.innerHTML=tabs.map((t,i)=>{
+  const action=t[0]==='sec-line'?`showLineProtected(this)`:`show('${t[0]}',this)`;
+  return `<button class="tab ${i?'':'active'}" onclick="${action}">${t[1]}</button>`;
+}).join('')}
 function show(id,btn){document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));$(id).classList.add('active');document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active')}
+function lineUnlocked(){return sessionStorage.getItem('bw_line_unlocked')==='1'}
+function showLineProtected(btn){
+  if(!lineUnlocked()){
+    const pw=prompt('LINE整理需要密碼');
+    if(pw!==LINE_PROTECT_PASSWORD){alert('密碼錯誤，未開啟LINE整理。');return;}
+    sessionStorage.setItem('bw_line_unlocked','1');
+  }
+  show('sec-line',btn);
+}
 function setupFilters(){
 }
 function normDateStr(v){
@@ -1004,14 +1017,27 @@ function loadImageForHash(url){
     img.src=url;
   });
 }
-function bitsFromCanvas(img,w,h,mode){
+function drawHashCanvas(img,w,h,crop){
   const c=document.createElement('canvas');
   c.width=w; c.height=h;
   const ctx=c.getContext('2d',{willReadFrequently:true});
-  ctx.drawImage(img,0,0,w,h);
+  const cw=img.naturalWidth||img.width, ch=img.naturalHeight||img.height;
+  const sx=Math.max(0, Math.round((crop.x||0)*cw));
+  const sy=Math.max(0, Math.round((crop.y||0)*ch));
+  const sw=Math.max(1, Math.round((crop.w||1)*cw));
+  const sh=Math.max(1, Math.round((crop.h||1)*ch));
+  ctx.drawImage(img,sx,sy,Math.min(sw,cw-sx),Math.min(sh,ch-sy),0,0,w,h);
+  return ctx;
+}
+function grayFromContext(ctx,w,h){
   const data=ctx.getImageData(0,0,w,h).data;
   const gray=[];
   for(let i=0;i<data.length;i+=4) gray.push(data[i]*0.299+data[i+1]*0.587+data[i+2]*0.114);
+  return gray;
+}
+function bitsFromImageCrop(img,w,h,mode,crop){
+  const ctx=drawHashCanvas(img,w,h,crop||{x:0,y:0,w:1,h:1});
+  const gray=grayFromContext(ctx,w,h);
   if(mode==='dhash'){
     let bits='';
     for(let y=0;y<h;y++) for(let x=0;x<w-1;x++) bits += gray[y*w+x] > gray[y*w+x+1] ? '1':'0';
@@ -1020,17 +1046,76 @@ function bitsFromCanvas(img,w,h,mode){
   const avg=gray.reduce((a,b)=>a+b,0)/gray.length;
   return gray.map(v=>v>=avg?'1':'0').join('');
 }
+function colorHistogramFromCrop(img,crop){
+  const w=32,h=32;
+  const ctx=drawHashCanvas(img,w,h,crop||{x:0,y:0,w:1,h:1});
+  const data=ctx.getImageData(0,0,w,h).data;
+  const hist=new Array(64).fill(0);
+  for(let i=0;i<data.length;i+=4){
+    const r=data[i]>>6, g=data[i+1]>>6, b=data[i+2]>>6;
+    hist[r*16+g*4+b]++;
+  }
+  const total=w*h;
+  return hist.map(v=>v/total);
+}
 async function visualSignaturePhotoUrl(url){
   const img=await loadImageForHash(url);
-  return {dhash:bitsFromCanvas(img,9,8,'dhash'), ahash:bitsFromCanvas(img,8,8,'ahash')};
+  // 裁切容錯：full 抓完全圖，center/left/right/top/bottom 抓局部畫面。
+  // LINE 重新壓縮、裁頭尾、縮放後，SHA 與 full hash 都可能不同；多區塊比對才抓得到你截圖那種重複。
+  const cropDefs=[
+    ['full',{x:0,y:0,w:1,h:1}],
+    ['center80',{x:.10,y:.10,w:.80,h:.80}],
+    ['center65',{x:.175,y:.175,w:.65,h:.65}],
+    ['left',{x:0,y:.08,w:.72,h:.84}],
+    ['right',{x:.28,y:.08,w:.72,h:.84}],
+    ['top',{x:.08,y:0,w:.84,h:.72}],
+    ['bottom',{x:.08,y:.28,w:.84,h:.72}]
+  ];
+  return {
+    width:img.naturalWidth||img.width,
+    height:img.naturalHeight||img.height,
+    crops:cropDefs.map(([name,crop])=>({
+      name,
+      dhash:bitsFromImageCrop(img,9,8,'dhash',crop),
+      ahash:bitsFromImageCrop(img,8,8,'ahash',crop),
+      hist:colorHistogramFromCrop(img,crop)
+    }))
+  };
 }
 function hammingBits(a,b){
   if(!a || !b || a.length!==b.length) return 999;
   let n=0; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) n++;
   return n;
 }
-function visualDistance(a,b){
-  return Math.min(hammingBits(a&&a.dhash,b&&b.dhash), hammingBits(a&&a.ahash,b&&b.ahash));
+function histDistance(a,b){
+  if(!a || !b || a.length!==b.length) return 999;
+  let inter=0;
+  for(let i=0;i<a.length;i++) inter += Math.min(a[i],b[i]);
+  return 1-inter; // 0 越像，1 越不像
+}
+function visualCompare(a,b){
+  if(!a || !b || !Array.isArray(a.crops) || !Array.isArray(b.crops)) return {hit:false,score:999,label:'無法比對'};
+  let best={d:999,a:999,h:999,score:999,label:'畫面相似'};
+  for(const ca of a.crops){
+    for(const cb of b.crops){
+      const d=hammingBits(ca.dhash,cb.dhash);
+      const ah=hammingBits(ca.ahash,cb.ahash);
+      const hd=histDistance(ca.hist,cb.hist);
+      const score=Math.min(d,ah*1.25,hd*80);
+      if(score<best.score) best={d,a:ah,h:hd,score,label:`${ca.name} ↔ ${cb.name}`};
+    }
+  }
+  // 三層：近乎同圖、裁切同圖、同場景連拍。最後一層較寬，讓主辦人人工確認再刪。
+  const exactVisual = best.d<=10 || best.a<=8;
+  const cropVisual = best.d<=18 || best.a<=14 || (best.h<=0.20 && best.d<=28);
+  const sceneVisual = best.h<=0.16 && (best.d<=34 || best.a<=24);
+  return {hit: exactVisual || cropVisual || sceneVisual, exactVisual, cropVisual, sceneVisual, ...best};
+}
+function makeDisjointSet(n){
+  const p=Array.from({length:n},(_,i)=>i);
+  const find=x=>p[x]===x?x:(p[x]=find(p[x]));
+  const union=(a,b)=>{a=find(a);b=find(b);if(a!==b)p[b]=a};
+  return {find,union};
 }
 function openDuplicateFinder(){
   let el=$('photoOrgPanel'); if(!el)return;
@@ -1041,7 +1126,7 @@ function openDuplicateFinder(){
 function renderDuplicateFinderIdle(){
   const count=currentAlbumDuplicateItems().length;
   const title=escHtml(state.currentAlbumScopeTitle||'目前活動相簿');
-  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">掃描：${title}｜目前 ${count} 張。先用 SHA-256 抓完全相同，再用影像指紋抓「看起來重複／近似」照片。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">SHA-256 只能找到檔案內容 100% 一樣；同一張照片若被 LINE 壓縮、裁切、重新存檔，SHA-256 會不同。所以這版加入「影像相似」掃描。掃描完成會顯示 Group 1、Group 2...；每組第一張自動標「⭐ 保留」。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">開始掃描</button><button class="btn secondary" onclick="togglePhotoOrganizer('summary')">回整理照片</button></div><div id="dupScanResult"></div>`;
+  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">掃描：${title}｜目前 ${count} 張。先用 SHA-256 抓完全相同，再用「裁切容錯影像指紋」抓你一眼看得出來的重複／同場景照片。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">SHA-256 只能找到檔案內容 100% 一樣；同一張照片若被 LINE 壓縮、裁切、重新存檔，SHA-256 會不同。所以這版加入「裁切容錯／局部相似」掃描。掃描完成會顯示 Group 1、Group 2...；每組第一張自動標「⭐ 保留」。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">開始掃描</button><button class="btn secondary" onclick="togglePhotoOrganizer('summary')">回整理照片</button></div><div id="dupScanResult"></div>`;
 }
 async function scanCurrentAlbumDuplicates(){
   const items=currentAlbumDuplicateItems();
@@ -1056,7 +1141,7 @@ async function scanCurrentAlbumDuplicates(){
     try{ it.visual=await visualSignaturePhotoUrl(it.url); it.visualError=''; }
     catch(e){ it.visual=null; it.visualError=String(e&&e.message?e.message:e); }
     scanned.push(it);
-    box.innerHTML=`<div class="notice">正在掃描 ${i+1} / ${items.length} 張...<br><span class="small">SHA-256 + 影像指紋比對中</span></div>`;
+    box.innerHTML=`<div class="notice">正在掃描 ${i+1} / ${items.length} 張...<br><span class="small">SHA-256 + SHA-256 + 裁切容錯影像指紋比對中</span></div>`;
   }
 
   const exactGroups=groupBy(scanned.filter(x=>x.sha256),x=>x.sha256)
@@ -1065,20 +1150,27 @@ async function scanCurrentAlbumDuplicates(){
 
   const exactUrls=new Set(exactGroups.flatMap(g=>g.items.map(x=>x.url)));
   const pool=scanned.filter(x=>x.visual && !exactUrls.has(x.url));
-  const used=new Set();
-  const similarGroups=[];
-  const DHASH_LIMIT=12, AHASH_LIMIT=10;
+  const dsu=makeDisjointSet(pool.length);
+  const notes=new Map();
   for(let i=0;i<pool.length;i++){
-    if(used.has(pool[i].url)) continue;
-    const group=[pool[i]];
     for(let j=i+1;j<pool.length;j++){
-      if(used.has(pool[j].url)) continue;
-      const dd=hammingBits(pool[i].visual.dhash,pool[j].visual.dhash);
-      const ad=hammingBits(pool[i].visual.ahash,pool[j].visual.ahash);
-      if(dd<=DHASH_LIMIT || ad<=AHASH_LIMIT){ pool[j].similarDistance=Math.min(dd,ad); group.push(pool[j]); }
+      const cmp=visualCompare(pool[i].visual,pool[j].visual);
+      if(cmp.hit){
+        dsu.union(i,j);
+        notes.set(pool[i].url+'||'+pool[j].url,cmp);
+      }
     }
-    if(group.length>1){ group.forEach(x=>used.add(x.url)); similarGroups.push({type:'畫面相似',items:group,keep:group[0],remove:group.slice(1)}); }
   }
+  const simMap=new Map();
+  for(let i=0;i<pool.length;i++){
+    const k=dsu.find(i);
+    if(!simMap.has(k)) simMap.set(k,[]);
+    simMap.get(k).push(pool[i]);
+  }
+  const similarGroups=[...simMap.values()].filter(g=>g.length>1).map(group=>{
+    group.sort((a,b)=>a.index-b.index);
+    return {type:'畫面相似／裁切相似',items:group,keep:group[0],remove:group.slice(1)};
+  });
 
   const groups=[...exactGroups,...similarGroups].map((g,i)=>Object.assign(g,{id:i+1}));
   state.shaDuplicateGroups=groups;
@@ -1088,10 +1180,10 @@ function renderShaDuplicateGroups(){
   const groups=state.shaDuplicateGroups||[];
   const totalRemove=groups.reduce((n,g)=>n+g.remove.length,0);
   const body=groups.length?groups.map(g=>{
-    const headExtra=g.type==='完全相同' ? `｜SHA-256：${escHtml(String(g.sha256||'').slice(0,16))}...` : '｜影像指紋相似，不是只比網址';
+    const headExtra=g.type==='完全相同' ? `｜SHA-256：${escHtml(String(g.sha256||'').slice(0,16))}...` : '｜裁切／局部畫面相似，不是只比網址';
     return `<div class="dup-group"><div class="dup-head">Group ${g.id}｜${escHtml(g.type)} ${g.items.length} 張${headExtra}</div><div class="org-photo-row">${g.items.map((it,idx)=>`<div class="org-photo" onclick="openPhotoModal('${String(it.url).replace(/'/g,'%27')}')"><img src="${escHtml(it.url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"><span class="${idx===0?'keep-badge':'del-badge'}">${idx===0?'⭐ 保留':(g.type==='完全相同'?'重複刪除':'相似刪除')}</span></div>`).join('')}</div></div>`;
   }).join(''):'<div class="empty">沒有找到完全相同或影像相似的照片。</div>';
-  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">重複／相似群組 ${groups.length} 組｜可刪 ${totalRemove} 張。第一張自動保留。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">完全相同＝SHA-256 一樣；畫面相似＝照片重新壓縮、裁切或解析度不同，但畫面接近。刪除前請看一下 Group 內容。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">重新掃描</button><button class="btn red" ${totalRemove?'':'disabled'} onclick="deleteShaDuplicates()">刪除重複</button><button class="btn secondary" onclick="downloadAlbums()">下載 event-photos.json</button><button class="btn secondary" onclick="downloadPhotosJson()">下載 photos.json</button></div>${body}`;
+  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">重複／相似群組 ${groups.length} 組｜可刪 ${totalRemove} 張。第一張自動保留。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">完全相同＝SHA-256 一樣；畫面相似＝照片重新壓縮、裁切、解析度不同，或同場景連拍但畫面接近。刪除前請看一下 Group 內容。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">重新掃描</button><button class="btn red" ${totalRemove?'':'disabled'} onclick="deleteShaDuplicates()">刪除重複</button><button class="btn secondary" onclick="downloadAlbums()">下載 event-photos.json</button><button class="btn secondary" onclick="downloadPhotosJson()">下載 photos.json</button></div>${body}`;
 }
 function removePhotoUrlFromAlbumRecord(a,url){
   const same=x=>normalizePhotoUrl(x)===url;
@@ -1147,7 +1239,7 @@ function renderPhotoOrganizer(view='summary'){
   }else{
     body=`<h3>全部照片</h3><p class="small">全部展開只在需要檢查時使用。</p>${renderOrgThumbs(org.items.map(x=>x.url))}`;
   }
-  panel.innerHTML=`<div class="toolbar"><div><h2 style="margin:0">照片整理</h2><div class="small">整理分類不動原圖；找重複請用 SHA-256 完全相同掃描。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="org-tabs">${tab('summary','總覽')}${tab('solo','個人獨照')}${tab('group','團體照')}${tab('duplicates','舊候選')}${tab('all','全部照片')}<button class="org-tab" onclick="openDuplicateFinder()">找重複 SHA-256</button></div><div>${body}</div>`;
+  panel.innerHTML=`<div class="toolbar"><div><h2 style="margin:0">照片整理</h2><div class="small">整理分類不動原圖；找重複請用「找重複」：含 SHA-256 完全相同 + 裁切容錯影像比對。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="org-tabs">${tab('summary','總覽')}${tab('solo','個人獨照')}${tab('group','團體照')}${tab('duplicates','舊候選')}${tab('all','全部照片')}<button class="org-tab" onclick="openDuplicateFinder()">找重複</button></div><div>${body}</div>`;
 }
 function photoGroupsJson(){
   const org=buildPhotoOrganization();
