@@ -84,7 +84,7 @@
 
 <section id="sec-album" class="section">
  <div class="card">
-  <div class="toolbar"><div><h2 style="margin:0">活動相簿</h2><p class="small" style="margin:8px 0 0">先看活動列表；點「展開照片」才看該次照片，避免 6/13、6/20 混在一起。</p></div><div class="btns" style="margin-top:0"><button class="btn secondary" onclick="toggleAlbumForm()">新增／補照片</button><button class="btn secondary" onclick="togglePhotoOrganizer()">整理照片</button></div></div>
+  <div class="toolbar"><div><h2 style="margin:0">活動相簿</h2><p class="small" style="margin:8px 0 0">先看活動列表；點「展開照片」才看該次照片，避免 6/13、6/20 混在一起。</p></div><div class="btns" style="margin-top:0"><button class="btn secondary" onclick="toggleAlbumForm()">新增照片</button><button class="btn secondary" onclick="togglePhotoOrganizer('summary')">整理照片</button><button class="btn gold" onclick="openDuplicateFinder()">找重複</button></div></div>
  </div>
  <div class="card" id="albumForm" style="display:none"><h2>新增／補照片</h2><p class="small">只在要補照片時打開。可只填日期、路線、代表照片或相簿連結。</p><div class="filters"><div class="field"><label>日期</label><input id="aDate" type="date"></div><div class="field"><label>路線</label><input id="aRoute" placeholder="例如：改大坑1號體能步道"></div><div class="field"><label>相簿連結 / R2資料夾</label><input id="aAlbumUrl" placeholder="https://... 相簿或資料夾連結"></div><div class="field"><label>代表照片</label><input id="aCoverUrl" placeholder="https://...jpg，可空白"></div><div class="field"><label>備註</label><input id="aNote" placeholder="路況／集合／天氣"></div></div><div class="field" style="margin-top:10px"><label>其他照片網址（可貼多行，可空白）</label><textarea id="aPhotoUrls" placeholder="https://.../416668_0.jpg&#10;https://.../416669_0.jpg"></textarea></div><div class="btns"><button class="btn" onclick="saveAlbum()">加入相簿紀錄</button><button class="btn gray" onclick="toggleAlbumForm(false)">收起</button></div></div>
  <div id="albumList" class="route-list"></div>
@@ -791,10 +791,14 @@ function photoGridHtml(urls){
   return `<div class="photo-grid">${urls.map(u=>`<div class="photo-tile" onclick="openPhotoModal('${String(u).replace(/'/g,"%27")}')"><img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"></div>`).join('')}</div>`;
 }
 function viewAlbumRecord(key){
+  state.activeAlbumKey=key;
   renderAlbum(null,key);
   show('sec-album', document.querySelectorAll('.tab')[2]);
 }
 function renderAlbum(routeId,eventKey){
+  if(eventKey) state.activeAlbumKey=String(eventKey);
+  else if(routeId) state.activeAlbumKey='route:'+String(routeId);
+  else if(!routeId && !eventKey) state.activeAlbumKey='';
   let arr=(state.albums||[]).slice().sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
   let routeTitle='活動相簿';
   let expanded=false;
@@ -829,7 +833,9 @@ function renderAlbum(routeId,eventKey){
 
   if(expanded){
     const allUrls=[...new Set(arr.flatMap(albumAllPhotoUrls).map(normalizePhotoUrl).filter(isImageUrl))];
-    html += `<div class="album-card"><div class="album-head"><div><div class="album-title">照片展開</div><div class="album-meta">共 ${allUrls.length} 張照片</div></div></div>${photoGridHtml(allUrls)}</div>`;
+    state.currentAlbumPhotoUrls=allUrls;
+    state.currentAlbumScopeTitle=routeTitle;
+    html += `<div class="album-card"><div class="album-head"><div><div class="album-title">照片展開</div><div class="album-meta">共 ${allUrls.length} 張照片</div></div><div class="btns" style="margin-top:0"><button class="btn gold" onclick="openDuplicateFinder()">找重複</button></div></div>${photoGridHtml(allUrls)}</div>`;
     html += arr.map(a=>{
       let urls=albumAllPhotoUrls(a);
       let open=albumOpenUrl(a);
@@ -966,10 +972,92 @@ function buildPhotoOrganization(){
   state.photoOrganization={items,dupGroups,deleteGroups,organizeGroups,removeSet,organizeSet,kept,featured,eventGroups};
   return state.photoOrganization;
 }
+
+function currentAlbumDuplicateItems(){
+  let urls=(state.currentAlbumPhotoUrls||[]).map(normalizePhotoUrl).filter(isImageUrl);
+  if(!urls.length && state.activeAlbumKey){
+    const key=String(state.activeAlbumKey).replace(/^route:/,'');
+    let arr=(state.albums||[]).filter(a=>{
+      const aid=String(a.id||a.event_id||'');
+      const rid=String(a.route_id||a.routeId||'');
+      return aid===key || rid===key;
+    });
+    urls=[...new Set(arr.flatMap(albumAllPhotoUrls).map(normalizePhotoUrl).filter(isImageUrl))];
+  }
+  return [...new Set(urls)].map((url,index)=>({url,index}));
+}
+function bufferToHex(buffer){return [...new Uint8Array(buffer)].map(b=>b.toString(16).padStart(2,'0')).join('')}
+async function sha256PhotoUrl(url){
+  const r=await fetch(url,{cache:'no-store',mode:'cors'});
+  if(!r.ok) throw new Error('HTTP '+r.status);
+  const buf=await r.arrayBuffer();
+  const hash=await crypto.subtle.digest('SHA-256',buf);
+  return bufferToHex(hash);
+}
+function openDuplicateFinder(){
+  let el=$('photoOrgPanel'); if(!el)return;
+  el.classList.add('active');
+  renderDuplicateFinderIdle();
+  el.scrollIntoView({behavior:'smooth',block:'start'});
+}
+function renderDuplicateFinderIdle(){
+  const count=currentAlbumDuplicateItems().length;
+  const title=escHtml(state.currentAlbumScopeTitle||'目前活動相簿');
+  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">掃描：${title}｜目前 ${count} 張。使用 SHA-256，只抓完全相同檔案內容。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">請先在相簿點「展開照片」，再按「開始掃描」。掃描完成會顯示 Group 1、Group 2...；每組第一張自動標「⭐ 保留」。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">開始掃描</button><button class="btn secondary" onclick="togglePhotoOrganizer('summary')">回整理照片</button></div><div id="dupScanResult"></div>`;
+}
+async function scanCurrentAlbumDuplicates(){
+  const items=currentAlbumDuplicateItems();
+  const box=$('dupScanResult')||$('photoOrgPanel');
+  if(!items.length){box.innerHTML='<div class="empty">目前沒有可掃描照片。先展開某一個活動相簿。</div>';return;}
+  box.innerHTML=`<div class="notice">正在掃描 0 / ${items.length} 張...</div>`;
+  const hashed=[];
+  for(let i=0;i<items.length;i++){
+    const it=items[i];
+    try{ it.sha256=await sha256PhotoUrl(it.url); it.error=''; }
+    catch(e){ it.sha256='ERROR:'+it.url; it.error=String(e&&e.message?e.message:e); }
+    hashed.push(it);
+    box.innerHTML=`<div class="notice">正在掃描 ${i+1} / ${items.length} 張...</div>`;
+  }
+  const groups=groupBy(hashed.filter(x=>x.sha256 && !x.error),x=>x.sha256).filter(g=>g.items.length>1).map((g,i)=>({id:i+1,sha256:g.key,items:g.items,keep:g.items[0],remove:g.items.slice(1)}));
+  state.shaDuplicateGroups=groups;
+  renderShaDuplicateGroups();
+}
+function renderShaDuplicateGroups(){
+  const groups=state.shaDuplicateGroups||[];
+  const totalRemove=groups.reduce((n,g)=>n+g.remove.length,0);
+  const body=groups.length?groups.map(g=>`<div class="dup-group"><div class="dup-head">Group ${g.id}｜完全相同 ${g.items.length} 張｜SHA-256：${escHtml(g.sha256.slice(0,16))}...</div><div class="org-photo-row">${g.items.map((it,idx)=>`<div class="org-photo" onclick="openPhotoModal('${String(it.url).replace(/'/g,'%27')}')"><img src="${escHtml(it.url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"><span class="${idx===0?'keep-badge':'del-badge'}">${idx===0?'⭐ 保留':'重複刪除'}</span></div>`).join('')}</div></div>`).join(''):'<div class="empty">沒有找到 SHA-256 完全相同的照片。</div>';
+  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">完全相同群組 ${groups.length} 組｜可刪 ${totalRemove} 張。第一張自動保留。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">重新掃描</button><button class="btn red" ${totalRemove?'':'disabled'} onclick="deleteShaDuplicates()">刪除重複</button><button class="btn secondary" onclick="downloadAlbums()">下載 event-photos.json</button><button class="btn secondary" onclick="downloadPhotosJson()">下載 photos.json</button></div>${body}`;
+}
+function removePhotoUrlFromAlbumRecord(a,url){
+  const same=x=>normalizePhotoUrl(x)===url;
+  if(Array.isArray(a.photo_urls)) a.photo_urls=a.photo_urls.filter(x=>!same(x));
+  if(Array.isArray(a.photos)) a.photos=a.photos.filter(x=>!same(x));
+  ['url','image_url','src'].forEach(k=>{ if(a[k] && normalizePhotoUrl(a[k])===url) a[k]=''; });
+  if(a.cover_url && normalizePhotoUrl(a.cover_url)===url){
+    const next=(Array.isArray(a.photo_urls)?a.photo_urls:[]).concat(Array.isArray(a.photos)?a.photos:[]).map(normalizePhotoUrl).find(isImageUrl);
+    a.cover_url=next||'';
+  }
+}
+function deleteShaDuplicates(){
+  const groups=state.shaDuplicateGroups||[];
+  const removeUrls=new Set(groups.flatMap(g=>g.remove.map(x=>x.url)));
+  if(!removeUrls.size){renderShaDuplicateGroups();return;}
+  for(const a of (state.albums||[])) for(const u of removeUrls) removePhotoUrlFromAlbumRecord(a,u);
+  state.photos=(state.photos||[]).filter(p=>!removeUrls.has(normalizePhotoUrl(p)));
+  state.currentAlbumPhotoUrls=(state.currentAlbumPhotoUrls||[]).filter(u=>!removeUrls.has(u));
+  state.shaDuplicateGroups=[];
+  renderAlbum(state.albumRouteId||null, (state.activeAlbumKey&& !String(state.activeAlbumKey).startsWith('route:'))?state.activeAlbumKey:null);
+  renderHistoryBoard();
+  openDuplicateFinder();
+  const box=$('dupScanResult')||$('photoOrgPanel');
+  if(box) box.innerHTML=`<div class="notice"><b>已刪除重複項目：</b>${removeUrls.size} 張。這是移除 event-photos.json 內的重複網址；原始 R2 圖檔不會被前端直接刪。請下載 event-photos.json 覆蓋。</div>`;
+}
+
 function togglePhotoOrganizer(force){
   let el=$('photoOrgPanel'); if(!el)return;
-  const show=(typeof force==='boolean')?force:!el.classList.contains('active');
-  if(show){renderPhotoOrganizer('summary'); el.classList.add('active'); el.scrollIntoView({behavior:'smooth',block:'start'});} else el.classList.remove('active');
+  const view=(typeof force==='string')?force:'summary';
+  const show=(typeof force==='boolean')?force:!el.classList.contains('active') || typeof force==='string';
+  if(show){renderPhotoOrganizer(view); el.classList.add('active'); el.scrollIntoView({behavior:'smooth',block:'start'});} else el.classList.remove('active');
 }
 function renderOrgThumbs(urls,keepSet=new Set(),removeSet=new Set(),organizeSet=new Set()){
   urls=[...new Set((urls||[]).filter(isImageUrl))];
@@ -988,12 +1076,13 @@ function renderPhotoOrganizer(view='summary'){
     body=`<h3>精選照片</h3><p class="small">每場先抓前 20 張當精選，不再一口氣炸出全部照片。</p>${org.eventGroups.map(g=>`<div class="dup-group"><div class="dup-head">${escHtml(g.date)}｜${escHtml(g.route_name)}｜精選 ${g.featured.length} 張 / 原始 ${g.original_count} 張</div>${renderOrgThumbs(g.featured)}</div>`).join('')}`;
   }else if(view==='duplicates'){
     body=org.dupGroups.length?org.dupGroups.map(g=>`<div class="dup-group"><div class="dup-head">${escHtml(g.type)}｜${g.items.length} 張｜${g.type.includes('90%')?'90%可刪候選｜建議保留 '+g.keep.length+' 張':'建議保留 '+g.keep.length+' 張'}</div>${renderOrgThumbs(g.items.map(x=>x.url),new Set(g.keep),new Set(g.remove_suggested),g.type==='疑似連拍'?new Set(g.items.map(x=>x.url)):new Set())}</div>`).join(''):'<div class="empty">目前沒有抓到完全重複或疑似連拍。若照片內容很像但檔名不連續，需要第二版用影像相似度。</div>';
-  }else if(view==='people'){
-    body=renderPersonClassify('solo');
+  }else if(view==='solo'||view==='group'||view==='people'){
+    state.personFilter=(view==='group')?'group':'solo';
+    body=renderPersonClassify(state.personFilter);
   }else{
     body=`<h3>全部照片</h3><p class="small">全部展開只在需要檢查時使用。</p>${renderOrgThumbs(org.items.map(x=>x.url))}`;
   }
-  panel.innerHTML=`<div class="toolbar"><div><h2 style="margin:0">照片整理</h2><div class="small">不動原圖，只產生整理建議與 photo-groups.json。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="org-tabs">${tab('summary','總覽')}${tab('solo','個人獨照')}${tab('group','團體照')}${tab('duplicates','90%刪重')}${tab('all','全部照片')}</div><div>${body}</div>`;
+  panel.innerHTML=`<div class="toolbar"><div><h2 style="margin:0">照片整理</h2><div class="small">整理分類不動原圖；找重複請用 SHA-256 完全相同掃描。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="org-tabs">${tab('summary','總覽')}${tab('solo','個人獨照')}${tab('group','團體照')}${tab('duplicates','舊候選')}${tab('all','全部照片')}<button class="org-tab" onclick="openDuplicateFinder()">找重複 SHA-256</button></div><div>${body}</div>`;
 }
 function photoGroupsJson(){
   const org=buildPhotoOrganization();
@@ -1002,6 +1091,7 @@ function photoGroupsJson(){
 function downloadPhotoGroups(){downloadJson('photo-groups.json',photoGroupsJson())}
 
 function downloadAlbums(){let blob=new Blob([JSON.stringify({photos:state.albums},null,2)],{type:'application/json'}); let a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='event-photos.json';a.click();URL.revokeObjectURL(a.href)}
+function downloadPhotosJson(){downloadJson('photos.json',{photos:state.photos||[]})}
 init();
 </script>
 </body>
