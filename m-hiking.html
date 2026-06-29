@@ -994,6 +994,44 @@ async function sha256PhotoUrl(url){
   const hash=await crypto.subtle.digest('SHA-256',buf);
   return bufferToHex(hash);
 }
+function loadImageForHash(url){
+  return new Promise((resolve,reject)=>{
+    const img=new Image();
+    img.crossOrigin='anonymous';
+    const timer=setTimeout(()=>reject(new Error('圖片載入逾時')),12000);
+    img.onload=()=>{clearTimeout(timer);resolve(img)};
+    img.onerror=()=>{clearTimeout(timer);reject(new Error('圖片載入失敗'))};
+    img.src=url;
+  });
+}
+function bitsFromCanvas(img,w,h,mode){
+  const c=document.createElement('canvas');
+  c.width=w; c.height=h;
+  const ctx=c.getContext('2d',{willReadFrequently:true});
+  ctx.drawImage(img,0,0,w,h);
+  const data=ctx.getImageData(0,0,w,h).data;
+  const gray=[];
+  for(let i=0;i<data.length;i+=4) gray.push(data[i]*0.299+data[i+1]*0.587+data[i+2]*0.114);
+  if(mode==='dhash'){
+    let bits='';
+    for(let y=0;y<h;y++) for(let x=0;x<w-1;x++) bits += gray[y*w+x] > gray[y*w+x+1] ? '1':'0';
+    return bits;
+  }
+  const avg=gray.reduce((a,b)=>a+b,0)/gray.length;
+  return gray.map(v=>v>=avg?'1':'0').join('');
+}
+async function visualSignaturePhotoUrl(url){
+  const img=await loadImageForHash(url);
+  return {dhash:bitsFromCanvas(img,9,8,'dhash'), ahash:bitsFromCanvas(img,8,8,'ahash')};
+}
+function hammingBits(a,b){
+  if(!a || !b || a.length!==b.length) return 999;
+  let n=0; for(let i=0;i<a.length;i++) if(a[i]!==b[i]) n++;
+  return n;
+}
+function visualDistance(a,b){
+  return Math.min(hammingBits(a&&a.dhash,b&&b.dhash), hammingBits(a&&a.ahash,b&&b.ahash));
+}
 function openDuplicateFinder(){
   let el=$('photoOrgPanel'); if(!el)return;
   el.classList.add('active');
@@ -1003,30 +1041,57 @@ function openDuplicateFinder(){
 function renderDuplicateFinderIdle(){
   const count=currentAlbumDuplicateItems().length;
   const title=escHtml(state.currentAlbumScopeTitle||'目前活動相簿');
-  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">掃描：${title}｜目前 ${count} 張。使用 SHA-256，只抓完全相同檔案內容。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">請先在相簿點「展開照片」，再按「開始掃描」。掃描完成會顯示 Group 1、Group 2...；每組第一張自動標「⭐ 保留」。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">開始掃描</button><button class="btn secondary" onclick="togglePhotoOrganizer('summary')">回整理照片</button></div><div id="dupScanResult"></div>`;
+  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">掃描：${title}｜目前 ${count} 張。先用 SHA-256 抓完全相同，再用影像指紋抓「看起來重複／近似」照片。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">SHA-256 只能找到檔案內容 100% 一樣；同一張照片若被 LINE 壓縮、裁切、重新存檔，SHA-256 會不同。所以這版加入「影像相似」掃描。掃描完成會顯示 Group 1、Group 2...；每組第一張自動標「⭐ 保留」。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">開始掃描</button><button class="btn secondary" onclick="togglePhotoOrganizer('summary')">回整理照片</button></div><div id="dupScanResult"></div>`;
 }
 async function scanCurrentAlbumDuplicates(){
   const items=currentAlbumDuplicateItems();
   const box=$('dupScanResult')||$('photoOrgPanel');
   if(!items.length){box.innerHTML='<div class="empty">目前沒有可掃描照片。先展開某一個活動相簿。</div>';return;}
   box.innerHTML=`<div class="notice">正在掃描 0 / ${items.length} 張...</div>`;
-  const hashed=[];
+  const scanned=[];
   for(let i=0;i<items.length;i++){
     const it=items[i];
-    try{ it.sha256=await sha256PhotoUrl(it.url); it.error=''; }
-    catch(e){ it.sha256='ERROR:'+it.url; it.error=String(e&&e.message?e.message:e); }
-    hashed.push(it);
-    box.innerHTML=`<div class="notice">正在掃描 ${i+1} / ${items.length} 張...</div>`;
+    try{ it.sha256=await sha256PhotoUrl(it.url); it.shaError=''; }
+    catch(e){ it.sha256=''; it.shaError=String(e&&e.message?e.message:e); }
+    try{ it.visual=await visualSignaturePhotoUrl(it.url); it.visualError=''; }
+    catch(e){ it.visual=null; it.visualError=String(e&&e.message?e.message:e); }
+    scanned.push(it);
+    box.innerHTML=`<div class="notice">正在掃描 ${i+1} / ${items.length} 張...<br><span class="small">SHA-256 + 影像指紋比對中</span></div>`;
   }
-  const groups=groupBy(hashed.filter(x=>x.sha256 && !x.error),x=>x.sha256).filter(g=>g.items.length>1).map((g,i)=>({id:i+1,sha256:g.key,items:g.items,keep:g.items[0],remove:g.items.slice(1)}));
+
+  const exactGroups=groupBy(scanned.filter(x=>x.sha256),x=>x.sha256)
+    .filter(g=>g.items.length>1)
+    .map(g=>({type:'完全相同',sha256:g.key,items:g.items,keep:g.items[0],remove:g.items.slice(1)}));
+
+  const exactUrls=new Set(exactGroups.flatMap(g=>g.items.map(x=>x.url)));
+  const pool=scanned.filter(x=>x.visual && !exactUrls.has(x.url));
+  const used=new Set();
+  const similarGroups=[];
+  const DHASH_LIMIT=12, AHASH_LIMIT=10;
+  for(let i=0;i<pool.length;i++){
+    if(used.has(pool[i].url)) continue;
+    const group=[pool[i]];
+    for(let j=i+1;j<pool.length;j++){
+      if(used.has(pool[j].url)) continue;
+      const dd=hammingBits(pool[i].visual.dhash,pool[j].visual.dhash);
+      const ad=hammingBits(pool[i].visual.ahash,pool[j].visual.ahash);
+      if(dd<=DHASH_LIMIT || ad<=AHASH_LIMIT){ pool[j].similarDistance=Math.min(dd,ad); group.push(pool[j]); }
+    }
+    if(group.length>1){ group.forEach(x=>used.add(x.url)); similarGroups.push({type:'畫面相似',items:group,keep:group[0],remove:group.slice(1)}); }
+  }
+
+  const groups=[...exactGroups,...similarGroups].map((g,i)=>Object.assign(g,{id:i+1}));
   state.shaDuplicateGroups=groups;
   renderShaDuplicateGroups();
 }
 function renderShaDuplicateGroups(){
   const groups=state.shaDuplicateGroups||[];
   const totalRemove=groups.reduce((n,g)=>n+g.remove.length,0);
-  const body=groups.length?groups.map(g=>`<div class="dup-group"><div class="dup-head">Group ${g.id}｜完全相同 ${g.items.length} 張｜SHA-256：${escHtml(g.sha256.slice(0,16))}...</div><div class="org-photo-row">${g.items.map((it,idx)=>`<div class="org-photo" onclick="openPhotoModal('${String(it.url).replace(/'/g,'%27')}')"><img src="${escHtml(it.url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"><span class="${idx===0?'keep-badge':'del-badge'}">${idx===0?'⭐ 保留':'重複刪除'}</span></div>`).join('')}</div></div>`).join(''):'<div class="empty">沒有找到 SHA-256 完全相同的照片。</div>';
-  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">完全相同群組 ${groups.length} 組｜可刪 ${totalRemove} 張。第一張自動保留。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">重新掃描</button><button class="btn red" ${totalRemove?'':'disabled'} onclick="deleteShaDuplicates()">刪除重複</button><button class="btn secondary" onclick="downloadAlbums()">下載 event-photos.json</button><button class="btn secondary" onclick="downloadPhotosJson()">下載 photos.json</button></div>${body}`;
+  const body=groups.length?groups.map(g=>{
+    const headExtra=g.type==='完全相同' ? `｜SHA-256：${escHtml(String(g.sha256||'').slice(0,16))}...` : '｜影像指紋相似，不是只比網址';
+    return `<div class="dup-group"><div class="dup-head">Group ${g.id}｜${escHtml(g.type)} ${g.items.length} 張${headExtra}</div><div class="org-photo-row">${g.items.map((it,idx)=>`<div class="org-photo" onclick="openPhotoModal('${String(it.url).replace(/'/g,'%27')}')"><img src="${escHtml(it.url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"><span class="${idx===0?'keep-badge':'del-badge'}">${idx===0?'⭐ 保留':(g.type==='完全相同'?'重複刪除':'相似刪除')}</span></div>`).join('')}</div></div>`;
+  }).join(''):'<div class="empty">沒有找到完全相同或影像相似的照片。</div>';
+  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">重複／相似群組 ${groups.length} 組｜可刪 ${totalRemove} 張。第一張自動保留。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">完全相同＝SHA-256 一樣；畫面相似＝照片重新壓縮、裁切或解析度不同，但畫面接近。刪除前請看一下 Group 內容。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">重新掃描</button><button class="btn red" ${totalRemove?'':'disabled'} onclick="deleteShaDuplicates()">刪除重複</button><button class="btn secondary" onclick="downloadAlbums()">下載 event-photos.json</button><button class="btn secondary" onclick="downloadPhotosJson()">下載 photos.json</button></div>${body}`;
 }
 function removePhotoUrlFromAlbumRecord(a,url){
   const same=x=>normalizePhotoUrl(x)===url;
@@ -1050,7 +1115,7 @@ function deleteShaDuplicates(){
   renderHistoryBoard();
   openDuplicateFinder();
   const box=$('dupScanResult')||$('photoOrgPanel');
-  if(box) box.innerHTML=`<div class="notice"><b>已刪除重複項目：</b>${removeUrls.size} 張。這是移除 event-photos.json 內的重複網址；原始 R2 圖檔不會被前端直接刪。請下載 event-photos.json 覆蓋。</div>`;
+  if(box) box.innerHTML=`<div class="notice"><b>已刪除重複／相似項目：</b>${removeUrls.size} 張。這是移除 event-photos.json / photos.json 內的重複網址；原始 R2 圖檔不會被前端直接刪。請下載 JSON 覆蓋。</div>`;
 }
 
 function togglePhotoOrganizer(force){
