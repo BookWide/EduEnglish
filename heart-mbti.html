@@ -661,6 +661,25 @@ const MBTI_FREE_RESULT_TOTAL = 10; // 初階：10 題免費完成後立即給初
 const MBTI_ADVANCED_RESULT_TOTAL = 20; // 進階：20 題提高準度
 const MBTI_FULL_REPORT_TOTAL = 40; // 完整：40 題產出完整人格報告｜感情/職場/學習/金錢模式
 function mbtiAnswerKey(){ return "bw_heart_mbti_scores_" + HEART_TOPIC_SLUG; }
+
+// === MBTI v2: 選答案就算完成，不再依賴「完成本題」按鈕；避免答完10題看不到報告 ===
+function mbtiAnswerDays(){
+  try{
+    return [...new Set(getHeartAnswers().map(a=>Number(a.day||0)).filter(n=>n>0))].sort((a,b)=>a-b);
+  }catch(e){ return []; }
+}
+function mbtiDoneDays(){
+  const a = mbtiAnswerDays();
+  const d = Array.isArray(getDone()) ? getDone().map(x=>Number(x||0)).filter(n=>n>0) : [];
+  return [...new Set([...d, ...a])].sort((x,y)=>x-y);
+}
+function mbtiSyncDoneFromAnswers(){
+  if(!isMbtiMode()) return getDone();
+  const merged = mbtiDoneDays();
+  try{ setDone(merged); }catch(e){}
+  return merged;
+}
+function mbtiCount(){ return mbtiDoneDays().length; }
 function mbtiResetScores(){ localStorage.setItem(mbtiAnswerKey(), JSON.stringify({E:0,I:0,S:0,N:0,T:0,F:0,J:0,P:0})); }
 function mbtiGetScores(){
   try{
@@ -2123,6 +2142,24 @@ function showMbtiFinalResult(mode){
   if(nextCoinEl) nextCoinEl.textContent = (mode === 'initial' ? '初階分析完成' : (mode === 'advanced' ? '進階分析完成' : '完整報告完成'));
 }
 
+function mbtiOpenMilestoneReport(count){
+  count = Number(count || mbtiCount() || 0);
+  const mode = mbtiStageMode(count);
+  if(mode === "progress") return false;
+  const type = mbtiTypeFromScores(mbtiScoresForMode(mode));
+  showMbtiFinalResult(mode);
+  const title = document.getElementById('rewardTitle');
+  const text = document.getElementById('rewardText');
+  const ok = document.getElementById('rewardOk');
+  const reward = document.getElementById('reward');
+  if(title) title.textContent = mode === 'full' ? `完整人格報告：${type}` : (mode === 'advanced' ? `進階性格分析：${type}` : `初階性格傾向：${type}`);
+  if(text) text.textContent = mode === 'full' ? mbtiResultText('full') : (mode === 'advanced' ? mbtiResultText('advanced') + "\n\n可以停在這裡，也可以繼續做 21–40 題解鎖完整人格報告。" : mbtiResultText('initial') + "\n\n10 題免費結果已完成，可以停下分享，也可以繼續做 11–20 題提高準度。");
+  if(ok) ok.textContent = mode === 'full' ? '完成測驗' : (mode === 'advanced' ? '繼續完整報告' : '繼續進階題');
+  resetRenqingRewardButtons();
+  if(reward) reward.classList.add('show');
+  return true;
+}
+
 function render(){
   updateLaughButton();
   idx=Math.max(0,Math.min(idx,Math.max(0,lessons.length-1))); localStorage.setItem("bw_heart_idx_"+HEART_TOPIC_SLUG,idx);
@@ -2130,9 +2167,9 @@ function render(){
   // 只在「已完成」的題目回退閱讀時，才還原已選答案。
   // 之前 recordHeartAnswer 會在點選答案當下就寫入 localStorage；
   // 如果還沒按「完成本題」就重整，會造成答案自動黏住。
-  const completedDays = getDone();
+  const completedDays = isMbtiMode() ? mbtiSyncDoneFromAnswers() : getDone();
   const isCompletedDay = completedDays.includes(l.day);
-  const pastAnswer = (isCompletedDay && !window.BW_HEART_FRESH_LOAD) ? getHeartAnswerByDay(l.day) : null;
+  const pastAnswer = isMbtiMode() ? getHeartAnswerByDay(l.day) : ((isCompletedDay && !window.BW_HEART_FRESH_LOAD) ? getHeartAnswerByDay(l.day) : null);
   showMonkReply(null,false);
   answered=!!pastAnswer;
   correct=!!(pastAnswer && (pastAnswer.is_correct || (Array.isArray(l.choices) && l.choices.some(c => c.correct && sameAnswerChoice(c, pastAnswer)))));
@@ -2183,15 +2220,23 @@ function render(){
         document.querySelectorAll(".choice.ok,.choice.bad").forEach(x=>x.classList.remove("ok","bad"));
         b.classList.add("ok");
         recordHeartAnswer(l,c,true);
+        // MBTI 專用頁：選完答案就算完成本題，直接寫入 done，避免使用者忘記按「完成本題」導致第10題沒有報告。
+        const futureDone = Array.from(new Set([...mbtiDoneDays(), Number(l.day || idx+1)])).sort((a,b)=>a-b);
+        setDone(futureDone);
         mbtiRecalcScores();
-        showMonkReply(l,true,c);
-        const futureDone = Array.from(new Set([...getDone(), l.day]));
         const hitMbtiMilestone = [MBTI_FREE_RESULT_TOTAL, MBTI_ADVANCED_RESULT_TOTAL, MBTI_FULL_REPORT_TOTAL, TOTAL].includes(futureDone.length);
-        $("complete").textContent = hitMbtiMilestone ? (futureDone.length >= MBTI_FULL_REPORT_TOTAL ? "查看完整人格報告" : (futureDone.length >= MBTI_ADVANCED_RESULT_TOTAL ? "查看進階分析" : "查看初階分析")) : "已選擇，完成本題";
+        if(hitMbtiMilestone){
+          showMbtiFinalResult(mbtiStageMode(futureDone.length));
+        }else{
+          showMonkReply(l,true,c);
+        }
+        $("done").textContent = futureDone.length < MBTI_FREE_RESULT_TOTAL ? `初階 ${futureDone.length}/${MBTI_FREE_RESULT_TOTAL}` : (futureDone.length < MBTI_ADVANCED_RESULT_TOTAL ? `進階 ${futureDone.length}/${MBTI_ADVANCED_RESULT_TOTAL}` : `完整 ${futureDone.length}/${TOTAL}`);
+        $("nextCoin").textContent = futureDone.length>=TOTAL ? '完整報告完成' : (futureDone.length>=MBTI_ADVANCED_RESULT_TOTAL ? '進階結果已開' : (futureDone.length>=MBTI_FREE_RESULT_TOTAL ? '初階結果已開' : '不扣金幣'));
+        $("complete").textContent = hitMbtiMilestone ? (futureDone.length >= MBTI_FULL_REPORT_TOTAL ? "查看完整人格報告" : (futureDone.length >= MBTI_ADVANCED_RESULT_TOTAL ? "查看進階分析" : "查看初階分析")) : "已完成，可前後閱讀";
         $("complete").classList.add("ready");
         $("coins").textContent=mbtiTypeFromScores(mbtiRecalcScores());
         if(hitMbtiMilestone){
-          setTimeout(()=>{ try{ if(!$("reward").classList.contains("show")) complete(); }catch(e){} }, 120);
+          setTimeout(()=>{ try{ mbtiOpenMilestoneReport(futureDone.length); }catch(e){} }, 80);
         }
         await speakAnswerLang(c.en,"en");
       }else if(c.correct){
@@ -2243,8 +2288,8 @@ function render(){
       box.classList.add("show");
     }
   }
-  if(isMbtiMode() && getDone().length >= MBTI_FREE_RESULT_TOTAL){
-    showMbtiFinalResult(mbtiStageMode(getDone().length));
+  if(isMbtiMode() && mbtiCount() >= MBTI_FREE_RESULT_TOTAL){
+    showMbtiFinalResult(mbtiStageMode(mbtiCount()));
   }
 }
 function complete(){
@@ -2255,15 +2300,15 @@ function complete(){
       if(hasSaved){ answered = true; correct = true; }
     }catch(e){}
   }
-  const d=getDone();
+  const d=isMbtiMode() ? mbtiSyncDoneFromAnswers() : getDone();
   const isCompletedDay = d.includes(l.day);
   if(isCompletedDay && isRenqingSeries()){
     if(showRenqingStageBreakIfNeeded(d.length)) return;
   }
   if(!answered){toast("先選一個答案");return}
   if(!isMbtiMode() && !correct){toast("要先選出正確答案，才能進下一關");return}
-  if(!d.includes(l.day))setDone([...d,l.day]);
-  const nd=getDone();
+  if(!d.includes(l.day))setDone([...d,Number(l.day || idx+1)]);
+  const nd=isMbtiMode() ? mbtiSyncDoneFromAnswers() : getDone();
   $("done").textContent = isMbtiMode() ? (nd.length < MBTI_FREE_RESULT_TOTAL ? `初階 ${nd.length}/${MBTI_FREE_RESULT_TOTAL}` : (nd.length < MBTI_ADVANCED_RESULT_TOTAL ? `進階 ${nd.length}/${MBTI_ADVANCED_RESULT_TOTAL}` : `完整 ${nd.length}/${TOTAL}`)) : `${nd.length}/${TOTAL}`;
   if(isMbtiMode()){
     const scores = mbtiRecalcScores();
@@ -2304,13 +2349,13 @@ function complete(){
 function canLeaveCurrent(){
   const l = lessons[idx];
   if(!l) return true;
-  const d = getDone();
+  const d = isMbtiMode() ? mbtiSyncDoneFromAnswers() : getDone();
   if(d.includes(l.day) || correct) return true;
   toast(isMbtiMode() ? "本題尚未選擇" : "本題尚未答對，不能跳開");
   return false;
 }
 function firstUnfinishedIndex(){
-  const d = getDone();
+  const d = isMbtiMode() ? mbtiSyncDoneFromAnswers() : getDone();
   const i = lessons.findIndex(x => !d.includes(x.day));
   return i >= 0 ? i : Math.max(0, lessons.length - 1);
 }
@@ -2388,8 +2433,9 @@ loadHeartTopic()
     if(idx >= lessons.length) idx = 0;
     const requestedStage = requestedRenqingStageFromUrl();
     const hasRequestedStage = requestedStage > 0 && applyStageParamOnLoad();
+    if(isMbtiMode()) mbtiSyncDoneFromAnswers();
     const firstTodo = firstUnfinishedIndex();
-    const doneList = getDone();
+    const doneList = isMbtiMode() ? mbtiSyncDoneFromAnswers() : getDone();
     const allDone = doneList.length >= lessons.length;
 
     // 有 URL stage=2/3... 時，必須停在指定關，不可再被 firstTodo 拉回第1關。
@@ -2408,7 +2454,7 @@ loadHeartTopic()
     alert("心靈問答載入失敗：\n" + (e.message || e));
   });
 
-console.log("[BookWide] heart-v8-review-only-completed", HEART_TOPIC_SLUG);
+console.log("[BookWide] heart-mbti-v3-selfchecked-select-report", HEART_TOPIC_SLUG);
 
 window.bwHeartResetThisTopic=function(){
   localStorage.removeItem("bw_heart_done_"+HEART_TOPIC_SLUG);
