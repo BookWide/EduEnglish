@@ -1154,6 +1154,30 @@ label{
     width:100%!important;
   }
 }
+
+
+/* === BookWide v50：Profile 照片品質規格 + MBTI 封面照 === */
+.mbtiCoverPreview{
+  width:min(360px,100%);
+  aspect-ratio:3/1;
+  border-radius:16px;
+  object-fit:cover;
+  object-position:center;
+  border:3px solid #fff;
+  box-shadow:0 14px 32px rgba(37,99,235,.14);
+  background:#eef4ff;
+  display:block;
+}
+.photoSpec{
+  margin-top:6px;
+  color:#64748b;
+  font-size:12px;
+  line-height:1.55;
+}
+@media(max-width:820px){
+  .mbtiCoverPreview{width:100%;border-radius:14px;}
+  .photoSpec{font-size:11.5px;}
+}
 </style>
 
 </head>
@@ -1174,7 +1198,18 @@ label{
           <div style="flex:1;min-width:0">
             <label>頭像</label>
             <input id="avatarFile" type="file" accept="image/*" class="input" />
-            <div class="hint">建議 JPG/PNG，系統會儲存為會員頭像</div><div id="avatarStatus" class="hint" style="margin-top:4px"></div>
+            <div class="hint">會員小頭像：建議 800×800，最低 400×400；系統會自動裁成正方形。</div><div id="avatarStatus" class="hint" style="margin-top:4px"></div>
+          </div>
+        </div>
+
+        <div class="center" style="margin-bottom:14px">
+          <img id="mbtiCoverPreview" class="mbtiCoverPreview" alt="MBTI cover" src="">
+          <div style="flex:1;min-width:0">
+            <label>MBTI 專屬封面照</label>
+            <input id="mbtiCoverFile" type="file" accept="image/*" class="input" />
+            <div class="hint">用於 MBTI 個人化分享封面；建議清楚半身／戶外橫圖，最低 1200×450。</div>
+            <div class="photoSpec">一般報告只用小頭像；這張封面照以後給「產生我的 MBTI 專屬封面」使用，避免把低品質頭像硬放大。</div>
+            <div id="mbtiCoverStatus" class="hint" style="margin-top:4px"></div>
           </div>
         </div>
 
@@ -1399,21 +1434,146 @@ label{
       el.textContent = text || '';
     }
 
-    function validateAvatarFile(file) {
+    function setMbtiCoverStatus(text, type = '') {
+      const el = $('#mbtiCoverStatus');
+      if (!el) return;
+      el.className = type === 'err' ? 'err' : type === 'ok' ? 'ok' : type === 'warn' ? 'warn' : 'hint';
+      el.textContent = text || '';
+    }
+
+    function setMbtiCoverCache(url) {
+      const v = String(url || '').trim();
+      if (!v) return;
+      try {
+        localStorage.setItem('mbti_cover_url', v);
+        localStorage.setItem('bw_mbti_cover_photo_url', v);
+        const old = JSON.parse(localStorage.getItem('bw_user_profile') || '{}');
+        localStorage.setItem('bw_user_profile', JSON.stringify({ ...old, mbti_cover_url: v, bw_mbti_cover_photo_url: v, updated_at: new Date().toISOString() }));
+      } catch (_e) {}
+    }
+
+    function clearMbtiCoverPreview() {
+      const img = $('#mbtiCoverPreview');
+      if (!img) return;
+      img.removeAttribute('src');
+    }
+
+    function setMbtiCoverPreview(url) {
+      const img = $('#mbtiCoverPreview');
+      if (!img) return;
+      const v = String(url || '').trim();
+      if (!v) {
+        clearMbtiCoverPreview();
+        return;
+      }
+      img.src = v;
+      setMbtiCoverCache(v);
+    }
+
+    function validateImageFile(file, opts) {
       if (!file) return;
       if (!/^image\//i.test(file.type || '')) {
-        throw new Error('頭像必須是圖片檔');
+        throw new Error((opts?.label || '照片') + '必須是圖片檔');
       }
-      const max = 6 * 1024 * 1024;
+      const max = (opts?.maxMB || 6) * 1024 * 1024;
       if (file.size > max) {
-        throw new Error('頭像檔案太大，請小於 6MB');
+        throw new Error((opts?.label || '照片') + '檔案太大，請小於 ' + (opts?.maxMB || 6) + 'MB');
       }
     }
 
-    function extFromFile(file) {
-      const raw = String(file?.name || '').split('.').pop() || '';
-      const ext = raw.toLowerCase();
-      return ext === 'png' ? 'png' : 'jpg';
+    function validateAvatarFile(file) {
+      validateImageFile(file, { label:'頭像', maxMB:6 });
+    }
+
+    function validateMbtiCoverFile(file) {
+      validateImageFile(file, { label:'MBTI 封面照', maxMB:8 });
+    }
+
+    function loadImageFromFile(file) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => resolve({ img, url });
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          reject(new Error('無法讀取照片，請換一張 JPG/PNG/WebP'));
+        };
+        img.src = url;
+      });
+    }
+
+    async function checkAvatarDimension(file) {
+      const { img, url } = await loadImageFromFile(file);
+      try {
+        if (img.width < 400 || img.height < 400) {
+          throw new Error('頭像解析度太低，請上傳至少 400×400 的照片');
+        }
+        const ratio = img.width / img.height;
+        if (ratio < 0.75 || ratio > 1.33) {
+          throw new Error('頭像比例不適合，建議上傳接近正方形的照片');
+        }
+        return { width: img.width, height: img.height };
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    async function checkMbtiCoverDimension(file) {
+      const { img, url } = await loadImageFromFile(file);
+      try {
+        if (img.width < 1200 || img.height < 450) {
+          throw new Error('MBTI 封面照解析度太低，請上傳至少 1200×450 的橫圖');
+        }
+        const ratio = img.width / img.height;
+        if (ratio < 1.8 || ratio > 3.6) {
+          throw new Error('MBTI 封面照比例不適合，建議橫圖約 2:1～3:1');
+        }
+        return { width: img.width, height: img.height };
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    function canvasToBlob(canvas, type = 'image/jpeg', quality = 0.88) {
+      return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('照片壓縮失敗')), type, quality);
+      });
+    }
+
+    async function cropImageFileToJpeg(file, targetW, targetH, quality = 0.88) {
+      const { img, url } = await loadImageFromFile(file);
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d', { alpha:false });
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, targetW, targetH);
+
+        const srcRatio = img.width / img.height;
+        const dstRatio = targetW / targetH;
+        let sx = 0, sy = 0, sw = img.width, sh = img.height;
+        if (srcRatio > dstRatio) {
+          sw = img.height * dstRatio;
+          sx = (img.width - sw) / 2;
+        } else {
+          sh = img.width / dstRatio;
+          sy = (img.height - sh) / 2;
+        }
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, targetW, targetH);
+        return await canvasToBlob(canvas, 'image/jpeg', quality);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    function makeLocalPreview(file, selector) {
+      const url = URL.createObjectURL(file);
+      const img = $(selector);
+      if (img) {
+        img.onload = () => URL.revokeObjectURL(url);
+        img.src = url;
+      }
     }
 
     const msg = $('#msg');
@@ -1643,6 +1803,7 @@ label{
         $('#wechat_id').value = data?.wechat_id ?? '';
         $('#address').value = data?.address ?? '';
         setAvatarPreview(data?.avatar_url || '');
+        await loadOptionalMbtiCover(currentUser.id);
 
         const rawDomainCode = data?.domain_code ?? '';
         const domainCode = rawDomainCode === 'lifestyle' ? 'travel' : rawDomainCode;
@@ -1697,18 +1858,45 @@ label{
       }
     }
 
+    async function loadOptionalMbtiCover(userId) {
+      try {
+        const { data, error } = await supabase
+          .from('profiles')
+          .select('mbti_cover_url')
+          .eq('id', userId)
+          .maybeSingle();
+        if (!error && data?.mbti_cover_url) setMbtiCoverPreview(data.mbti_cover_url);
+      } catch (_e) {
+        // profiles 尚未建立 mbti_cover_url 欄位時，不影響 Profile 主流程。
+      }
+    }
+
+    async function saveOptionalMbtiCoverUrl(userId, url) {
+      if (!url) return;
+      setMbtiCoverCache(url);
+      try {
+        await supabase
+          .from('profiles')
+          .update({ mbti_cover_url: url, updated_at: new Date().toISOString() })
+          .eq('id', userId);
+      } catch (_e) {
+        // 若資料庫尚未加 mbti_cover_url 欄位，先保留 localStorage，不阻斷儲存。
+      }
+    }
+
     async function uploadAvatar(user, file) {
       validateAvatarFile(file);
+      await checkAvatarDimension(file);
 
-      const ext = extFromFile(file);
-      const path = `${user.id}/avatar.${ext}`;
-      const contentType = ext === 'png' ? 'image/png' : 'image/jpeg';
+      const blob = await cropImageFileToJpeg(file, 800, 800, 0.88);
+      const path = `${user.id}/avatar.jpg`;
+      const contentType = 'image/jpeg';
 
-      setAvatarStatus('頭像上傳中…');
+      setAvatarStatus('頭像處理並上傳中…');
 
       const up = await supabase.storage
         .from('avatars')
-        .upload(path, file, {
+        .upload(path, blob, {
           upsert: true,
           contentType,
           cacheControl: '60'
@@ -1722,7 +1910,37 @@ label{
 
       const finalUrl = publicUrl + (publicUrl.includes('?') ? '&' : '?') + 'v=' + Date.now();
       setAvatarPreview(finalUrl);
-      setAvatarStatus('頭像已上傳', 'ok');
+      setAvatarStatus('頭像已上傳：已自動裁成 800×800', 'ok');
+      return finalUrl;
+    }
+
+    async function uploadMbtiCover(user, file) {
+      validateMbtiCoverFile(file);
+      await checkMbtiCoverDimension(file);
+
+      const blob = await cropImageFileToJpeg(file, 1800, 600, 0.90);
+      const path = `${user.id}/mbti-cover.jpg`;
+      const contentType = 'image/jpeg';
+
+      setMbtiCoverStatus('MBTI 封面照處理並上傳中…');
+
+      const up = await supabase.storage
+        .from('avatars')
+        .upload(path, blob, {
+          upsert: true,
+          contentType,
+          cacheControl: '60'
+        });
+
+      if (up.error) throw up.error;
+
+      const { data } = supabase.storage.from('avatars').getPublicUrl(path);
+      const publicUrl = data?.publicUrl || null;
+      if (!publicUrl) throw new Error('無法取得 MBTI 封面照公開網址');
+
+      const finalUrl = publicUrl + (publicUrl.includes('?') ? '&' : '?') + 'v=' + Date.now();
+      setMbtiCoverPreview(finalUrl);
+      setMbtiCoverStatus('MBTI 封面照已上傳：已自動裁成 1800×600', 'ok');
       return finalUrl;
     }
 
@@ -1762,6 +1980,13 @@ label{
           if (avatar_url) setAvatarPreview(avatar_url);
         }
 
+        const mbtiCoverFile = $('#mbtiCoverFile')?.files?.[0];
+        let mbti_cover_url = null;
+        if (mbtiCoverFile) {
+          mbti_cover_url = await uploadMbtiCover(currentUser, mbtiCoverFile);
+          if (mbti_cover_url) setMbtiCoverPreview(mbti_cover_url);
+        }
+
         const updateData = {
           display_name: $('#display_name').value.trim() || null,
           phone: $('#phone').value.trim() || null,
@@ -1795,6 +2020,8 @@ label{
 
         if (avatar_url) setAvatarCache(avatar_url);
         else if ($('#avatarPreview')?.src) setAvatarCache($('#avatarPreview').src);
+        if (mbti_cover_url) await saveOptionalMbtiCoverUrl(currentUser.id, mbti_cover_url);
+        else if ($('#mbtiCoverPreview')?.src) setMbtiCoverCache($('#mbtiCoverPreview').src);
 
         $('#onboarding_done_text').value = '已啟用學習控制台';
         applyProfileLock(true);
@@ -1826,7 +2053,7 @@ label{
     });
 
 
-    $('#avatarFile')?.addEventListener('change', () => {
+    $('#avatarFile')?.addEventListener('change', async () => {
       const file = $('#avatarFile').files?.[0];
       if (!file) {
         setAvatarStatus('');
@@ -1834,12 +2061,29 @@ label{
       }
       try {
         validateAvatarFile(file);
-        const localUrl = URL.createObjectURL(file);
-        $('#avatarPreview').src = localUrl;
-        setAvatarStatus('已選擇照片，按「儲存」後才會正式上傳', 'warn');
+        await checkAvatarDimension(file);
+        makeLocalPreview(file, '#avatarPreview');
+        setAvatarStatus('已選擇頭像，儲存時會自動裁成 800×800', 'warn');
       } catch (e) {
         $('#avatarFile').value = '';
         setAvatarStatus(e.message || String(e), 'err');
+      }
+    });
+
+    $('#mbtiCoverFile')?.addEventListener('change', async () => {
+      const file = $('#mbtiCoverFile').files?.[0];
+      if (!file) {
+        setMbtiCoverStatus('');
+        return;
+      }
+      try {
+        validateMbtiCoverFile(file);
+        await checkMbtiCoverDimension(file);
+        makeLocalPreview(file, '#mbtiCoverPreview');
+        setMbtiCoverStatus('已選擇 MBTI 封面照，儲存時會自動裁成 1800×600', 'warn');
+      } catch (e) {
+        $('#mbtiCoverFile').value = '';
+        setMbtiCoverStatus(e.message || String(e), 'err');
       }
     });
 
