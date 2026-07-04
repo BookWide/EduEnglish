@@ -1452,6 +1452,17 @@ label{
       } catch (_e) {}
     }
 
+    function setMbtiCoverOriginalCache(url) {
+      const v = String(url || '').trim();
+      if (!v) return;
+      try {
+        localStorage.setItem('mbti_cover_original_url', v);
+        localStorage.setItem('bw_mbti_cover_original_url', v);
+        const old = JSON.parse(localStorage.getItem('bw_user_profile') || '{}');
+        localStorage.setItem('bw_user_profile', JSON.stringify({ ...old, mbti_cover_original_url: v, bw_mbti_cover_original_url: v, updated_at: new Date().toISOString() }));
+      } catch (_e) {}
+    }
+
     function clearMbtiCoverPreview() {
       const img = $('#mbtiCoverPreview');
       if (!img) return;
@@ -1565,6 +1576,26 @@ label{
       }
     }
 
+
+
+    async function makeImageFileToJpeg(file, maxSide = 1800, quality = 0.92) {
+      const { img, url } = await loadImageFromFile(file);
+      try {
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+        const targetW = Math.max(1, Math.round(img.width * scale));
+        const targetH = Math.max(1, Math.round(img.height * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d', { alpha:false });
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, targetW, targetH);
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+        return await canvasToBlob(canvas, 'image/jpeg', quality);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
 
     async function makeMbtiCoverJpeg(file, targetW = 1800, targetH = 600, quality = 0.90) {
       const { img, url } = await loadImageFromFile(file);
@@ -1907,27 +1938,51 @@ label{
 
     async function loadOptionalMbtiCover(userId) {
       try {
-        const { data, error } = await supabase
+        let { data, error } = await supabase
           .from('profiles')
-          .select('mbti_cover_url')
+          .select('mbti_cover_url,mbti_cover_original_url')
           .eq('id', userId)
           .maybeSingle();
+
+        // 舊資料庫若還沒加 mbti_cover_original_url，退回只讀 mbti_cover_url。
+        if (error) {
+          const r = await supabase
+            .from('profiles')
+            .select('mbti_cover_url')
+            .eq('id', userId)
+            .maybeSingle();
+          data = r.data;
+          error = r.error;
+        }
+
         if (!error && data?.mbti_cover_url) setMbtiCoverPreview(data.mbti_cover_url);
+        if (!error && data?.mbti_cover_original_url) setMbtiCoverOriginalCache(data.mbti_cover_original_url);
       } catch (_e) {
-        // profiles 尚未建立 mbti_cover_url 欄位時，不影響 Profile 主流程。
+        // profiles 尚未建立 mbti_cover 欄位時，不影響 Profile 主流程。
       }
     }
 
-    async function saveOptionalMbtiCoverUrl(userId, url) {
+    async function saveOptionalMbtiCoverUrl(userId, url, originalUrl = '') {
       if (!url) return;
       setMbtiCoverCache(url);
+      if (originalUrl) setMbtiCoverOriginalCache(originalUrl);
       try {
-        await supabase
+        const payload = { mbti_cover_url: url, updated_at: new Date().toISOString() };
+        if (originalUrl) payload.mbti_cover_original_url = originalUrl;
+        const { error } = await supabase
           .from('profiles')
-          .update({ mbti_cover_url: url, updated_at: new Date().toISOString() })
+          .update(payload)
           .eq('id', userId);
+
+        // 舊資料庫若還沒加 mbti_cover_original_url，退回只寫寬版封面。
+        if (error && originalUrl) {
+          await supabase
+            .from('profiles')
+            .update({ mbti_cover_url: url, updated_at: new Date().toISOString() })
+            .eq('id', userId);
+        }
       } catch (_e) {
-        // 若資料庫尚未加 mbti_cover_url 欄位，先保留 localStorage，不阻斷儲存。
+        // 若資料庫尚未加 mbti_cover 欄位，先保留 localStorage，不阻斷儲存。
       }
     }
 
@@ -1965,30 +2020,45 @@ label{
       validateMbtiCoverFile(file);
       await checkMbtiCoverDimension(file);
 
-      const blob = await makeMbtiCoverJpeg(file, 1800, 600, 0.90);
-      const path = `${user.id}/mbti-cover.jpg`;
+      const originalBlob = await makeImageFileToJpeg(file, 1800, 0.92);
+      const coverBlob = await makeMbtiCoverJpeg(file, 1800, 600, 0.90);
+      const originalPath = `${user.id}/mbti-cover-original.jpg`;
+      const coverPath = `${user.id}/mbti-cover.jpg`; // 保留舊路徑，MBTI 頁不用大改也能讀到寬版封面
       const contentType = 'image/jpeg';
 
       setMbtiCoverStatus('MBTI 封面照處理並上傳中…');
 
-      const up = await supabase.storage
+      const upOriginal = await supabase.storage
         .from('avatars')
-        .upload(path, blob, {
+        .upload(originalPath, originalBlob, {
           upsert: true,
           contentType,
           cacheControl: '60'
         });
+      if (upOriginal.error) throw upOriginal.error;
 
-      if (up.error) throw up.error;
+      const upCover = await supabase.storage
+        .from('avatars')
+        .upload(coverPath, coverBlob, {
+          upsert: true,
+          contentType,
+          cacheControl: '60'
+        });
+      if (upCover.error) throw upCover.error;
 
-      const { data } = supabase.storage.from('avatars').getPublicUrl(path);
-      const publicUrl = data?.publicUrl || null;
-      if (!publicUrl) throw new Error('無法取得 MBTI 封面照公開網址');
+      const { data: originalData } = supabase.storage.from('avatars').getPublicUrl(originalPath);
+      const { data: coverData } = supabase.storage.from('avatars').getPublicUrl(coverPath);
+      const originalPublicUrl = originalData?.publicUrl || null;
+      const coverPublicUrl = coverData?.publicUrl || null;
+      if (!coverPublicUrl) throw new Error('無法取得 MBTI 封面照公開網址');
 
-      const finalUrl = publicUrl + (publicUrl.includes('?') ? '&' : '?') + 'v=' + Date.now();
-      setMbtiCoverPreview(finalUrl);
-      setMbtiCoverStatus('MBTI 封面照已上傳：已自動轉成 1800×600', 'ok');
-      return finalUrl;
+      const stamp = Date.now();
+      const originalUrl = originalPublicUrl ? originalPublicUrl + (originalPublicUrl.includes('?') ? '&' : '?') + 'v=' + stamp : '';
+      const coverUrl = coverPublicUrl + (coverPublicUrl.includes('?') ? '&' : '?') + 'v=' + stamp;
+      setMbtiCoverPreview(coverUrl);
+      if (originalUrl) setMbtiCoverOriginalCache(originalUrl);
+      setMbtiCoverStatus('MBTI 封面照已上傳：原圖已保留，寬版封面已自動轉成 1800×600', 'ok');
+      return { coverUrl, originalUrl };
     }
 
     function validateForm() {
@@ -2029,8 +2099,11 @@ label{
 
         const mbtiCoverFile = $('#mbtiCoverFile')?.files?.[0];
         let mbti_cover_url = null;
+        let mbti_cover_original_url = null;
         if (mbtiCoverFile) {
-          mbti_cover_url = await uploadMbtiCover(currentUser, mbtiCoverFile);
+          const mbtiCoverResult = await uploadMbtiCover(currentUser, mbtiCoverFile);
+          mbti_cover_url = mbtiCoverResult?.coverUrl || mbtiCoverResult || null;
+          mbti_cover_original_url = mbtiCoverResult?.originalUrl || null;
           if (mbti_cover_url) setMbtiCoverPreview(mbti_cover_url);
         }
 
@@ -2067,7 +2140,7 @@ label{
 
         if (avatar_url) setAvatarCache(avatar_url);
         else if ($('#avatarPreview')?.src) setAvatarCache($('#avatarPreview').src);
-        if (mbti_cover_url) await saveOptionalMbtiCoverUrl(currentUser.id, mbti_cover_url);
+        if (mbti_cover_url) await saveOptionalMbtiCoverUrl(currentUser.id, mbti_cover_url, mbti_cover_original_url);
         else if ($('#mbtiCoverPreview')?.src) setMbtiCoverCache($('#mbtiCoverPreview').src);
 
         $('#onboarding_done_text').value = '已啟用學習控制台';
@@ -2127,7 +2200,7 @@ label{
         validateMbtiCoverFile(file);
         await checkMbtiCoverDimension(file);
         makeLocalPreview(file, '#mbtiCoverPreview');
-        setMbtiCoverStatus('已選擇 MBTI 封面照，儲存時會自動轉成 1800×600；直式照會補背景', 'warn');
+        setMbtiCoverStatus('已選擇 MBTI 封面照；儲存時會保留原圖，並另外產生 1800×600 寬版封面', 'warn');
       } catch (e) {
         $('#mbtiCoverFile').value = '';
         setMbtiCoverStatus(e.message || String(e), 'err');
