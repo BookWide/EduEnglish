@@ -1208,7 +1208,7 @@ label{
             <label>MBTI 專屬封面照</label>
             <input id="mbtiCoverFile" type="file" accept="image/*" class="input" />
             <div class="hint">用於 MBTI 個人化分享封面；可用直式半身照或橫圖，長邊至少 1200、短邊至少 600。</div>
-            <div class="photoSpec">一般報告只用小頭像；這張封面照會自動轉成 1800×600，直式照會用背景模糊延展，不再硬擋。</div>
+            <div class="photoSpec">一般報告只用小頭像；這張封面照會自動轉成 1800×600；直式照會放大置右，左側保留模糊背景給 MBTI 標題。</div>
             <div id="mbtiCoverStatus" class="hint" style="margin-top:4px"></div>
           </div>
         </div>
@@ -1597,6 +1597,20 @@ label{
       }
     }
 
+    function drawCoverImage(ctx, img, dx, dy, dw, dh, focusX = 0.5, focusY = 0.46) {
+      const srcRatio = img.width / img.height;
+      const dstRatio = dw / dh;
+      let sx = 0, sy = 0, sw = img.width, sh = img.height;
+      if (srcRatio > dstRatio) {
+        sw = img.height * dstRatio;
+        sx = Math.max(0, Math.min(img.width - sw, img.width * focusX - sw / 2));
+      } else {
+        sh = img.width / dstRatio;
+        sy = Math.max(0, Math.min(img.height - sh, img.height * focusY - sh / 2));
+      }
+      ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
+    }
+
     async function makeMbtiCoverJpeg(file, targetW = 1800, targetH = 600, quality = 0.90) {
       const { img, url } = await loadImageFromFile(file);
       try {
@@ -1607,41 +1621,59 @@ label{
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, targetW, targetH);
 
-        // 先用原圖 cover 填滿整張封面，再模糊，解決直式照片左右空白問題。
-        const srcRatio = img.width / img.height;
-        const dstRatio = targetW / targetH;
-        let sx = 0, sy = 0, sw = img.width, sh = img.height;
-        if (srcRatio > dstRatio) {
-          sw = img.height * dstRatio;
-          sx = (img.width - sw) / 2;
-        } else {
-          sh = img.width / dstRatio;
-          sy = (img.height - sh) / 2;
-        }
+        // 背景：原圖放大 cover 鋪滿並模糊，直式照不會出現空白邊。
         ctx.save();
-        ctx.filter = 'blur(22px) saturate(1.08) brightness(1.02)';
-        ctx.drawImage(img, sx, sy, sw, sh, -36, -36, targetW + 72, targetH + 72);
+        ctx.filter = 'blur(24px) saturate(1.10) brightness(1.04)';
+        drawCoverImage(ctx, img, -42, -42, targetW + 84, targetH + 84, 0.52, 0.46);
         ctx.restore();
 
-        // 再疊一層淡白，讓封面給文字使用時不會太雜。
+        // 左側保留給 MBTI 標題文字；右側人物區保持乾淨。
         const grad = ctx.createLinearGradient(0, 0, targetW, 0);
-        grad.addColorStop(0, 'rgba(255,255,255,0.30)');
-        grad.addColorStop(0.45, 'rgba(255,255,255,0.14)');
-        grad.addColorStop(1, 'rgba(255,255,255,0.04)');
+        grad.addColorStop(0, 'rgba(255,255,255,0.68)');
+        grad.addColorStop(0.30, 'rgba(255,255,255,0.36)');
+        grad.addColorStop(0.58, 'rgba(255,255,255,0.10)');
+        grad.addColorStop(1, 'rgba(255,255,255,0.00)');
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, targetW, targetH);
 
-        // 主照片完整放進封面，不硬裁人像；直式圖會保留人物全貌。
-        const scale = Math.min(targetW / img.width, targetH / img.height);
-        const dw = img.width * scale;
-        const dh = img.height * scale;
-        const dx = (targetW - dw) / 2;
-        const dy = (targetH - dh) / 2;
-        ctx.drawImage(img, dx, dy, dw, dh);
+        const srcRatio = img.width / img.height;
+        const isPortrait = srcRatio < 1.15;
+
+        if (isPortrait) {
+          // 直式照：不要再縮成中間小圖；改成右側放大裁切，人物臉與上半身更有存在感。
+          const fw = Math.round(targetW * 0.56);
+          const fh = targetH;
+          const fx = Math.round(targetW * 0.42);
+          const fy = 0;
+          drawCoverImage(ctx, img, fx, fy, fw, fh, 0.54, 0.47);
+
+          // 輕微羽化左邊接縫，避免像硬貼一張直式證件照。
+          const seam = ctx.createLinearGradient(fx - targetW * 0.08, 0, fx + targetW * 0.10, 0);
+          seam.addColorStop(0, 'rgba(255,255,255,0.18)');
+          seam.addColorStop(0.55, 'rgba(255,255,255,0.04)');
+          seam.addColorStop(1, 'rgba(255,255,255,0.00)');
+          ctx.fillStyle = seam;
+          ctx.fillRect(fx - targetW * 0.08, 0, targetW * 0.18, targetH);
+        } else {
+          // 橫圖：直接以 cover 方式產生乾淨寬版封面。
+          drawCoverImage(ctx, img, 0, 0, targetW, targetH, 0.5, 0.46);
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, 0, targetW, targetH);
+        }
 
         return await canvasToBlob(canvas, 'image/jpeg', quality);
       } finally {
         URL.revokeObjectURL(url);
+      }
+    }
+
+    async function makeMbtiCoverGeneratedPreview(file) {
+      const blob = await makeMbtiCoverJpeg(file, 900, 300, 0.88);
+      const url = URL.createObjectURL(blob);
+      const img = $('#mbtiCoverPreview');
+      if (img) {
+        img.onload = () => URL.revokeObjectURL(url);
+        img.src = url;
       }
     }
 
@@ -2199,8 +2231,8 @@ label{
       try {
         validateMbtiCoverFile(file);
         await checkMbtiCoverDimension(file);
-        makeLocalPreview(file, '#mbtiCoverPreview');
-        setMbtiCoverStatus('已選擇 MBTI 封面照；儲存時會保留原圖，並另外產生 1800×600 寬版封面', 'warn');
+        await makeMbtiCoverGeneratedPreview(file);
+        setMbtiCoverStatus('已選擇 MBTI 封面照；預覽已放大人物，儲存時會保留原圖並另產生 1800×600 寬版封面', 'warn');
       } catch (e) {
         $('#mbtiCoverFile').value = '';
         setMbtiCoverStatus(e.message || String(e), 'err');
