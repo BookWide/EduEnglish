@@ -1207,8 +1207,8 @@ label{
           <div style="flex:1;min-width:0">
             <label>MBTI 專屬封面照</label>
             <input id="mbtiCoverFile" type="file" accept="image/*" class="input" />
-            <div class="hint">用於 MBTI 個人化分享封面；建議清楚半身／戶外橫圖，最低 1200×450。</div>
-            <div class="photoSpec">一般報告只用小頭像；這張封面照以後給「產生我的 MBTI 專屬封面」使用，避免把低品質頭像硬放大。</div>
+            <div class="hint">用於 MBTI 個人化分享封面；可用直式半身照或橫圖，長邊至少 1200、短邊至少 600。</div>
+            <div class="photoSpec">一般報告只用小頭像；這張封面照會自動轉成 1800×600，直式照會用背景模糊延展，不再硬擋。</div>
             <div id="mbtiCoverStatus" class="hint" style="margin-top:4px"></div>
           </div>
         </div>
@@ -1521,14 +1521,12 @@ label{
     async function checkMbtiCoverDimension(file) {
       const { img, url } = await loadImageFromFile(file);
       try {
-        if (img.width < 1200 || img.height < 450) {
-          throw new Error('MBTI 封面照解析度太低，請上傳至少 1200×450 的橫圖');
+        const longSide = Math.max(img.width, img.height);
+        const shortSide = Math.min(img.width, img.height);
+        if (longSide < 1200 || shortSide < 600) {
+          throw new Error('MBTI 封面照解析度太低，請上傳長邊至少 1200、短邊至少 600 的清楚照片');
         }
-        const ratio = img.width / img.height;
-        if (ratio < 1.8 || ratio > 3.6) {
-          throw new Error('MBTI 封面照比例不適合，建議橫圖約 2:1～3:1');
-        }
-        return { width: img.width, height: img.height };
+        return { width: img.width, height: img.height, mode: img.width >= img.height ? 'landscape' : 'portrait' };
       } finally {
         URL.revokeObjectURL(url);
       }
@@ -1561,6 +1559,55 @@ label{
           sy = (img.height - sh) / 2;
         }
         ctx.drawImage(img, sx, sy, sw, sh, 0, 0, targetW, targetH);
+        return await canvasToBlob(canvas, 'image/jpeg', quality);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+
+    async function makeMbtiCoverJpeg(file, targetW = 1800, targetH = 600, quality = 0.90) {
+      const { img, url } = await loadImageFromFile(file);
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d', { alpha:false });
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, targetW, targetH);
+
+        // 先用原圖 cover 填滿整張封面，再模糊，解決直式照片左右空白問題。
+        const srcRatio = img.width / img.height;
+        const dstRatio = targetW / targetH;
+        let sx = 0, sy = 0, sw = img.width, sh = img.height;
+        if (srcRatio > dstRatio) {
+          sw = img.height * dstRatio;
+          sx = (img.width - sw) / 2;
+        } else {
+          sh = img.width / dstRatio;
+          sy = (img.height - sh) / 2;
+        }
+        ctx.save();
+        ctx.filter = 'blur(22px) saturate(1.08) brightness(1.02)';
+        ctx.drawImage(img, sx, sy, sw, sh, -36, -36, targetW + 72, targetH + 72);
+        ctx.restore();
+
+        // 再疊一層淡白，讓封面給文字使用時不會太雜。
+        const grad = ctx.createLinearGradient(0, 0, targetW, 0);
+        grad.addColorStop(0, 'rgba(255,255,255,0.30)');
+        grad.addColorStop(0.45, 'rgba(255,255,255,0.14)');
+        grad.addColorStop(1, 'rgba(255,255,255,0.04)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, targetW, targetH);
+
+        // 主照片完整放進封面，不硬裁人像；直式圖會保留人物全貌。
+        const scale = Math.min(targetW / img.width, targetH / img.height);
+        const dw = img.width * scale;
+        const dh = img.height * scale;
+        const dx = (targetW - dw) / 2;
+        const dy = (targetH - dh) / 2;
+        ctx.drawImage(img, dx, dy, dw, dh);
+
         return await canvasToBlob(canvas, 'image/jpeg', quality);
       } finally {
         URL.revokeObjectURL(url);
@@ -1918,7 +1965,7 @@ label{
       validateMbtiCoverFile(file);
       await checkMbtiCoverDimension(file);
 
-      const blob = await cropImageFileToJpeg(file, 1800, 600, 0.90);
+      const blob = await makeMbtiCoverJpeg(file, 1800, 600, 0.90);
       const path = `${user.id}/mbti-cover.jpg`;
       const contentType = 'image/jpeg';
 
@@ -1940,7 +1987,7 @@ label{
 
       const finalUrl = publicUrl + (publicUrl.includes('?') ? '&' : '?') + 'v=' + Date.now();
       setMbtiCoverPreview(finalUrl);
-      setMbtiCoverStatus('MBTI 封面照已上傳：已自動裁成 1800×600', 'ok');
+      setMbtiCoverStatus('MBTI 封面照已上傳：已自動轉成 1800×600', 'ok');
       return finalUrl;
     }
 
@@ -2080,7 +2127,7 @@ label{
         validateMbtiCoverFile(file);
         await checkMbtiCoverDimension(file);
         makeLocalPreview(file, '#mbtiCoverPreview');
-        setMbtiCoverStatus('已選擇 MBTI 封面照，儲存時會自動裁成 1800×600', 'warn');
+        setMbtiCoverStatus('已選擇 MBTI 封面照，儲存時會自動轉成 1800×600；直式照會補背景', 'warn');
       } catch (e) {
         $('#mbtiCoverFile').value = '';
         setMbtiCoverStatus(e.message || String(e), 'err');
