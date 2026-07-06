@@ -139,9 +139,11 @@ function mediaHTML(url,fallback){
   const cands=encodeURIComponent(JSON.stringify(window.__CANDS||[]));
   if(raw.startsWith('yt:')){
     const parts=raw.split('|'), id=parts[0].slice(3);
-    const start=parseInt(parts[1]||'0',10)||0, end=parseInt(parts[2]||'0',10)||0;
-    const src=`https://www.youtube.com/embed/${encodeURIComponent(id)}?enablejsapi=1&playsinline=1&rel=0&modestbranding=1&start=${start}`;
-    return `<iframe id="mainMedia" class="media ytFrame" src="${src}" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen data-idx="0" data-cands="${cands}" data-ytid="${esc(id)}" data-ytstart="${start}" data-ytend="${end}"></iframe><div class="videoHint ytHint">YouTube 段落播放：到 end 自動暫停</div>`;
+    const start=parseFloat(parts[1]||'0')||0, end=parseFloat(parts[2]||'0')||0;
+    const s=Math.max(0,Math.floor(start)), e=end>start?Math.ceil(end):0;
+    const origin=encodeURIComponent(location.origin);
+    const src=`https://www.youtube.com/embed/${encodeURIComponent(id)}?enablejsapi=1&playsinline=1&rel=0&modestbranding=1&start=${s}${e?`&end=${e}`:''}&origin=${origin}`;
+    return `<iframe id="mainMedia" class="media ytFrame" src="${src}" allow="autoplay; accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" allowfullscreen data-idx="0" data-cands="${cands}" data-ytid="${esc(id)}" data-ytstart="${start}" data-ytend="${end}"></iframe><div class="videoHint ytHint">YouTube 段落播放：到 end 自動停，可循環</div>`;
   }
   if(url && low.includes('.mp4'))return `<video id="mainMedia" class="media" src="${esc(url)}" playsinline preload="metadata" poster="${esc(fallback||'')}" data-idx="0" data-cands="${cands}"></video><div class="videoHint">影片可播放 / 暫停</div>`;
   if(url)return `<img id="mainMedia" class="media" src="${esc(url)}" alt="media">`;
@@ -155,22 +157,44 @@ function cueReaction(txt,tag){const lines=textLines(txt);const beats=lines.slice
 function currentMedia(){return document.getElementById('mainMedia')}
 
 function clearYtTimer(){if(ytTimer){clearInterval(ytTimer);ytTimer=null}}
-function onYouTubeIframeAPIReady(){const v=currentMedia();if(v&&v.tagName==='IFRAME')setupYouTubePlayer(v)}
+function stopAtSegmentEnd(){
+  if(!ytPlayer||!ytReady||!ytSegEnd||ytSegEnd<=ytSegStart)return;
+  try{
+    const t=ytPlayer.getCurrentTime?ytPlayer.getCurrentTime():0;
+    if(t>=ytSegEnd-0.12){
+      if(loopOne){
+        ytPlayer.seekTo(ytSegStart,true);
+        ytPlayer.playVideo();
+        playBtn.textContent='⏸ 暫停';
+      }else{
+        ytPlayer.pauseVideo();
+        ytPlaying=false;
+        playBtn.textContent='▶ 播放';
+        clearYtTimer();
+      }
+    }
+  }catch(e){}
+}
+function startYtWatch(){clearYtTimer();ytTimer=setInterval(stopAtSegmentEnd,120)}
+function onYouTubeIframeAPIReady(){const v=currentMedia();if(v&&v.tagName==='IFRAME')setupYouTubePlayer(v,false)}
 function ytCommand(cmd,args=[]){try{if(ytPlayer&&ytPlayer[cmd])ytPlayer[cmd](...(args||[]));else{const v=currentMedia();if(v&&v.tagName==='IFRAME'&&v.contentWindow)v.contentWindow.postMessage(JSON.stringify({event:'command',func:cmd,args:args}),'*')}}catch(e){}}
 function setupYouTubePlayer(iframe, autoPlay=false){
- clearYtTimer();ytPlayer=null;ytReady=false;ytPlaying=false;ytAutoPlayOnReady=!!autoPlay;playBtn.textContent='▶ 播放';
+ clearYtTimer();
+ try{if(ytPlayer&&ytPlayer.destroy)ytPlayer.destroy()}catch(e){}
+ ytPlayer=null;ytReady=false;ytPlaying=false;ytAutoPlayOnReady=!!autoPlay;playBtn.textContent='▶ 播放';
  ytSegStart=parseFloat(iframe.dataset.ytstart||'0')||0;ytSegEnd=parseFloat(iframe.dataset.ytend||'0')||0;
- const make=()=>{if(!window.YT||!YT.Player){setTimeout(make,120);return}
+ const make=()=>{if(!window.YT||!YT.Player){setTimeout(make,100);return}
   try{ytPlayer=new YT.Player(iframe,{events:{onReady:()=>{
    ytReady=true;
    try{
     ytPlayer.seekTo(ytSegStart,true);
-    if(ytAutoPlayOnReady){ytPlayer.playVideo();playBtn.textContent='⏸ 暫停'}
+    if(ytAutoPlayOnReady){ytPlayer.playVideo();playBtn.textContent='⏸ 暫停';startYtWatch()}
     else ytPlayer.pauseVideo();
    }catch(e){}
   },onStateChange:(ev)=>{
-   if(ev.data===YT.PlayerState.PLAYING){ytPlaying=true;playBtn.textContent='⏸ 暫停';clearYtTimer();ytTimer=setInterval(()=>{try{const t=ytPlayer.getCurrentTime?ytPlayer.getCurrentTime():0;if(ytSegEnd>ytSegStart&&t>=ytSegEnd){if(loopOne){ytPlayer.seekTo(ytSegStart,true);ytPlayer.playVideo()}else{ytPlayer.pauseVideo();ytPlaying=false;playBtn.textContent='▶ 播放';clearYtTimer()}}}catch(e){}},180)}
-   else if(ev.data===YT.PlayerState.PAUSED||ev.data===YT.PlayerState.ENDED){ytPlaying=false;playBtn.textContent='▶ 播放';if(ev.data===YT.PlayerState.ENDED&&loopOne){try{ytPlayer.seekTo(ytSegStart,true);ytPlayer.playVideo()}catch(e){}}else clearYtTimer()}
+   if(ev.data===YT.PlayerState.PLAYING){ytPlaying=true;playBtn.textContent='⏸ 暫停';startYtWatch()}
+   else if(ev.data===YT.PlayerState.PAUSED){ytPlaying=false;playBtn.textContent='▶ 播放';clearYtTimer()}
+   else if(ev.data===YT.PlayerState.ENDED){ytPlaying=false;playBtn.textContent='▶ 播放';if(loopOne){try{ytPlayer.seekTo(ytSegStart,true);ytPlayer.playVideo();startYtWatch()}catch(e){}}else clearYtTimer()}
   }}})}catch(e){}
  };
  make();
@@ -188,30 +212,30 @@ function enhanceMedia(autoPlay=false){
 function playSegment(){
  const v=currentMedia();if(!v)return;
  if(v.tagName==='IFRAME'){
-  if(!ytPlayer){setupYouTubePlayer(v,true);return}
-  try{const t=ytPlayer.getCurrentTime?ytPlayer.getCurrentTime():0;if(ytSegEnd>ytSegStart&&(t<ytSegStart||t>=ytSegEnd))ytPlayer.seekTo(ytSegStart,true);ytPlayer.playVideo();playBtn.textContent='⏸ 暫停'}catch(e){ytCommand('seekTo',[ytSegStart,true]);ytCommand('playVideo')}
+  if(!ytPlayer||!ytReady){setupYouTubePlayer(v,true);return}
+  try{ytPlayer.seekTo(ytSegStart,true);ytPlayer.playVideo();playBtn.textContent='⏸ 暫停';startYtWatch()}catch(e){ytCommand('seekTo',[ytSegStart,true]);ytCommand('playVideo')}
   return;
  }
- if(v.tagName==='VIDEO'){if(v.currentTime<0.05)v.currentTime=0;v.play().catch(()=>{})}
+ if(v.tagName==='VIDEO'){v.currentTime=0;v.play().catch(()=>{})}
 }
 function togglePlay(){
  const v=currentMedia();if(!v)return;
  if(v.tagName==='IFRAME'){
-  if(!ytPlayer){setupYouTubePlayer(v,true);return}
-  try{const state=ytPlayer.getPlayerState?ytPlayer.getPlayerState():-1;if(state===YT.PlayerState.PLAYING){ytPlayer.pauseVideo();clearYtTimer()}else playSegment()}catch(e){playSegment()}
+  if(!ytPlayer||!ytReady){setupYouTubePlayer(v,true);return}
+  try{const state=ytPlayer.getPlayerState?ytPlayer.getPlayerState():-1;if(state===YT.PlayerState.PLAYING){ytPlayer.pauseVideo();clearYtTimer();playBtn.textContent='▶ 播放'}else playSegment()}catch(e){playSegment()}
   return;
  }
  if(v.tagName!=='VIDEO')return;if(v.paused)v.play().catch(()=>{});else v.pause()
 }
 function replay(){
- const v=currentMedia();if(v&&v.tagName==='IFRAME'){if(!ytPlayer){setupYouTubePlayer(v,true);return}try{ytPlayer.seekTo(ytSegStart,true);ytPlayer.playVideo();playBtn.textContent='⏸ 暫停'}catch(e){ytCommand('seekTo',[ytSegStart,true]);ytCommand('playVideo')}return}
+ const v=currentMedia();if(v&&v.tagName==='IFRAME'){playSegment();return}
  if(v&&v.tagName==='VIDEO'){v.currentTime=0;v.play().catch(()=>{})}
 }
 function buildCues(t,sc,mainZh){const reaction=cueReaction(mainZh,t.tag);return [{time:'00:00',en:sc.en,zh:sc.zh},{time:'00:04',en:'Reaction beat',zh:reaction},{time:'00:08',en:'Mood tag',zh:t.tag}]}
-function render(){const type=me.value, scene=sceneSel(), t=TYPES[type], sc=SCENES[scene];localStorage.setItem('mbti_last_type',type);const cands=mediaCandidates(type,scene);window.__CANDS=cands;const media=cands[0]||'';const fallback=actorState.src||fallbackPhoto;const mainZh=scene==='see'?t.see:t.msg;const compactZh=compactCaption(mainZh);storyCard.innerHTML=`${mediaHTML(media,fallback)}<div class="dim"></div><div class="typeTop"><div class="typeChip"><b>${esc(type)} </b><span>${esc(t.zh)} / ${esc(t.en)}</span></div><div class="thumbWrap"><img class="topThumb" src="${esc(actorState.src||fallbackPhoto)}"><div class="sceneChip">${esc(sc.zh)}</div></div></div><div class="caption"><div class="zh">${esc(compactZh)}</div><span class="tag">${esc(t.tag)}</span></div>`;enhanceMedia();
+function render(){const type=me.value, scene=sceneSel(), t=TYPES[type], sc=SCENES[scene];localStorage.setItem('mbti_last_type',type);const cands=mediaCandidates(type,scene);window.__CANDS=cands;const media=cands[0]||'';const fallback=actorState.src||fallbackPhoto;const mainZh=scene==='see'?t.see:t.msg;const compactZh=compactCaption(mainZh);storyCard.innerHTML=`${mediaHTML(media,fallback)}<div class="dim"></div><div class="typeTop"><div class="typeChip"><b>${esc(type)} </b><span>${esc(t.zh)} / ${esc(t.en)}</span></div><div class="thumbWrap"><img class="topThumb" src="${esc(actorState.src||fallbackPhoto)}"><div class="sceneChip">${esc(sc.zh)}</div></div></div><div class="caption"><div class="zh">${esc(compactZh)}</div><span class="tag">${esc(t.tag)}</span></div>`;enhanceMedia(true);
 langPanel.innerHTML=`<div class="subtitleNow"><button class="speak" onclick="speak('${esc(t.lineEN)}','en')">🔊</button><h2>可跟讀句 / Practice line</h2><p class="bigEN">${esc(t.lineEN)}</p><p class="lineJP">${esc(t.lineJA)}</p><p class="lineZH">${esc(t.lineZH)}</p></div>`;const cues=buildCues(t,sc,mainZh);cueList.innerHTML=cues.map((c,i)=>`<div class="cueItem ${i===0?'active':''}"><div class="cueTime">${c.time}</div><div class="cueText"><b>${esc(c.en)}</b><span>${esc(c.zh)}</span></div></div>`).join('');mediaMode.textContent='媒體來源：'+(media||'Profile / 示意圖')+'｜備援 '+cands.length+' 個';}
 function sceneSel(){return document.getElementById('scene').value}
-playBtn.onclick=togglePlay;replayBtn.onclick=replay;prevBtn.onclick=()=>{curIdx=Math.max(0,curIdx-1);replay()};nextBtn.onclick=()=>{curIdx++;replay()};loopBtn.onclick=()=>{loopOne=!loopOne;loopBtn.classList.toggle('green',loopOne);loopBtn.textContent=loopOne?'✅ 段落循環':'🔁 段落循環'};coinBtn.onclick=()=>{let n=parseInt(localStorage.getItem('bw_guest_coins')||'0',10);if(n>0){n--;localStorage.setItem('bw_guest_coins',String(n));coinState.textContent='已扣｜餘 '+n}else{coinState.textContent='未扣｜餘額不足'}};speedRange.oninput=()=>{speedVal.textContent=parseFloat(speedRange.value).toFixed(2)+'x';const v=currentMedia();if(v&&v.tagName==='VIDEO')v.playbackRate=parseFloat(speedRange.value)};
+playBtn.onclick=togglePlay;replayBtn.onclick=replay;prevBtn.onclick=()=>{curIdx=Math.max(0,curIdx-1);replay()};nextBtn.onclick=()=>{curIdx++;replay()};loopBtn.onclick=()=>{loopOne=!loopOne;loopBtn.classList.toggle('green',loopOne);loopBtn.textContent=loopOne?'✅ 段落循環':'🔁 段落循環';const v=currentMedia();if(v&&v.tagName==='IFRAME'&&ytPlayer){try{const st=ytPlayer.getPlayerState?ytPlayer.getPlayerState():-1;if(st===YT.PlayerState.PLAYING)startYtWatch()}catch(e){}}};coinBtn.onclick=()=>{let n=parseInt(localStorage.getItem('bw_guest_coins')||'0',10);if(n>0){n--;localStorage.setItem('bw_guest_coins',String(n));coinState.textContent='已扣｜餘 '+n}else{coinState.textContent='未扣｜餘額不足'}};speedRange.oninput=()=>{speedVal.textContent=parseFloat(speedRange.value).toFixed(2)+'x';const v=currentMedia();if(v&&v.tagName==='VIDEO')v.playbackRate=parseFloat(speedRange.value)};
 fillTypes();['me','scene','mediaUrl'].forEach(id=>document.getElementById(id).addEventListener('change',render));buildBtn.onclick=render;reloadPhotoBtn.onclick=async()=>{await loadPhoto(true);render()};Promise.all([loadPhoto(),loadR2List(),loadYouTubeList()]).then(render);
 </script>
 </body></html>
