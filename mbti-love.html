@@ -1313,18 +1313,64 @@ function drawWrapped(ctx,text,x,y,maxWidth,font,lineHeight,color,limitLines){
   take.forEach((ln,i)=>ctx.fillText(ln,x,y+i*lineHeight));
   return y+take.length*lineHeight;
 }
+const REPORT_IMG_CACHE = new Map();
+function bgUrlOf(el){
+  if(!el) return '';
+  try{
+    const bg = getComputedStyle(el).backgroundImage || '';
+    const m = bg.match(/url\((['"]?)(.*?)\1\)/i);
+    return m ? String(m[2]||'').trim() : '';
+  }catch(e){ return ''; }
+}
+function currentRenderedPersonaUrls(){
+  const out = document.getElementById('output') || document;
+  const nodes = out.querySelectorAll('.result .personaPhoto');
+  return [bgUrlOf(nodes[0]), bgUrlOf(nodes[1])];
+}
+function currentRenderedCoverUrl(){
+  const out = document.getElementById('output') || document;
+  const img = out.querySelector('.rightPane .profileMedia img, .profileMedia img');
+  return String((img && (img.currentSrc || img.src)) || '').trim();
+}
+async function ensureCanvasReportAssetUrls(me,pa){
+  try{ await initProfileCover(); }catch(e){}
+  const until = Date.now() + 8000;
+  let a='', b='', c='';
+  while(Date.now() < until){
+    const current = currentRenderedPersonaUrls();
+    a = current[0] || photoOf(me) || a;
+    b = current[1] || photoOf(pa) || b;
+    c = currentRenderedCoverUrl() || profileMbtiCoverUrl() || c;
+    if(a && b && c) break;
+    if(a && b && (c || profileMbtiCoverUrl() || a || b)) break;
+    await new Promise(r=>setTimeout(r,250));
+  }
+  return {
+    a: a || photoOf(me) || '',
+    b: b || photoOf(pa) || '',
+    c: c || profileMbtiCoverUrl() || a || b || photoOf(me) || photoOf(pa) || ''
+  };
+}
 function loadCanvasImage(src){
   src=String(src||'').trim();
   if(!src) return Promise.resolve(null);
-  return new Promise(resolve=>{
+  if(REPORT_IMG_CACHE.has(src)) return REPORT_IMG_CACHE.get(src);
+  const promise = new Promise(resolve=>{
+    let settled=false;
+    const done=(img)=>{ if(settled) return; settled=true; clearTimeout(timer); resolve(img||null); };
     const img=new Image();
     img.crossOrigin='anonymous';
     img.referrerPolicy='no-referrer';
-    img.onload=()=>resolve(img);
-    img.onerror=()=>resolve(null);
+    img.onload=async()=>{
+      try{ if(img.decode) await img.decode(); }catch(e){}
+      done(img);
+    };
+    img.onerror=()=>done(null);
+    const timer=setTimeout(()=>done(null),10000);
     img.src=src;
-    setTimeout(()=>resolve(null),2200);
   });
+  REPORT_IMG_CACHE.set(src,promise);
+  return promise;
 }
 function drawCoverImage(ctx,img,x,y,w,h,posX=.5,posY=.5){
   if(!img || !img.naturalWidth){
@@ -1389,8 +1435,9 @@ async function buildReportCanvas(){
   const pa=document.getElementById('partner')?.value||'ISTJ';
   const relation=document.getElementById('relation')?.value||'交往';
   const r=buildCard(me,pa,relation);
-  const cover=profileMbtiCoverUrl() || photoOf(me) || photoOf(pa) || '';
-  const [imgA,imgB,imgCover]=await Promise.all([loadCanvasImage(photoOf(me)),loadCanvasImage(photoOf(pa)),loadCanvasImage(cover)]);
+  const assetUrls = await ensureCanvasReportAssetUrls(me,pa);
+  const cover=assetUrls.c || profileMbtiCoverUrl() || photoOf(me) || photoOf(pa) || '';
+  const [imgA,imgB,imgCover]=await Promise.all([loadCanvasImage(assetUrls.a || photoOf(me)),loadCanvasImage(assetUrls.b || photoOf(pa)),loadCanvasImage(cover)]);
   const W=1200,H=1900,m=32,cardW=W-m*2;
   const canvas=document.createElement('canvas');canvas.width=W;canvas.height=H;const ctx=canvas.getContext('2d');
   ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);
@@ -1613,3 +1660,4 @@ function render(){
 
 <!-- BookWide mbti-love v18: compact result, merged explanation, human-readable scene cards. -->
 <!-- BookWide mbti-love v28: print CSS reset and compact A4 print output. -->
+<!-- BookWide mbti-love v36: share report waits for rendered photo assets and uses longer image load timeout. -->
