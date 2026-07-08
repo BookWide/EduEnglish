@@ -77,6 +77,10 @@ function planLabel(r){
 }
 function approveText(r){ return isScholarship(r) ? '審核通過並開通' : '確認開通'; }
 function approveConfirmText(r){ return isScholarship(r) ? '確認通過這筆助學申請、開通會員、發金幣並寄出通知信？' : '確認要開通這筆訂閱、發金幣並寄出通知信？'; }
+function scholarshipCoins(r){
+  const n = Number(r.coins || r.coins_added || 50);
+  return Number.isFinite(n) && n > 0 ? n : 50;
+}
 async function call(action, payload={}){
   const { data:sess } = await sb.auth.getSession();
   const token = sess?.session?.access_token;
@@ -129,105 +133,6 @@ async function load(){
   }
   catch(e){ $('result').textContent='❌ 讀取失敗：'+(e.message||e); }
 }
-function pickUserIdFromApprove(r, j){
-  return r.user_id || r.buyer_id || r.member_id || r.profile_id || r.auth_user_id ||
-    j.user_id || j.buyer_id || j.member_id || j.profile_id || j.auth_user_id ||
-    j?.request?.user_id || j?.request?.buyer_id || j?.data?.user_id || j?.data?.buyer_id || '';
-}
-function scholarshipCoins(r){
-  const n = Number(r.coins || r.coins_added || r.coins_granted || 50);
-  return Number.isFinite(n) && n > 0 ? n : 50;
-}
-async function findUserIdByEmail(email){
-  const e = String(email || '').trim().toLowerCase();
-  if(!e) return '';
-  try{
-    const { data, error } = await sb
-      .from('profiles')
-      .select('id,email')
-      .ilike('email', e)
-      .maybeSingle();
-    if(!error && data?.id) return data.id;
-  }catch(_e){}
-  return '';
-}
-async function ensureScholarshipVirtualOrder(r, approveResult){
-  // 重點：助學通過後，不能只有金幣；要補 0 元 aid 訂單，subscription/profile 才會認定已開通。
-  const coins = scholarshipCoins(r);
-  let userId = pickUserIdFromApprove(r, approveResult || {});
-  if(!userId) userId = await findUserIdByEmail(r.email);
-  if(!userId){
-    throw new Error('找不到會員 user_id，無法自動補助學虛擬訂單。請確認 subscription_requests 有 user_id，或 profiles 有 email 欄位。');
-  }
-
-  const nowIso = new Date().toISOString();
-  const expireIso = new Date(Date.now() + 30*24*60*60*1000).toISOString();
-
-  // 防重複：同會員仍有效的 aid paid 訂單存在，就不再補。
-  try{
-    const { data: exist, error: existErr } = await sb
-      .from('orders')
-      .select('id,expire_at,status,period')
-      .or(`buyer_id.eq.${userId},user_id.eq.${userId}`)
-      .eq('status','paid')
-      .eq('period','aid')
-      .gt('expire_at', nowIso)
-      .limit(1);
-    if(!existErr && Array.isArray(exist) && exist.length){
-      return { skipped:true, reason:'已存在有效 aid 虛擬訂單', order:exist[0] };
-    }
-  }catch(_e){}
-
-  const item = {
-    type:'aid',
-    name:'助學免費資格',
-    coins,
-    request_id:r.id || null,
-    slip_no:r.slip_no || null,
-    payment_ref:r.payment_ref || null
-  };
-
-  const fullPayload = {
-    buyer_id:userId,
-    user_id:userId,
-    status:'paid',
-    paid_at:nowIso,
-    expire_at:expireIso,
-    period:'aid',
-    total:0,
-    total_cents:0,
-    subtotal:0,
-    unit_price:0,
-    quantity:1,
-    coins_added:coins,
-    coins_granted:coins,
-    referral_code:r.referral_code || null,
-    items:[item]
-  };
-
-  let ins = await sb.from('orders').insert(fullPayload).select('id,expire_at,period,status').single();
-
-  // 舊 orders schema 若缺 coins_granted / total_cents / items 等欄位，退回核心欄位，至少讓前台認定訂閱有效。
-  if(ins.error){
-    const minimalPayload = {
-      buyer_id:userId,
-      user_id:userId,
-      status:'paid',
-      paid_at:nowIso,
-      expire_at:expireIso,
-      period:'aid',
-      total:0,
-      subtotal:0,
-      unit_price:0,
-      quantity:1,
-      coins_added:coins
-    };
-    ins = await sb.from('orders').insert(minimalPayload).select('id,expire_at,period,status').single();
-  }
-
-  if(ins.error) throw ins.error;
-  return { inserted:true, order:ins.data };
-}
 async function approveReq(id){
   const r = (currentRows || []).find(x => String(x.id) === String(id)) || {};
   const scholar = isScholarship(r);
@@ -235,30 +140,19 @@ async function approveReq(id){
   if(note===null) return;
   if(!confirm(approveConfirmText(r))) return;
   try{
-    $('result').textContent = scholar ? '助學開通中：更新申請、發金幣、補 0 元 aid 虛擬訂單…' : '開通中…';
+    $('result').textContent = scholar ? '助學開通中：交由 Edge Function 判斷有效訂閱、補金幣/補訂單…' : '開通中…';
 
-    const approvePayload = scholar ? {
+    // 核心：前端只送 approve；真正寫入 subscription_requests / orders / profiles / coin_transactions
+    // 全部交給 Supabase Edge Function subscription-request，用 service role 執行。
+    const j = await call('approve', {
       requestId:id,
       adminNote:note,
-      scholarship:true,
-      virtualOrder:true,
-      period:'aid',
-      amount:0,
+      scholarship:scholar,
       coins:scholarshipCoins(r),
       expireDays:30
-    } : { requestId:id, adminNote:note };
+    });
 
-    const j = await call('approve', approvePayload);
-    let extra = null;
-
-    if(scholar){
-      extra = await ensureScholarshipVirtualOrder(r, j);
-    }
-
-    $('result').textContent = '✅ 開通完成' +
-      (scholar ? '\n✅ 助學虛擬訂單處理完成' : '') +
-      '\n\nEdge Function 回應：\n' + JSON.stringify(j,null,2) +
-      (extra ? '\n\n虛擬訂單結果：\n' + JSON.stringify(extra,null,2) : '');
+    $('result').textContent = '✅ 開通完成\n\nEdge Function 回應：\n' + JSON.stringify(j,null,2);
     await load();
   }
   catch(e){ $('result').textContent='❌ 開通失敗：'+(e.message||e); }
