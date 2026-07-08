@@ -3078,56 +3078,60 @@ function bwHeartMbtiIsMobileLike(){
     return !!(mobileUA || coarse || small);
   }catch(e){ return false; }
 }
-async function bwHeartEnsureJsPdf(){
-  if(window.jspdf && window.jspdf.jsPDF) return window.jspdf.jsPDF;
-  if(window.jsPDF) return window.jsPDF;
+function bwHeartCanvasToBlob(canvas){
+  return new Promise(resolve=>{
+    try{
+      if(canvas.toBlob) canvas.toBlob(b=>resolve(b),'image/png');
+      else fetch(canvas.toDataURL('image/png')).then(r=>r.blob()).then(resolve).catch(()=>resolve(null));
+    }catch(e){ resolve(null); }
+  });
+}
+function bwHeartHtmlToFrame(html){
+  const frame=document.createElement('iframe');
+  frame.style.position='fixed';
+  frame.style.left='-99999px';
+  frame.style.top='0';
+  frame.style.width='794px';
+  frame.style.height='1123px';
+  frame.style.border='0';
+  frame.style.opacity='0';
+  frame.style.pointerEvents='none';
+  document.body.appendChild(frame);
+  const doc=frame.contentDocument || frame.contentWindow.document;
+  doc.open(); doc.write(html); doc.close();
+  return frame;
+}
+async function bwHeartEnsureHtml2Canvas(){
+  if(window.html2canvas) return window.html2canvas;
   await new Promise((resolve, reject)=>{
-    const old=document.getElementById('bw-heart-jspdf-loader');
+    const old=document.getElementById('bw-heart-html2canvas-loader');
     if(old){
       old.addEventListener('load', ()=>resolve(), {once:true});
-      old.addEventListener('error', ()=>reject(new Error('jsPDF load error')), {once:true});
+      old.addEventListener('error', ()=>reject(new Error('html2canvas load error')), {once:true});
       return;
     }
     const s=document.createElement('script');
-    s.id='bw-heart-jspdf-loader';
-    s.src='https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js';
+    s.id='bw-heart-html2canvas-loader';
+    s.src='https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';
     s.onload=()=>resolve();
-    s.onerror=()=>reject(new Error('jsPDF load error'));
+    s.onerror=()=>reject(new Error('html2canvas load error'));
     document.head.appendChild(s);
   });
-  return (window.jspdf && window.jspdf.jsPDF) || window.jsPDF;
+  return window.html2canvas;
 }
-function bwHeartHtmlToPlainPage(html){
-  const box=document.createElement('iframe');
-  box.style.position='fixed';
-  box.style.left='-99999px';
-  box.style.top='0';
-  box.style.width='794px';
-  box.style.height='1123px';
-  box.style.border='0';
-  document.body.appendChild(box);
-  const doc=box.contentDocument || box.contentWindow.document;
-  doc.open(); doc.write(html); doc.close();
-  return box;
-}
-async function bwHeartMobileSharePrintPdf(forceMode){
+async function bwHeartMobileSharePrintPng(forceMode){
   try{
     try{ await bwMbtiEnsureProfilePhotoUrls(); }catch(_e){}
     const mode = forceMode || window.BW_MBTI_CURRENT_REPORT_MODE || mbtiStageMode(mbtiCount());
     const type = mbtiTypeFromScores(mbtiScoresForMode(mode));
-    const html = mbtiOnePagePrintHtml(mode);
-    const frame = bwHeartHtmlToPlainPage(html);
-    await new Promise(r=>setTimeout(r, 220));
 
+    // 跟前面成功的 mbti-love 一樣：手機走 PNG 分享，不走 PDF。
+    const html = mbtiOnePagePrintHtml(mode);
+    const frame = bwHeartHtmlToFrame(html);
+    await new Promise(r=>setTimeout(r, 260));
+
+    await bwHeartEnsureHtml2Canvas();
     const page = frame.contentDocument.querySelector('.page') || frame.contentDocument.body;
-    if(!window.html2canvas){
-      await new Promise((resolve, reject)=>{
-        const s=document.createElement('script');
-        s.src='https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';
-        s.onload=resolve; s.onerror=reject;
-        document.head.appendChild(s);
-      });
-    }
     const canvas = await html2canvas(page, {
       backgroundColor:'#ffffff',
       scale:2,
@@ -3137,37 +3141,43 @@ async function bwHeartMobileSharePrintPdf(forceMode){
       width:794,
       height:1123,
       windowWidth:794,
-      windowHeight:1123
+      windowHeight:1123,
+      scrollX:0,
+      scrollY:0
     });
-    frame.remove();
+    try{ frame.remove(); }catch(_e){}
 
-    const jsPDFCtor = await bwHeartEnsureJsPdf();
-    const pdf = new jsPDFCtor({orientation:'p', unit:'pt', format:'a4'});
-    const pageW = pdf.internal.pageSize.getWidth();
-    const pageH = pdf.internal.pageSize.getHeight();
-    pdf.addImage(canvas.toDataURL('image/jpeg',0.95),'JPEG',0,0,pageW,pageH,undefined,'FAST');
-    const blob = pdf.output('blob');
-    const file = new File([blob], `BookWide-MBTI-${type}-report.pdf`, {type:'application/pdf'});
+    const blob = await bwHeartCanvasToBlob(canvas);
+    if(!blob) return false;
+    const file = new File([blob], `BookWide-MBTI-${type}-report.png`, {type:'image/png'});
 
+    // 這裡不要用 PDF；PNG 在手機分享面板才會有「列印」。
     if(navigator.canShare && navigator.canShare({files:[file]})){
-      await navigator.share({title:'BookWide MBTI Report', text:'BookWide MBTI report PDF', files:[file]});
+      await navigator.share({title:'BookWide MBTI Report', text:'BookWide MBTI 報告', files:[file]});
       return true;
     }
+    if(navigator.share){
+      try{
+        await navigator.share({title:'BookWide MBTI Report', text:'BookWide MBTI 報告', files:[file]});
+        return true;
+      }catch(_e){}
+    }
+
     const url=URL.createObjectURL(blob);
     const a=document.createElement('a');
     a.href=url; a.download=file.name; a.click();
     setTimeout(()=>URL.revokeObjectURL(url),1500);
     return true;
   }catch(e){
-    console.warn('mobile MBTI PDF share/print failed', e);
-    try{ if(typeof toast==='function') toast('手機產生 PDF 失敗，請重新按一次'); }catch(_e){}
+    console.warn('mobile MBTI PNG share/print failed', e);
+    try{ if(typeof toast==='function') toast('手機列印圖產生失敗，請重新按一次'); }catch(_e){}
     return false;
   }
 }
 
 async function mbtiPrintReport(forceMode){
   if(bwHeartMbtiIsMobileLike()){
-    return await bwHeartMobileSharePrintPdf(forceMode);
+    return await bwHeartMobileSharePrintPng(forceMode);
   }
   // v57: 列印前先同步 Profile 專屬封面，避免直接列印時還吃 16 型預設圖。
   try{ await bwMbtiEnsureProfilePhotoUrls(); }catch(_e){}
@@ -3902,9 +3912,10 @@ console.log("[BookWide] heart-topic-once-charge-v5", HEART_TOPIC_SLUG);
 console.log("[BookWide] mbti-v32-one-snapshot-only-a4", HEART_TOPIC_SLUG);
 
 
-// v81: mobile print button uses PDF share/print path; remove unused personal cover button.
+// v82: mobile print follows the working PNG-share flow; cover button removed.
 (function(){
   function hookHeartMbtiPrint(){
+    document.querySelectorAll('#bwMbtiPersonalCoverFloat,.bwMbtiPersonalCover,[data-mbti-action="cover"]').forEach(el=>el.remove());
     document.querySelectorAll('#bwMbtiPrintFloat,#bwMbtiPrint,.bwMbtiPrint,[data-mbti-action="print"]').forEach(btn=>{
       if(btn.dataset.bwHeartPrintHook==='1') return;
       btn.dataset.bwHeartPrintHook='1';
@@ -3916,7 +3927,6 @@ console.log("[BookWide] mbti-v32-one-snapshot-only-a4", HEART_TOPIC_SLUG);
       btn.addEventListener('pointerup', run, {capture:true, passive:false});
       btn.addEventListener('touchend', run, {capture:true, passive:false});
     });
-    document.querySelectorAll('#bwMbtiPersonalCoverFloat,.bwMbtiPersonalCover,[data-mbti-action="cover"]').forEach(el=>el.remove());
   }
   document.addEventListener('DOMContentLoaded', hookHeartMbtiPrint);
   document.addEventListener('click', function(){ setTimeout(hookHeartMbtiPrint, 0); }, true);
