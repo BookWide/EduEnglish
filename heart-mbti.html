@@ -3372,6 +3372,93 @@ function bwHeartMobileSharePrintNativePng(forceMode){
   }
 }
 
+
+
+/* === BookWide v96: MBTI report save-to-profile before/open/print === */
+async function bwMbtiSaveReportToProfile(mode, src){
+  try{
+    mode = String(mode || window.BW_MBTI_CURRENT_REPORT_MODE || mbtiStageMode(mbtiCount()) || 'initial').trim().toLowerCase();
+    const scores = (typeof mbtiScoresForMode === 'function') ? mbtiScoresForMode(mode) : (typeof mbtiRecalcScores === 'function' ? mbtiRecalcScores() : null);
+    const type = String((typeof mbtiTypeFromScores === 'function' ? mbtiTypeFromScores(scores) : '') || '').toUpperCase();
+    if(!type || type.length !== 4) return { ok:false, skipped:true, reason:'missing_mbti_type' };
+
+    const titleZh = (typeof mbtiTypeName === 'function') ? mbtiTypeName(type) : '';
+    const titleEn = (typeof mbtiTypeNameEn === 'function') ? mbtiTypeNameEn(type) : '';
+    const nickEn  = (typeof mbtiTypeNickEn === 'function') ? mbtiTypeNickEn(type) : '';
+    const done = Number((src && (src.textContent||'').match(/完成題數\s*([0-9]+)\s*\/\s*40/) || [])[1] || mbtiCount() || 0);
+
+    const zodiacAnimal = String(localStorage.getItem('zodiac_animal') || localStorage.getItem('bw_zodiac_animal') || '').trim();
+    const westernZodiac = String(localStorage.getItem('western_zodiac') || localStorage.getItem('bw_western_zodiac') || localStorage.getItem('constellation') || '').trim();
+
+    if(!window.supabase || !supabase || !supabase.auth){
+      return { ok:false, skipped:true, reason:'supabase_not_ready' };
+    }
+    const { data: userRes, error: userErr } = await supabase.auth.getUser();
+    if(userErr) throw userErr;
+    const user = userRes && userRes.user;
+    if(!user || !user.id) return { ok:false, skipped:true, reason:'not_logged_in' };
+
+    const payload = {
+      mbti_code: type,
+      mbti_title: [titleZh, titleEn].filter(Boolean).join(' / '),
+      personality_report_json: {
+        source: 'heart-mbti',
+        mode,
+        mbti_code: type,
+        mbti_title_zh: titleZh,
+        mbti_title_en: titleEn,
+        mbti_nick_en: nickEn,
+        completed_count: done,
+        scores: scores || {},
+        report_text: src ? String(src.textContent || '').slice(0, 6000) : '',
+        saved_at: new Date().toISOString()
+      },
+      personality_report_updated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    if(zodiacAnimal) payload.zodiac_animal = zodiacAnimal;
+    if(westernZodiac) payload.western_zodiac = westernZodiac;
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .update(payload)
+      .eq('id', user.id)
+      .select('id,mbti_code,mbti_title,personality_report_updated_at')
+      .maybeSingle();
+    if(error) throw error;
+    try{ localStorage.setItem('bw_last_mbti_profile_save', JSON.stringify({user_id:user.id, ...payload})); }catch(_e){}
+    try{ console.log('[BookWide MBTI] profile saved', data || payload); }catch(_e){}
+    return { ok:true, data:data || payload };
+  }catch(e){
+    try{ console.warn('[BookWide MBTI] save profile failed', e); }catch(_e){}
+    try{ if(typeof toast === 'function') toast('MBTI 回存失敗：' + (e.message || e)); }catch(_e){}
+    return { ok:false, error:String(e && e.message || e) };
+  }
+}
+
+async function bwMbtiSaveCurrentReportToProfile(mode){
+  const src = document.getElementById('bwMbtiPrintableReport') || document.querySelector('.bwMbtiReport');
+  return bwMbtiSaveReportToProfile(mode, src);
+}
+
+(function(){
+  document.addEventListener('keydown', function(e){
+    const isPrintKey = (e.ctrlKey || e.metaKey) && String(e.key || '').toLowerCase() === 'p';
+    if(!isPrintKey) return;
+    const reward = document.getElementById('reward');
+    const isOpen = reward && reward.classList.contains('show') && (document.getElementById('bwMbtiPrintableReport') || document.querySelector('.bwMbtiReport'));
+    if(!isOpen) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if(e.stopImmediatePropagation) e.stopImmediatePropagation();
+    mbtiPrintReport(window.BW_MBTI_CURRENT_REPORT_MODE || 'initial');
+  }, true);
+
+  window.addEventListener('beforeprint', function(){
+    try{ bwMbtiSaveCurrentReportToProfile(window.BW_MBTI_CURRENT_REPORT_MODE || 'initial'); }catch(_e){}
+  });
+})();
+
 async function mbtiPrintReport(forceMode){
   // v57: 列印前先同步 Profile 專屬封面，避免直接列印時還吃 16 型預設圖。
   try{ await bwMbtiEnsureProfilePhotoUrls(); }catch(_e){}
@@ -3381,6 +3468,8 @@ async function mbtiPrintReport(forceMode){
     try{ if(typeof toast === 'function') toast('目前沒有可列印的報告'); }catch(e){}
     return;
   }
+
+  try{ await bwMbtiSaveReportToProfile(forceMode || window.BW_MBTI_CURRENT_REPORT_MODE || 'initial', src); }catch(_e){}
 
   const textAll = src.textContent || '';
   const currentReportMode = String(forceMode || window.BW_MBTI_CURRENT_REPORT_MODE || '').trim().toLowerCase();
@@ -3765,6 +3854,7 @@ async function mbtiOpenMilestoneReport(count){
   if(box) box.classList.add('bwMbtiReportBox');
   if(title) title.textContent = `BookWide 16型性格傾向報告`;
   if(text){ text.innerHTML = mbtiReportPageHtml(mode); bwMbtiRemoveDuplicateSnapshotNodes(text); }
+  try{ await bwMbtiSaveCurrentReportToProfile(mode); }catch(_e){}
   if(ok) ok.style.display = 'none';
   if(stageActions){
     stageActions.hidden = true;
