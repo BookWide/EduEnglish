@@ -3078,98 +3078,158 @@ function bwHeartMbtiIsMobileLike(){
     return !!(mobileUA || coarse || small);
   }catch(e){ return false; }
 }
-function bwHeartCanvasToBlob(canvas){
-  return new Promise(resolve=>{
-    try{
-      if(canvas.toBlob) canvas.toBlob(b=>resolve(b),'image/png');
-      else fetch(canvas.toDataURL('image/png')).then(r=>r.blob()).then(resolve).catch(()=>resolve(null));
-    }catch(e){ resolve(null); }
-  });
+function bwHeartRoundRect(ctx,x,y,w,h,r,fill,stroke){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  if(fill){ctx.fillStyle=fill;ctx.fill();}
+  if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=1;ctx.stroke();}
 }
-function bwHeartHtmlToFrame(html){
-  const frame=document.createElement('iframe');
-  frame.style.position='fixed';
-  frame.style.left='-99999px';
-  frame.style.top='0';
-  frame.style.width='794px';
-  frame.style.height='1123px';
-  frame.style.border='0';
-  frame.style.opacity='0';
-  frame.style.pointerEvents='none';
-  document.body.appendChild(frame);
-  const doc=frame.contentDocument || frame.contentWindow.document;
-  doc.open(); doc.write(html); doc.close();
-  return frame;
+function bwHeartWrapText(ctx, text, x, y, maxW, lineH, maxLines){
+  const words = String(text||'').split(/(\s+)/).filter(Boolean);
+  let line='', lines=[];
+  for(const word of words){
+    const test=line+word;
+    if(ctx.measureText(test).width>maxW && line){
+      lines.push(line.trim()); line=word.trim();
+      if(maxLines && lines.length>=maxLines) break;
+    }else line=test;
+  }
+  if((!maxLines || lines.length<maxLines) && line) lines.push(line.trim());
+  lines.slice(0,maxLines||lines.length).forEach((l,i)=>ctx.fillText(l,x,y+i*lineH));
+  return y + Math.min(lines.length,maxLines||lines.length)*lineH;
 }
-async function bwHeartEnsureHtml2Canvas(){
-  if(window.html2canvas) return window.html2canvas;
-  await new Promise((resolve, reject)=>{
-    const old=document.getElementById('bw-heart-html2canvas-loader');
-    if(old){
-      old.addEventListener('load', ()=>resolve(), {once:true});
-      old.addEventListener('error', ()=>reject(new Error('html2canvas load error')), {once:true});
-      return;
-    }
-    const s=document.createElement('script');
-    s.id='bw-heart-html2canvas-loader';
-    s.src='https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';
-    s.onload=()=>resolve();
-    s.onerror=()=>reject(new Error('html2canvas load error'));
-    document.head.appendChild(s);
-  });
-  return window.html2canvas;
+function bwHeartCanvasPngBlobSync(canvas){
+  const data = canvas.toDataURL('image/png');
+  const raw = atob(data.split(',')[1]);
+  const arr = new Uint8Array(raw.length);
+  for(let i=0;i<raw.length;i++) arr[i]=raw.charCodeAt(i);
+  return new Blob([arr], {type:'image/png'});
 }
-async function bwHeartMobileSharePrintPng(forceMode){
+function bwHeartReportOwnerText(){
   try{
-    try{ await bwMbtiEnsureProfilePhotoUrls(); }catch(_e){}
+    const owner = (typeof bwMbtiOwnerLine === 'function') ? bwMbtiOwnerLine() : '';
+    return owner || 'BookWide user';
+  }catch(e){ return 'BookWide user'; }
+}
+function bwHeartMobileSharePrintNativePng(forceMode){
+  try{
     const mode = forceMode || window.BW_MBTI_CURRENT_REPORT_MODE || mbtiStageMode(mbtiCount());
-    const type = mbtiTypeFromScores(mbtiScoresForMode(mode));
+    const scores = mbtiScoresForMode(mode);
+    const type = mbtiTypeFromScores(scores);
+    const nameZh = mbtiTypeNameZh(type);
+    const nameEn = mbtiTypeNameEn(type);
+    const nickZh = (typeof mbtiTypeNickZh === 'function') ? mbtiTypeNickZh(type) : '';
+    const nickEn = (typeof mbtiTypeNickEn === 'function') ? mbtiTypeNickEn(type) : '';
+    const report = (typeof mbtiReportForType === 'function') ? mbtiReportForType(type) : {};
+    const doneMap = {initial:10, advanced:20, full:40};
+    const stageZh = mode === 'full' ? '完整 40 題報告' : (mode === 'advanced' ? '進階 20 題報告' : '初階 10 題快測');
+    const confidenceZh = mode === 'full' ? '完整分析' : (mode === 'advanced' ? '中高參考' : '快速參考');
+    const W=1200,H=1650,m=42,cardW=W-m*2;
+    const canvas=document.createElement('canvas');
+    canvas.width=W; canvas.height=H;
+    const ctx=canvas.getContext('2d');
+    ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
+    ctx.textBaseline='top';
 
-    // 跟前面成功的 mbti-love 一樣：手機走 PNG 分享，不走 PDF。
-    const html = mbtiOnePagePrintHtml(mode);
-    const frame = bwHeartHtmlToFrame(html);
-    await new Promise(r=>setTimeout(r, 260));
+    let y=36;
+    ctx.fillStyle='#071225';
+    bwHeartRoundRect(ctx,m,y,cardW,248,18,'#0b1f38','#d6a437');
+    ctx.fillStyle='#fff';
+    ctx.font='900 38px Arial, "Noto Sans TC", sans-serif';
+    ctx.fillText('BookWide 16型性格傾向報告',m+32,y+28);
+    ctx.font='900 58px Arial, "Noto Sans TC", sans-serif';
+    ctx.fillText(`${type}｜${nameZh}`,m+32,y+88);
+    ctx.font='900 28px Arial, "Noto Sans TC", sans-serif';
+    ctx.fillStyle='#fde68a';
+    ctx.fillText(`${nameEn} / ${nickEn}`,m+32,y+154);
+    ctx.font='800 22px Arial, "Noto Sans TC", sans-serif';
+    ctx.fillStyle='#dbeafe';
+    ctx.fillText(`${nickZh}｜${stageZh}`,m+32,y+194);
+    y += 276;
 
-    await bwHeartEnsureHtml2Canvas();
-    const page = frame.contentDocument.querySelector('.page') || frame.contentDocument.body;
-    const canvas = await html2canvas(page, {
-      backgroundColor:'#ffffff',
-      scale:2,
-      useCORS:true,
-      allowTaint:true,
-      logging:false,
-      width:794,
-      height:1123,
-      windowWidth:794,
-      windowHeight:1123,
-      scrollX:0,
-      scrollY:0
+    bwHeartRoundRect(ctx,m,y,cardW,104,14,'#fff','#d1d5db');
+    const now=new Date();
+    const today=`${now.getFullYear()}/${String(now.getMonth()+1).padStart(2,'0')}/${String(now.getDate()).padStart(2,'0')} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+    const meta=[
+      ['報告對象', bwHeartReportOwnerText()],
+      ['報告階段', stageZh],
+      ['完成題數', `${doneMap[mode]||10} / 40`],
+      ['信心度', confidenceZh],
+      ['產生時間', today]
+    ];
+    const cw=cardW/meta.length;
+    meta.forEach((it,i)=>{
+      const x=m+i*cw;
+      if(i){ctx.strokeStyle='#e5e7eb';ctx.beginPath();ctx.moveTo(x,y+16);ctx.lineTo(x,y+88);ctx.stroke();}
+      ctx.font='800 16px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#64748b';ctx.fillText(it[0],x+18,y+18);
+      ctx.font='900 22px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#111827';
+      bwHeartWrapText(ctx,it[1],x+18,y+48,cw-36,24,2);
     });
-    try{ frame.remove(); }catch(_e){}
+    y += 128;
 
-    const blob = await bwHeartCanvasToBlob(canvas);
-    if(!blob) return false;
-    const file = new File([blob], `BookWide-MBTI-${type}-report.png`, {type:'image/png'});
+    const pct=(a,b)=>{const t=(Number(a)||0)+(Number(b)||0);return t?Math.round((Number(a)||0)*100/t):50;};
+    const scoreData=[
+      ['能量方向','Energy','E','I','外放','內收'],
+      ['資訊偏好','Information','S','N','實感','聯想'],
+      ['決策方式','Decision','T','F','理性','感受'],
+      ['行動節奏','Pace','J','P','收斂','彈性']
+    ];
+    const sw=(cardW-36)/4;
+    scoreData.forEach((s,i)=>{
+      const x=m+i*(sw+12);
+      bwHeartRoundRect(ctx,x,y,sw,126,14,'#fff','#d1d5db');
+      const pa=pct(scores[s[2]],scores[s[3]]);
+      ctx.font='900 20px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#111827';ctx.fillText(s[0],x+16,y+14);
+      ctx.font='800 13px Arial, sans-serif';ctx.fillStyle='#64748b';ctx.fillText(s[1],x+16,y+40);
+      ctx.font='800 15px Arial, sans-serif';ctx.fillStyle='#334155';ctx.fillText(`${s[2]} ${scores[s[2]]||0} : ${s[3]} ${scores[s[3]]||0}`,x+16,y+62);
+      bwHeartRoundRect(ctx,x+16,y+86,sw-32,10,5,'#e2e8f0',null);
+      bwHeartRoundRect(ctx,x+16,y+86,(sw-32)*pa/100,10,5,'#2563eb',null);
+      ctx.font='800 12px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#475569';ctx.fillText(`${s[4]} ${pa}% / ${s[5]} ${100-pa}%`,x+16,y+102);
+    });
+    y += 156;
 
-    // 這裡不要用 PDF；PNG 在手機分享面板才會有「列印」。
+    const sections=[
+      ['你的第一印象','First impression', report.first_impression, report.first_impression_en],
+      ['你的思考模式','Thinking style', report.thinking, report.thinking_en],
+      ['你的互動模式','Interaction style', report.interaction, report.interaction_en],
+      ['適合的 BookWide 學習方式','BookWide learning path', report.bookwide_path, report.bookwide_path_en || 'Use short daily practice and repeatable phrases to turn insight into action.']
+    ];
+    sections.forEach((sec,idx)=>{
+      const x=m+(idx%2)*((cardW-18)/2+18);
+      const yy=y+Math.floor(idx/2)*260;
+      const ww=(cardW-18)/2;
+      bwHeartRoundRect(ctx,x,yy,ww,238,14,'#fff','#d1d5db');
+      ctx.font='900 24px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#92400e';ctx.fillText(sec[0],x+18,yy+16);
+      ctx.font='800 15px Arial, sans-serif';ctx.fillStyle='#64748b';ctx.fillText(sec[1],x+18,yy+46);
+      ctx.font='800 18px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#111827';
+      let yy2=bwHeartWrapText(ctx,sec[2]||'',x+18,yy+78,ww-36,26,4);
+      ctx.font='700 15px Arial, sans-serif';ctx.fillStyle='#475569';
+      bwHeartWrapText(ctx,sec[3]||'',x+18,yy2+8,ww-36,21,3);
+    });
+    y += 542;
+
+    ctx.strokeStyle='#e5e7eb';ctx.beginPath();ctx.moveTo(m,H-90);ctx.lineTo(m+cardW,H-90);ctx.stroke();
+    ctx.font='900 20px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#b45309';ctx.fillText('BookWide',m,H-66);
+    ctx.font='800 18px Arial, sans-serif';ctx.fillStyle='#334155';ctx.fillText('bookwide.net',m+120,H-64);
+    ctx.font='800 14px Arial, sans-serif';ctx.fillStyle='#64748b';ctx.fillText('Share · Save · Print',m,H-38);
+
+    const blob=bwHeartCanvasPngBlobSync(canvas);
+    const file=new File([blob],`BookWide-MBTI-${type}-report.png`,{type:'image/png'});
     if(navigator.canShare && navigator.canShare({files:[file]})){
-      await navigator.share({title:'BookWide MBTI Report', text:'BookWide MBTI 報告', files:[file]});
+      navigator.share({title:'BookWide MBTI Report',text:'BookWide MBTI 報告',files:[file]}).catch(err=>console.warn(err));
       return true;
     }
     if(navigator.share){
-      try{
-        await navigator.share({title:'BookWide MBTI Report', text:'BookWide MBTI 報告', files:[file]});
-        return true;
-      }catch(_e){}
+      navigator.share({title:'BookWide MBTI Report',text:'BookWide MBTI 報告',files:[file]}).catch(err=>console.warn(err));
+      return true;
     }
-
     const url=URL.createObjectURL(blob);
-    const a=document.createElement('a');
-    a.href=url; a.download=file.name; a.click();
+    const a=document.createElement('a');a.href=url;a.download=file.name;a.click();
     setTimeout(()=>URL.revokeObjectURL(url),1500);
     return true;
   }catch(e){
-    console.warn('mobile MBTI PNG share/print failed', e);
+    console.warn('native PNG share failed', e);
     try{ if(typeof toast==='function') toast('手機列印圖產生失敗，請重新按一次'); }catch(_e){}
     return false;
   }
@@ -3177,7 +3237,7 @@ async function bwHeartMobileSharePrintPng(forceMode){
 
 async function mbtiPrintReport(forceMode){
   if(bwHeartMbtiIsMobileLike()){
-    return await bwHeartMobileSharePrintPng(forceMode);
+    return bwHeartMobileSharePrintNativePng(forceMode);
   }
   // v57: 列印前先同步 Profile 專屬封面，避免直接列印時還吃 16 型預設圖。
   try{ await bwMbtiEnsureProfilePhotoUrls(); }catch(_e){}
@@ -3912,7 +3972,7 @@ console.log("[BookWide] heart-topic-once-charge-v5", HEART_TOPIC_SLUG);
 console.log("[BookWide] mbti-v32-one-snapshot-only-a4", HEART_TOPIC_SLUG);
 
 
-// v82: mobile print follows the working PNG-share flow; cover button removed.
+// v83: hard mobile print path: synchronous native canvas PNG share. Cover button removed.
 (function(){
   function hookHeartMbtiPrint(){
     document.querySelectorAll('#bwMbtiPersonalCoverFloat,.bwMbtiPersonalCover,[data-mbti-action="cover"]').forEach(el=>el.remove());
@@ -3924,7 +3984,6 @@ console.log("[BookWide] mbti-v32-one-snapshot-only-a4", HEART_TOPIC_SLUG);
         return mbtiPrintReport(window.BW_MBTI_CURRENT_REPORT_MODE);
       };
       btn.addEventListener('click', run, {capture:true, passive:false});
-      btn.addEventListener('pointerup', run, {capture:true, passive:false});
       btn.addEventListener('touchend', run, {capture:true, passive:false});
     });
   }
