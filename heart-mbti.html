@@ -3514,6 +3514,7 @@ async function bwMbtiProfileUpdateGate(sbp, user){
 }
 
 async function bwMbtiSaveAnswerPdfToProfile(reason, reportHtml){
+  const nowIso = new Date().toISOString();
   try{
     if(!isMbtiMode()) return {ok:false, skipped:true, reason:'not_mbti'};
     const sbp = bwProfileSupabaseClient();
@@ -3521,18 +3522,21 @@ async function bwMbtiSaveAnswerPdfToProfile(reason, reportHtml){
     const { data:userRes } = await sbp.auth.getUser();
     const user = userRes && userRes.user;
     if(!user || !user.id) return {ok:false, skipped:true, reason:'not_logged_in'};
+
     const progress = (typeof bwMbtiProgressSnapshot === 'function') ? bwMbtiProgressSnapshot() : null;
     const completed = Number((progress && progress.completed_count) || (typeof mbtiCount === 'function' ? mbtiCount() : 0) || 0);
-    const nowIso = new Date().toISOString();
-    const safeReportHtml = String(reportHtml || '');
-    const payload = {
+
+    let safeReportHtml = String(reportHtml || '');
+    safeReportHtml = safeReportHtml.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '');
+
+    const compactFallbackHtml = `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><title>BookWide MBTI 問答報告</title>
+<style>body{font-family:system-ui,"Noto Sans TC","Microsoft JhengHei",sans-serif;line-height:1.65;padding:24px;color:#111827}h1{font-size:28px}.box{border:1px solid #d97706;border-radius:18px;background:#fff7ed;padding:18px;margin:14px 0}.muted{color:#64748b}</style></head>
+<body><h1>BookWide 16型性格傾向報告</h1><div class="box"><b>已完成題數：${completed} / 40</b><br><span class="muted">完整 HTML 快照過大或寫入失敗時使用此備援快照。</span></div><pre>${JSON.stringify(progress || {}, null, 2).replace(/[<>&]/g, s=>({ '<':'&lt;','>':'&gt;','&':'&amp;' }[s]))}</pre></body></html>`;
+
+    const basePayload = {
       mbti_answer_pdf_updated_at: nowIso,
       mbti_progress_updated_at: nowIso,
       mbti_completed_count: completed,
-      mbti_answer_report_html: safeReportHtml,
-      mbti_last_report_html: safeReportHtml,
-      mbti_last_report_kind: 'answer_pdf',
-      mbti_last_report_updated_at: nowIso,
       personality_report_json: {
         source:'heart-mbti-answer-pdf',
         reason: reason || 'answer_pdf',
@@ -3543,20 +3547,72 @@ async function bwMbtiSaveAnswerPdfToProfile(reason, reportHtml){
       },
       updated_at: nowIso
     };
-    const { data, error } = await sbp
-      .from('profiles')
-      .update(payload)
+
+    // 第一段：先確保時間/題數一定寫入
+    const r1 = await sbp.from('profiles')
+      .update(basePayload)
       .eq('id', user.id)
-      .select('id,mbti_answer_pdf_updated_at,mbti_progress_updated_at,mbti_completed_count,mbti_last_report_kind,mbti_last_report_updated_at')
+      .select('id,mbti_answer_pdf_updated_at,mbti_progress_updated_at,mbti_completed_count')
       .maybeSingle();
-    if(error) throw error;
-    try{ localStorage.setItem('bw_last_mbti_answer_pdf_save', JSON.stringify({user_id:user.id,email:user.email||'',...payload})); }catch(_e){}
-    try{ if(typeof toast === 'function') toast('已記錄問答 PDF 時間'); }catch(_e){}
-    return {ok:true, data:data || payload};
+    if(r1.error) throw r1.error;
+
+    // 第二段：再寫 HTML 快照；失敗時改寫較小備援版並把錯誤記錄出來
+    let htmlSaved = false;
+    let htmlError = null;
+    const htmlPayload = {
+      mbti_answer_report_html: safeReportHtml || compactFallbackHtml,
+      mbti_last_report_html: safeReportHtml || compactFallbackHtml,
+      mbti_last_report_kind: 'answer_pdf',
+      mbti_last_report_updated_at: nowIso,
+      updated_at: nowIso
+    };
+    let r2 = await sbp.from('profiles')
+      .update(htmlPayload)
+      .eq('id', user.id)
+      .select('id,mbti_last_report_kind,mbti_last_report_updated_at')
+      .maybeSingle();
+
+    if(r2.error){
+      htmlError = String(r2.error.message || r2.error);
+      const fallbackPayload = {
+        mbti_answer_report_html: compactFallbackHtml,
+        mbti_last_report_html: compactFallbackHtml,
+        mbti_last_report_kind: 'answer_pdf_fallback',
+        mbti_last_report_updated_at: nowIso,
+        updated_at: nowIso
+      };
+      r2 = await sbp.from('profiles')
+        .update(fallbackPayload)
+        .eq('id', user.id)
+        .select('id,mbti_last_report_kind,mbti_last_report_updated_at')
+        .maybeSingle();
+      if(r2.error) throw r2.error;
+      htmlSaved = true;
+    }else{
+      htmlSaved = true;
+    }
+
+    const result = {
+      ok:true,
+      user_id:user.id,
+      email:user.email||'',
+      completed_count:completed,
+      html_saved:htmlSaved,
+      html_length:safeReportHtml.length,
+      html_error:htmlError,
+      mbti_last_report_kind: htmlError ? 'answer_pdf_fallback' : 'answer_pdf',
+      saved_at:nowIso
+    };
+    try{ localStorage.setItem('bw_last_mbti_answer_pdf_save', JSON.stringify(result)); }catch(_e){}
+    try{ if(typeof toast === 'function') toast(htmlError ? '已存備援報告快照' : '已存問答報告快照'); }catch(_e){}
+    console.log('[BookWide MBTI] answer report snapshot saved', result);
+    return result;
   }catch(e){
-    try{ console.warn('[BookWide MBTI] save answer PDF time failed', e); }catch(_e){}
-    try{ localStorage.setItem('bw_last_mbti_answer_pdf_save_error', JSON.stringify({ok:false,error:String(e&&e.message||e),at:new Date().toISOString()})); }catch(_e){}
-    return {ok:false, error:String(e && e.message || e)};
+    const err = String(e && e.message || e);
+    console.warn('[BookWide MBTI] save answer PDF snapshot failed', e);
+    try{ localStorage.setItem('bw_last_mbti_answer_pdf_save_error', JSON.stringify({ok:false,error:err,at:nowIso})); }catch(_e){}
+    try{ if(typeof toast === 'function') toast('問答報告快照存檔失敗：' + err); }catch(_e){}
+    return {ok:false, error:err};
   }
 }
 
