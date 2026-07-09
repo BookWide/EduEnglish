@@ -2672,11 +2672,9 @@ async function composeHeartReportCover(answers){
 async function openHeartReportPdf(){
   const answers=getHeartAnswers();
   if(!answers.length){toast("還沒有作答紀錄");return}
-  if(isMbtiMode() && typeof bwMbtiSaveReportToProfile === 'function'){
+  if(isMbtiMode() && typeof bwMbtiSaveAnswerPdfToProfile === 'function'){
     try{
-      const completed = (typeof mbtiCount === 'function') ? mbtiCount() : answers.length;
-      const mode = (typeof mbtiStageMode === 'function') ? mbtiStageMode(completed) : 'initial';
-      await bwMbtiSaveReportToProfile(mode, null);
+      await bwMbtiSaveAnswerPdfToProfile('answer_pdf');
     }catch(e){ try{ console.warn('[BookWide MBTI] answer PDF profile save failed', e); }catch(_e){} }
   }
   const done=getDone();
@@ -3513,6 +3511,48 @@ async function bwMbtiProfileUpdateGate(sbp, user){
     return { allowed:true, gate_error:String(e && e.message || e) };
   }
 }
+
+async function bwMbtiSaveAnswerPdfToProfile(reason){
+  try{
+    if(!isMbtiMode()) return {ok:false, skipped:true, reason:'not_mbti'};
+    const sbp = bwProfileSupabaseClient();
+    if(!sbp || !sbp.auth) return {ok:false, skipped:true, reason:'supabase_not_ready'};
+    const { data:userRes } = await sbp.auth.getUser();
+    const user = userRes && userRes.user;
+    if(!user || !user.id) return {ok:false, skipped:true, reason:'not_logged_in'};
+    const progress = (typeof bwMbtiProgressSnapshot === 'function') ? bwMbtiProgressSnapshot() : null;
+    const completed = Number((progress && progress.completed_count) || (typeof mbtiCount === 'function' ? mbtiCount() : 0) || 0);
+    const nowIso = new Date().toISOString();
+    const payload = {
+      mbti_answer_pdf_updated_at: nowIso,
+      mbti_progress_updated_at: nowIso,
+      mbti_completed_count: completed,
+      personality_report_json: {
+        source:'heart-mbti-answer-pdf',
+        reason: reason || 'answer_pdf',
+        progress,
+        completed_count: completed,
+        saved_at: nowIso
+      },
+      updated_at: nowIso
+    };
+    const { data, error } = await sbp
+      .from('profiles')
+      .update(payload)
+      .eq('id', user.id)
+      .select('id,mbti_answer_pdf_updated_at,mbti_progress_updated_at,mbti_completed_count')
+      .maybeSingle();
+    if(error) throw error;
+    try{ localStorage.setItem('bw_last_mbti_answer_pdf_save', JSON.stringify({user_id:user.id,email:user.email||'',...payload})); }catch(_e){}
+    try{ if(typeof toast === 'function') toast('已記錄問答 PDF 時間'); }catch(_e){}
+    return {ok:true, data:data || payload};
+  }catch(e){
+    try{ console.warn('[BookWide MBTI] save answer PDF time failed', e); }catch(_e){}
+    try{ localStorage.setItem('bw_last_mbti_answer_pdf_save_error', JSON.stringify({ok:false,error:String(e&&e.message||e),at:new Date().toISOString()})); }catch(_e){}
+    return {ok:false, error:String(e && e.message || e)};
+  }
+}
+
 async function bwMbtiSaveReportToProfile(mode, src){
   try{
     mode = String(mode || window.BW_MBTI_CURRENT_REPORT_MODE || mbtiStageMode(mbtiCount()) || 'initial').trim().toLowerCase();
@@ -3557,9 +3597,12 @@ async function bwMbtiSaveReportToProfile(mode, src){
     // v11：10/20 題只記憶進度與暫存分析，不覆蓋 Profile 正式人格欄位與「最近人格報告時間」。
     //      只有 40/40 完整報告才更新 mbti_code / mbti_title / personality_report_updated_at。
     if(!isFullReport){
+      const nowIso = new Date().toISOString();
       const payload = {
         personality_report_json: reportJson,
-        updated_at: new Date().toISOString()
+        mbti_progress_updated_at: nowIso,
+        mbti_completed_count: done,
+        updated_at: nowIso
       };
       const { data, error } = await sbp
         .from('profiles')
@@ -3591,12 +3634,15 @@ async function bwMbtiSaveReportToProfile(mode, src){
       return { ok:false, skipped:true, ...gate };
     }
 
+    const nowIsoFormal = new Date().toISOString();
     const payload = {
       mbti_code: type,
       mbti_title: [titleZh, titleEn].filter(Boolean).join(' / '),
       personality_report_json: reportJson,
-      personality_report_updated_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      personality_report_updated_at: nowIsoFormal,
+      mbti_progress_updated_at: nowIsoFormal,
+      mbti_completed_count: done,
+      updated_at: nowIsoFormal
     };
     if(zodiacAnimal) payload.zodiac_animal = zodiacAnimal;
     if(westernZodiac) payload.western_zodiac = westernZodiac;
@@ -3659,16 +3705,19 @@ async function bwMbtiSaveProgressToProfile(reason){
   const user = userRes && userRes.user;
   if(!user || !user.id) return {ok:false, skipped:true, reason:'not_logged_in'};
   const progress = bwMbtiProgressSnapshot();
+  const nowIso = new Date().toISOString();
   const payload = {
     personality_report_json: {
       source:'heart-mbti-progress',
       reason: reason || 'auto',
       progress,
-      saved_at: new Date().toISOString()
+      saved_at: nowIso
     },
-    // 進度記憶只更新 JSON 與 updated_at；
-    // 不更新 personality_report_updated_at / mbti_code / mbti_title，避免每答一題就刷新「最近人格報告時間」。
-    updated_at: new Date().toISOString()
+    mbti_progress_updated_at: nowIso,
+    mbti_completed_count: Number(progress && progress.completed_count || 0),
+    // 進度記憶只更新 JSON 與進度欄位；
+    // 不更新 personality_report_updated_at / mbti_code / mbti_title，避免每答一題就刷新「最近正式人格報告時間」。
+    updated_at: nowIso
   };
   const { error } = await sbp.from('profiles').update(payload).eq('id', user.id);
   if(error) throw error;
