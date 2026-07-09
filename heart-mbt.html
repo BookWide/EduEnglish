@@ -997,6 +997,7 @@ body.bw-mbti-mode #bwMbtiFloatingActions .bwMbtiPersonalCover{background:linear-
 }
 </style>
 
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="toast" id="toast"></div>
@@ -1028,7 +1029,7 @@ const HEART_TOPIC_SLUG = new URLSearchParams(location.search).get("topic") || "m
 (function(){
   try{
     const p = new URLSearchParams(location.search);
-    if(p.get("reset") === "1"){
+    if(p.get("reset") === "1" && p.get("mbti_resume") !== "1"){
       const slug = HEART_TOPIC_SLUG;
       [
         "bw_heart_done_"+slug,
@@ -1729,8 +1730,71 @@ function bwMbtiOwnerLine(){
   return u.safeLabel || u.label || '未登入訪客';
 }
 
-function bwLoginUrl(){
-  return "/login.html";
+function bwLoginUrl(nextUrl){
+  const next = String(nextUrl || (location.pathname + location.search + location.hash) || "/heart-mbti.html?topic=" + encodeURIComponent(HEART_TOPIC_SLUG)).trim();
+  return "/login.html?next=" + encodeURIComponent(next);
+}
+function bwMbtiResumeKey(){ return "bw_mbti_login_resume_" + HEART_TOPIC_SLUG; }
+function bwMbtiResumeUrl(targetIndex){
+  try{
+    const u = new URL(location.href);
+    u.searchParams.set("topic", HEART_TOPIC_SLUG || "mbti");
+    u.searchParams.delete("reset");
+    u.searchParams.set("mbti_resume", "1");
+    u.searchParams.set("q", String(Math.max(1, Number(targetIndex||0)+1)));
+    return u.pathname + u.search + u.hash;
+  }catch(e){
+    return "/heart-mbti.html?topic=" + encodeURIComponent(HEART_TOPIC_SLUG || "mbti") + "&mbti_resume=1&q=" + encodeURIComponent(String(Math.max(1, Number(targetIndex||0)+1)));
+  }
+}
+function bwMbtiSaveLoginResumeSnapshot(targetIndex, reason){
+  if(!isMbtiMode()) return;
+  try{
+    const snap = {
+      topic_slug: HEART_TOPIC_SLUG,
+      idx: Math.max(0, Number(targetIndex||0)),
+      q: Math.max(1, Number(targetIndex||0)+1),
+      done: (typeof getDone === 'function') ? getDone() : [],
+      answers: (typeof getHeartAnswers === 'function') ? getHeartAnswers() : [],
+      scores: (typeof mbtiRecalcScores === 'function') ? mbtiRecalcScores() : (typeof mbtiGetScores === 'function' ? mbtiGetScores() : {}),
+      completed_count: (typeof mbtiCount === 'function') ? mbtiCount() : 0,
+      reason: reason || 'login_required',
+      saved_at: new Date().toISOString()
+    };
+    localStorage.setItem(bwMbtiResumeKey(), JSON.stringify(snap));
+    localStorage.setItem("bw_heart_idx_" + HEART_TOPIC_SLUG, String(snap.idx));
+  }catch(e){}
+}
+function bwMbtiShouldResumeAfterLogin(){
+  try{ return isMbtiMode() && new URLSearchParams(location.search).get("mbti_resume") === "1"; }catch(e){ return false; }
+}
+function bwMbtiRestoreLoginResumeSnapshot(){
+  if(!isMbtiMode()) return null;
+  try{
+    const p = new URLSearchParams(location.search);
+    const q = Math.max(0, Number(p.get("q") || 0) - 1);
+    const snap = JSON.parse(localStorage.getItem(bwMbtiResumeKey()) || "null");
+    if(snap && snap.topic_slug === HEART_TOPIC_SLUG){
+      if(Array.isArray(snap.done)) localStorage.setItem("bw_heart_done_" + HEART_TOPIC_SLUG, JSON.stringify([...new Set(snap.done.map(Number).filter(n=>n>0))]));
+      if(Array.isArray(snap.answers)) localStorage.setItem("bw_heart_answers_" + HEART_TOPIC_SLUG, JSON.stringify(snap.answers));
+      if(snap.scores) localStorage.setItem(mbtiAnswerKey(), JSON.stringify(snap.scores));
+      idx = Number.isFinite(Number(snap.idx)) ? Math.max(0, Number(snap.idx)) : q;
+    }else if(Number.isFinite(q) && q >= 0){
+      idx = q;
+    }
+    localStorage.setItem("bw_heart_idx_" + HEART_TOPIC_SLUG, String(idx));
+    return {ok:true, idx};
+  }catch(e){ return null; }
+}
+function bwMbtiResumeTargetIndex(fallbackIndex){
+  try{
+    const p = new URLSearchParams(location.search);
+    const q = Number(p.get("q") || 0);
+    if(q > 0) return Math.max(0, Math.min((lessons && lessons.length ? lessons.length - 1 : 999), q - 1));
+    const snap = JSON.parse(localStorage.getItem(bwMbtiResumeKey()) || "null");
+    if(snap && snap.topic_slug === HEART_TOPIC_SLUG && Number.isFinite(Number(snap.idx))) return Math.max(0, Number(snap.idx));
+  }catch(e){}
+  return Math.max(0, Number(fallbackIndex || 0));
 }
 function bwCoinTopupUrl(){
   return "/account/subscription.html";
@@ -1775,101 +1839,20 @@ function getSupabaseAccessToken(){
   }
   return best&&!isJwtExpired(best)?best:"";
 }
-
-
-/* === BookWide v95：MBTI 列印前回存 Profile 人格紀錄 === */
-const BW_PROFILE_REST_URL = "https://jeajrwpmrgczimmrflxo.supabase.co/rest/v1/profiles";
-const BW_PROFILE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJIUzI1NiIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
-function bwPersonalityFirstLocal(keys){
-  for(const k of keys){
-    try{
-      const v = String(localStorage.getItem(k) || '').trim();
-      if(v && v !== 'null' && v !== 'undefined') return v;
-    }catch(_e){}
-  }
-  return '';
-}
-function bwBuildMbtiProfilePayload(mode, reportEl){
-  mode = String(mode || window.BW_MBTI_CURRENT_REPORT_MODE || mbtiStageMode(mbtiCount ? mbtiCount() : 0) || 'full').toLowerCase();
-  const scores = (typeof mbtiScoresForMode === 'function') ? mbtiScoresForMode(mode) : (typeof mbtiRecalcScores === 'function' ? mbtiRecalcScores() : {});
-  const type = String((typeof mbtiTypeFromScores === 'function' ? mbtiTypeFromScores(scores) : '') || '').toUpperCase();
-  const report = (typeof mbtiReportForType === 'function' ? mbtiReportForType(type) : null) || (typeof mbtiFallbackReport === 'function' ? mbtiFallbackReport(type) : {});
-  const titleZh = (typeof mbtiTypeName === 'function' ? mbtiTypeName(type) : '') || report.name_zh || '';
-  const titleEn = (typeof mbtiTypeNameEn === 'function' ? mbtiTypeNameEn(type) : '') || '';
-  const nickEn = (typeof mbtiTypeNickEn === 'function' ? mbtiTypeNickEn(type) : '') || '';
-  const nowIso = new Date().toISOString();
-  const zodiacAnimal = bwPersonalityFirstLocal(['zodiac_animal','bw_zodiac_animal','bookwide_zodiac_animal','生肖']);
-  const westernZodiac = bwPersonalityFirstLocal(['western_zodiac','bw_western_zodiac','bookwide_western_zodiac','zodiac_sign','constellation','星座']);
-  const doneCount = (typeof getDone === 'function') ? ((getDone() || []).length || 0) : 0;
-  const profileJson = {
-    source: 'heart-mbti',
-    topic_slug: String(typeof HEART_TOPIC_SLUG !== 'undefined' ? HEART_TOPIC_SLUG : 'mbti'),
-    report_mode: mode,
-    mbti_code: type,
-    mbti_title: [titleZh, titleEn].filter(Boolean).join(' / '),
-    mbti_title_zh: titleZh,
-    mbti_title_en: titleEn,
-    mbti_nickname_zh: report.nickname || '',
-    mbti_nickname_en: nickEn,
-    zodiac_animal: zodiacAnimal,
-    western_zodiac: westernZodiac,
-    scores: scores || {},
-    done_count: doneCount,
-    generated_at: nowIso,
-    report_text: reportEl ? String(reportEl.textContent || '').replace(/\s+\n/g, '\n').trim().slice(0, 12000) : '',
-    report_snapshot: report || {}
-  };
-  const payload = {
-    mbti_code: type,
-    mbti_title: [titleZh, titleEn].filter(Boolean).join(' / '),
-    personality_report_json: profileJson,
-    personality_report_updated_at: nowIso,
-    updated_at: nowIso
-  };
-  if(zodiacAnimal) payload.zodiac_animal = zodiacAnimal;
-  if(westernZodiac) payload.western_zodiac = westernZodiac;
-  return payload;
-}
-async function bwSaveMbtiProfileBeforePrint(mode, reportEl){
-  const token = getSupabaseAccessToken ? getSupabaseAccessToken() : '';
-  const jwt = token ? decodeJwtPayload(token) : null;
-  const userId = jwt && jwt.sub ? String(jwt.sub) : '';
-  if(!token || !userId) throw new Error('尚未登入，無法回存 MBTI 報告');
-  const payload = bwBuildMbtiProfilePayload(mode, reportEl);
-  const res = await fetch(`${BW_PROFILE_REST_URL}?id=eq.${encodeURIComponent(userId)}`, {
-    method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-      'apikey': BW_PROFILE_ANON_KEY,
-      'Authorization': 'Bearer ' + token,
-      'Prefer': 'return=minimal'
-    },
-    body: JSON.stringify(payload)
-  });
-  if(!res.ok){
-    const txt = await res.text().catch(()=>'');
-    throw new Error(txt || ('Profile 回存失敗 HTTP ' + res.status));
-  }
-  try{
-    const old = bwMbtiLocalJson ? bwMbtiLocalJson('bw_user_profile') : {};
-    localStorage.setItem('bw_user_profile', JSON.stringify(Object.assign({}, old, payload, {updated_at:new Date().toISOString()})));
-    if(payload.mbti_code) localStorage.setItem('mbti_code', payload.mbti_code);
-    if(payload.mbti_title) localStorage.setItem('mbti_title', payload.mbti_title);
-  }catch(_e){}
-  return payload;
-}
 function requireHeartLogin(){
   const token=getSupabaseAccessToken();
   if(token)return true;
   clearSupabaseAuthStorage();
-  alert("請先登入 BookWide，再進入心靈問答。");
-  location.href=bwLoginUrl();
+  try{ bwMbtiSaveLoginResumeSnapshot(idx || 0, 'require_login'); }catch(e){}
+  alert("請先登入 BookWide，再回到目前題目。");
+  location.href=bwLoginUrl(bwMbtiResumeUrl(idx || 0));
   return false;
 }
 function redirectLoginBecauseTokenInvalid(message){
+  try{ bwMbtiSaveLoginResumeSnapshot(idx || 0, 'token_invalid'); }catch(e){}
   clearSupabaseAuthStorage();
   alert(message||"登入已過期，請重新登入。");
-  location.href=bwLoginUrl();
+  location.href=bwLoginUrl(bwMbtiResumeUrl(idx || 0));
 }
 async function deductHeartTopicCoins(){
   const token=getSupabaseAccessToken();
@@ -1911,32 +1894,48 @@ async function deductHeartTopicCoins(){
     try{localStorage.setItem("bookwide_coin_balance",String(j.remaining_coins));}catch(e){}
   }
   unlockTopic();
+  try{ await bwMbtiSaveProgressToProfile('unlock_paid_topic'); }catch(e){}
   return true;
 }
-async function ensureTopicChargeBeforeIndex(targetIndex){
-  // v64：MBTI 1～10 題作為引流體驗，不扣金幣；第 11 題起才照原本主題扣款規則。
-  // 非 MBTI 題庫維持原規格：第 1～4 題免費，第 5 題起扣款。
+let bwTopicChargePromptRunning = null;
+async function ensureTopicChargeBeforeIndex(targetIndex, opts={}){
+  // v66：扣款提醒改低調，只在使用者主動進入付費題時提醒；頁面載入不再跳確認視窗。
+  // MBTI：1～10 題免費，第 11 題起一次扣本主題費用；非 MBTI 維持 1～4 題免費。
   const freeLimit = isMbtiMode() ? MBTI_FREE_RESULT_TOTAL : 4;
   if(targetIndex < freeLimit) return true;
   if(isTopicUnlocked()) return true;
-  if(!requireHeartLogin()) return false;
-  const cost=topicCoinCost();
-  const chargeTitle = isMbtiMode() ? "MBTI 性格測驗扣款確認" : "心靈問答扣款確認";
-  const chargeMsg = isMbtiMode()
-    ? ("第 1～10 題免費體驗。\n第 11 題開始一次扣款：每10題1金，最多3金。")
-    : ("第 1～4 題免費。\n第 5 題開始一次扣款：每10題1金，最多3金。");
-  const ok=confirm(chargeTitle+"\n\n"+chargeMsg+"\n本主題共 "+TOTAL+" 題，本次扣 "+cost+" 金幣。\n完成後本主題不再重複扣款。\n\n確認後進入第 "+(targetIndex+1)+" 題。");
-  if(!ok){
-    toast("已取消，停留目前關");
-    return false;
-  }
-  const charged=await deductHeartTopicCoins();
-  if(!charged)return false;
-  toast("已扣 "+cost+" 金幣，本關已解鎖");
-  return true;
+  if(opts && opts.silent) return false;
+  if(bwTopicChargePromptRunning) return await bwTopicChargePromptRunning;
+
+  bwTopicChargePromptRunning = (async()=>{
+    if(!getSupabaseAccessToken()){
+      bwMbtiSaveLoginResumeSnapshot(targetIndex, 'need_login_for_paid_question');
+      clearSupabaseAuthStorage();
+      alert("請先登入，登入後會回到第 " + (targetIndex + 1) + " 題並保留前 1-10 題答案。");
+      location.href = bwLoginUrl(bwMbtiResumeUrl(targetIndex));
+      return false;
+    }
+    const cost=topicCoinCost();
+    const itemNo = targetIndex + 1;
+    const ok = confirm(`第 ${itemNo} 題起需解鎖本主題
+本次扣 ${cost} 金幣，之後本主題不重複扣款。
+
+是否解鎖？`);
+    if(!ok){
+      toast("尚未解鎖，停在免費題");
+      return false;
+    }
+    const charged=await deductHeartTopicCoins();
+    if(!charged) return false;
+    toast("已解鎖，本主題不再重複扣款");
+    return true;
+  })();
+
+  try{ return await bwTopicChargePromptRunning; }
+  finally{ bwTopicChargePromptRunning = null; }
 }
-async function confirmPaidBlockIfNeeded(targetIndex){
-  return await ensureTopicChargeBeforeIndex(targetIndex);
+async function confirmPaidBlockIfNeeded(targetIndex, opts={}){
+  return await ensureTopicChargeBeforeIndex(targetIndex, opts);
 }
 
 
@@ -1983,7 +1982,10 @@ function bindBgmFirstGesture(){
 function tryAutoBgm(){ if(isRenqingSeries()) return; startBgm(true) }
 function toast(msg){const t=$("toast");t.textContent=msg;t.classList.add("show");clearTimeout(toast.t);toast.t=setTimeout(()=>t.classList.remove("show"),1600)}
 function getDone(){try{return JSON.parse(localStorage.getItem("bw_heart_done_"+HEART_TOPIC_SLUG)||"[]")}catch(e){return[]}}
-function setDone(a){localStorage.setItem("bw_heart_done_"+HEART_TOPIC_SLUG,JSON.stringify([...new Set(a)]))}
+function setDone(a){
+  localStorage.setItem("bw_heart_done_"+HEART_TOPIC_SLUG,JSON.stringify([...new Set(a)]));
+  try{ if(isMbtiMode()) bwMbtiScheduleProfileProgressSave('done'); }catch(e){}
+}
 function getFailed(){try{return JSON.parse(localStorage.getItem("bw_heart_failed_"+HEART_TOPIC_SLUG)||"[]")}catch(e){return[]}}
 function setFailed(a){localStorage.setItem("bw_heart_failed_"+HEART_TOPIC_SLUG,JSON.stringify([...new Set(a)]))}
 function markFailed(day){const f=getFailed(); if(!f.includes(day)) setFailed([...f,day])}
@@ -2492,7 +2494,10 @@ function renderLessonLink(l){
 
 function bwHeartAnswerKey(){return "bw_heart_answers_" + HEART_TOPIC_SLUG;}
 function getHeartAnswers(){try{const a=JSON.parse(localStorage.getItem(bwHeartAnswerKey())||"[]");return Array.isArray(a)?a:[]}catch(e){return[]}}
-function setHeartAnswers(a){localStorage.setItem(bwHeartAnswerKey(),JSON.stringify(a||[]))}
+function setHeartAnswers(a){
+  localStorage.setItem(bwHeartAnswerKey(),JSON.stringify(a||[]));
+  try{ if(isMbtiMode()) bwMbtiScheduleProfileProgressSave('answer'); }catch(e){}
+}
 function getHeartAnswerByDay(day){
   return getHeartAnswers().find(x => Number(x.day) === Number(day)) || null;
 }
@@ -3455,6 +3460,188 @@ function bwHeartMobileSharePrintNativePng(forceMode){
   }
 }
 
+
+
+/* === BookWide v97: MBTI report save-to-profile on 10/20/40 report open + print, fixed anon key === */
+
+const BW_PROFILE_SUPABASE_URL = "https://jeajrwpmrgczimmrflxo.supabase.co";
+const BW_PROFILE_SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do";
+function bwProfileSupabaseClient(){
+  try{
+    if(window.BW_PROFILE_SB) return window.BW_PROFILE_SB;
+    if(!window.supabase || !window.supabase.createClient) return null;
+    window.BW_PROFILE_SB = window.supabase.createClient(BW_PROFILE_SUPABASE_URL, BW_PROFILE_SUPABASE_ANON_KEY, {
+      auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true }
+    });
+    return window.BW_PROFILE_SB;
+  }catch(_e){ return null; }
+}
+async function bwMbtiSaveReportToProfile(mode, src){
+  try{
+    mode = String(mode || window.BW_MBTI_CURRENT_REPORT_MODE || mbtiStageMode(mbtiCount()) || 'initial').trim().toLowerCase();
+    const scores = (typeof mbtiScoresForMode === 'function') ? mbtiScoresForMode(mode) : (typeof mbtiRecalcScores === 'function' ? mbtiRecalcScores() : null);
+    const type = String((typeof mbtiTypeFromScores === 'function' ? mbtiTypeFromScores(scores) : '') || '').toUpperCase();
+    if(!type || type.length !== 4) return { ok:false, skipped:true, reason:'missing_mbti_type' };
+
+    const titleZh = (typeof mbtiTypeName === 'function') ? mbtiTypeName(type) : '';
+    const titleEn = (typeof mbtiTypeNameEn === 'function') ? mbtiTypeNameEn(type) : '';
+    const nickEn  = (typeof mbtiTypeNickEn === 'function') ? mbtiTypeNickEn(type) : '';
+    const done = Number((src && (src.textContent||'').match(/完成題數\s*([0-9]+)\s*\/\s*40/) || [])[1] || mbtiCount() || 0);
+
+    const zodiacAnimal = String(localStorage.getItem('zodiac_animal') || localStorage.getItem('bw_zodiac_animal') || '').trim();
+    const westernZodiac = String(localStorage.getItem('western_zodiac') || localStorage.getItem('bw_western_zodiac') || localStorage.getItem('constellation') || '').trim();
+
+    const sbp = bwProfileSupabaseClient();
+    if(!sbp || !sbp.auth){
+      try{ if(typeof toast === 'function') toast('MBTI 無法回存：Supabase SDK 未載入'); }catch(_e){}
+      return { ok:false, skipped:true, reason:'supabase_not_ready' };
+    }
+    const { data: userRes, error: userErr } = await sbp.auth.getUser();
+    if(userErr) throw userErr;
+    const user = userRes && userRes.user;
+    if(!user || !user.id) return { ok:false, skipped:true, reason:'not_logged_in' };
+
+    const payload = {
+      mbti_code: type,
+      mbti_title: [titleZh, titleEn].filter(Boolean).join(' / '),
+      personality_report_json: {
+        source: 'heart-mbti',
+        progress: (typeof bwMbtiProgressSnapshot === 'function' ? bwMbtiProgressSnapshot(mode) : null),
+        mode,
+        mbti_code: type,
+        mbti_title_zh: titleZh,
+        mbti_title_en: titleEn,
+        mbti_nick_en: nickEn,
+        completed_count: done,
+        scores: scores || {},
+        report_text: src ? String(src.textContent || '').slice(0, 6000) : '',
+        saved_at: new Date().toISOString()
+      },
+      personality_report_updated_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    if(zodiacAnimal) payload.zodiac_animal = zodiacAnimal;
+    if(westernZodiac) payload.western_zodiac = westernZodiac;
+
+    const { data, error } = await sbp
+      .from('profiles')
+      .update(payload)
+      .eq('id', user.id)
+      .select('id,mbti_code,mbti_title,personality_report_updated_at')
+      .maybeSingle();
+    if(error) throw error;
+    try{ window.BW_LAST_MBTI_SAVE_RESULT = { ok:true, user_id:user.id, email:user.email||'', mbti_code:type, mbti_title:payload.mbti_title, mode, done, saved_at:payload.personality_report_updated_at }; localStorage.setItem('bw_last_mbti_profile_save', JSON.stringify({user_id:user.id, email:user.email||'', ...payload})); }catch(_e){}
+    try{ if(typeof toast === 'function') toast('MBTI 已回存 Profile：' + type); }catch(_e){}
+    try{ console.log('[BookWide MBTI] profile saved', data || payload); }catch(_e){}
+    return { ok:true, data:data || payload };
+  }catch(e){
+    try{ window.BW_LAST_MBTI_SAVE_RESULT = { ok:false, error:String(e && e.message || e), at:new Date().toISOString() }; localStorage.setItem('bw_last_mbti_profile_save_error', JSON.stringify(window.BW_LAST_MBTI_SAVE_RESULT)); }catch(_e){}
+    try{ console.warn('[BookWide MBTI] save profile failed', e); }catch(_e){}
+    try{ if(typeof toast === 'function') toast('MBTI 回存失敗：' + (e.message || e)); }catch(_e){}
+    return { ok:false, error:String(e && e.message || e) };
+  }
+}
+
+async function bwMbtiSaveCurrentReportToProfile(mode){
+  const src = document.getElementById('bwMbtiPrintableReport') || document.querySelector('.bwMbtiReport');
+  return bwMbtiSaveReportToProfile(mode, src);
+}
+
+function bwMbtiProgressSnapshot(mode){
+  const done = (typeof mbtiSyncDoneFromAnswers === 'function') ? mbtiSyncDoneFromAnswers() : (typeof getDone === 'function' ? getDone() : []);
+  const completed = (typeof mbtiCount === 'function') ? mbtiCount() : (Array.isArray(done) ? done.length : 0);
+  const m = String(mode || (typeof mbtiStageMode === 'function' ? mbtiStageMode(completed) : '') || 'progress');
+  const scores = (typeof mbtiScoresForMode === 'function' && m !== 'progress') ? mbtiScoresForMode(m) : (typeof mbtiRecalcScores === 'function' ? mbtiRecalcScores() : {});
+  const type = (typeof mbtiTypeFromScores === 'function' && completed >= MBTI_FREE_RESULT_TOTAL) ? String(mbtiTypeFromScores(scores)||'').toUpperCase() : '';
+  return {
+    source:'heart-mbti',
+    topic_slug: HEART_TOPIC_SLUG,
+    idx: Math.max(0, Number(idx||0)),
+    q: Math.max(1, Number(idx||0)+1),
+    mode:m,
+    completed_count: completed,
+    done: Array.isArray(done) ? done : [],
+    answers: (typeof getHeartAnswers === 'function') ? getHeartAnswers() : [],
+    scores: scores || {},
+    mbti_code: type,
+    saved_at: new Date().toISOString()
+  };
+}
+let bwMbtiProgressSaveTimer = null;
+function bwMbtiScheduleProfileProgressSave(reason){
+  if(!isMbtiMode()) return;
+  clearTimeout(bwMbtiProgressSaveTimer);
+  bwMbtiProgressSaveTimer = setTimeout(()=>{ bwMbtiSaveProgressToProfile(reason || 'auto').catch(()=>{}); }, 650);
+}
+async function bwMbtiSaveProgressToProfile(reason){
+  if(!isMbtiMode()) return {ok:false, skipped:true, reason:'not_mbti'};
+  const sbp = bwProfileSupabaseClient();
+  if(!sbp || !sbp.auth) return {ok:false, skipped:true, reason:'supabase_not_ready'};
+  const { data:userRes } = await sbp.auth.getUser();
+  const user = userRes && userRes.user;
+  if(!user || !user.id) return {ok:false, skipped:true, reason:'not_logged_in'};
+  const progress = bwMbtiProgressSnapshot();
+  const payload = {
+    personality_report_json: {
+      source:'heart-mbti-progress',
+      reason: reason || 'auto',
+      progress,
+      saved_at: new Date().toISOString()
+    },
+    personality_report_updated_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+  if(progress.mbti_code && progress.mbti_code.length === 4){
+    payload.mbti_code = progress.mbti_code;
+    const zh = (typeof mbtiTypeName === 'function') ? mbtiTypeName(progress.mbti_code) : '';
+    const en = (typeof mbtiTypeNameEn === 'function') ? mbtiTypeNameEn(progress.mbti_code) : '';
+    payload.mbti_title = [zh,en].filter(Boolean).join(' / ');
+  }
+  const { error } = await sbp.from('profiles').update(payload).eq('id', user.id);
+  if(error) throw error;
+  try{ localStorage.setItem('bw_last_mbti_progress_save', JSON.stringify({user_id:user.id,email:user.email||'',reason,progress})); }catch(e){}
+  return {ok:true, progress};
+}
+async function bwMbtiLoadProgressFromProfile(force){
+  if(!isMbtiMode()) return false;
+  if(!force && (typeof mbtiCount === 'function') && mbtiCount() > 0) return false;
+  const sbp = bwProfileSupabaseClient();
+  if(!sbp || !sbp.auth) return false;
+  const { data:userRes } = await sbp.auth.getUser();
+  const user = userRes && userRes.user;
+  if(!user || !user.id) return false;
+  const { data, error } = await sbp.from('profiles').select('personality_report_json').eq('id', user.id).maybeSingle();
+  if(error || !data) return false;
+  const j = data.personality_report_json || {};
+  const progress = j.progress || (j.source === 'heart-mbti' ? j : null);
+  if(!progress || progress.topic_slug !== HEART_TOPIC_SLUG) return false;
+  if(Array.isArray(progress.answers)) localStorage.setItem(bwHeartAnswerKey(), JSON.stringify(progress.answers));
+  if(Array.isArray(progress.done)) localStorage.setItem('bw_heart_done_' + HEART_TOPIC_SLUG, JSON.stringify(progress.done));
+  if(progress.scores) localStorage.setItem(mbtiAnswerKey(), JSON.stringify(progress.scores));
+  if(Number.isFinite(Number(progress.idx))) idx = Math.max(0, Number(progress.idx));
+  localStorage.setItem('bw_heart_idx_' + HEART_TOPIC_SLUG, String(idx));
+  try{ localStorage.setItem('bw_last_mbti_profile_load', JSON.stringify({user_id:user.id,email:user.email||'',progress,loaded_at:new Date().toISOString()})); }catch(e){}
+  return true;
+}
+
+(function(){
+  document.addEventListener('keydown', function(e){
+    const isPrintKey = (e.ctrlKey || e.metaKey) && String(e.key || '').toLowerCase() === 'p';
+    if(!isPrintKey) return;
+    const reward = document.getElementById('reward');
+    const isOpen = reward && reward.classList.contains('show') && (document.getElementById('bwMbtiPrintableReport') || document.querySelector('.bwMbtiReport'));
+    if(!isOpen) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if(e.stopImmediatePropagation) e.stopImmediatePropagation();
+    mbtiPrintReport(window.BW_MBTI_CURRENT_REPORT_MODE || 'initial');
+  }, true);
+
+  window.addEventListener('beforeprint', function(){
+    try{ bwMbtiSaveCurrentReportToProfile(window.BW_MBTI_CURRENT_REPORT_MODE || 'initial'); }catch(_e){}
+  });
+})();
+
 async function mbtiPrintReport(forceMode){
   // v57: 列印前先同步 Profile 專屬封面，避免直接列印時還吃 16 型預設圖。
   try{ await bwMbtiEnsureProfilePhotoUrls(); }catch(_e){}
@@ -3465,6 +3652,8 @@ async function mbtiPrintReport(forceMode){
     return;
   }
 
+  try{ await bwMbtiSaveReportToProfile(forceMode || window.BW_MBTI_CURRENT_REPORT_MODE || 'initial', src); }catch(_e){}
+
   const textAll = src.textContent || '';
   const currentReportMode = String(forceMode || window.BW_MBTI_CURRENT_REPORT_MODE || '').trim().toLowerCase();
   const doneText = (textAll.match(/完成題數\s*([0-9]+)\s*\/\s*40/) || textAll.match(/([0-9]+)\s*\/\s*40/) || [])[1] || '';
@@ -3472,16 +3661,6 @@ async function mbtiPrintReport(forceMode){
   const isFullReport = currentReportMode === 'full' || src.classList.contains('bwMbtiReport--full') || doneText === '40' || /(^|\D)40\s*\/\s*40(\D|$)/.test(textAll);
   const isPagedReport = isAdvancedReport || isFullReport;
   try{ console.log('[BookWide MBTI print]', {forceMode, currentReportMode, doneText, isAdvancedReport, isFullReport, isPagedReport}); }catch(_e){}
-
-  // v95：按「列印 / 存 PDF」時，先把目前 MBTI 結果回存到 profiles，再進入列印流程。
-  try{
-    const saveMode = currentReportMode || (isFullReport ? 'full' : (isAdvancedReport ? 'advanced' : 'initial'));
-    await bwSaveMbtiProfileBeforePrint(saveMode, src);
-    try{ if(typeof toast === 'function') toast('MBTI 報告已回存 Profile'); }catch(_e){}
-  }catch(saveErr){
-    console.error('[BookWide MBTI profile save failed]', saveErr);
-    try{ if(typeof toast === 'function') toast('MBTI 回存失敗，仍會繼續列印'); }catch(_e){}
-  }
 
   const oldMount = document.getElementById('bwMbtiPrintMount');
   if(oldMount) oldMount.remove();
@@ -3639,6 +3818,34 @@ body > *:not(#bwMbtiPrintMount){display:none!important;visibility:hidden!importa
 #bwMbtiPrintMount .bwMbtiTypeHeader.bwMbtiTypeHeader--personal{background-size:cover!important;background-position:center center!important;}
 #bwMbtiPrintMount .bwMbtiTypeHeader.bwMbtiTypeHeader--personal::after{background:linear-gradient(90deg,rgba(255,255,255,.96) 0%,rgba(255,255,255,.86) 34%,rgba(255,255,255,.34) 58%,rgba(255,255,255,.06) 100%)!important;}
 #bwMbtiPrintMount.bwMbtiPrintMount--advanced .bwMbtiTypeHeaderTitle,#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiTypeHeaderTitle{font-size:29px!important;line-height:1.14!important;}
+
+/* v98：40/40 完整報告列印字級放大約 30%，並放開字距 / 行距；仍維持 2 頁 A4。 */
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiFullPage{padding:4.8mm 5.2mm 4.6mm!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiFullPageContent{gap:5px!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiTypeHeader{height:58mm!important;min-height:58mm!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiTypeHeaderText{padding:18px 20px 20px!important;max-width:54%!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiTypeHeaderKicker{font-size:11.8px!important;letter-spacing:.18em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiTypeHeaderTitle{font-size:30px!important;line-height:1.16!important;letter-spacing:.015em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiTypeHeaderSub{font-size:18px!important;line-height:1.22!important;letter-spacing:.02em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiTypeHeaderLead{font-size:12.8px!important;line-height:1.50!important;letter-spacing:.012em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiTypeHeaderLead small{font-size:11.4px!important;line-height:1.42!important;letter-spacing:.01em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiMetaPanel{gap:5px!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiMetaRow{padding:5px 6px!important;font-size:11.6px!important;letter-spacing:.015em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiMetaRow b{font-size:12.2px!important;line-height:1.26!important;letter-spacing:.018em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiScoreGrid{gap:5px!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiScore{padding:6px 7px!important;border-radius:11px!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiScore b{font-size:12.8px!important;line-height:1.18!important;letter-spacing:.02em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiScore .pair{font-size:11.4px!important;line-height:1.26!important;letter-spacing:.015em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiScore small{font-size:10.8px!important;line-height:1.22!important;letter-spacing:.01em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiSectionsGrid{gap:5px 7px!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiSec{padding:7px 8px!important;border-radius:12px!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiSec h3{font-size:15.4px!important;line-height:1.24!important;margin:0 0 5px!important;letter-spacing:.025em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiSec h3 small{font-size:12px!important;line-height:1.28!important;margin-top:2px!important;letter-spacing:.02em!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiSec p{font-size:13.5px!important;line-height:1.56!important;letter-spacing:.022em!important;word-spacing:.08em!important;font-weight:780!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiSec p.en{font-size:12px!important;line-height:1.46!important;margin-top:4px!important;letter-spacing:.012em!important;word-spacing:.05em!important;font-weight:720!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiFullPageFooter{min-height:8mm!important;margin-top:1.2mm!important;padding-top:1.8mm!important;font-size:10.8px!important;}
+#bwMbtiPrintMount.bwMbtiPrintMount--full .bwMbtiFooter{font-size:10.2px!important;line-height:1.26!important;padding-top:5px!important;margin-top:1px!important;letter-spacing:.01em!important;}
+
 #bwMbtiPrintMount .noPrint,#bwMbtiPrintMount .bwMbtiActions,#bwMbtiFloatingActions,#stageBreakActions,#rewardOk,#rewardTitle{display:none!important;visibility:hidden!important;}
 `;
     document.head.appendChild(style);
@@ -3858,6 +4065,7 @@ async function mbtiOpenMilestoneReport(count){
   if(box) box.classList.add('bwMbtiReportBox');
   if(title) title.textContent = `BookWide 16型性格傾向報告`;
   if(text){ text.innerHTML = mbtiReportPageHtml(mode); bwMbtiRemoveDuplicateSnapshotNodes(text); }
+  try{ await bwMbtiSaveCurrentReportToProfile(mode); }catch(_e){}
   if(ok) ok.style.display = 'none';
   if(stageActions){
     stageActions.hidden = true;
@@ -4161,18 +4369,38 @@ loadHeartTopic()
     if(idx >= lessons.length) idx = 0;
     const requestedStage = requestedRenqingStageFromUrl();
     const hasRequestedStage = requestedStage > 0 && applyStageParamOnLoad();
-    if(isMbtiMode()) mbtiSyncDoneFromAnswers();
+    const mbtiResumeOnLoad = isMbtiMode() && bwMbtiShouldResumeAfterLogin();
+    const urlParamsOnLoad = new URLSearchParams(location.search);
+    const explicitResetOnLoad = urlParamsOnLoad.get("reset") === "1" && urlParamsOnLoad.get("mbti_resume") !== "1";
+    if(isMbtiMode()){
+      if(mbtiResumeOnLoad) bwMbtiRestoreLoginResumeSnapshot();
+      else if(!explicitResetOnLoad) await bwMbtiLoadProgressFromProfile(false);
+      mbtiSyncDoneFromAnswers();
+    }
     const firstTodo = firstUnfinishedIndex();
     const doneList = isMbtiMode() ? mbtiSyncDoneFromAnswers() : getDone();
     const allDone = doneList.length >= lessons.length;
 
     // 有 URL stage=2/3... 時，必須停在指定關，不可再被 firstTodo 拉回第1關。
-    if(!hasRequestedStage && !allDone) idx = firstTodo;
+    if(mbtiResumeOnLoad){
+      idx = bwMbtiResumeTargetIndex(firstTodo);
+    }else if(!hasRequestedStage && !allDone) idx = firstTodo;
 
-    if(!(await confirmPaidBlockIfNeeded(idx))) idx = hasRequestedStage ? idx : firstTodo;
+    // v67：一般載入不彈扣款；但登入返回第11題要保留進度並可直接解鎖。
+    if(!mbtiResumeOnLoad && !(await confirmPaidBlockIfNeeded(idx, {silent:true}))){
+      const freeLimitOnLoad = isMbtiMode() ? MBTI_FREE_RESULT_TOTAL : 4;
+      idx = Math.max(0, Math.min(firstTodo, freeLimitOnLoad - 1));
+    }
     window.BW_HEART_FRESH_LOAD = true;
     render();
     window.BW_HEART_FRESH_LOAD = false;
+    if(mbtiResumeOnLoad && idx >= MBTI_FREE_RESULT_TOTAL && !isTopicUnlocked()){
+      setTimeout(async()=>{
+        const ok = await confirmPaidBlockIfNeeded(idx, {resume:true});
+        if(!ok){ idx = MBTI_FREE_RESULT_TOTAL - 1; render(); }
+        else { try{ await bwMbtiSaveProgressToProfile('resume_after_login_unlocked'); }catch(e){} render(); }
+      }, 260);
+    }
     updateBgmButton();
     bindRenqingStageButtonsHard();
     scheduleAutoQuestion(780);
