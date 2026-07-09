@@ -1029,8 +1029,9 @@ const HEART_TOPIC_SLUG = new URLSearchParams(location.search).get("topic") || "m
 (function(){
   try{
     const p = new URLSearchParams(location.search);
-    if(p.get("reset") === "1"){
-      const slug = HEART_TOPIC_SLUG;
+    const slug = HEART_TOPIC_SLUG;
+    const hasPendingLoginResume = localStorage.getItem("bw_mbti_pending_login_resume_" + slug) === "1";
+    if(p.get("reset") === "1" && p.get("mbti_resume") !== "1" && !hasPendingLoginResume){
       [
         "bw_heart_done_"+slug,
         "bw_heart_failed_"+slug,
@@ -1730,8 +1731,100 @@ function bwMbtiOwnerLine(){
   return u.safeLabel || u.label || '未登入訪客';
 }
 
-function bwLoginUrl(){
-  return "/login.html";
+function bwLoginUrl(nextUrl){
+  const next = String(nextUrl || (location.pathname + location.search + location.hash) || "/heart-mbti.html?topic=" + encodeURIComponent(HEART_TOPIC_SLUG)).trim();
+  try{
+    localStorage.setItem("bw_login_next", next);
+    localStorage.setItem("bookwide_login_next", next);
+    localStorage.setItem("bw_after_login_url", next);
+  }catch(e){}
+  const enc = encodeURIComponent(next);
+  // 同時帶 next / redirect / returnTo，避免 login.html 只吃其中一種參數時回不來。
+  return "/login.html?next=" + enc + "&redirect=" + enc + "&returnTo=" + enc;
+}
+function bwMbtiResumeKey(){ return "bw_mbti_login_resume_" + HEART_TOPIC_SLUG; }
+function bwMbtiPendingResumeKey(){ return "bw_mbti_pending_login_resume_" + HEART_TOPIC_SLUG; }
+function bwMbtiResumeUrl(targetIndex){
+  try{
+    const u = new URL(location.href);
+    u.searchParams.set("topic", HEART_TOPIC_SLUG || "mbti");
+    u.searchParams.delete("reset");
+    u.searchParams.set("mbti_resume", "1");
+    u.searchParams.set("q", String(Math.max(1, Number(targetIndex||0)+1)));
+    return u.pathname + u.search + u.hash;
+  }catch(e){
+    return "/heart-mbti.html?topic=" + encodeURIComponent(HEART_TOPIC_SLUG || "mbti") + "&mbti_resume=1&q=" + encodeURIComponent(String(Math.max(1, Number(targetIndex||0)+1)));
+  }
+}
+function bwMbtiSaveLoginResumeSnapshot(targetIndex, reason){
+  if(!isMbtiMode()) return;
+  try{
+    const snap = {
+      topic_slug: HEART_TOPIC_SLUG,
+      idx: Math.max(0, Number(targetIndex||0)),
+      q: Math.max(1, Number(targetIndex||0)+1),
+      done: (typeof getDone === 'function') ? getDone() : [],
+      answers: (typeof getHeartAnswers === 'function') ? getHeartAnswers() : [],
+      scores: (typeof mbtiRecalcScores === 'function') ? mbtiRecalcScores() : (typeof mbtiGetScores === 'function' ? mbtiGetScores() : {}),
+      completed_count: (typeof mbtiCount === 'function') ? mbtiCount() : 0,
+      reason: reason || 'login_required',
+      saved_at: new Date().toISOString()
+    };
+    localStorage.setItem(bwMbtiResumeKey(), JSON.stringify(snap));
+    localStorage.setItem(bwMbtiPendingResumeKey(), "1");
+    localStorage.setItem("bw_heart_idx_" + HEART_TOPIC_SLUG, String(snap.idx));
+  }catch(e){}
+}
+function bwMbtiShouldResumeAfterLogin(){
+  try{ return isMbtiMode() && new URLSearchParams(location.search).get("mbti_resume") === "1"; }catch(e){ return false; }
+}
+function bwMbtiGetLoginResumeSnapshot(){
+  try{ return JSON.parse(localStorage.getItem(bwMbtiResumeKey()) || "null"); }catch(e){ return null; }
+}
+function bwMbtiHasFreshPendingResume(){
+  if(!isMbtiMode()) return false;
+  try{
+    if(localStorage.getItem(bwMbtiPendingResumeKey()) !== "1") return false;
+    const snap = bwMbtiGetLoginResumeSnapshot();
+    if(!snap || snap.topic_slug !== HEART_TOPIC_SLUG) return false;
+    const saved = Date.parse(snap.saved_at || "");
+    if(!saved || (Date.now() - saved) > 2*60*60*1000) return false;
+    return /login|required|paid|token/i.test(String(snap.reason || ""));
+  }catch(e){ return false; }
+}
+function bwMbtiShouldAutoResumeAfterLogin(){
+  return isMbtiMode() && !!getSupabaseAccessToken() && bwMbtiHasFreshPendingResume();
+}
+function bwMbtiClearPendingResumeFlag(){
+  try{ localStorage.removeItem(bwMbtiPendingResumeKey()); }catch(e){}
+}
+function bwMbtiRestoreLoginResumeSnapshot(){
+  if(!isMbtiMode()) return null;
+  try{
+    const p = new URLSearchParams(location.search);
+    const q = Math.max(0, Number(p.get("q") || 0) - 1);
+    const snap = JSON.parse(localStorage.getItem(bwMbtiResumeKey()) || "null");
+    if(snap && snap.topic_slug === HEART_TOPIC_SLUG){
+      if(Array.isArray(snap.done)) localStorage.setItem("bw_heart_done_" + HEART_TOPIC_SLUG, JSON.stringify([...new Set(snap.done.map(Number).filter(n=>n>0))]));
+      if(Array.isArray(snap.answers)) localStorage.setItem("bw_heart_answers_" + HEART_TOPIC_SLUG, JSON.stringify(snap.answers));
+      if(snap.scores) localStorage.setItem(mbtiAnswerKey(), JSON.stringify(snap.scores));
+      idx = Number.isFinite(Number(snap.idx)) ? Math.max(0, Number(snap.idx)) : q;
+    }else if(Number.isFinite(q) && q >= 0){
+      idx = q;
+    }
+    localStorage.setItem("bw_heart_idx_" + HEART_TOPIC_SLUG, String(idx));
+    return {ok:true, idx};
+  }catch(e){ return null; }
+}
+function bwMbtiResumeTargetIndex(fallbackIndex){
+  try{
+    const p = new URLSearchParams(location.search);
+    const q = Number(p.get("q") || 0);
+    if(q > 0) return Math.max(0, Math.min((lessons && lessons.length ? lessons.length - 1 : 999), q - 1));
+    const snap = JSON.parse(localStorage.getItem(bwMbtiResumeKey()) || "null");
+    if(snap && snap.topic_slug === HEART_TOPIC_SLUG && Number.isFinite(Number(snap.idx))) return Math.max(0, Number(snap.idx));
+  }catch(e){}
+  return Math.max(0, Number(fallbackIndex || 0));
 }
 function bwCoinTopupUrl(){
   return "/account/subscription.html";
@@ -1780,14 +1873,16 @@ function requireHeartLogin(){
   const token=getSupabaseAccessToken();
   if(token)return true;
   clearSupabaseAuthStorage();
-  alert("請先登入 BookWide，再進入心靈問答。");
-  location.href=bwLoginUrl();
+  try{ bwMbtiSaveLoginResumeSnapshot(idx || 0, 'require_login'); }catch(e){}
+  alert("請先登入 BookWide，再回到目前題目。");
+  location.href=bwLoginUrl(bwMbtiResumeUrl(idx || 0));
   return false;
 }
 function redirectLoginBecauseTokenInvalid(message){
+  try{ bwMbtiSaveLoginResumeSnapshot(idx || 0, 'token_invalid'); }catch(e){}
   clearSupabaseAuthStorage();
   alert(message||"登入已過期，請重新登入。");
-  location.href=bwLoginUrl();
+  location.href=bwLoginUrl(bwMbtiResumeUrl(idx || 0));
 }
 async function deductHeartTopicCoins(){
   const token=getSupabaseAccessToken();
@@ -1829,32 +1924,48 @@ async function deductHeartTopicCoins(){
     try{localStorage.setItem("bookwide_coin_balance",String(j.remaining_coins));}catch(e){}
   }
   unlockTopic();
+  try{ await bwMbtiSaveProgressToProfile('unlock_paid_topic'); }catch(e){}
   return true;
 }
-async function ensureTopicChargeBeforeIndex(targetIndex){
-  // v64：MBTI 1～10 題作為引流體驗，不扣金幣；第 11 題起才照原本主題扣款規則。
-  // 非 MBTI 題庫維持原規格：第 1～4 題免費，第 5 題起扣款。
+let bwTopicChargePromptRunning = null;
+async function ensureTopicChargeBeforeIndex(targetIndex, opts={}){
+  // v66：扣款提醒改低調，只在使用者主動進入付費題時提醒；頁面載入不再跳確認視窗。
+  // MBTI：1～10 題免費，第 11 題起一次扣本主題費用；非 MBTI 維持 1～4 題免費。
   const freeLimit = isMbtiMode() ? MBTI_FREE_RESULT_TOTAL : 4;
   if(targetIndex < freeLimit) return true;
   if(isTopicUnlocked()) return true;
-  if(!requireHeartLogin()) return false;
-  const cost=topicCoinCost();
-  const chargeTitle = isMbtiMode() ? "MBTI 性格測驗扣款確認" : "心靈問答扣款確認";
-  const chargeMsg = isMbtiMode()
-    ? ("第 1～10 題免費體驗。\n第 11 題開始一次扣款：每10題1金，最多3金。")
-    : ("第 1～4 題免費。\n第 5 題開始一次扣款：每10題1金，最多3金。");
-  const ok=confirm(chargeTitle+"\n\n"+chargeMsg+"\n本主題共 "+TOTAL+" 題，本次扣 "+cost+" 金幣。\n完成後本主題不再重複扣款。\n\n確認後進入第 "+(targetIndex+1)+" 題。");
-  if(!ok){
-    toast("已取消，停留目前關");
-    return false;
-  }
-  const charged=await deductHeartTopicCoins();
-  if(!charged)return false;
-  toast("已扣 "+cost+" 金幣，本關已解鎖");
-  return true;
+  if(opts && opts.silent) return false;
+  if(bwTopicChargePromptRunning) return await bwTopicChargePromptRunning;
+
+  bwTopicChargePromptRunning = (async()=>{
+    if(!getSupabaseAccessToken()){
+      bwMbtiSaveLoginResumeSnapshot(targetIndex, 'need_login_for_paid_question');
+      clearSupabaseAuthStorage();
+      alert("請先登入，登入後會回到第 " + (targetIndex + 1) + " 題並保留前 1-10 題答案。");
+      location.href = bwLoginUrl(bwMbtiResumeUrl(targetIndex));
+      return false;
+    }
+    const cost=topicCoinCost();
+    const itemNo = targetIndex + 1;
+    const ok = confirm(`第 ${itemNo} 題起需解鎖本主題
+本次扣 ${cost} 金幣，之後本主題不重複扣款。
+
+是否解鎖？`);
+    if(!ok){
+      toast("尚未解鎖，停在免費題");
+      return false;
+    }
+    const charged=await deductHeartTopicCoins();
+    if(!charged) return false;
+    toast("已解鎖，本主題不再重複扣款");
+    return true;
+  })();
+
+  try{ return await bwTopicChargePromptRunning; }
+  finally{ bwTopicChargePromptRunning = null; }
 }
-async function confirmPaidBlockIfNeeded(targetIndex){
-  return await ensureTopicChargeBeforeIndex(targetIndex);
+async function confirmPaidBlockIfNeeded(targetIndex, opts={}){
+  return await ensureTopicChargeBeforeIndex(targetIndex, opts);
 }
 
 
@@ -1901,7 +2012,10 @@ function bindBgmFirstGesture(){
 function tryAutoBgm(){ if(isRenqingSeries()) return; startBgm(true) }
 function toast(msg){const t=$("toast");t.textContent=msg;t.classList.add("show");clearTimeout(toast.t);toast.t=setTimeout(()=>t.classList.remove("show"),1600)}
 function getDone(){try{return JSON.parse(localStorage.getItem("bw_heart_done_"+HEART_TOPIC_SLUG)||"[]")}catch(e){return[]}}
-function setDone(a){localStorage.setItem("bw_heart_done_"+HEART_TOPIC_SLUG,JSON.stringify([...new Set(a)]))}
+function setDone(a){
+  localStorage.setItem("bw_heart_done_"+HEART_TOPIC_SLUG,JSON.stringify([...new Set(a)]));
+  try{ if(isMbtiMode()) bwMbtiScheduleProfileProgressSave('done'); }catch(e){}
+}
 function getFailed(){try{return JSON.parse(localStorage.getItem("bw_heart_failed_"+HEART_TOPIC_SLUG)||"[]")}catch(e){return[]}}
 function setFailed(a){localStorage.setItem("bw_heart_failed_"+HEART_TOPIC_SLUG,JSON.stringify([...new Set(a)]))}
 function markFailed(day){const f=getFailed(); if(!f.includes(day)) setFailed([...f,day])}
@@ -2410,7 +2524,10 @@ function renderLessonLink(l){
 
 function bwHeartAnswerKey(){return "bw_heart_answers_" + HEART_TOPIC_SLUG;}
 function getHeartAnswers(){try{const a=JSON.parse(localStorage.getItem(bwHeartAnswerKey())||"[]");return Array.isArray(a)?a:[]}catch(e){return[]}}
-function setHeartAnswers(a){localStorage.setItem(bwHeartAnswerKey(),JSON.stringify(a||[]))}
+function setHeartAnswers(a){
+  localStorage.setItem(bwHeartAnswerKey(),JSON.stringify(a||[]));
+  try{ if(isMbtiMode()) bwMbtiScheduleProfileProgressSave('answer'); }catch(e){}
+}
 function getHeartAnswerByDay(day){
   return getHeartAnswers().find(x => Number(x.day) === Number(day)) || null;
 }
@@ -3419,6 +3536,7 @@ async function bwMbtiSaveReportToProfile(mode, src){
       mbti_title: [titleZh, titleEn].filter(Boolean).join(' / '),
       personality_report_json: {
         source: 'heart-mbti',
+        progress: (typeof bwMbtiProgressSnapshot === 'function' ? bwMbtiProgressSnapshot(mode) : null),
         mode,
         mbti_code: type,
         mbti_title_zh: titleZh,
@@ -3457,6 +3575,83 @@ async function bwMbtiSaveReportToProfile(mode, src){
 async function bwMbtiSaveCurrentReportToProfile(mode){
   const src = document.getElementById('bwMbtiPrintableReport') || document.querySelector('.bwMbtiReport');
   return bwMbtiSaveReportToProfile(mode, src);
+}
+
+function bwMbtiProgressSnapshot(mode){
+  const done = (typeof mbtiSyncDoneFromAnswers === 'function') ? mbtiSyncDoneFromAnswers() : (typeof getDone === 'function' ? getDone() : []);
+  const completed = (typeof mbtiCount === 'function') ? mbtiCount() : (Array.isArray(done) ? done.length : 0);
+  const m = String(mode || (typeof mbtiStageMode === 'function' ? mbtiStageMode(completed) : '') || 'progress');
+  const scores = (typeof mbtiScoresForMode === 'function' && m !== 'progress') ? mbtiScoresForMode(m) : (typeof mbtiRecalcScores === 'function' ? mbtiRecalcScores() : {});
+  const type = (typeof mbtiTypeFromScores === 'function' && completed >= MBTI_FREE_RESULT_TOTAL) ? String(mbtiTypeFromScores(scores)||'').toUpperCase() : '';
+  return {
+    source:'heart-mbti',
+    topic_slug: HEART_TOPIC_SLUG,
+    idx: Math.max(0, Number(idx||0)),
+    q: Math.max(1, Number(idx||0)+1),
+    mode:m,
+    completed_count: completed,
+    done: Array.isArray(done) ? done : [],
+    answers: (typeof getHeartAnswers === 'function') ? getHeartAnswers() : [],
+    scores: scores || {},
+    mbti_code: type,
+    saved_at: new Date().toISOString()
+  };
+}
+let bwMbtiProgressSaveTimer = null;
+function bwMbtiScheduleProfileProgressSave(reason){
+  if(!isMbtiMode()) return;
+  clearTimeout(bwMbtiProgressSaveTimer);
+  bwMbtiProgressSaveTimer = setTimeout(()=>{ bwMbtiSaveProgressToProfile(reason || 'auto').catch(()=>{}); }, 650);
+}
+async function bwMbtiSaveProgressToProfile(reason){
+  if(!isMbtiMode()) return {ok:false, skipped:true, reason:'not_mbti'};
+  const sbp = bwProfileSupabaseClient();
+  if(!sbp || !sbp.auth) return {ok:false, skipped:true, reason:'supabase_not_ready'};
+  const { data:userRes } = await sbp.auth.getUser();
+  const user = userRes && userRes.user;
+  if(!user || !user.id) return {ok:false, skipped:true, reason:'not_logged_in'};
+  const progress = bwMbtiProgressSnapshot();
+  const payload = {
+    personality_report_json: {
+      source:'heart-mbti-progress',
+      reason: reason || 'auto',
+      progress,
+      saved_at: new Date().toISOString()
+    },
+    personality_report_updated_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+  if(progress.mbti_code && progress.mbti_code.length === 4){
+    payload.mbti_code = progress.mbti_code;
+    const zh = (typeof mbtiTypeName === 'function') ? mbtiTypeName(progress.mbti_code) : '';
+    const en = (typeof mbtiTypeNameEn === 'function') ? mbtiTypeNameEn(progress.mbti_code) : '';
+    payload.mbti_title = [zh,en].filter(Boolean).join(' / ');
+  }
+  const { error } = await sbp.from('profiles').update(payload).eq('id', user.id);
+  if(error) throw error;
+  try{ localStorage.setItem('bw_last_mbti_progress_save', JSON.stringify({user_id:user.id,email:user.email||'',reason,progress})); }catch(e){}
+  return {ok:true, progress};
+}
+async function bwMbtiLoadProgressFromProfile(force){
+  if(!isMbtiMode()) return false;
+  if(!force && (typeof mbtiCount === 'function') && mbtiCount() > 0) return false;
+  const sbp = bwProfileSupabaseClient();
+  if(!sbp || !sbp.auth) return false;
+  const { data:userRes } = await sbp.auth.getUser();
+  const user = userRes && userRes.user;
+  if(!user || !user.id) return false;
+  const { data, error } = await sbp.from('profiles').select('personality_report_json').eq('id', user.id).maybeSingle();
+  if(error || !data) return false;
+  const j = data.personality_report_json || {};
+  const progress = j.progress || (j.source === 'heart-mbti' ? j : null);
+  if(!progress || progress.topic_slug !== HEART_TOPIC_SLUG) return false;
+  if(Array.isArray(progress.answers)) localStorage.setItem(bwHeartAnswerKey(), JSON.stringify(progress.answers));
+  if(Array.isArray(progress.done)) localStorage.setItem('bw_heart_done_' + HEART_TOPIC_SLUG, JSON.stringify(progress.done));
+  if(progress.scores) localStorage.setItem(mbtiAnswerKey(), JSON.stringify(progress.scores));
+  if(Number.isFinite(Number(progress.idx))) idx = Math.max(0, Number(progress.idx));
+  localStorage.setItem('bw_heart_idx_' + HEART_TOPIC_SLUG, String(idx));
+  try{ localStorage.setItem('bw_last_mbti_profile_load', JSON.stringify({user_id:user.id,email:user.email||'',progress,loaded_at:new Date().toISOString()})); }catch(e){}
+  return true;
 }
 
 (function(){
@@ -4204,18 +4399,39 @@ loadHeartTopic()
     if(idx >= lessons.length) idx = 0;
     const requestedStage = requestedRenqingStageFromUrl();
     const hasRequestedStage = requestedStage > 0 && applyStageParamOnLoad();
-    if(isMbtiMode()) mbtiSyncDoneFromAnswers();
+    const mbtiResumeOnLoad = isMbtiMode() && bwMbtiShouldResumeAfterLogin();
+    const mbtiAutoResumeOnLoad = isMbtiMode() && !mbtiResumeOnLoad && bwMbtiShouldAutoResumeAfterLogin();
+    const urlParamsOnLoad = new URLSearchParams(location.search);
+    const explicitResetOnLoad = urlParamsOnLoad.get("reset") === "1" && urlParamsOnLoad.get("mbti_resume") !== "1" && !mbtiAutoResumeOnLoad;
+    if(isMbtiMode()){
+      if(mbtiResumeOnLoad || mbtiAutoResumeOnLoad) bwMbtiRestoreLoginResumeSnapshot();
+      else if(!explicitResetOnLoad) await bwMbtiLoadProgressFromProfile(false);
+      mbtiSyncDoneFromAnswers();
+    }
     const firstTodo = firstUnfinishedIndex();
     const doneList = isMbtiMode() ? mbtiSyncDoneFromAnswers() : getDone();
     const allDone = doneList.length >= lessons.length;
 
     // 有 URL stage=2/3... 時，必須停在指定關，不可再被 firstTodo 拉回第1關。
-    if(!hasRequestedStage && !allDone) idx = firstTodo;
+    if(mbtiResumeOnLoad || mbtiAutoResumeOnLoad){
+      idx = bwMbtiResumeTargetIndex(firstTodo);
+    }else if(!hasRequestedStage && !allDone) idx = firstTodo;
 
-    if(!(await confirmPaidBlockIfNeeded(idx))) idx = hasRequestedStage ? idx : firstTodo;
+    // v67：一般載入不彈扣款；但登入返回第11題要保留進度並可直接解鎖。
+    if(!mbtiResumeOnLoad && !(await confirmPaidBlockIfNeeded(idx, {silent:true}))){
+      const freeLimitOnLoad = isMbtiMode() ? MBTI_FREE_RESULT_TOTAL : 4;
+      idx = Math.max(0, Math.min(firstTodo, freeLimitOnLoad - 1));
+    }
     window.BW_HEART_FRESH_LOAD = true;
     render();
     window.BW_HEART_FRESH_LOAD = false;
+    if((mbtiResumeOnLoad || mbtiAutoResumeOnLoad) && idx >= MBTI_FREE_RESULT_TOTAL && !isTopicUnlocked()){
+      setTimeout(async()=>{
+        const ok = await confirmPaidBlockIfNeeded(idx, {resume:true});
+        if(!ok){ idx = MBTI_FREE_RESULT_TOTAL - 1; render(); }
+        else { try{ await bwMbtiSaveProgressToProfile('resume_after_login_unlocked'); bwMbtiClearPendingResumeFlag(); }catch(e){} render(); }
+      }, 260);
+    }
     updateBgmButton();
     bindRenqingStageButtonsHard();
     scheduleAutoQuestion(780);
