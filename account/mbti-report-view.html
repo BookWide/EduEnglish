@@ -20,103 +20,68 @@ header h1{margin:0;font-size:22px;font-weight:950}.back{display:inline-flex;alig
 <main class="wrap">
   <section class="panel">
     <div class="bar">
-      <div><b id="title">讀取中…</b><div class="sub" id="subtitle">正在讀取 Profile 內存放的報告快照｜v4-profilecache</div></div>
-      <div class="actions"><button class="btn outline" onclick="location.reload()">重新載入</button><button class="btn" onclick="printReport()">列印 / 存 PDF</button></div>
+      <div><b id="title">讀取中…</b><div class="sub" id="subtitle">正在讀取 Profile 帶入的報告快照｜v5-localcache</div></div>
+      <div class="actions"><button class="btn outline" onclick="location.href='./profile.html'">回 Profile</button><button class="btn" onclick="printReport()">列印 / 存 PDF</button></div>
     </div>
     <div id="msg">讀取中…</div>
     <div id="reportHost" hidden><iframe id="reportFrame" class="reportFrame" sandbox="allow-same-origin allow-scripts"></iframe></div>
     <pre id="debug" class="debug" hidden></pre>
   </section>
 </main>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" crossorigin="anonymous"></script>
 <script>
-const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
-// 與 /account/profile.html 同一組 anon key
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const kind = (params.get('kind') || 'last').toLowerCase();
-const sb = window.supabase && window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth:{ persistSession:true, autoRefreshToken:true, detectSessionInUrl:true } });
 function label(k){return k==='answer'?'最近問答報告':k==='full'?'最近正式報告':'最後存放報告';}
 function fmt(v){ if(!v) return ''; const d=new Date(v); return Number.isNaN(d.getTime())?String(v):d.toLocaleString('zh-TW',{hour12:false}); }
 function showMsg(text, cls=''){ const el=$('msg'); el.className=cls; el.textContent=text; el.hidden=false; }
 function debug(text){ try{ $('debug').hidden=false; $('debug').textContent=text; }catch(_){} }
-function pickHtml(row){
-  if(kind === 'answer') return row.mbti_answer_report_html || '';
-  if(kind === 'full') return row.mbti_full_report_html || '';
-  return row.mbti_last_report_html || row.mbti_answer_report_html || row.mbti_full_report_html || '';
-}
-function pickTime(row){
-  if(kind === 'answer') return row.mbti_answer_pdf_updated_at || row.mbti_last_report_updated_at || '';
-  if(kind === 'full') return row.personality_report_updated_at || row.mbti_last_report_updated_at || '';
-  return row.mbti_last_report_updated_at || row.mbti_answer_pdf_updated_at || row.personality_report_updated_at || '';
-}
 function normalizeHtml(html){
   const s = String(html || '').trim();
   if(!s) return '';
   if(/<!doctype|<html[\s>]/i.test(s)) return s;
   return '<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BookWide MBTI 報告</title><style>body{margin:0;background:#fff;color:#111827;font-family:system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif}.page{max-width:980px;margin:0 auto;padding:24px}</style></head><body><div class="page">'+s+'</div></body></html>';
 }
-
-function tryLoadFromProfileCache(){
-  try{
-    const raw = sessionStorage.getItem('bw_mbti_report_view_payload') || '';
-    if(!raw) return false;
-    const payload = JSON.parse(raw);
-    const wanted = kind;
-    if(payload.kind && wanted && wanted !== 'last' && payload.kind !== wanted) return false;
-    const html = normalizeHtml(payload.html || '');
-    if(!html) return false;
-    $('title').textContent = payload.title || label(kind);
-    $('subtitle').textContent = `${payload.email || ''}｜${payload.completed_count || 0}/40｜${payload.last_report_kind || payload.kind || kind}｜${fmt(payload.updated_at || payload.saved_at)}`;
-    debug(`v4-profilecache\nsource=sessionStorage from profile.html\nkind=${payload.kind||kind}\nhas_html=${!!html}\nemail=${payload.email||''}`);
-    $('msg').hidden = true;
-    $('reportHost').hidden = false;
-    const frame = $('reportFrame');
-    if('srcdoc' in frame) frame.srcdoc = html;
-    else {
-      const blob = new Blob([html], {type:'text/html;charset=utf-8'});
-      frame.src = URL.createObjectURL(blob);
+function getPayload(){
+  const keys = ['bw_mbti_report_view_payload','bw_mbti_report_view_payload_answer','bw_mbti_report_view_payload_last'];
+  for (const storage of [localStorage, sessionStorage]){
+    for (const key of keys){
+      try{
+        const raw = storage.getItem(key) || '';
+        if(!raw) continue;
+        const p = JSON.parse(raw);
+        if(!p || !p.html) continue;
+        if(p.kind && kind && kind !== 'last' && p.kind !== kind) continue;
+        p._storage = storage === localStorage ? 'localStorage' : 'sessionStorage';
+        p._key = key;
+        return p;
+      }catch(_e){}
     }
-    return true;
-  }catch(e){
-    debug('profile cache load error=' + (e?.message || e));
-    return false;
   }
+  return null;
 }
-async function loadReport(){
-  $('title').textContent = label(kind);
-  if (tryLoadFromProfileCache()) return;
-  if(!sb){ showMsg('讀取失敗：Supabase SDK 未載入，且沒有從 Profile 帶入暫存報告。請從 Profile 的「查看報告」按鈕進入。','err'); return; }
-  try{
-    const { data:{ user }, error:userErr } = await sb.auth.getUser();
-    if(userErr) throw userErr;
-    if(!user){ showMsg('尚未登入，請先登入後再查看報告。','empty'); return; }
-    const fields = 'email,mbti_answer_report_html,mbti_full_report_html,mbti_last_report_html,mbti_last_report_kind,mbti_last_report_updated_at,mbti_answer_pdf_updated_at,personality_report_updated_at,mbti_completed_count';
-    const { data:row, error } = await sb.from('profiles').select(fields).eq('id', user.id).maybeSingle();
-    if(error) throw error;
-    if(!row){ showMsg('讀取失敗：找不到 Profile 資料。','err'); return; }
-    const html = normalizeHtml(pickHtml(row));
-    const time = pickTime(row);
-    $('subtitle').textContent = `${row.email || user.email || ''}｜${row.mbti_completed_count || 0}/40｜${row.mbti_last_report_kind || kind}｜${fmt(time)}`;
-    debug(`v4-profilecache\nuser=${user.id}\nemail=${row.email||user.email}\nkind=${kind}\nhas_answer=${!!row.mbti_answer_report_html}\nhas_last=${!!row.mbti_last_report_html}\nlast_kind=${row.mbti_last_report_kind||''}`);
-    if(!html){
-      showMsg('尚未存放這份報告 HTML。請先回 heart-mbti.html 按「列印目前問答 PDF」產生並存放。','empty');
-      return;
-    }
-    $('msg').hidden = true;
-    $('reportHost').hidden = false;
-    const frame = $('reportFrame');
-    if('srcdoc' in frame) frame.srcdoc = html;
-    else {
-      const blob = new Blob([html], {type:'text/html;charset=utf-8'});
-      frame.src = URL.createObjectURL(blob);
-    }
-  }catch(e){
-    const msg = e && (e.message || e.error_description || e.details || e.hint) || String(e || 'unknown error');
-    showMsg('讀取失敗：' + msg, 'err');
-    debug('error=' + msg + '\nkind=' + kind + '\nkey_prefix=' + SUPABASE_ANON_KEY.slice(0,18));
+function renderPayload(payload){
+  const html = normalizeHtml(payload && payload.html);
+  if(!html) return false;
+  $('title').textContent = payload.title || label(kind);
+  $('subtitle').textContent = `${payload.email || ''}｜${payload.completed_count || 0}/40｜${payload.last_report_kind || payload.kind || kind}｜${fmt(payload.updated_at || payload.saved_at)}`;
+  debug(`v5-localcache\nsource=${payload._storage||''}.${payload._key||''}\nkind=${payload.kind||kind}\nhas_html=${!!html}\nemail=${payload.email||''}`);
+  $('msg').hidden = true;
+  $('reportHost').hidden = false;
+  const frame = $('reportFrame');
+  if('srcdoc' in frame) frame.srcdoc = html;
+  else {
+    const blob = new Blob([html], {type:'text/html;charset=utf-8'});
+    frame.src = URL.createObjectURL(blob);
   }
+  return true;
+}
+function loadReport(){
+  $('title').textContent = label(kind);
+  const payload = getPayload();
+  if(renderPayload(payload)) return;
+  showMsg('沒有收到 Profile 帶過來的報告內容。請回 Profile，按「查看問答報告 / 查看最後存放報告」進入；不要直接手打這個網址。', 'empty');
+  debug('v5-localcache: no payload in localStorage/sessionStorage. This page no longer calls Supabase directly, so it will not show Invalid API key.');
 }
 function printReport(){
   const frame = $('reportFrame');
