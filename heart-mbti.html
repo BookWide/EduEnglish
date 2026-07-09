@@ -2672,6 +2672,13 @@ async function composeHeartReportCover(answers){
 async function openHeartReportPdf(){
   const answers=getHeartAnswers();
   if(!answers.length){toast("還沒有作答紀錄");return}
+  if(isMbtiMode() && typeof bwMbtiSaveReportToProfile === 'function'){
+    try{
+      const completed = (typeof mbtiCount === 'function') ? mbtiCount() : answers.length;
+      const mode = (typeof mbtiStageMode === 'function') ? mbtiStageMode(completed) : 'initial';
+      await bwMbtiSaveReportToProfile(mode, null);
+    }catch(e){ try{ console.warn('[BookWide MBTI] answer PDF profile save failed', e); }catch(_e){} }
+  }
   const done=getDone();
   if(!(hasPaidForHeart() || done.length>=TOTAL || answers.length>=TOTAL)){
     toast("扣到金幣後即可列印 PDF");
@@ -3468,6 +3475,44 @@ function bwProfileSupabaseClient(){
     return window.BW_PROFILE_SB;
   }catch(_e){ return null; }
 }
+
+/* === BookWide v10: Profile 人格報告時間一個月更新一次；Admin 不限 === */
+const BW_MBTI_PROFILE_UPDATE_COOLDOWN_DAYS = 30;
+function bwMbtiDateMs(v){
+  const t = Date.parse(String(v || ''));
+  return Number.isFinite(t) ? t : 0;
+}
+function bwMbtiIsAdminProfile(user, profile){
+  const email = String((user && user.email) || (profile && profile.email) || '').trim().toLowerCase();
+  const role = String((profile && profile.role_code) || '').trim().toLowerCase();
+  const domain = String((profile && profile.domain_code) || '').trim().toLowerCase();
+  return email === 'pmktools@gmail.com' || email === 'admin@bookwide.net' || role === 'admin' || role === 'owner' || domain === 'admin';
+}
+async function bwMbtiProfileUpdateGate(sbp, user){
+  try{
+    if(!sbp || !user || !user.id) return { allowed:false, reason:'not_ready' };
+    const { data:profile, error } = await sbp
+      .from('profiles')
+      .select('id,email,role_code,domain_code,personality_report_updated_at')
+      .eq('id', user.id)
+      .maybeSingle();
+    if(error) throw error;
+    const admin = bwMbtiIsAdminProfile(user, profile || {});
+    if(admin) return { allowed:true, admin:true, profile:profile || null };
+    const last = bwMbtiDateMs(profile && profile.personality_report_updated_at);
+    if(last){
+      const diffDays = (Date.now() - last) / 86400000;
+      if(diffDays < BW_MBTI_PROFILE_UPDATE_COOLDOWN_DAYS){
+        const nextAt = new Date(last + BW_MBTI_PROFILE_UPDATE_COOLDOWN_DAYS * 86400000).toISOString();
+        return { allowed:false, reason:'monthly_limit', admin:false, profile:profile || null, last_at:profile.personality_report_updated_at, next_at:nextAt, days_left:Math.ceil(BW_MBTI_PROFILE_UPDATE_COOLDOWN_DAYS - diffDays) };
+      }
+    }
+    return { allowed:true, admin:false, profile:profile || null };
+  }catch(e){
+    try{ console.warn('[BookWide MBTI] profile update gate failed, allow once', e); }catch(_e){}
+    return { allowed:true, gate_error:String(e && e.message || e) };
+  }
+}
 async function bwMbtiSaveReportToProfile(mode, src){
   try{
     mode = String(mode || window.BW_MBTI_CURRENT_REPORT_MODE || mbtiStageMode(mbtiCount()) || 'initial').trim().toLowerCase();
@@ -3492,6 +3537,20 @@ async function bwMbtiSaveReportToProfile(mode, src){
     if(userErr) throw userErr;
     const user = userRes && userRes.user;
     if(!user || !user.id) return { ok:false, skipped:true, reason:'not_logged_in' };
+
+    const gate = await bwMbtiProfileUpdateGate(sbp, user);
+    if(gate && gate.allowed === false){
+      const msg = gate.reason === 'monthly_limit'
+        ? '本月已回存過人格報告，約 ' + (gate.days_left || 1) + ' 天後可再更新；Admin 不限制。'
+        : 'Profile 暫不更新：' + (gate.reason || 'blocked');
+      try{
+        window.BW_LAST_MBTI_SAVE_RESULT = { ok:false, skipped:true, ...gate, mbti_code:type, mode, done, at:new Date().toISOString() };
+        localStorage.setItem('bw_last_mbti_profile_save_skip', JSON.stringify(window.BW_LAST_MBTI_SAVE_RESULT));
+      }catch(_e){}
+      try{ if(typeof toast === 'function') toast(msg); }catch(_e){}
+      try{ console.log('[BookWide MBTI] profile save skipped', gate); }catch(_e){}
+      return { ok:false, skipped:true, ...gate };
+    }
 
     const payload = {
       mbti_code: type,
@@ -3522,7 +3581,7 @@ async function bwMbtiSaveReportToProfile(mode, src){
       .select('id,mbti_code,mbti_title,personality_report_updated_at')
       .maybeSingle();
     if(error) throw error;
-    try{ window.BW_LAST_MBTI_SAVE_RESULT = { ok:true, user_id:user.id, email:user.email||'', mbti_code:type, mbti_title:payload.mbti_title, mode, done, saved_at:payload.personality_report_updated_at }; localStorage.setItem('bw_last_mbti_profile_save', JSON.stringify({user_id:user.id, email:user.email||'', ...payload})); }catch(_e){}
+    try{ window.BW_LAST_MBTI_SAVE_RESULT = { ok:true, user_id:user.id, email:user.email||'', admin:!!(gate&&gate.admin), mbti_code:type, mbti_title:payload.mbti_title, mode, done, saved_at:payload.personality_report_updated_at }; localStorage.setItem('bw_last_mbti_profile_save', JSON.stringify({user_id:user.id, email:user.email||'', ...payload})); }catch(_e){}
     try{ if(typeof toast === 'function') toast('MBTI 已回存 Profile：' + type); }catch(_e){}
     try{ console.log('[BookWide MBTI] profile saved', data || payload); }catch(_e){}
     return { ok:true, data:data || payload };
@@ -3580,15 +3639,10 @@ async function bwMbtiSaveProgressToProfile(reason){
       progress,
       saved_at: new Date().toISOString()
     },
-    personality_report_updated_at: new Date().toISOString(),
+    // 進度記憶只更新 JSON 與 updated_at；
+    // 不更新 personality_report_updated_at / mbti_code / mbti_title，避免每答一題就刷新「最近人格報告時間」。
     updated_at: new Date().toISOString()
   };
-  if(progress.mbti_code && progress.mbti_code.length === 4){
-    payload.mbti_code = progress.mbti_code;
-    const zh = (typeof mbtiTypeName === 'function') ? mbtiTypeName(progress.mbti_code) : '';
-    const en = (typeof mbtiTypeNameEn === 'function') ? mbtiTypeNameEn(progress.mbti_code) : '';
-    payload.mbti_title = [zh,en].filter(Boolean).join(' / ');
-  }
   const { error } = await sbp.from('profiles').update(payload).eq('id', user.id);
   if(error) throw error;
   try{ localStorage.setItem('bw_last_mbti_progress_save', JSON.stringify({user_id:user.id,email:user.email||'',reason,progress})); }catch(e){}
