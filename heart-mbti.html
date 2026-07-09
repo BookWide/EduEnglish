@@ -3476,7 +3476,7 @@ function bwProfileSupabaseClient(){
   }catch(_e){ return null; }
 }
 
-/* === BookWide v10: Profile 人格報告時間一個月更新一次；Admin 不限 === */
+/* === BookWide v11: 10/20 只存進度；40/40 才更新正式 Profile；一般會員完整報告 30 天一次，Admin 不限 === */
 const BW_MBTI_PROFILE_UPDATE_COOLDOWN_DAYS = 30;
 function bwMbtiDateMs(v){
   const t = Date.parse(String(v || ''));
@@ -3524,6 +3524,7 @@ async function bwMbtiSaveReportToProfile(mode, src){
     const titleEn = (typeof mbtiTypeNameEn === 'function') ? mbtiTypeNameEn(type) : '';
     const nickEn  = (typeof mbtiTypeNickEn === 'function') ? mbtiTypeNickEn(type) : '';
     const done = Number((src && (src.textContent||'').match(/完成題數\s*([0-9]+)\s*\/\s*40/) || [])[1] || mbtiCount() || 0);
+    const isFullReport = (mode === 'full') || done >= 40;
 
     const zodiacAnimal = String(localStorage.getItem('zodiac_animal') || localStorage.getItem('bw_zodiac_animal') || '').trim();
     const westernZodiac = String(localStorage.getItem('western_zodiac') || localStorage.getItem('bw_western_zodiac') || localStorage.getItem('constellation') || '').trim();
@@ -3538,36 +3539,62 @@ async function bwMbtiSaveReportToProfile(mode, src){
     const user = userRes && userRes.user;
     if(!user || !user.id) return { ok:false, skipped:true, reason:'not_logged_in' };
 
+    const reportJson = {
+      source: 'heart-mbti',
+      progress: (typeof bwMbtiProgressSnapshot === 'function' ? bwMbtiProgressSnapshot(mode) : null),
+      mode,
+      formal_profile_update: !!isFullReport,
+      mbti_code: type,
+      mbti_title_zh: titleZh,
+      mbti_title_en: titleEn,
+      mbti_nick_en: nickEn,
+      completed_count: done,
+      scores: scores || {},
+      report_text: src ? String(src.textContent || '').slice(0, 6000) : '',
+      saved_at: new Date().toISOString()
+    };
+
+    // v11：10/20 題只記憶進度與暫存分析，不覆蓋 Profile 正式人格欄位與「最近人格報告時間」。
+    //      只有 40/40 完整報告才更新 mbti_code / mbti_title / personality_report_updated_at。
+    if(!isFullReport){
+      const payload = {
+        personality_report_json: reportJson,
+        updated_at: new Date().toISOString()
+      };
+      const { data, error } = await sbp
+        .from('profiles')
+        .update(payload)
+        .eq('id', user.id)
+        .select('id,mbti_code,mbti_title,personality_report_updated_at')
+        .maybeSingle();
+      if(error) throw error;
+      try{
+        window.BW_LAST_MBTI_SAVE_RESULT = { ok:true, progress_only:true, user_id:user.id, email:user.email||'', mbti_code:type, mode, done, saved_at:reportJson.saved_at };
+        localStorage.setItem('bw_last_mbti_profile_progress_save', JSON.stringify({user_id:user.id, email:user.email||'', ...payload}));
+      }catch(_e){}
+      try{ if(typeof toast === 'function') toast('已記住 MBTI 進度；40 題完整報告才更新 Profile 正式人格。'); }catch(_e){}
+      try{ console.log('[BookWide MBTI] profile progress saved only', data || payload); }catch(_e){}
+      return { ok:true, progress_only:true, data:data || payload };
+    }
+
     const gate = await bwMbtiProfileUpdateGate(sbp, user);
     if(gate && gate.allowed === false){
       const msg = gate.reason === 'monthly_limit'
-        ? '本月已回存過人格報告，約 ' + (gate.days_left || 1) + ' 天後可再更新；Admin 不限制。'
+        ? '本月已回存過完整人格報告，約 ' + (gate.days_left || 1) + ' 天後可再更新；Admin 不限制。'
         : 'Profile 暫不更新：' + (gate.reason || 'blocked');
       try{
         window.BW_LAST_MBTI_SAVE_RESULT = { ok:false, skipped:true, ...gate, mbti_code:type, mode, done, at:new Date().toISOString() };
         localStorage.setItem('bw_last_mbti_profile_save_skip', JSON.stringify(window.BW_LAST_MBTI_SAVE_RESULT));
       }catch(_e){}
       try{ if(typeof toast === 'function') toast(msg); }catch(_e){}
-      try{ console.log('[BookWide MBTI] profile save skipped', gate); }catch(_e){}
+      try{ console.log('[BookWide MBTI] formal profile save skipped', gate); }catch(_e){}
       return { ok:false, skipped:true, ...gate };
     }
 
     const payload = {
       mbti_code: type,
       mbti_title: [titleZh, titleEn].filter(Boolean).join(' / '),
-      personality_report_json: {
-        source: 'heart-mbti',
-        progress: (typeof bwMbtiProgressSnapshot === 'function' ? bwMbtiProgressSnapshot(mode) : null),
-        mode,
-        mbti_code: type,
-        mbti_title_zh: titleZh,
-        mbti_title_en: titleEn,
-        mbti_nick_en: nickEn,
-        completed_count: done,
-        scores: scores || {},
-        report_text: src ? String(src.textContent || '').slice(0, 6000) : '',
-        saved_at: new Date().toISOString()
-      },
+      personality_report_json: reportJson,
       personality_report_updated_at: new Date().toISOString(),
       updated_at: new Date().toISOString()
     };
@@ -3581,10 +3608,10 @@ async function bwMbtiSaveReportToProfile(mode, src){
       .select('id,mbti_code,mbti_title,personality_report_updated_at')
       .maybeSingle();
     if(error) throw error;
-    try{ window.BW_LAST_MBTI_SAVE_RESULT = { ok:true, user_id:user.id, email:user.email||'', admin:!!(gate&&gate.admin), mbti_code:type, mbti_title:payload.mbti_title, mode, done, saved_at:payload.personality_report_updated_at }; localStorage.setItem('bw_last_mbti_profile_save', JSON.stringify({user_id:user.id, email:user.email||'', ...payload})); }catch(_e){}
-    try{ if(typeof toast === 'function') toast('MBTI 已回存 Profile：' + type); }catch(_e){}
-    try{ console.log('[BookWide MBTI] profile saved', data || payload); }catch(_e){}
-    return { ok:true, data:data || payload };
+    try{ window.BW_LAST_MBTI_SAVE_RESULT = { ok:true, formal:true, user_id:user.id, email:user.email||'', admin:!!(gate&&gate.admin), mbti_code:type, mbti_title:payload.mbti_title, mode, done, saved_at:payload.personality_report_updated_at }; localStorage.setItem('bw_last_mbti_profile_save', JSON.stringify({user_id:user.id, email:user.email||'', ...payload})); }catch(_e){}
+    try{ if(typeof toast === 'function') toast('40 題完整 MBTI 已回存 Profile：' + type); }catch(_e){}
+    try{ console.log('[BookWide MBTI] formal profile saved', data || payload); }catch(_e){}
+    return { ok:true, formal:true, data:data || payload };
   }catch(e){
     try{ window.BW_LAST_MBTI_SAVE_RESULT = { ok:false, error:String(e && e.message || e), at:new Date().toISOString() }; localStorage.setItem('bw_last_mbti_profile_save_error', JSON.stringify(window.BW_LAST_MBTI_SAVE_RESULT)); }catch(_e){}
     try{ console.warn('[BookWide MBTI] save profile failed', e); }catch(_e){}
