@@ -2672,11 +2672,6 @@ async function composeHeartReportCover(answers){
 async function openHeartReportPdf(){
   const answers=getHeartAnswers();
   if(!answers.length){toast("還沒有作答紀錄");return}
-  if(isMbtiMode() && typeof bwMbtiSaveAnswerPdfToProfile === 'function'){
-    try{
-      await bwMbtiSaveAnswerPdfToProfile('answer_pdf');
-    }catch(e){ try{ console.warn('[BookWide MBTI] answer PDF profile save failed', e); }catch(_e){} }
-  }
   const done=getDone();
   if(!(hasPaidForHeart() || done.length>=TOTAL || answers.length>=TOTAL)){
     toast("扣到金幣後即可列印 PDF");
@@ -2686,7 +2681,13 @@ async function openHeartReportPdf(){
   if(!w){toast("請允許彈出視窗，才能列印 PDF");return}
   toast("正在合成 PDF 封面…");
   const coverUrl=await composeHeartReportCover(answers);
-  w.document.open();w.document.write(buildHeartReportHtml(coverUrl));w.document.close();
+  const reportHtml = buildHeartReportHtml(coverUrl);
+  if(isMbtiMode() && typeof bwMbtiSaveAnswerPdfToProfile === 'function'){
+    try{
+      await bwMbtiSaveAnswerPdfToProfile('answer_pdf', reportHtml);
+    }catch(e){ try{ console.warn('[BookWide MBTI] answer PDF profile save failed', e); }catch(_e){} }
+  }
+  w.document.open();w.document.write(reportHtml);w.document.close();
 }
 
 
@@ -3512,7 +3513,7 @@ async function bwMbtiProfileUpdateGate(sbp, user){
   }
 }
 
-async function bwMbtiSaveAnswerPdfToProfile(reason){
+async function bwMbtiSaveAnswerPdfToProfile(reason, reportHtml){
   try{
     if(!isMbtiMode()) return {ok:false, skipped:true, reason:'not_mbti'};
     const sbp = bwProfileSupabaseClient();
@@ -3523,15 +3524,21 @@ async function bwMbtiSaveAnswerPdfToProfile(reason){
     const progress = (typeof bwMbtiProgressSnapshot === 'function') ? bwMbtiProgressSnapshot() : null;
     const completed = Number((progress && progress.completed_count) || (typeof mbtiCount === 'function' ? mbtiCount() : 0) || 0);
     const nowIso = new Date().toISOString();
+    const safeReportHtml = String(reportHtml || '');
     const payload = {
       mbti_answer_pdf_updated_at: nowIso,
       mbti_progress_updated_at: nowIso,
       mbti_completed_count: completed,
+      mbti_answer_report_html: safeReportHtml,
+      mbti_last_report_html: safeReportHtml,
+      mbti_last_report_kind: 'answer_pdf',
+      mbti_last_report_updated_at: nowIso,
       personality_report_json: {
         source:'heart-mbti-answer-pdf',
         reason: reason || 'answer_pdf',
         progress,
         completed_count: completed,
+        has_report_html: !!safeReportHtml,
         saved_at: nowIso
       },
       updated_at: nowIso
@@ -3540,7 +3547,7 @@ async function bwMbtiSaveAnswerPdfToProfile(reason){
       .from('profiles')
       .update(payload)
       .eq('id', user.id)
-      .select('id,mbti_answer_pdf_updated_at,mbti_progress_updated_at,mbti_completed_count')
+      .select('id,mbti_answer_pdf_updated_at,mbti_progress_updated_at,mbti_completed_count,mbti_last_report_kind,mbti_last_report_updated_at')
       .maybeSingle();
     if(error) throw error;
     try{ localStorage.setItem('bw_last_mbti_answer_pdf_save', JSON.stringify({user_id:user.id,email:user.email||'',...payload})); }catch(_e){}
@@ -3635,6 +3642,7 @@ async function bwMbtiSaveReportToProfile(mode, src){
     }
 
     const nowIsoFormal = new Date().toISOString();
+    const formalReportHtml = src ? `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>BookWide MBTI 正式人格報告</title><style>body{margin:0;background:#f6f8fc;color:#0f172a;font-family:system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif}.wrap{max-width:980px;margin:0 auto;padding:18px}.tools{position:sticky;top:0;z-index:2;text-align:right;background:rgba(255,255,255,.94);padding:10px;border-bottom:1px solid #e5e7eb}.tools button{border:0;border-radius:999px;background:#2563eb;color:#fff;font-weight:900;padding:9px 16px}@media print{.tools{display:none}}</style></head><body><div class="tools"><button onclick="window.print()">列印 / 存 PDF</button></div><main class="wrap">${src.outerHTML}</main></body></html>` : '';
     const payload = {
       mbti_code: type,
       mbti_title: [titleZh, titleEn].filter(Boolean).join(' / '),
@@ -3642,6 +3650,10 @@ async function bwMbtiSaveReportToProfile(mode, src){
       personality_report_updated_at: nowIsoFormal,
       mbti_progress_updated_at: nowIsoFormal,
       mbti_completed_count: done,
+      mbti_full_report_html: formalReportHtml,
+      mbti_last_report_html: formalReportHtml,
+      mbti_last_report_kind: 'full_report',
+      mbti_last_report_updated_at: nowIsoFormal,
       updated_at: nowIsoFormal
     };
     if(zodiacAnimal) payload.zodiac_animal = zodiacAnimal;
