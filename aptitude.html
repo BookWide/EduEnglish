@@ -1091,10 +1091,16 @@ body.bw-aptitude-mode .aptOwnerMeta .account{font-size:10.5px;color:#475569;marg
 <script>
 
 const BW_APTITUDE_PARAMS = new URLSearchParams(location.search);
-const HEART_TOPIC_SLUG = BW_APTITUDE_PARAMS.get("test") || BW_APTITUDE_PARAMS.get("topic") || "aptitude-analysis";
+const BW_APTITUDE_DATASET =
+  BW_APTITUDE_PARAMS.get("test") ||
+  BW_APTITUDE_PARAMS.get("dataset") ||
+  BW_APTITUDE_PARAMS.get("json") ||
+  BW_APTITUDE_PARAMS.get("topic") ||
+  "aptitude-analysis";
+const HEART_TOPIC_SLUG = BW_APTITUDE_DATASET;
 let BW_APTITUDE_CONFIG = null;
 function bwAptitudeJsonFile(){
-  const raw = String(BW_APTITUDE_PARAMS.get("test") || HEART_TOPIC_SLUG || "aptitude-analysis").trim();
+  const raw = String(BW_APTITUDE_DATASET || "aptitude-analysis").trim().replace(/\.json$/i,"");
   return /^[a-z0-9][a-z0-9_-]*$/i.test(raw) ? raw : "aptitude-analysis";
 }
 function bwAptitudeDataUrl(){ return `/data/monk/aptitude/${encodeURIComponent(bwAptitudeJsonFile())}.json`; }
@@ -1676,22 +1682,56 @@ async function loadHeartLessons(){
   if(isAptitudeMode() && j && typeof j === 'object'){
     HEART_TITLE = j.title_zh || j.title_en || HEART_TITLE || '性向測驗';
     HEART_SERIES = j.title_zh || HEART_SERIES || '性向測驗';
-    document.title = HEART_TITLE;
+    document.title = HEART_TITLE + "｜BookWide";
+    document.documentElement.dataset.aptitudeJson = bwAptitudeJsonFile();
     const brandSub = document.querySelector(".brand span");
     if(brandSub){ const cfg = BW_APTITUDE_CONFIG || {}; brandSub.textContent = (cfg.brand_subtitle_zh || `${Array.isArray(cfg.questions) ? cfg.questions.length : TOTAL}題趣味偏好測驗｜英・日・中`); }
   }
-  const arr = Array.isArray(j) ? j : (Array.isArray(j.questions) ? j.questions : (Array.isArray(j.lessons) ? j.lessons : []));
+  const arr = Array.isArray(j)
+    ? j
+    : (Array.isArray(j.questions)
+      ? j.questions
+      : (Array.isArray(j.lessons)
+        ? j.lessons
+        : (Array.isArray(j.items)
+          ? j.items
+          : (Array.isArray(j?.data?.questions) ? j.data.questions : []))));
   if(!arr.length) throw new Error("題庫沒有 questions / lessons：" + HEART_QUESTIONS_URL);
-  lessons = arr.map((x,i)=>({
-    day: Number(x.day || i+1),
-    scene:x.scene||HEART_SERIES,
-    title:x.title||HEART_SERIES,
-    en:x.en||"",
-    zh:x.zh||"",
-    ja:x.ja||"",
-    choices:Array.isArray(x.choices) ? x.choices.map(ch => isAptitudeMode() ? Object.assign({}, ch, {correct:true}) : ch) : [],
-    axis:x.axis||"",
-    category:x.category||"",
+  lessons = arr.map((x,i)=>{
+    const rawChoices = Array.isArray(x.choices)
+      ? x.choices
+      : (Array.isArray(x.options)
+        ? x.options
+        : (Array.isArray(x.answers) ? x.answers : []));
+    const normalizedChoices = rawChoices.map((ch,ci)=>{
+      const scoreObj = (ch && typeof ch.score === "object") ? ch.score : {};
+      return Object.assign({}, ch, {
+        en: ch.en || ch.text_en || ch.label_en || ch.english || ch.text || "",
+        zh: ch.zh || ch.text_zh || ch.label_zh || ch.chinese || ch.label || "",
+        ja: ch.ja || ch.text_ja || ch.label_ja || ch.japanese || "",
+        aptitude_score: Number(
+          ch.aptitude_score ??
+          ch.points ??
+          ch.value ??
+          scoreObj.total_score ??
+          scoreObj.aptitude_tendency ??
+          scoreObj.score ??
+          0
+        ) || 0,
+        correct: isAptitudeMode() ? true : !!ch.correct,
+        option_index: ci + 1
+      });
+    });
+    return {
+    day: Number(x.day || x.id || x.no || i+1),
+    scene:x.scene||x.section||x.group||HEART_SERIES,
+    title:x.title||x.title_zh||x.question_zh||HEART_SERIES,
+    en:x.en||x.question_en||x.prompt_en||x.text_en||"",
+    zh:x.zh||x.question_zh||x.prompt_zh||x.text_zh||x.question||"",
+    ja:x.ja||x.question_ja||x.prompt_ja||x.text_ja||"",
+    choices:normalizedChoices,
+    axis:x.axis||x.dimension||x.scale||"",
+    category:x.category||x.group||x.section||"",
     weight:Number(x.weight||1)||1,
     q_type:x.q_type||"best_reply",
     type_label:x.type_label||"選最佳接話",
@@ -1716,7 +1756,8 @@ async function loadHeartLessons(){
     lesson_category:x.lesson_category||x.lesson_cat||x.video_category||"",
     lesson_slug:x.lesson_slug||x.video_slug||"",
     lesson_label:x.lesson_label||"先看星座補解影片"
-  }));
+  };
+  });
   TOTAL = lessons.length;
   ZEN_LEVEL_NAME = HEART_SERIES;
 }
@@ -4679,7 +4720,14 @@ $("play").onclick=()=>{
 /* === BookWide aptitude standalone v7: score/progress fix, standalone only === */
 try{ document.body.classList.add('bw-aptitude-mode'); }catch(e){}
 (function(){
-  function aptMode(){ return /^aptitude(?:-|$)/i.test(String(HEART_TOPIC_SLUG||'')); }
+  function aptMode(){
+    const pathIsAptitude = /\/aptitude\.html$/i.test(String(location.pathname || ""));
+    const hasDatasetParam =
+      BW_APTITUDE_PARAMS.has("test") ||
+      BW_APTITUDE_PARAMS.has("dataset") ||
+      BW_APTITUDE_PARAMS.has("json");
+    return pathIsAptitude || hasDatasetParam || /^aptitude(?:-|$)/i.test(String(HEART_TOPIC_SLUG||""));
+  }
   function esc(s){ return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;'); }
   function aptAnswers(){ try{return getHeartAnswers ? getHeartAnswers() : [];}catch(e){return [];} }
   function aptScoreFromRecord(rec){
@@ -4808,7 +4856,11 @@ ${rangeExtra}<div class="aptNote">${esc(disclaimer)}</div>`;
     HEART_TITLE = 'BookWide 趣味偏好測驗';
     HEART_SERIES = 'BookWide 趣味偏好測驗';
     HEART_QUESTIONS_URL = bwPath(bwAptitudeDataUrl());
-    HEART_PHOTOS_URL = bwPath('/assets/hiking/photos.json');
+    HEART_PHOTOS_URL = bwPath(
+      BW_APTITUDE_CONFIG?.photos_json ||
+      BW_APTITUDE_CONFIG?.photo_json ||
+      '/assets/hiking/photos.json'
+    );
     HEART_BGM_URL = '';
     document.title = HEART_TITLE;
     const sub = document.querySelector('.brand span'); if(sub) sub.textContent = 'BookWide JSON 測驗引擎｜題目與報告由 JSON 控制';
