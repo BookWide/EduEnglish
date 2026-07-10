@@ -198,21 +198,15 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
 
 <script>
 "use strict";
-console.log("BOOKWIDE_APTITUDE_BUILD","V1.1_RAW_20260711");
+console.log("BOOKWIDE_APTITUDE_BUILD","V1.2.2_STRICT_JSON_COMPAT_20260711");
 console.log("BOOKWIDE_LOCATION",location.href);
 
 const FALLBACK_COVER="https://pub-578e9e060a104f24b6865e26eb941648.r2.dev/ads/monk/aptitude/cover.png";
 const qs=new URLSearchParams(location.search);
-const DATASET=safeSlug(
-  qs.get("test") ||
-  qs.get("dataset") ||
-  qs.get("json") ||
-  qs.get("topic") ||
-  "aptitude-analysis"
-);
-const DATA_LOCAL_URL="/data/monk/aptitude/"+DATASET+".json";
-const DATA_RAW_URL="https://raw.githubusercontent.com/BookWide/EduEnglish/main/data/monk/aptitude/"+DATASET+".json";
-let DATA_URL=DATA_RAW_URL;
+const DATASET=safeSlug(qs.get("test")||qs.get("dataset")||qs.get("json")||qs.get("topic")||"");
+const DATA_LOCAL_URL=DATASET?"/data/monk/aptitude/"+DATASET+".json":"";
+const DATA_RAW_URL=DATASET?"https://raw.githubusercontent.com/BookWide/EduEnglish/main/data/monk/aptitude/"+DATASET+".json":"";
+let DATA_URL=DATA_LOCAL_URL;
 const $=id=>document.getElementById(id);
 
 let config=null, questions=[], photos=[], index=0, selected=null;
@@ -225,7 +219,22 @@ index=Math.max(0,Number(state.index||0));
 
 function safeSlug(v){
   v=String(v||"").trim().replace(/\.json$/i,"");
-  return /^[a-z0-9][a-z0-9_-]*$/i.test(v)?v:"aptitude-analysis";
+  return /^[a-z0-9][a-z0-9_-]*$/i.test(v)?v:"";
+}
+function parseDatasetFromUrl(){
+  const params=new URLSearchParams(location.search);
+  const raw=params.get("test")||params.get("dataset")||params.get("json")||params.get("topic")||"";
+  return safeSlug(raw);
+}
+function declaredDataset(raw){
+  if(!raw||typeof raw!=="object"||Array.isArray(raw))return "";
+  return safeSlug(raw.dataset||raw.slug||raw.test_id||raw.testId||"");
+}
+function validateDataset(raw,expected,url){
+  const actual=declaredDataset(raw);
+  if(!actual)throw new Error(`JSON 缺少 dataset 或 slug：${url}`);
+  if(actual!==expected)throw new Error(`JSON 識別不符：網址要求 ${expected}，實際收到 ${actual}（${url}）`);
+  return raw;
 }
 function storageKey(name){return `bw_test_v1_${DATASET}_${name}`}
 function loadJson(k,fallback){try{const v=JSON.parse(localStorage.getItem(k)||"null");return v??fallback}catch(_){return fallback}}
@@ -241,7 +250,7 @@ function normalizeConfig(raw){
     Array.isArray(root.lessons)?root.lessons:
     Array.isArray(root.items)?root.items:
     Array.isArray(root?.data?.questions)?root.data.questions:[];
-  const declaredSlug=safeSlug(first(root.slug,root.topic,root.id,DATASET));
+  const declaredSlug=declaredDataset(root)||DATASET;
   const cfg={
     slug:DATASET,
     topic:first(root.topic,declaredSlug,DATASET),
@@ -254,9 +263,9 @@ function normalizeConfig(raw){
     scene:first(root.scene_label_zh,root.scene_label,"選比較像你的反應"),
     photosJson:first(root.photos_json,root.photo_json,root.assets?.photos_json,"/assets/hiking/photos.json"),
     cover:first(root.cover_url,root.report_profile?.cover,FALLBACK_COVER),
-    scoreMin:number(root.score_model?.min,root.result_gauge?.min,root.min_score,0),
-    scoreMax:number(root.score_model?.max,root.result_gauge?.max,root.max_score,arr.length*10||300),
-    ranges:root.result_ranges||root.ranges||root.results||root.analysis?.ranges||root.score_model?.ranges||[],
+    scoreMin:number(root.score_model?.min,root.result_gauge?.min,root.result_gauge?.min_score,root.min_score,0),
+    scoreMax:number(root.score_model?.max,root.result_gauge?.max,root.result_gauge?.max_score,root.max_score,arr.length*10||300),
+    ranges:root.result_ranges||root.ranges||root.results||root.analysis?.ranges||root.analysis?.result_levels||root.score_model?.ranges||[],
     ticks:root.result_gauge?.ticks||root.ticks||[],
     disclaimer:first(root.result_profile?.disclaimer_zh,root.analysis?.disclaimer_zh,root.score_model?.important_disclaimer?.zh,root.disclaimer_zh,"本測驗僅供娛樂與自我探索，不構成專業診斷。"),
     reportTitle:first(root.report_profile?.title_zh,root.report_title_zh,root.title_zh,root.title,"BookWide 趣味偏好分析"),
@@ -313,13 +322,21 @@ async function fetchJson(url){
   return data;
 }
 async function fetchDataset(){
+  let localError=null;
+  try{
+    DATA_URL=DATA_LOCAL_URL;
+    const local=await fetchJson(DATA_LOCAL_URL);
+    return validateDataset(local,DATASET,DATA_LOCAL_URL);
+  }catch(err){
+    localError=err;
+    console.warn("網站同源 JSON 讀取失敗或識別不符，改用 GitHub RAW 備援：",err);
+  }
   try{
     DATA_URL=DATA_RAW_URL;
-    return await fetchJson(DATA_RAW_URL);
+    const raw=await fetchJson(DATA_RAW_URL);
+    return validateDataset(raw,DATASET,DATA_RAW_URL);
   }catch(rawError){
-    console.warn("GitHub Raw 讀取失敗，改讀網站本機 JSON：",rawError);
-    DATA_URL=DATA_LOCAL_URL;
-    return await fetchJson(DATA_LOCAL_URL);
+    throw new Error(`同源與 GitHub RAW 都無法載入正確資料。\n同源：${localError?.message||localError}\nGitHub：${rawError?.message||rawError}`);
   }
 }
 async function loadPhotos(url){
@@ -363,7 +380,7 @@ function render(options={}){
   $("statusProgress").textContent=`${index+1}/${questions.length}`;
   $("statusDone").textContent=`${answers.length}/${questions.length}`;
   $("statusScore").textContent=`${totalScore()}分`;
-  $("statusSource").textContent=DATA_URL===DATA_RAW_URL?"GitHub RAW 最新 JSON":"網站備援 JSON";
+  $("statusSource").textContent=DATA_URL===DATA_LOCAL_URL?"網站同源 JSON":"GitHub RAW 備援 JSON";
   $("statusSource").title=DATA_URL;
   $("testTitle").textContent=`${config.title} Q${index+1}`;
   const sceneText=q.scene||config.scene;
@@ -505,6 +522,61 @@ function continueFlow(){
   render({autoSpeak:true});
 }
 
+function stopAllSpeech(){
+  speechRunId++;
+  lastAutoSpokenKey="";
+  if("speechSynthesis" in window)speechSynthesis.cancel();
+}
+function clearCurrentTestState(){
+  stopAllSpeech();
+  localStorage.removeItem(storageKey("answers"));
+  localStorage.removeItem(storageKey("state"));
+  sessionStorage.removeItem(storageKey("voice_unlocked"));
+  const reports=loadJson("bw_aptitude_reports_v1",{});
+  if(reports&&typeof reports==="object"&&Object.prototype.hasOwnProperty.call(reports,DATASET)){
+    delete reports[DATASET];
+    saveJson("bw_aptitude_reports_v1",reports);
+  }
+  answers=[];
+  state={index:0};
+  index=0;
+  selected=null;
+  autoVoiceEnabled=false;
+}
+function verifyPageDataset(){
+  let current="";
+  try{current=parseDatasetFromUrl()}catch(err){
+    stopAllSpeech();
+    $("app").hidden=true;
+    $("error").textContent=`BookWide 測驗網址錯誤\n\n${err.message||err}`;
+    $("error").classList.add("show");
+    return false;
+  }
+  if(!current){
+    stopAllSpeech();
+    $("app").hidden=true;
+    $("error").textContent="BookWide 測驗網址錯誤\n\n網址缺少合法的 test/dataset 參數；禁止自動退回 aptitude-analysis。";
+    $("error").classList.add("show");
+    return false;
+  }
+  if(current!==DATASET){
+    stopAllSpeech();
+    location.reload();
+    return false;
+  }
+  if(config&&config.declaredSlug!==DATASET){
+    stopAllSpeech();
+    $("app").hidden=true;
+    $("error").textContent=`BookWide JSON 識別錯誤\n\n網址要求：${DATASET}\n目前資料：${config.declaredSlug}`;
+    $("error").classList.add("show");
+    return false;
+  }
+  return true;
+}
+window.addEventListener("pagehide",stopAllSpeech);
+window.addEventListener("beforeunload",stopAllSpeech);
+window.addEventListener("pageshow",()=>{stopAllSpeech();verifyPageDataset();});
+
 function bind(){
   $("voiceUnlockBtn").onclick=unlockVoiceAndSpeak;
   $("voiceUnlock").hidden=autoVoiceEnabled;
@@ -536,15 +608,12 @@ function bind(){
 }
 async function init(){
   try{
-    if(qs.get("reset")==="1"){
-      localStorage.removeItem(storageKey("answers"));
-      localStorage.removeItem(storageKey("state"));
-      answers=[];
-      index=0;
-      lastAutoSpokenKey="";
-    }
+    if(!DATASET)throw new Error("網址缺少合法的 test/dataset 參數；禁止自動退回 aptitude-analysis。");
+    if(qs.get("reset")==="1")clearCurrentTestState();
+    if(!verifyPageDataset())return;
     const raw=await fetchDataset();
     config=normalizeConfig(raw);
+    if(config.declaredSlug!==DATASET)throw new Error(`正規化後資料集仍不符：${config.declaredSlug} !== ${DATASET}`);
     questions=config.questions;
     if(!questions.length)throw new Error("JSON 內找不到 questions / lessons / items / data.questions。");
     console.log("BOOKWIDE_JSON_SOURCE",DATA_URL);
@@ -556,7 +625,7 @@ async function init(){
     bind();
     render({autoSpeak:autoVoiceEnabled});
   }catch(err){
-    $("error").textContent=`BookWide V1.1 RAW 多測驗引擎載入失敗\n\nGitHub：${DATA_RAW_URL}\n網站備援：${DATA_LOCAL_URL}\n錯誤：${err.message||err}`;
+    $("error").textContent=`BookWide V1.2.2 STRICT 多測驗引擎載入失敗\n\n網站同源：${DATA_LOCAL_URL||"未建立"}\nGitHub 備援：${DATA_RAW_URL||"未建立"}\n錯誤：${err.message||err}`;
     $("error").classList.add("show");
   }
 }
