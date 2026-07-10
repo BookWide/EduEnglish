@@ -21,6 +21,12 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
 .brandCopy b{display:block;font-size:20px;line-height:1}
 .brandCopy span{display:block;color:#bfdbfe;font-size:11px;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .topLink{border:1px solid var(--line);border-radius:999px;padding:7px 11px;background:rgba(15,31,56,.78);font-size:12px;font-weight:900}
+.voiceUnlock{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;padding:10px 12px;border:1px solid rgba(245,158,11,.48);border-radius:15px;background:linear-gradient(135deg,rgba(245,158,11,.18),rgba(37,99,235,.14));box-shadow:0 8px 22px rgba(0,0,0,.12)}
+.voiceUnlock[hidden]{display:none!important}
+.voiceUnlock div{min-width:0}
+.voiceUnlock b{display:block;color:#fff7ed;font-size:14px}
+.voiceUnlock span{display:block;margin-top:2px;color:#dbeafe;font-size:11px;line-height:1.35}
+.voiceUnlock button{flex:0 0 auto;border:0;border-radius:999px;padding:9px 13px;background:linear-gradient(135deg,#f59e0b,#f97316);color:#fff;font-size:12px;font-weight:1000;box-shadow:0 6px 16px rgba(249,115,22,.28)}
 
 .hero{position:relative;height:300px;border-radius:22px;overflow:hidden;background:#061225;box-shadow:0 16px 40px rgba(0,0,0,.26);margin-bottom:7px}
 .hero img{width:100%;height:100%;display:block;object-fit:cover;object-position:center 34%;filter:grayscale(.16) saturate(.66) contrast(.88) brightness(.86) blur(1.8px);transform:scale(1.018)}
@@ -96,6 +102,7 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
 @media(max-width:640px){
   .app{padding:4px 5px 14px}
   .brandLogo{width:30px;height:30px}.brandCopy b{font-size:17px}.brandCopy span{font-size:9px}
+  .voiceUnlock{align-items:stretch;flex-direction:column;padding:9px 10px}.voiceUnlock button{width:100%}
   .hero{height:190px;border-radius:16px}.heroText{left:34px;right:34px;bottom:34px}
   .heroText .en{font-size:17px}.heroText .ja,.heroText .zh{font-size:12px;margin-top:4px}
   .titleRow{gap:5px}.title h1{font-size:14px}.title .scene{font-size:12px}
@@ -132,6 +139,14 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
     <a class="topLink" href="/index.html">控制台</a>
   </header>
 
+  <section id="voiceUnlock" class="voiceUnlock" hidden>
+    <div>
+      <b>啟用每題自動朗讀</b>
+      <span>瀏覽器要求先點一下；啟用後，每題會自動朗讀英文、日文、中文。</span>
+    </div>
+    <button id="voiceUnlockBtn" type="button">啟用自動朗讀</button>
+  </section>
+
   <section class="hero">
     <img id="heroImg" alt="">
     <button id="heroPrev" class="heroNav heroPrev" type="button">‹</button>
@@ -149,7 +164,6 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
     <span id="statusProgress">1/1</span>
     <span id="statusDone">0/1</span>
     <span id="statusScore" class="score">0分</span>
-    <span id="statusSource">JSON</span>
     <span>英・日・中</span>
   </div>
 
@@ -186,14 +200,20 @@ button,a{font:inherit}button{cursor:pointer}a{color:inherit;text-decoration:none
 
 const FALLBACK_COVER="https://pub-578e9e060a104f24b6865e26eb941648.r2.dev/ads/monk/aptitude/cover.png";
 const qs=new URLSearchParams(location.search);
-const DATASET=safeSlug(qs.get("test")||qs.get("dataset")||qs.get("json")||qs.get("topic")||"aptitude-analysis");
-const DATA_URL=`/data/monk/aptitude/${encodeURIComponent(DATASET)}.json`;
+const DATASET=safeSlug(
+  qs.get("test") ||
+  qs.get("dataset") ||
+  qs.get("json") ||
+  qs.get("topic") ||
+  "aptitude-analysis"
+);
+const DATA_URL="/data/monk/aptitude/"+DATASET+".json";
 const $=id=>document.getElementById(id);
 
 let config=null, questions=[], photos=[], index=0, selected=null;
 let answers=loadJson(storageKey("answers"),[]);
 let state=loadJson(storageKey("state"),{index:0});
-let autoVoiceEnabled=loadJson(storageKey("auto_voice"),true)!==false;
+let autoVoiceEnabled=sessionStorage.getItem(storageKey("voice_unlocked"))==="1";
 let speechRunId=0;
 let lastAutoSpokenKey="";
 index=Math.max(0,Number(state.index||0));
@@ -216,26 +236,15 @@ function normalizeConfig(raw){
     Array.isArray(root.lessons)?root.lessons:
     Array.isArray(root.items)?root.items:
     Array.isArray(root?.data?.questions)?root.data.questions:[];
-  const declaredSlug=safeSlug(first(root.slug,root.id,DATASET));
-  const aliases=new Set([
-    DATASET,
-    declaredSlug,
-    ...(Array.isArray(root.aliases)?root.aliases.map(safeSlug):[]),
-    ...(Array.isArray(root.slugs)?root.slugs.map(safeSlug):[])
-  ]);
-  const builtInAliasGroups=[
-    new Set(["aptitude-analysis","aptitude-orientation"]),
-    new Set(["left-right-zodiac-potential","left-right-zodiac"])
-  ];
-  const aliasGroupMatch=builtInAliasGroups.some(group=>group.has(DATASET)&&group.has(declaredSlug));
-  const sameDataset=aliases.has(DATASET) || aliasGroupMatch;
-  if((root.slug||root.id) && !sameDataset){
-    throw new Error(`JSON 資料集不符：網址要求 ${DATASET}，JSON 宣告 ${declaredSlug}`);
-  }
+  const declaredSlug=safeSlug(first(root.slug,root.topic,root.id,DATASET));
   const cfg={
     slug:DATASET,
+    topic:first(root.topic,declaredSlug,DATASET),
     declaredSlug,
     title:first(root.title_zh,root.title,root.name_zh,root.name,"BookWide 趣味偏好測驗"),
+    titleEn:first(root.title_en,root.name_en),
+    titleJa:first(root.title_ja,root.name_ja),
+    description:first(root.description_zh,root.description,root.summary_zh),
     subtitle:first(root.subtitle_zh,root.subtitle,"英・日・中"),
     scene:first(root.scene_label_zh,root.scene_label,"選比較像你的反應"),
     photosJson:first(root.photos_json,root.photo_json,root.assets?.photos_json,"/assets/hiking/photos.json"),
@@ -288,7 +297,7 @@ function normalizeChoice(c,ci){
 }
 
 async function fetchJson(url){
-  const r=await fetch(url+(url.includes("?")?"&":"?")+"v="+Date.now(),{cache:"no-store"});
+  const r=await fetch(url+"?v="+Date.now(),{cache:"no-store"});
   if(!r.ok)throw new Error(`${r.status} ${url}`);
   return r.json();
 }
@@ -333,12 +342,9 @@ function render(options={}){
   $("statusProgress").textContent=`${index+1}/${questions.length}`;
   $("statusDone").textContent=`${answers.length}/${questions.length}`;
   $("statusScore").textContent=`${totalScore()}分`;
-  $("statusSource").textContent=`${DATASET}.json`;
-  $("statusSource").title=config.declaredSlug && config.declaredSlug!==DATASET
-    ? `${DATA_URL}｜JSON slug: ${config.declaredSlug}`
-    : DATA_URL;
   $("testTitle").textContent=`${config.title} Q${index+1}`;
-  $("scene").textContent=q.scene||config.scene;
+  const sceneText=q.scene||config.scene;
+  $("scene").textContent=/^[a-z0-9_-]+$/i.test(sceneText)?config.scene:sceneText;
   $("qEn").textContent=q.en;
   $("qJa").textContent=q.ja;
   $("qZh").textContent=q.zh;
@@ -401,16 +407,20 @@ function speakSequence(lines){
   };
   next();
 }
-function speakQuestion(){
-  const q=questions[index];
+function unlockVoiceAndSpeak(){
   autoVoiceEnabled=true;
-  saveJson(storageKey("auto_voice"),true);
+  sessionStorage.setItem(storageKey("voice_unlocked"),"1");
+  $("voiceUnlock").hidden=true;
+  const q=questions[index];
   lastAutoSpokenKey=`${DATASET}:${q.id}`;
   speakSequence([
     {text:q.en,lang:"en"},
     {text:q.ja,lang:"ja"},
     {text:q.zh,lang:"zh"}
   ]);
+}
+function speakQuestion(){
+  unlockVoiceAndSpeak();
 }
 function scheduleAutoSpeak(q){
   if(!autoVoiceEnabled||!q)return;
@@ -473,6 +483,8 @@ function continueFlow(){
 }
 
 function bind(){
+  $("voiceUnlockBtn").onclick=unlockVoiceAndSpeak;
+  $("voiceUnlock").hidden=autoVoiceEnabled;
   $("heroPrev").onclick=()=>move(-1);$("prevBtn").onclick=()=>move(-1);
   $("heroNext").onclick=()=>move(1);$("nextBtn").onclick=()=>move(1);
   $("heroPlay").onclick=speakQuestion;$("playBtn").onclick=speakQuestion;
@@ -515,9 +527,9 @@ async function init(){
     document.title=`${config.title}｜BookWide`;
     $("app").hidden=false;
     bind();
-    render({autoSpeak:true});
+    render({autoSpeak:autoVoiceEnabled});
   }catch(err){
-    $("error").textContent=`BookWide V1 多測驗引擎載入失敗\n\n資料集：${DATASET}\n路徑：${DATA_URL}\n錯誤：${err.message||err}`;
+    $("error").textContent=`BookWide V1 多測驗引擎載入失敗\n\n直接讀取：${DATA_URL}\n錯誤：${err.message||err}`;
     $("error").classList.add("show");
   }
 }
