@@ -1090,7 +1090,14 @@ body.bw-aptitude-mode .aptOwnerMeta .account{font-size:10.5px;color:#475569;marg
 <div class="modal" id="reward"><div class="box"><h2 id="rewardTitle">完成！</h2><p id="rewardText"></p><button id="rewardOk" type="button">收下，進下一關</button><div class="stageBreakActions" id="stageBreakActions" hidden><button class="musicBtn" id="goMusic" type="button">去聽音樂</button><button class="storyBtn" id="goStory" type="button">去看故事</button><button class="movieBtn" id="goMovie" type="button">去看電影</button><button class="nextBtn" id="goNextStage" type="button">直接進下一關</button></div></div></div>
 <script>
 
-const HEART_TOPIC_SLUG = new URLSearchParams(location.search).get("topic") || "aptitude";
+const BW_APTITUDE_PARAMS = new URLSearchParams(location.search);
+const HEART_TOPIC_SLUG = BW_APTITUDE_PARAMS.get("test") || BW_APTITUDE_PARAMS.get("topic") || "aptitude-analysis";
+let BW_APTITUDE_CONFIG = null;
+function bwAptitudeJsonFile(){
+  const raw = String(BW_APTITUDE_PARAMS.get("test") || HEART_TOPIC_SLUG || "aptitude-analysis").trim();
+  return /^[a-z0-9][a-z0-9_-]*$/i.test(raw) ? raw : "aptitude-analysis";
+}
+function bwAptitudeDataUrl(){ return `/data/monk/aptitude/${encodeURIComponent(bwAptitudeJsonFile())}.json`; }
 // MBTI 測試用：?reset=1 會清空本主題舊進度，強制回第 1 題。
 (function(){
   try{
@@ -1633,7 +1640,7 @@ async function loadHeartTopic(){
     if(/^aptitude(?:-|$)/i.test(String(topic))){
       HEART_TITLE = "性向測驗";
       HEART_SERIES = "性向測驗";
-      HEART_QUESTIONS_URL = bwPath(`/data/monk/aptitude/aptitude-analysis.json`);
+      HEART_QUESTIONS_URL = bwPath(bwAptitudeDataUrl());
       HEART_PHOTOS_URL = bwPath(`/data/monk/aptitude/aptitude-photos.json`);
       HEART_BGM_URL = bwPath(`/data/monk/aptitude/aptitude-bgm.mp3`);
     }else{
@@ -1658,18 +1665,19 @@ async function loadHeartLessons(){
   const topic = HEART_TOPIC_SLUG || "";
   const urls = [HEART_QUESTIONS_URL + "?v=" + Date.now()];
   if(isAptitudeMode()){
-    urls.push(`/data/monk/aptitude/aptitude-analysis.json?v=${Date.now()}`);
+    urls.push(bwAptitudeDataUrl() + `?v=${Date.now()}`);
   }else{
     if(HEART_QUESTIONS_URL.includes("/data/monk/")) urls.push(`/data/heart/${topic}/${topic}.json?v=${Date.now()}`);
     if(HEART_QUESTIONS_URL.includes("/data/heart/")) urls.push(`/data/monk/${topic}/${topic}.json?v=${Date.now()}`);
   }
   const j = await fetchJsonAny(urls);
+  if(isAptitudeMode() && j && typeof j === 'object') BW_APTITUDE_CONFIG = j;
   if(isAptitudeMode() && j && typeof j === 'object'){
     HEART_TITLE = j.title_zh || j.title_en || HEART_TITLE || '性向測驗';
     HEART_SERIES = j.title_zh || HEART_SERIES || '性向測驗';
     document.title = HEART_TITLE;
     const brandSub = document.querySelector(".brand span");
-    if(brandSub) brandSub.textContent = "性向測驗｜30題非診斷傾向測驗｜英・日・中";
+    if(brandSub) brandSub.textContent = (j.brand_subtitle_zh || `${j.questions?.length || 0}題趣味偏好測驗｜英・日・中`);
   }
   const arr = Array.isArray(j) ? j : (Array.isArray(j.questions) ? j.questions : (Array.isArray(j.lessons) ? j.lessons : []));
   if(!arr.length) throw new Error("題庫沒有 questions / lessons：" + HEART_QUESTIONS_URL);
@@ -4419,7 +4427,7 @@ function render(){
   }
   if(isAptitudeMode()){
     const brandSub = document.querySelector(".brand span");
-    if(brandSub) brandSub.textContent = "性向測驗｜30題非診斷傾向測驗｜英・日・中";
+    if(brandSub) brandSub.textContent = (j.brand_subtitle_zh || `${j.questions?.length || 0}題趣味偏好測驗｜英・日・中`);
     $("scene").textContent = (l.category || l.axis || "性向") + "｜選比較像你的反應";
   }
   const qq = $("quizQ");
@@ -4685,11 +4693,16 @@ try{ document.body.classList.add('bw-aptitude-mode'); }catch(e){}
   }
   window.bwAptitudeResult = function(){
     const arr = aptAnswers();
-    const total = Math.max(0, Math.min(300, arr.reduce((sum,r)=>sum+aptScoreFromRecord(r),0)));
-    let key='masculine', label='偏男性化傾向', summary='你的分數低於 150，表示反應方式比較偏男性化。通常比較重視邏輯、分析、規則、組織能力與自律，不太容易被情緒影響。';
-    if(total>=150 && total<=180){ key='balanced'; label='男女特質平衡'; summary='你的分數在 150～180 之間，表示同時有男性化與女性化的思考特質。遇到問題時，通常比較能在理性分析與感性判斷之間切換。'; }
-    else if(total>180){ key='feminine'; label='偏女性化傾向'; summary='你的分數高於 180，表示反應方式比較偏女性化。通常比較依靠直覺、感受、創意、音樂藝術感與人際氣氛來判斷。'; }
-    return {total,key,label,summary,answered:arr.length};
+    const cfg = BW_APTITUDE_CONFIG || {};
+    const max = Number(cfg?.score_model?.score_range?.max ?? cfg?.result_gauge?.max_score ?? 300) || 300;
+    const min = Number(cfg?.score_model?.score_range?.min ?? cfg?.result_gauge?.min_score ?? 0) || 0;
+    const total = Math.max(min, Math.min(max, arr.reduce((sum,r)=>sum+aptScoreFromRecord(r),0)));
+    const ranges = cfg?.result_profile?.ranges || cfg?.analysis?.result_levels || cfg?.gender_tendency_analysis?.ranges || [];
+    const hit = ranges.find(x => total >= Number(x.from ?? min) && total <= Number(x.to ?? max)) || ranges[0] || {};
+    const key = hit.key || 'balanced';
+    const label = hit.label_zh || hit.title_zh || '平衡整合型';
+    const summary = hit.summary_zh || hit.description_zh || '你的結果呈現多種思考方式的組合。';
+    return {total,min,max,key,label,summary,answered:arr.length,range:hit};
   };
   const BW_APTITUDE_GUEST_COVER = 'https://pub-578e9e060a104f24b6865e26eb941648.r2.dev/ads/monk/aptitude/cover.png';
 
@@ -4753,47 +4766,51 @@ try{ document.body.classList.add('bw-aptitude-mode'); }catch(e){}
 
   window.bwAptitudeReportHtml = function(){
     const r = bwAptitudeResult();
-    const pct = Math.max(0,Math.min(100,(r.total/300)*100));
+    const cfg = BW_APTITUDE_CONFIG || {};
+    const totalQuestions = Array.isArray(cfg.questions) ? cfg.questions.length : (lessons?.length || 0);
+    const pct = Math.max(0,Math.min(100,((r.total-r.min)/Math.max(1,r.max-r.min))*100));
     const owner = (typeof bwMbtiReportOwnerInfo === 'function')
       ? bwMbtiReportOwnerInfo()
       : {loggedIn:false,name:'未登入訪客',email:'',status:'訪客模式'};
-    const createdAt = new Intl.DateTimeFormat('zh-TW',{
-      year:'numeric',month:'2-digit',day:'2-digit',
-      hour:'2-digit',minute:'2-digit',hour12:false
-    }).format(new Date()).replace(/\//g,'/');
+    const createdAt = new Intl.DateTimeFormat('zh-TW',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date()).replace(/\//g,'/');
     const ownerName = owner.name || (owner.loggedIn ? 'BookWide 會員' : '未登入訪客');
     const accountLine = owner.email ? `<div class="account">${esc(owner.email)}</div>` : '';
     const ownerMeta = `<div class="aptOwnerMeta">
       <div><small>報告對象 / Report owner</small><b>${esc(ownerName)}</b>${accountLine}</div>
       <div><small>帳號狀態 / Account</small><b>${esc(owner.status || (owner.loggedIn ? '已登入會員' : '訪客模式'))}</b></div>
-      <div><small>完成題數 / Completed</small><b>${r.answered} / 30</b></div>
+      <div><small>完成題數 / Completed</small><b>${r.answered} / ${totalQuestions}</b></div>
       <div><small>產生時間 / Created</small><b>${esc(createdAt)}</b></div>
     </div>`;
-    const reportPhoto = bwAptitudeCachedProfilePhoto();
-    const headerNote = owner.loggedIn
-      ? '已登入會員｜套用 Profile 的 MBTI 專屬封面照'
-      : '訪客模式｜使用 BookWide 男女傾向測驗封面';
+    const reportPhoto = cfg?.report_profile?.cover || bwAptitudeCachedProfilePhoto();
+    const title = cfg?.report_profile?.title_zh || cfg.title_zh || 'BookWide 趣味偏好分析';
+    const kicker = cfg?.report_profile?.kicker || 'BOOKWIDE APTITUDE REPORT';
+    const note = cfg?.report_profile?.header_note_zh || `${totalQuestions}題分析・英・日・中`;
+    const disclaimer = cfg?.result_profile?.disclaimer_zh || cfg?.analysis?.disclaimer_zh || cfg?.score_model?.important_disclaimer?.zh || '本測驗僅供娛樂與自我探索，不構成專業診斷。';
+    const ticks = Array.isArray(cfg?.result_gauge?.ticks) ? cfg.result_gauge.ticks : [r.min,Math.round(r.max/2),r.max];
+    const tickHtml = ticks.map(x=>`<span>${esc(x)}</span>`).join('');
+    const rangeExtra = r.range?.potential_zh ? `<div class="aptNote"><b>星座潛能：</b>${esc(r.range.potential_zh)}</div>` : '';
     const reportHeader = `<div class="aptReportHeader">
       <div class="aptReportHeaderPhoto" style="background-image:url('${esc(reportPhoto)}')"></div>
-      <div class="aptReportHeaderText">
-        <small>BOOKWIDE APTITUDE REPORT</small>
-        <h2>BookWide 男女傾向分析</h2>
-        <p>${esc(headerNote)}<br>30題分析・英・日・中</p>
-      </div>
+      <div class="aptReportHeaderText"><small>${esc(kicker)}</small><h2>${esc(title)}</h2><p>${esc(note)}</p></div>
     </div>`;
-    return `${reportHeader}${ownerMeta}<b>你的分數：${r.total} / 300</b>\n<span class="aptResultLabel">結果：${esc(r.label)}</span>\n${esc(r.summary)}\n\n<div class="aptMeter" aria-label="男女傾向分數指標"><div class="aptNeedle" style="left:${pct}%"></div><div class="aptMeterBar"><i></i><i></i><i></i></div><div class="aptTicks"><span>0</span><span>150</span><span>180</span><span>300</span></div></div>\n多數男性分數會落在 0～180；多數女性分數會落在 150～300。150～180 是男女特質交會區，代表同時有男性化與女性化的思考特質。\n\n<div class="aptNote">本測驗不是醫學、心理或性傾向診斷，只是男女傾向的反應風格參考。</div>`;
+    return `${reportHeader}${ownerMeta}<b>你的分數：${r.total} / ${r.max}</b>
+<span class="aptResultLabel">結果：${esc(r.label)}</span>
+${esc(r.summary)}
+
+<div class="aptMeter" aria-label="偏好分數指標"><div class="aptNeedle" style="left:${pct}%"></div><div class="aptMeterBar"><i></i><i></i><i></i></div><div class="aptTicks">${tickHtml}</div></div>
+${rangeExtra}<div class="aptNote">${esc(disclaimer)}</div>`;
   };
   const oldLoadHeartTopic = loadHeartTopic;
   loadHeartTopic = async function(){
     if(!aptMode()) return oldLoadHeartTopic.apply(this, arguments);
-    HEART_TOPIC = {slug:'aptitude', title:'BookWide 男女傾向測驗', series:'BookWide 男女傾向測驗', coin_cost:0};
-    HEART_TITLE = 'BookWide 男女傾向測驗';
-    HEART_SERIES = 'BookWide 男女傾向測驗';
-    HEART_QUESTIONS_URL = bwPath('/data/monk/aptitude/aptitude-analysis.json');
+    HEART_TOPIC = {slug:bwAptitudeJsonFile(), title:'BookWide 趣味偏好測驗', series:'BookWide 趣味偏好測驗', coin_cost:0};
+    HEART_TITLE = 'BookWide 趣味偏好測驗';
+    HEART_SERIES = 'BookWide 趣味偏好測驗';
+    HEART_QUESTIONS_URL = bwPath(bwAptitudeDataUrl());
     HEART_PHOTOS_URL = bwPath('/assets/hiking/photos.json');
     HEART_BGM_URL = '';
     document.title = HEART_TITLE;
-    const sub = document.querySelector('.brand span'); if(sub) sub.textContent = 'BookWide 男女傾向測驗｜30題｜英・日・中';
+    const sub = document.querySelector('.brand span'); if(sub) sub.textContent = 'BookWide JSON 測驗引擎｜題目與報告由 JSON 控制';
     const qq = document.getElementById('quizQ'); if(qq) qq.textContent = '選比較像你的反應：';
     const a = document.getElementById('bgm'); if(a){ a.removeAttribute('src'); try{a.load();}catch(e){} }
   };
@@ -4805,11 +4822,11 @@ try{ document.body.classList.add('bw-aptitude-mode'); }catch(e){}
   confirmPaidBlockIfNeeded = async function(){ return true; };
   topicCoinCost = function(){ return aptMode() ? 0 : Math.max(1, Math.min(3, Math.ceil((TOTAL || 20) / FORMAL_COIN_EVERY))); };
   coinCount = function(){ return 0; };
-  zenProgressText = function(){ return aptMode() ? '英・日・中｜男女傾向分析' : '進行中'; };
+  zenProgressText = function(){ return aptMode() ? '英・日・中｜趣味偏好分析' : '進行中'; };
   zenRewardText = function(day,totalDone){
     if(!aptMode()) return `已完成 ${totalDone}/${TOTAL}`;
     if(totalDone>=TOTAL) return bwAptitudeReportHtml();
-    return `已記錄 ${totalDone}/${TOTAL}。請繼續完成 30 題，最後會產生男女傾向分析。`;
+    return `已記錄 ${totalDone}/${TOTAL}。請繼續完成全部題目，最後會依 JSON 產生分析報告。`;
   };
   const oldComplete = complete;
   complete = function(){
