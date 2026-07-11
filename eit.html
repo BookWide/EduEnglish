@@ -52,6 +52,11 @@ header{display:flex;align-items:center;gap:10px;height:44px;margin-bottom:3px}
 .ticks{display:flex;justify-content:space-between;font-size:12px;color:#63748d;margin-top:8px;padding:0 2px}.explain{margin-top:20px;border:1px solid #d2def1;background:#e9f0fb;border-radius:16px;padding:14px 16px;font-size:13px;line-height:1.65;color:#4f6076}
 .error{position:absolute;inset:0;display:grid;place-content:center;padding:30px;text-align:center;font-size:28px;font-weight:900;z-index:3;text-shadow:0 2px 4px rgba(0,0,0,.75)}.error small{display:block;font-size:14px;margin-top:10px;font-weight:700}
 .hidden{display:none!important}
+.navBig:disabled,.heroBtn:disabled{opacity:.34;cursor:not-allowed;filter:grayscale(.7);box-shadow:none!important}
+.navBig.ready{border-color:#ffd65a;background:#173d69;box-shadow:0 0 0 2px rgba(255,214,90,.16),0 0 18px rgba(77,145,255,.24)}
+.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%) translateY(20px);z-index:9999;opacity:0;pointer-events:none;background:rgba(6,23,47,.96);border:1px solid #ffca21;color:#fff;border-radius:999px;padding:10px 16px;font-size:13px;font-weight:800;box-shadow:0 12px 30px rgba(0,0,0,.35);transition:.2s ease}.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.resultBadge{display:inline-flex;align-items:center;gap:7px;margin-bottom:10px;border-radius:999px;padding:7px 12px;background:linear-gradient(100deg,#f59e0b,#f97316);color:#fff;font-weight:900;font-size:13px}
+
 @media (max-width:720px){
   html,body{background:#06172f}
   .app{padding:4px 6px 8px}
@@ -68,7 +73,7 @@ header{display:flex;align-items:center;gap:10px;height:44px;margin-bottom:3px}
 <body>
 <main class="app">
 <header>
-  <img class="logo" alt="BookWide" src="bookwide_logo.png">
+  <img class="logo" alt="BookWide" src="data/monk/aptitude/bookwide_logo.png">
   <div class="brand"><b>BookWide</b><small id="subtitle">通用心理測驗｜英・日・中</small></div>
   <select class="testPicker" id="testPicker" title="切換心理測驗">
     <option value="aptitude-analysis.json">男女傾向測驗</option>
@@ -132,6 +137,7 @@ header{display:flex;align-items:center;gap:10px;height:44px;margin-bottom:3px}
       <div><small>產生時間 / Created</small><b id="created"></b></div>
     </div>
 
+    <div class="resultBadge">🏅 完成 30 題・產生分析</div>
     <div class="scoreline">你的分數：<span id="score">0</span> / <span id="maxScore">0</span></div>
     <h2 class="resultTitle" id="resultTitle">結果</h2>
     <div class="summary" id="resultSummary"></div>
@@ -148,6 +154,7 @@ header{display:flex;align-items:center;gap:10px;height:44px;margin-bottom:3px}
   </div>
 </section>
 </main>
+<div class="toast" id="toast">請先回答本題</div>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -173,6 +180,11 @@ const owner = qs.get('name') || localStorage.getItem('bookwide_name') || '受測
 function getChoiceScore(c){
   return Number(c?.aptitude_score ?? c?.score?.total_score ?? c?.score ?? 0) || 0;
 }
+function showToast(message='請先回答本題') {
+  const t=$('#toast'); t.textContent=message; t.classList.add('show');
+  clearTimeout(showToast.timer); showToast.timer=setTimeout(()=>t.classList.remove('show'),1500);
+}
+function isCurrentAnswered(){ return Object.prototype.hasOwnProperty.call(answers,index); }
 function getLiveScore(){
   if(!data?.questions) return 0;
   let total = 0;
@@ -329,10 +341,25 @@ function render(){
     };
     $('#choices').appendChild(el);
   });
-  $('#submitBtn').textContent = Object.keys(answers).length === total ? '查看結果' : '先答題';
+  const currentAnswered = isCurrentAnswered();
+  const isLast = index === total - 1;
+  $('#submitBtn').textContent = Object.keys(answers).length === total ? '完成測驗・查看分析' : (currentAnswered ? '本題已作答' : '先答題');
+  $('#submitBtn').classList.toggle('ready', Object.keys(answers).length === total);
+  ['#next','#next2'].forEach(sel=>{
+    const b=$(sel); b.disabled=!currentAnswered; b.classList.toggle('ready',currentAnswered);
+    b.title=currentAnswered ? (isLast?'完成測驗・查看分析':'下一題') : '請先回答本題';
+    b.textContent=isLast&&currentAnswered?'✓':'›';
+  });
+  ['#prev','#prev2'].forEach(sel=>{ $(sel).disabled=index===0; });
 }
 
 function move(step){
+  if(step>0 && !isCurrentAnswered()){ showToast('請先回答本題，才能進下一題'); return; }
+  if(step>0 && index===data.questions.length-1){
+    if(Object.keys(answers).length===data.questions.length) finish();
+    else showToast('尚有題目未回答');
+    return;
+  }
   index = Math.max(0, Math.min(data.questions.length - 1, index + step));
   render();
   setTimeout(autoSpeakCurrent, 220);
@@ -357,12 +384,14 @@ function finish(){
   });
 
   const gauge = data.result_gauge || {};
-  const max = Number(gauge.max_score ?? gauge.standard_max_score ?? 300);
+  const calculatedMax = data.questions.reduce((sum,q)=>sum+Math.max(0,...q.choices.map(getChoiceScore)),0);
+  const max = Number(gauge.max_score ?? gauge.standard_max_score ?? calculatedMax ?? 300);
   const levels = data.analysis?.result_levels || data.result_levels || [];
   const level = levels.find(x => score >= Number(x.from) && score <= Number(x.to)) || levels[levels.length - 1] || {};
 
   $('#testView').style.display = 'none';
   $('#resultView').classList.add('show');
+  window.scrollTo({top:0,behavior:'smooth'});
   $('#owner').textContent = owner;
   $('#doneCount').textContent = `${total} / ${total}`;
   $('#created').textContent = new Date().toLocaleString('zh-TW',{hour12:false});
@@ -401,7 +430,11 @@ function finish(){
 
 ['#prev','#prev2'].forEach(sel => $(sel).onclick = () => move(-1));
 ['#next','#next2'].forEach(sel => $(sel).onclick = () => move(1));
-$('#submitBtn').onclick = finish;
+$('#submitBtn').onclick = () => {
+  if(!isCurrentAnswered()){ showToast('請先選一個答案'); return; }
+  if(Object.keys(answers).length===data.questions.length){ finish(); return; }
+  move(1);
+};
 $('#speakQ').onclick = autoSpeakCurrent;
 $('#speakJa').onclick = () => { const q = data.questions[index]; speak(q.ja,'ja-JP'); };
 $('#speakZh').onclick = () => { const q = data.questions[index]; speak(q.zh,'zh-TW'); };
