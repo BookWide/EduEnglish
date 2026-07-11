@@ -272,7 +272,10 @@ const EIT_TESTS=[
 ];
 function shortJsonName(value){ return String(value||'').split('/').pop(); }
 function eitCompleteKey(fileName){return 'bookwide_eit_complete_'+shortJsonName(fileName).replace(/\.json$/,'');}
-function eitPaidKey(fileName){return 'bookwide_eit_paid_'+shortJsonName(fileName).replace(/\.json$/,'');}
+function eitPaidKey(fileName){
+  const uid=bookWideUser?.id||'guest';
+  return 'bookwide_eit_paid_'+uid+'_'+shortJsonName(fileName).replace(/\.json$/,'');
+}
 function eitAnswersKey(fileName){return 'bookwide_eit_answers_'+shortJsonName(fileName).replace(/\.json$/,'');}
 function isTestComplete(fileName){return localStorage.getItem(eitCompleteKey(fileName))==='1';}
 function isTestPaid(fileName){
@@ -333,6 +336,20 @@ async function deductEitCoins(targetFile){
   if(body.remaining_coins!==undefined) localStorage.setItem('bookwide_coin_balance',String(body.remaining_coins));
   return true;
 }
+async function ensureEitPaidAccess(targetFile,{askConfirm=true}={}){
+  const name=shortJsonName(targetFile);
+  const t=EIT_TESTS.find(x=>x.file===name);
+  if(!t || t.free || isTestPaid(name)) return true;
+  if(!isLoggedIn){
+    location.href=eitLoginUrl(name);
+    return false;
+  }
+  if(askConfirm){
+    const ok=confirm(`開啟「${t.title||name}」需扣 ${Number(t.cost||EIT_COIN_COST)} 金幣。\n同一帳號同一套只扣一次，是否繼續？`);
+    if(!ok) return false;
+  }
+  return await deductEitCoins(name);
+}
 function testIndex(fileName){return EIT_TESTS.findIndex(x=>x.file===shortJsonName(fileName));}
 function canOpenBySequence(targetFile){
   const idx=testIndex(targetFile);
@@ -369,7 +386,8 @@ for(let i=0;i<52;i++){
 }
 
 const TEST_BASE = 'data/monk/aptitude/';
-let file = qs.get('json') || (isLoggedIn ? 'aptitude-analysis.json' : GUEST_TEST);
+/* 登入後也先停在免費測驗；付費測驗必須經過扣幣檢查，不能直接預載。 */
+let file = qs.get('json') || GUEST_TEST;
 if(!isLoggedIn && shortJsonName(file)!==GUEST_TEST){
   file=GUEST_TEST;
   const u=new URL(location.href);
@@ -451,11 +469,8 @@ $('#testPicker').onchange=async e=>{
     return;
   }
   if(!isTestPaid(selected)){
-    const t=EIT_TESTS.find(x=>x.file===selected);
-    const ok=confirm(`開啟「${t?.title||selected}」需扣 ${EIT_COIN_COST} 金幣。\n同一套測驗只扣一次，是否繼續？`);
-    if(!ok){e.target.value=current;return;}
     e.target.disabled=true;
-    const paid=await deductEitCoins(selected);
+    const paid=await ensureEitPaidAccess(selected,{askConfirm:true});
     e.target.disabled=false;
     if(!paid){e.target.value=current;return;}
   }
@@ -891,6 +906,20 @@ async function loadJSON(){
 (async function boot(){
   syncTestPicker();
   try{
+    /* 防止直接網址、登入返回網址繞過下拉選單的扣幣流程。 */
+    const openingName=currentJsonName();
+    const openingTest=EIT_TESTS.find(x=>x.file===openingName);
+    if(openingTest && !openingTest.free && !isTestPaid(openingName)){
+      const paid=await ensureEitPaidAccess(openingName,{askConfirm:true});
+      if(!paid){
+        const u=new URL(location.href);
+        u.searchParams.set('json',GUEST_TEST);
+        u.searchParams.delete('resume_report');
+        location.replace(u.toString());
+        return;
+      }
+      syncTestPicker();
+    }
     await loadPhotoPool();
     data = await loadJSON();
     const resumeReport=qs.get('resume_report')==='1';
