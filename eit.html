@@ -511,71 +511,137 @@ $('#playBtn').onclick = autoSpeakCurrent;
 $('#musicBtn').onclick = () => speechSynthesis.cancel();
 
 
-function buildMobilePrintMount(){
-  const old=document.getElementById('bwPrintMount');
-  if(old) old.remove();
-  const source=document.querySelector('#resultView .report');
-  if(!source) return null;
-  const mount=document.createElement('div');
-  mount.id='bwPrintMount';
-  mount.setAttribute('aria-hidden','true');
-  mount.style.position='fixed';
-  mount.style.left='-100000px';
-  mount.style.top='0';
-  mount.style.width='210mm';
-  mount.style.background='#fff';
-  mount.style.pointerEvents='none';
-  const clone=source.cloneNode(true);
-  clone.querySelectorAll('.reportActions,button,.noPrint').forEach(el=>el.remove());
-  mount.appendChild(clone);
-  document.body.appendChild(mount);
-  return mount;
+function isMobilePrintDevice(){
+  return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent || '') ||
+    !!(window.matchMedia && window.matchMedia('(max-width:760px)').matches);
 }
 
-function refreshMobilePrintMount(){
-  requestAnimationFrame(()=>{
-    const mount=buildMobilePrintMount();
-    if(!mount) return;
-    mount.querySelectorAll('img').forEach(img=>{
-      if(!img.complete){
-        img.addEventListener('load',()=>{}, {once:true});
-        img.addEventListener('error',()=>{}, {once:true});
-      }
-    });
+function bwRoundRect(ctx,x,y,w,h,r,fill,stroke){
+  r=Math.min(r,w/2,h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
+  if(fill){ctx.fillStyle=fill;ctx.fill();}
+  if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=2;ctx.stroke();}
+}
+function bwWrapCanvasText(ctx,text,x,y,maxWidth,lineHeight,maxLines=999){
+  text=String(text||'').replace(/\s+/g,' ').trim();
+  if(!text) return y;
+  const chars=[...text]; let line='', lines=[];
+  for(const ch of chars){
+    const test=line+ch;
+    if(ctx.measureText(test).width>maxWidth && line){ lines.push(line); line=ch; }
+    else line=test;
+  }
+  if(line) lines.push(line);
+  if(lines.length>maxLines){ lines=lines.slice(0,maxLines); lines[maxLines-1]=lines[maxLines-1].replace(/[。．.!！?？]?$/,'')+'…'; }
+  lines.forEach((ln,i)=>ctx.fillText(ln,x,y+i*lineHeight));
+  return y+lines.length*lineHeight;
+}
+function bwCanvasPngBlob(canvas){
+  return new Promise((resolve,reject)=>{
+    if(canvas.toBlob) canvas.toBlob(b=>b?resolve(b):reject(new Error('png-failed')),'image/png',0.95);
+    else{
+      try{
+        const raw=atob(canvas.toDataURL('image/png').split(',')[1]);
+        const arr=new Uint8Array(raw.length); for(let i=0;i<raw.length;i++) arr[i]=raw.charCodeAt(i);
+        resolve(new Blob([arr],{type:'image/png'}));
+      }catch(e){reject(e)}
+    }
   });
 }
-
-function printReportMobileSafe(){
-  if(!$('#resultView').classList.contains('show')){
-    showToast('目前沒有可列印的報告');
+async function buildNativePrintImage(){
+  const report=$('#resultView .report');
+  if(!report) throw new Error('no-report');
+  const W=1200, M=52, CW=W-M*2;
+  const sections=[...report.querySelectorAll('.detailSec,.scoreExplain,.rangeMap')]
+    .map(el=>({title:(el.querySelector('h3')?.textContent||'').trim(), body:(el.innerText||'').replace((el.querySelector('h3')?.textContent||''),'').trim()}))
+    .filter(x=>x.title||x.body);
+  const estimated=540 + sections.reduce((n,s)=>n+Math.max(150,Math.ceil((s.body.length||1)/34)*30+80),0)+420;
+  const H=Math.max(1600,Math.min(5200,estimated));
+  const canvas=document.createElement('canvas'); canvas.width=W; canvas.height=H;
+  const ctx=canvas.getContext('2d'); ctx.textBaseline='top';
+  ctx.fillStyle='#f3f6fb'; ctx.fillRect(0,0,W,H);
+  let y=42;
+  bwRoundRect(ctx,M,y,CW,245,26,'#e8eef8','#c7d5e8');
+  ctx.fillStyle='#2563eb';ctx.font='800 24px Arial, "Noto Sans TC", sans-serif';ctx.fillText('BOOKWIDE TEST REPORT',M+34,y+34);
+  ctx.fillStyle='#102544';ctx.font='900 46px Arial, "Noto Sans TC", sans-serif';
+  y=bwWrapCanvasText(ctx,$('#reportName').textContent,M+34,y+82,CW-180,56,2);
+  ctx.font='800 24px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#334e70';ctx.fillText($('#reportCount').textContent,M+34,y+14);
+  ctx.font='900 24px Arial, sans-serif';ctx.fillStyle='#b7791f';ctx.fillText('BookWide',W-M-165,76);
+  y=315;
+  bwRoundRect(ctx,M,y,CW,150,22,'#fff','#cbd8ea');
+  const meta=[['報告對象',$('#owner').textContent],['帳號狀態','已完成測驗'],['完成題數',$('#doneCount').textContent],['產生時間',$('#created').textContent]];
+  const mw=CW/4;
+  meta.forEach((it,i)=>{const x=M+i*mw; if(i){ctx.strokeStyle='#d6e1ef';ctx.beginPath();ctx.moveTo(x,y+24);ctx.lineTo(x,y+126);ctx.stroke();}
+    ctx.font='700 19px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#6a7f9a';ctx.fillText(it[0],x+20,y+24);
+    ctx.font='900 25px Arial, "Noto Sans TC", sans-serif';ctx.fillStyle='#182d4a';bwWrapCanvasText(ctx,it[1],x+20,y+62,mw-38,30,2);
+  });
+  y+=190;
+  ctx.fillStyle='#132c50';ctx.font='900 38px Arial, "Noto Sans TC", sans-serif';
+  ctx.fillText(`你的分數：${$('#score').textContent} / ${$('#maxScore').textContent}`,M,y); y+=62;
+  ctx.fillStyle='#3b7af5';ctx.font='900 39px Arial, "Noto Sans TC", sans-serif';
+  y=bwWrapCanvasText(ctx,$('#resultTitle').textContent,M,y,CW,48,2)+18;
+  ctx.fillStyle='#334a68';ctx.font='800 25px Arial, "Noto Sans TC", sans-serif';
+  y=bwWrapCanvasText(ctx,$('#resultSummary').textContent,M,y,CW,38,8)+28;
+  for(const sec of sections){
+    const body=sec.body.replace(/\n{2,}/g,'\n').trim();
+    ctx.font='700 23px Arial, "Noto Sans TC", sans-serif';
+    const bodyLines=Math.max(2,Math.ceil(body.length/36));
+    const boxH=Math.min(720,82+bodyLines*34);
+    if(y+boxH>H-250) break;
+    bwRoundRect(ctx,M,y,CW,boxH,22,'#fff','#cbd8ea');
+    ctx.fillStyle='#174b91';ctx.font='900 27px Arial, "Noto Sans TC", sans-serif';ctx.fillText(sec.title||'分析說明',M+26,y+22);
+    ctx.fillStyle='#344b68';ctx.font='700 22px Arial, "Noto Sans TC", sans-serif';
+    bwWrapCanvasText(ctx,body,M+26,y+64,CW-52,32,Math.floor((boxH-80)/32));
+    y+=boxH+18;
+  }
+  if(y+170<H){
+    bwRoundRect(ctx,M,y,CW,130,20,'#e9f0fb','#c9d8ec');
+    ctx.fillStyle='#526a86';ctx.font='700 22px Arial, "Noto Sans TC", sans-serif';
+    bwWrapCanvasText(ctx,$('#disclaimer').textContent,M+26,y+28,CW-52,34,3); y+=160;
+  }
+  ctx.strokeStyle='#cbd5e1';ctx.beginPath();ctx.moveTo(M,H-90);ctx.lineTo(W-M,H-90);ctx.stroke();
+  ctx.fillStyle='#174b91';ctx.font='900 22px Arial, sans-serif';ctx.fillText('BookWide',M,H-66);
+  ctx.fillStyle='#64748b';ctx.font='700 18px Arial, sans-serif';ctx.fillText('bookwide.net · Share · Save · Print',M+150,H-63);
+  return canvas;
+}
+async function nativeMobilePrintShare(){
+  const canvas=await buildNativePrintImage();
+  const blob=await bwCanvasPngBlob(canvas);
+  const fileName=`BookWide-${(data?.slug||'test')}-report.png`;
+  const file=new File([blob],fileName,{type:'image/png'});
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    await navigator.share({title:'BookWide 測驗報告',text:'BookWide 測驗報告｜可在分享選單選擇「列印」或儲存圖片',files:[file]});
+    return true;
+  }
+  if(navigator.share){
+    await navigator.share({title:'BookWide 測驗報告',text:'BookWide 測驗報告',url:location.href});
+    return true;
+  }
+  const url=URL.createObjectURL(blob); location.href=url; setTimeout(()=>URL.revokeObjectURL(url),60000); return true;
+}
+function buildDesktopPrintMount(){
+  const old=document.getElementById('bwPrintMount'); if(old) old.remove();
+  const source=document.querySelector('#resultView .report'); if(!source) return null;
+  const mount=document.createElement('div'); mount.id='bwPrintMount'; mount.setAttribute('aria-hidden','true');
+  mount.style.position='fixed';mount.style.left='-100000px';mount.style.top='0';mount.style.width='210mm';mount.style.background='#fff';mount.style.pointerEvents='none';
+  const clone=source.cloneNode(true); clone.querySelectorAll('.reportActions,button,.noPrint').forEach(el=>el.remove()); mount.appendChild(clone); document.body.appendChild(mount); return mount;
+}
+async function printReportMobileSafe(){
+  if(!$('#resultView').classList.contains('show')){showToast('目前沒有可列印的報告');return false;}
+  if(isMobilePrintDevice()){
+    try{await nativeMobilePrintShare();}
+    catch(e){if(e?.name!=='AbortError'){console.error(e);showToast('無法開啟手機列印分享，請重新按一次');}}
     return false;
   }
-
-  // 報告完成時已先建立列印副本；手機點擊時只同步呼叫 print，保留 Safari 的使用者手勢。
-  let mount=document.getElementById('bwPrintMount');
-  if(!mount) mount=buildMobilePrintMount();
-  if(!mount){
-    showToast('列印報告尚未準備完成');
-    return false;
-  }
-
-  document.documentElement.classList.add('bw-printing');
-  document.body.classList.add('bw-printing');
-  try{
-    window.print();
-  }catch(e){
-    showToast('請點 Safari 分享按鈕，再選「列印」');
-  }
-  // 不在列印面板開啟期間移除副本，避免 iPhone 一閃即關。
+  const mount=buildDesktopPrintMount(); if(!mount){showToast('列印報告尚未準備完成');return false;}
+  document.documentElement.classList.add('bw-printing');document.body.classList.add('bw-printing');
+  try{window.print();}catch(e){showToast('瀏覽器無法開啟列印');}
   return false;
 }
-
 $('#printReport').onclick = printReportMobileSafe;
-
-window.addEventListener('afterprint',()=>{
-  document.documentElement.classList.remove('bw-printing');
-  document.body.classList.remove('bw-printing');
-});
+window.addEventListener('afterprint',()=>{document.documentElement.classList.remove('bw-printing');document.body.classList.remove('bw-printing');});
 
 $('#shareReport').onclick = async () => {
   const title = $('#resultTitle').textContent || 'BookWide 測驗結果';
