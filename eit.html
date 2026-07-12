@@ -119,6 +119,55 @@ header{display:flex;align-items:center;gap:10px;min-height:72px;margin-bottom:3p
 @media screen and (max-width:720px){
   html.bw-printing,body.bw-printing{overflow:visible!important}
 }
+
+/* Auto portrait-safe report header */
+.reportHero.hasProfilePhoto.portraitProfile{
+  background:linear-gradient(120deg,#eef4fc,#d7e3f3 55%,#d0dbec)!important;
+}
+.reportHero.hasProfilePhoto.portraitProfile::before{
+  inset:-8%!important;
+  background-image:var(--report-photo,none)!important;
+  background-size:cover!important;
+  background-position:center 24%!important;
+  filter:blur(12px) brightness(.88) saturate(.9)!important;
+  transform:scale(1.12)!important;
+  opacity:.42!important;
+}
+.reportHero.hasProfilePhoto.portraitProfile::after{
+  background:linear-gradient(90deg,rgba(255,255,255,.97) 0 48%,rgba(255,255,255,.80) 60%,rgba(255,255,255,.30) 100%)!important;
+}
+.reportHero.hasProfilePhoto.portraitProfile .reportLogo{
+  display:block!important;
+  width:36%!important;
+  max-width:230px!important;
+  height:calc(100% - 18px)!important;
+  right:9px!important;
+  top:9px!important;
+  transform:none!important;
+  object-fit:cover!important;
+  object-position:center 24%!important;
+  border-radius:15px!important;
+  border:3px solid rgba(255,255,255,.92)!important;
+  box-shadow:0 8px 24px rgba(15,35,65,.24)!important;
+  background:#dce6f3!important;
+}
+.reportHero.hasProfilePhoto.portraitProfile .reportHeroText{max-width:58%!important}
+@media(max-width:720px){
+  .reportHero.hasProfilePhoto.portraitProfile .reportLogo{
+    width:39%!important;height:calc(100% - 12px)!important;
+    right:6px!important;top:6px!important;border-radius:11px!important
+  }
+  .reportHero.hasProfilePhoto.portraitProfile .reportHeroText{max-width:57%!important}
+}
+@media print{
+  #bwPrintMount .reportHero.portraitProfile .reportLogo{
+    display:block!important;width:58mm!important;height:32mm!important;
+    right:3mm!important;top:3mm!important;object-fit:cover!important;
+    object-position:center 24%!important
+  }
+  #bwPrintMount .reportHero.portraitProfile .reportHeroText{max-width:58%!important}
+}
+
 </style>
 </head>
 <body>
@@ -481,6 +530,124 @@ let owner = qs.get('name')
 const BW_PROFILE_REST='https://jeajrwpmrgczimmrflxo.supabase.co/rest/v1/profiles';
 const BW_PROFILE_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJIUzI1NiIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 let bwReportProfilePhotoUrl='';
+const BW_RESULTS_REST='https://jeajrwpmrgczimmrflxo.supabase.co/rest/v1/personality_test_results';
+let bwHistorySaving=false;
+let bwHistorySavedId='';
+
+function bwResultAttemptId(){
+  const slug=(data?.slug||currentJsonName().replace(/\.json$/,'')||'test');
+  const key='bookwide_eit_attempt_'+slug;
+  let id=sessionStorage.getItem(key);
+  if(!id){
+    id=(crypto?.randomUUID?.() || ('a-'+Date.now()+'-'+Math.random().toString(36).slice(2)));
+    sessionStorage.setItem(key,id);
+  }
+  return id;
+}
+
+function bwBuildAnswerSnapshot(){
+  return data.questions.map((q,i)=>{
+    const key=answers[i];
+    const choice=(q.choices||[]).find(c=>c.key===key)||{};
+    return {
+      question_index:i,
+      question_id:q.id ?? q.day ?? (i+1),
+      question_zh:q.zh||'',
+      selected_key:key ?? null,
+      selected_zh:choice.zh||'',
+      score:getChoiceScore(choice)
+    };
+  });
+}
+
+async function bwSavePersonalityResult({score,max,level}){
+  if(!isLoggedIn || !bookWideUser?.id || bwHistorySaving) return null;
+  const token=getSupabaseAccessToken();
+  if(!token) return null;
+
+  bwHistorySaving=true;
+  try{
+    const row={
+      user_id:bookWideUser.id,
+      attempt_id:bwResultAttemptId(),
+      test_slug:data.slug || currentJsonName().replace(/\.json$/,''),
+      test_file:currentJsonName(),
+      test_title:data.title_zh || data.title_en || currentJsonName(),
+      score:Number(score)||0,
+      max_score:Number(max)||0,
+      result_key:level?.key || null,
+      result_title_en:level?.label_en || level?.title_en || null,
+      result_title_zh:level?.label_zh || level?.title_zh || '分析完成',
+      summary_en:level?.summary_en || level?.description_en || null,
+      summary_zh:level?.summary_zh || level?.description_zh || null,
+      answers:bwBuildAnswerSnapshot(),
+      report_snapshot:{
+        analysis_mode:data.analysis_mode || null,
+        report_title_en:data.report_profile?.title_en || data.title_en || null,
+        report_title_zh:data.report_profile?.title_zh || data.title_zh || null,
+        disclaimer_en:data.analysis?.disclaimer_en || null,
+        disclaimer_zh:data.analysis?.disclaimer_zh || null
+      },
+      completed_at:new Date().toISOString()
+    };
+
+    const r=await fetch(BW_RESULTS_REST+'?on_conflict=user_id,attempt_id',{
+      method:'POST',
+      headers:{
+        apikey:BW_PROFILE_ANON,
+        Authorization:'Bearer '+token,
+        'Content-Type':'application/json',
+        Prefer:'resolution=merge-duplicates,return=representation'
+      },
+      body:JSON.stringify(row)
+    });
+    if(!r.ok){
+      const msg=await r.text();
+      console.warn('Save test result failed',r.status,msg);
+      return null;
+    }
+    const saved=await r.json();
+    bwHistorySavedId=saved?.[0]?.id || '';
+    showToast('測驗結果已存入個人 Profile');
+    return saved?.[0] || null;
+  }catch(e){
+    console.warn('Save personality result failed',e);
+    return null;
+  }finally{
+    bwHistorySaving=false;
+  }
+}
+
+async function bwLoadHistoryResult(resultId){
+  if(!resultId || !isLoggedIn || !bookWideUser?.id) return null;
+  const token=getSupabaseAccessToken();
+  if(!token) return null;
+  try{
+    const url=BW_RESULTS_REST
+      +'?id=eq.'+encodeURIComponent(resultId)
+      +'&user_id=eq.'+encodeURIComponent(bookWideUser.id)
+      +'&select=*&limit=1';
+    const r=await fetch(url,{
+      headers:{apikey:BW_PROFILE_ANON,Authorization:'Bearer '+token,Accept:'application/json'}
+    });
+    if(!r.ok) return null;
+    const rows=await r.json();
+    return rows?.[0] || null;
+  }catch(e){
+    console.warn('Load history result failed',e);
+    return null;
+  }
+}
+
+function bwAnswersFromHistoryRow(row){
+  const out={};
+  const list=Array.isArray(row?.answers)?row.answers:[];
+  list.forEach((item,i)=>{
+    const idx=Number(item?.question_index ?? i);
+    if(Number.isInteger(idx) && item?.selected_key!=null) out[idx]=item.selected_key;
+  });
+  return out;
+}
 
 function bwCachedProfilePhoto(){
   try{
@@ -545,27 +712,49 @@ async function applyReportProfilePhoto(){
   const fallback=document.querySelector('.logo')?.src || '/data/monk/aptitude/bookwide_logo.png';
   const photo=await bwFetchProfilePhoto();
   bwReportProfilePhotoUrl=photo||'';
+
+  let portrait=false;
+  if(photo){
+    const meta=await bwLoadImageMeta(photo);
+    if(meta?.width && meta?.height) portrait=(meta.width/meta.height)<1.28;
+  }
+
   if(hero){
+    hero.classList.remove('portraitProfile');
     if(photo){
       hero.style.setProperty('--report-photo', `url(${JSON.stringify(String(photo))})`);
-      hero.style.backgroundImage = `url(${JSON.stringify(String(photo))})`;
-      hero.style.backgroundSize = 'cover';
-      hero.style.backgroundPosition = 'center 22%';
+      hero.style.backgroundImage=portrait?'':`url(${JSON.stringify(String(photo))})`;
+      hero.style.backgroundSize='cover';
+      hero.style.backgroundPosition='center 22%';
       hero.classList.add('hasProfilePhoto');
+      if(portrait) hero.classList.add('portraitProfile');
     }else{
       hero.style.removeProperty('--report-photo');
-      hero.style.backgroundImage = '';
-      hero.classList.remove('hasProfilePhoto');
+      hero.style.backgroundImage='';
+      hero.classList.remove('hasProfilePhoto','portraitProfile');
     }
   }
+
   img.classList.toggle('profilePhoto',!!photo);
-  img.hidden = !!photo;
-  img.style.display = photo ? 'none' : '';
+  img.hidden=!!photo && !portrait;
+  img.style.display=photo?(portrait?'block':'none'):'';
   img.src=photo||fallback;
   img.alt=photo?'Profile MBTI photo':'BookWide';
+
   const ownerEl=document.getElementById('owner');
   if(ownerEl) ownerEl.textContent=owner || '受測者';
   return photo;
+}
+
+function bwLoadImageMeta(url){
+  return new Promise(resolve=>{
+    if(!url){resolve(null);return;}
+    const img=new Image();
+    img.crossOrigin='anonymous';
+    img.onload=()=>resolve({width:img.naturalWidth||img.width,height:img.naturalHeight||img.height});
+    img.onerror=()=>resolve(null);
+    img.src=url;
+  });
 }
 
 function bwLoadImageForCanvas(url){
@@ -794,7 +983,7 @@ function move(step){
   setTimeout(autoSpeakCurrent, 220);
 }
 
-async function finish(){
+async function finish(options={}){
   const total = data.questions.length;
   if(Object.keys(answers).length < total){
     const next = data.questions.findIndex((_, i) => !Object.prototype.hasOwnProperty.call(answers, i));
@@ -910,6 +1099,10 @@ async function finish(){
   localStorage.setItem(eitAnswersKey(currentJsonName()),JSON.stringify(answers));
   syncTestPicker();
   refreshMobilePrintMount();
+
+  if(!options.skipHistorySave){
+    await bwSavePersonalityResult({score,max,level});
+  }
   if(!isLoggedIn && shortJsonName(file)===GUEST_TEST){
     sessionStorage.setItem('bookwide_guest_left_right_complete','1');
     if($('#guestReportCta')) $('#guestReportCta').classList.add('show');
@@ -990,19 +1183,44 @@ async function buildNativePrintImage(){
   let y=42;
   const bwHeaderPhoto=await bwLoadImageForCanvas(bwReportProfilePhotoUrl || bwCachedProfilePhoto());
   if(bwHeaderPhoto){
+    const ir=bwHeaderPhoto.width/bwHeaderPhoto.height,br=CW/245;
+    const portrait=ir<1.28;
+    let sx=0,sy=0,sw=bwHeaderPhoto.width,sh=bwHeaderPhoto.height;
+    if(ir>br){sw=sh*br;sx=(bwHeaderPhoto.width-sw)/2;}else{sh=sw/br;sy=(bwHeaderPhoto.height-sh)*0.18;}
+
     ctx.save();
     ctx.beginPath();
     if(ctx.roundRect) ctx.roundRect(M,y,CW,245,26); else ctx.rect(M,y,CW,245);
     ctx.clip();
-    const ir=bwHeaderPhoto.width/bwHeaderPhoto.height,br=CW/245;
-    let sx=0,sy=0,sw=bwHeaderPhoto.width,sh=bwHeaderPhoto.height;
-    if(ir>br){sw=sh*br;sx=(bwHeaderPhoto.width-sw)/2;}else{sh=sw/br;sy=(bwHeaderPhoto.height-sh)*0.18;}
-    ctx.drawImage(bwHeaderPhoto,sx,sy,sw,sh,M,y,CW,245);
+
+    if(!portrait){
+      ctx.drawImage(bwHeaderPhoto,sx,sy,sw,sh,M,y,CW,245);
+    }else{
+      ctx.save();
+      ctx.globalAlpha=.34;
+      ctx.filter='blur(8px)';
+      ctx.drawImage(bwHeaderPhoto,sx,sy,sw,sh,M-12,y-12,CW+24,269);
+      ctx.restore();
+      ctx.filter='none';
+
+      const pw=270,ph=211,px=M+CW-pw-15,py=y+17;
+      const pr=pw/ph;
+      let psx=0,psy=0,psw=bwHeaderPhoto.width,psh=bwHeaderPhoto.height;
+      if(ir>pr){psw=psh*pr;psx=(bwHeaderPhoto.width-psw)/2;}
+      else{psh=psw/pr;psy=(bwHeaderPhoto.height-psh)*0.16;}
+      ctx.save();
+      ctx.beginPath();
+      if(ctx.roundRect) ctx.roundRect(px,py,pw,ph,16); else ctx.rect(px,py,pw,ph);
+      ctx.clip();
+      ctx.drawImage(bwHeaderPhoto,psx,psy,psw,psh,px,py,pw,ph);
+      ctx.restore();
+    }
+
     const grad=ctx.createLinearGradient(M,y,M+CW,y);
-    grad.addColorStop(0,'rgba(255,255,255,.94)');
-    grad.addColorStop(.42,'rgba(255,255,255,.88)');
-    grad.addColorStop(.64,'rgba(255,255,255,.60)');
-    grad.addColorStop(1,'rgba(255,255,255,.22)');
+    grad.addColorStop(0,'rgba(255,255,255,.96)');
+    grad.addColorStop(.46,'rgba(255,255,255,.90)');
+    grad.addColorStop(.66,'rgba(255,255,255,.54)');
+    grad.addColorStop(1,'rgba(255,255,255,.12)');
     ctx.fillStyle=grad;
     ctx.fillRect(M,y,CW,245);
     ctx.restore();
@@ -1121,10 +1339,13 @@ async function loadJSON(){
   rebuildTestPicker();
   syncTestPicker();
   try{
-    /* 索引載入後重新檢查直接網址，避免繞過依序解鎖。 */
+    const historyResultId=qs.get('result_id')||'';
+    const isHistoryView=!!historyResultId && isLoggedIn;
+
+    /* 一般新測驗維持依序解鎖；查看自己的歷史報告不重新扣幣。 */
     const openingName=currentJsonName();
     const openingIdx=testIndex(openingName);
-    if(openingIdx>0 && !canOpenBySequence(openingName)){
+    if(!isHistoryView && openingIdx>0 && !canOpenBySequence(openingName)){
       const previous=EIT_TESTS[openingIdx-1]?.file || GUEST_TEST;
       const u=new URL(location.href);
       u.searchParams.set('json',previous);
@@ -1132,7 +1353,7 @@ async function loadJSON(){
       location.replace(u.toString());
       return;
     }
-    if(openingIdx>0 && !isLoggedIn){
+    if(!isHistoryView && openingIdx>0 && !isLoggedIn){
       const u=new URL(location.href);
       u.searchParams.set('json',GUEST_TEST);
       u.searchParams.delete('resume_report');
@@ -1142,7 +1363,7 @@ async function loadJSON(){
 
     /* 防止直接網址、登入返回網址繞過下拉選單的扣幣流程。 */
     const openingTest=EIT_TESTS.find(x=>x.file===openingName);
-    if(openingTest && !openingTest.free && !isTestPaid(openingName)){
+    if(!isHistoryView && openingTest && !openingTest.free && !isTestPaid(openingName)){
       const paid=await ensureEitPaidAccess(openingName,{askConfirm:true});
       if(!paid){
         const u=new URL(location.href);
@@ -1155,6 +1376,19 @@ async function loadJSON(){
     }
     await loadPhotoPool();
     data = await loadJSON();
+
+    if(isHistoryView){
+      const historyRow=await bwLoadHistoryResult(historyResultId);
+      if(!historyRow) throw new Error('history-result-not-found');
+      answers=bwAnswersFromHistoryRow(historyRow);
+      if(Object.keys(answers).length!==data.questions.length){
+        throw new Error('history-answers-incomplete');
+      }
+      render();
+      setTimeout(()=>finish({skipHistorySave:true,historyRow}),120);
+      return;
+    }
+
     const resumeReport=qs.get('resume_report')==='1';
     if(resumeReport){
       try{
