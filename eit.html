@@ -566,6 +566,20 @@ function bwAbsoluteUrl(value){
   try{return new URL(value,location.href).href;}catch(e){return String(value);}
 }
 
+function bwEscapeReportHtml(v){
+  return String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function bwBuildFallbackReportHtml({score,max,level}){
+  const title=data?.report_profile?.title_zh || data?.title_zh || 'BookWide 心理測驗報告';
+  const result=level?.label_zh || level?.title_zh || '分析完成';
+  const summary=level?.summary_zh || level?.description_zh || '測驗已完成。';
+  const suggestions=Array.isArray(level?.suggestions_zh)?level.suggestions_zh:[];
+  const ownerName=owner || '受測者';
+  const now=new Date().toLocaleString('zh-TW',{hour12:false});
+  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${bwEscapeReportHtml(title)}</title><style>html,body{margin:0;background:#eef3f9;color:#172033;font-family:Arial,"Noto Sans TC","Microsoft JhengHei",sans-serif}body{padding:18px}.toolbar{max-width:860px;margin:0 auto 12px;text-align:right}.toolbar button{border:0;border-radius:999px;padding:10px 16px;background:#7c3aed;color:#fff;font-weight:900}.report{max-width:860px;margin:auto;background:#fff;border:1px solid #d7e1ef;border-radius:22px;padding:24px;box-shadow:0 18px 50px rgba(15,23,42,.10)}h1{margin:0 0 6px;color:#174b91}h2{color:#2563eb}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}.meta div{background:#f6f9fd;border-radius:14px;padding:12px}.meta small{display:block;color:#71839a}.score{font-size:28px;font-weight:950}.summary{line-height:1.8}.tips{line-height:1.7}@media(max-width:640px){.meta{grid-template-columns:1fr}.report{padding:16px}}@media print{body{background:#fff;padding:0}.toolbar{display:none}.report{border:0;box-shadow:none;max-width:none}}</style></head><body><div class="toolbar"><button onclick="window.print()">列印／存 PDF</button></div><main class="report"><h1>${bwEscapeReportHtml(title)}</h1><div>BookWide 正式心理測驗報告</div><section class="meta"><div><small>受測者</small><b>${bwEscapeReportHtml(ownerName)}</b></div><div><small>完成時間</small><b>${bwEscapeReportHtml(now)}</b></div><div><small>分數</small><b class="score">${Number(score)||0} / ${Number(max)||0}</b></div></section><h2>${bwEscapeReportHtml(result)}</h2><p class="summary">${bwEscapeReportHtml(summary)}</p>${suggestions.length?`<h2>建議</h2><ul class="tips">${suggestions.map(x=>`<li>${bwEscapeReportHtml(x)}</li>`).join('')}</ul>`:''}<p style="margin-top:24px;color:#64748b;font-size:12px">本報告供自我觀察，不是醫療或心理診斷。</p></main></body></html>`;
+}
+
 function bwBuildStandaloneReportHtml(){
   const source=document.querySelector('#resultView .report');
   if(!source) return '';
@@ -638,6 +652,11 @@ async function bwSavePersonalityResult({score,max,level}){
 
   bwHistorySaving=true;
   try{
+    let reportHtml=bwBuildStandaloneReportHtml();
+    if(!reportHtml || reportHtml.length<500){
+      reportHtml=bwBuildFallbackReportHtml({score,max,level});
+    }
+
     const row={
       user_id:bookWideUser.id,
       attempt_id:bwResultAttemptId(),
@@ -659,7 +678,7 @@ async function bwSavePersonalityResult({score,max,level}){
         disclaimer_en:data.analysis?.disclaimer_en || null,
         disclaimer_zh:data.analysis?.disclaimer_zh || null
       },
-      report_html:bwBuildStandaloneReportHtml(),
+      report_html:reportHtml,
       report_kind:'full_report',
       report_updated_at:new Date().toISOString(),
       completed_at:new Date().toISOString()
@@ -680,10 +699,20 @@ async function bwSavePersonalityResult({score,max,level}){
       console.warn('Save test result failed',r.status,msg);
       return null;
     }
-    const saved=await r.json();
-    bwHistorySavedId=saved?.[0]?.id || '';
-    showToast('測驗結果已存入個人 Profile');
-    return saved?.[0] || null;
+    let saved=await r.json();
+    let savedRow=saved?.[0]||null;
+    if(savedRow && !String(savedRow.report_html||'').trim()){
+      const patch=await fetch(BW_RESULTS_REST+'?id=eq.'+encodeURIComponent(savedRow.id),{
+        method:'PATCH',
+        headers:{apikey:BW_PROFILE_ANON,Authorization:'Bearer '+token,'Content-Type':'application/json',Prefer:'return=representation'},
+        body:JSON.stringify({report_html:reportHtml,report_kind:'full_report',report_updated_at:new Date().toISOString()})
+      });
+      if(patch.ok){const rows=await patch.json();savedRow=rows?.[0]||savedRow;}
+    }
+    bwHistorySavedId=savedRow?.id || '';
+    if(String(savedRow?.report_html||'').trim()) showToast('完整報告已存入個人 Profile');
+    else showToast('測驗紀錄已存，但完整報告回寫失敗');
+    return savedRow;
   }catch(e){
     console.warn('Save personality result failed',e);
     return null;
