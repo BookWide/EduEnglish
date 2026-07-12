@@ -2460,58 +2460,34 @@ ${viewerToolbar}
       return d.toLocaleString('zh-TW',{hour12:false});
     }
 
-    function bwEitResultUrl(row){
-      const file=row?.test_file || ((row?.test_slug||'')+'.json');
-      return '/eit.html?json='+encodeURIComponent(file)+'&result_id='+encodeURIComponent(row.id);
-    }
 
     function bwEitRetakeUrl(row){
       const file=row?.test_file || ((row?.test_slug||'')+'.json');
       return '/eit.html?json='+encodeURIComponent(file)+'&reset=1';
     }
 
-    function buildFallbackSavedReport(row){
-      const esc=bwEscapeHtml;
-      const title=esc(row?.test_title||row?.test_slug||'BookWide 心理測驗報告');
-      const result=esc(row?.result_title_zh||row?.result_title_en||'分析完成');
-      const summary=esc(row?.summary_zh||row?.summary_en||'測驗已完成。');
-      const score=esc(row?.score??'—'), max=esc(row?.max_score??'—');
-      const date=esc(bwFmtResultDate(row?.completed_at));
-      return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>html,body{margin:0;background:#eef3f9;color:#172033;font-family:Arial,"Noto Sans TC","Microsoft JhengHei",sans-serif}body{padding:18px}.toolbar{max-width:860px;margin:0 auto 12px;text-align:right}.toolbar button{border:0;border-radius:999px;padding:10px 16px;background:#7c3aed;color:#fff;font-weight:900}.report{max-width:860px;margin:auto;background:#fff;border:1px solid #d7e1ef;border-radius:22px;padding:24px;box-shadow:0 18px 50px rgba(15,23,42,.10)}h1{margin:0 0 6px;color:#174b91}h2{color:#2563eb}.meta{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:16px 0}.meta div{background:#f6f9fd;border-radius:14px;padding:12px}.meta small{display:block;color:#71839a}.score{font-size:28px;font-weight:950}.summary{line-height:1.8}@media(max-width:640px){.meta{grid-template-columns:1fr}.report{padding:16px}}@media print{body{background:#fff;padding:0}.toolbar{display:none}.report{border:0;box-shadow:none;max-width:none}}</style></head><body><div class="toolbar"><button onclick="window.print()">列印／存 PDF</button></div><main class="report"><h1>${title}</h1><div>BookWide 正式心理測驗報告</div><section class="meta"><div><small>完成時間</small><b>${date}</b></div><div><small>分數</small><b class="score">${score} / ${max}</b></div></section><h2>${result}</h2><p class="summary">${summary}</p><p style="margin-top:24px;color:#64748b;font-size:12px">本報告由已保存的測驗紀錄重建，供自我觀察，不是醫療或心理診斷。</p></main></body></html>`;
-    }
 
-    async function ensureSavedReportHtml(row){
-      let html=String(row?.report_html||'').trim();
-      if(html) return html;
-      html=buildFallbackSavedReport(row);
-      try{
-        const { error }=await supabase
-          .from('personality_test_results')
-          .update({report_html:html,report_kind:'reconstructed_report',report_updated_at:new Date().toISOString()})
-          .eq('id',row.id)
-          .eq('user_id',currentUser.id);
-        if(error) throw error;
-        row.report_html=html;
-        row.report_kind='reconstructed_report';
-      }catch(e){console.warn('backfill report_html failed',e);}
-      return html;
-    }
+    function openSavedPersonalityReport(row){
+      const reportHtml=String(row?.report_html||'').trim();
+      const enabled=row?.report_kind==='full_report' && !!reportHtml;
 
-    async function openSavedPersonalityReport(row){
-      if(!row) return;
-      if(!hasCompleteSavedReport(row)){
-        alert('這筆是舊紀錄，沒有保存完整正式報告。請按「再測一次」完成後，系統才會保存完整報告。');
-        return;
+      if(!enabled){
+        alert('這筆紀錄尚未保存完整報告。請按「再測一次」完成測驗後再查看。');
+        return false;
       }
 
-      const win=window.open('about:blank','_blank');
+      const blob=new Blob([reportHtml],{type:'text/html;charset=utf-8'});
+      const blobUrl=URL.createObjectURL(blob);
+      const win=window.open(blobUrl,'_blank');
+
       if(!win){
-        alert('瀏覽器阻擋了報告視窗，請允許 bookwide.net 開啟新視窗。');
-        return;
+        URL.revokeObjectURL(blobUrl);
+        alert('瀏覽器封鎖了報告視窗，請允許 BookWide 開啟彈出視窗。');
+        return false;
       }
-      win.document.open();
-      win.document.write(String(row.report_html));
-      win.document.close();
+
+      setTimeout(function(){URL.revokeObjectURL(blobUrl);},60000);
+      return false;
     }
 
     async function deletePersonalityResult(id){
@@ -2554,7 +2530,7 @@ ${viewerToolbar}
             ${summary?`<div class="personalityHistoryMeta">${summary.length>120?summary.slice(0,120)+'…':summary}</div>`:''}
           </div>
           <div class="personalityHistoryActions">
-            <button type="button" data-open-report="${bwEscapeHtml(row.id)}" class="personalityHistoryBtn ${hasCompleteSavedReport(row)?'':'missing'}">${hasCompleteSavedReport(row)?'查看完整報告':'尚無完整報告'}</button>
+            <button type="button" data-open-report="${bwEscapeHtml(row.id)}" class="personalityHistoryBtn ${hasCompleteSavedReport(row)?'':'missing'}">${hasCompleteSavedReport(row)?'查看完整報告':'需重新完成'}</button>
             <a class="personalityHistoryBtn" href="${bwEscapeHtml(bwEitRetakeUrl(row))}">再測一次</a>
             <button class="personalityHistoryBtn danger" type="button" data-delete-result="${bwEscapeHtml(row.id)}">刪除</button>
           </div>
@@ -2743,10 +2719,8 @@ ${viewerToolbar}
     }
 
     function hasCompleteSavedReport(row){
-      const html=String(row?.report_html||'');
       return row?.report_kind==='full_report'
-        && html.length>=3000
-        && html.includes('data-bookwide-complete-report=\"1\"');
+        && !!String(row?.report_html||'').trim();
     }
 
     async function loadPersonalityHistory(options={}){
