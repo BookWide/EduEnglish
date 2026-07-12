@@ -127,10 +127,7 @@ header{display:flex;align-items:center;gap:10px;min-height:72px;margin-bottom:3p
   <img class="logo" alt="BookWide" src="/data/monk/aptitude/bookwide_logo.png">
   <div class="brand"><b>BookWide</b><small id="subtitle">通用心理測驗｜英・日・中</small></div>
   <select class="testPicker" id="testPicker" title="完成目前測驗後，依序解鎖下一套">
-    <option value="left-right-zodiac-potential.json">1. 左右腦・星座潛能｜免費</option>
-    <option value="aptitude-analysis.json">2. 男女傾向測驗｜2 金幣</option>
-    <option value="psychological-age.json">3. 心理年齡測驗｜2 金幣</option>
-    <option value="psychological-maturity.json">4. 心理成熟度測驗｜2 金幣</option>
+    <option value="">載入測驗清單中…</option>
   </select>
   <button class="console" onclick="location.href='index.html'">控制台</button>
 </header>
@@ -275,13 +272,64 @@ const isLoggedIn=!!bookWideUser;
 const GUEST_TEST='left-right-zodiac-potential.json';
 const EIT_COIN_COST=2;
 const EIT_DEDUCT_COIN_URL='https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/heart-deduct-coin';
-/* 後續新增測驗只要依序加在這裡；除第一套引流測驗外，每套預設 2 金幣。 */
-const EIT_TESTS=[
+/* 測驗清單由 data/monk/aptitude/eit-tests.json 載入。
+   若索引檔暫時讀取失敗，先使用這份內建備援清單。 */
+const EIT_TESTS_INDEX='data/monk/aptitude/eit-tests.json';
+let EIT_TESTS=[
   {file:'left-right-zodiac-potential.json', title:'左右腦・星座潛能測驗', free:true},
   {file:'aptitude-analysis.json', title:'男女傾向測驗', cost:EIT_COIN_COST},
   {file:'psychological-age.json', title:'心理年齡測驗', cost:EIT_COIN_COST},
-  {file:'psychological-maturity.json', title:'心理成熟度測驗', cost:EIT_COIN_COST}
+  {file:'psychological-maturity.json', title:'心理成熟度測驗', cost:EIT_COIN_COST},
+  {file:'bullying-survival.json', title:'霸凌生存戰', cost:EIT_COIN_COST}
 ];
+
+function normalizeEitTests(list){
+  if(!Array.isArray(list)) return [];
+  return list.map((item,index)=>{
+    const file=shortJsonName(item?.file||item?.json||'');
+    if(!file || !file.endsWith('.json')) return null;
+    const free=Boolean(item?.free) || Number(item?.cost)===0 || index===0;
+    return {
+      file,
+      title:String(item?.title||item?.title_zh||file.replace(/\.json$/,'')),
+      free,
+      cost:free ? 0 : Number(item?.cost||EIT_COIN_COST)
+    };
+  }).filter(Boolean);
+}
+
+async function loadEitTestsIndex(){
+  const candidates=[
+    EIT_TESTS_INDEX,
+    '/'+EIT_TESTS_INDEX.replace(/^\//,'')
+  ];
+  for(const url of [...new Set(candidates)]){
+    try{
+      const r=await fetch(url+(url.includes('?')?'&':'?')+'v='+Date.now(),{cache:'no-store'});
+      if(!r.ok) continue;
+      const loaded=normalizeEitTests(await r.json());
+      if(loaded.length){
+        EIT_TESTS=loaded;
+        return true;
+      }
+    }catch(err){
+      console.warn('eit-tests.json load failed:',err);
+    }
+  }
+  return false;
+}
+
+function rebuildTestPicker(){
+  const picker=$('#testPicker');
+  if(!picker) return;
+  picker.innerHTML='';
+  EIT_TESTS.forEach((t,index)=>{
+    const opt=document.createElement('option');
+    opt.value=t.file;
+    opt.textContent=`${index+1}. ${t.title}${t.free?'｜免費':`｜${Number(t.cost||EIT_COIN_COST)} 金幣`}`;
+    picker.appendChild(opt);
+  });
+}
 function shortJsonName(value){ return String(value||'').split('/').pop(); }
 function eitCompleteKey(fileName){return 'bookwide_eit_complete_'+shortJsonName(fileName).replace(/\.json$/,'');}
 function eitPaidKey(fileName){
@@ -322,7 +370,12 @@ async function deductEitCoins(targetFile){
     res=await fetch(EIT_DEDUCT_COIN_URL,{
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
-      body:JSON.stringify({topic_slug:slug,block_no:1,cost:EIT_COIN_COST,mode:'topic_once'})
+      body:JSON.stringify({
+        topic_slug:slug,
+        block_no:1,
+        cost:Number(EIT_TESTS.find(x=>x.file===shortJsonName(targetFile))?.cost||EIT_COIN_COST),
+        mode:'topic_once'
+      })
     });
     const raw=await res.text();
     try{body=raw?JSON.parse(raw):null;}catch(err){body=null;}
@@ -562,7 +615,7 @@ function syncTestPicker(){
     const allowed=sequential && loginAllowed;
     o.disabled=!allowed;
     const t=EIT_TESTS[idx];
-    const base=t ? `${idx+1}. ${t.title}${t.free?'｜免費':`｜${EIT_COIN_COST} 金幣`}` : name;
+    const base=t ? `${idx+1}. ${t.title}${t.free?'｜免費':`｜${Number(t.cost||EIT_COIN_COST)} 金幣`}` : name;
     o.textContent=(allowed?'':'🔒 ')+base+(isTestComplete(name)?' ✓':'');
   });
   if(!isLoggedIn) $('#guestOnlyBadge')?.classList.add('show');
@@ -1064,10 +1117,30 @@ async function loadJSON(){
 }
 
 (async function boot(){
+  await loadEitTestsIndex();
+  rebuildTestPicker();
   syncTestPicker();
   try{
-    /* 防止直接網址、登入返回網址繞過下拉選單的扣幣流程。 */
+    /* 索引載入後重新檢查直接網址，避免繞過依序解鎖。 */
     const openingName=currentJsonName();
+    const openingIdx=testIndex(openingName);
+    if(openingIdx>0 && !canOpenBySequence(openingName)){
+      const previous=EIT_TESTS[openingIdx-1]?.file || GUEST_TEST;
+      const u=new URL(location.href);
+      u.searchParams.set('json',previous);
+      u.searchParams.delete('resume_report');
+      location.replace(u.toString());
+      return;
+    }
+    if(openingIdx>0 && !isLoggedIn){
+      const u=new URL(location.href);
+      u.searchParams.set('json',GUEST_TEST);
+      u.searchParams.delete('resume_report');
+      location.replace(u.toString());
+      return;
+    }
+
+    /* 防止直接網址、登入返回網址繞過下拉選單的扣幣流程。 */
     const openingTest=EIT_TESTS.find(x=>x.file===openingName);
     if(openingTest && !openingTest.free && !isTestPaid(openingName)){
       const paid=await ensureEitPaidAccess(openingName,{askConfirm:true});
