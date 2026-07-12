@@ -570,16 +570,6 @@ function bwEscapeReportHtml(v){
   return String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
 
-function bwBuildFallbackReportHtml({score,max,level}){
-  const title=data?.report_profile?.title_zh || data?.title_zh || 'BookWide 心理測驗報告';
-  const result=level?.label_zh || level?.title_zh || '分析完成';
-  const summary=level?.summary_zh || level?.description_zh || '測驗已完成。';
-  const suggestions=Array.isArray(level?.suggestions_zh)?level.suggestions_zh:[];
-  const ownerName=owner || '受測者';
-  const now=new Date().toLocaleString('zh-TW',{hour12:false});
-  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${bwEscapeReportHtml(title)}</title><style>html,body{margin:0;background:#eef3f9;color:#172033;font-family:Arial,"Noto Sans TC","Microsoft JhengHei",sans-serif}body{padding:18px}.toolbar{max-width:860px;margin:0 auto 12px;text-align:right}.toolbar button{border:0;border-radius:999px;padding:10px 16px;background:#7c3aed;color:#fff;font-weight:900}.report{max-width:860px;margin:auto;background:#fff;border:1px solid #d7e1ef;border-radius:22px;padding:24px;box-shadow:0 18px 50px rgba(15,23,42,.10)}h1{margin:0 0 6px;color:#174b91}h2{color:#2563eb}.meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}.meta div{background:#f6f9fd;border-radius:14px;padding:12px}.meta small{display:block;color:#71839a}.score{font-size:28px;font-weight:950}.summary{line-height:1.8}.tips{line-height:1.7}@media(max-width:640px){.meta{grid-template-columns:1fr}.report{padding:16px}}@media print{body{background:#fff;padding:0}.toolbar{display:none}.report{border:0;box-shadow:none;max-width:none}}</style></head><body><div class="toolbar"><button onclick="window.print()">列印／存 PDF</button></div><main class="report"><h1>${bwEscapeReportHtml(title)}</h1><div>BookWide 正式心理測驗報告</div><section class="meta"><div><small>受測者</small><b>${bwEscapeReportHtml(ownerName)}</b></div><div><small>完成時間</small><b>${bwEscapeReportHtml(now)}</b></div><div><small>分數</small><b class="score">${Number(score)||0} / ${Number(max)||0}</b></div></section><h2>${bwEscapeReportHtml(result)}</h2><p class="summary">${bwEscapeReportHtml(summary)}</p>${suggestions.length?`<h2>建議</h2><ul class="tips">${suggestions.map(x=>`<li>${bwEscapeReportHtml(x)}</li>`).join('')}</ul>`:''}<p style="margin-top:24px;color:#64748b;font-size:12px">本報告供自我觀察，不是醫療或心理診斷。</p></main></body></html>`;
-}
-
 function bwBuildStandaloneReportHtml(){
   const source=document.querySelector('#resultView .report');
   if(!source) return '';
@@ -640,7 +630,7 @@ body{display:block!important;padding:18px!important;font-family:Arial,"Noto Sans
   <button class="print" onclick="window.print()">列印／存 PDF</button>
   <button class="close" onclick="window.close()">關閉</button>
 </div>
-<main class="bwSavedReportShell">${clone.outerHTML}</main>
+<main class="bwSavedReportShell" data-bookwide-complete-report="1">${clone.outerHTML}</main>
 </body>
 </html>`;
 }
@@ -652,9 +642,18 @@ async function bwSavePersonalityResult({score,max,level}){
 
   bwHistorySaving=true;
   try{
-    let reportHtml=bwBuildStandaloneReportHtml();
-    if(!reportHtml || reportHtml.length<500){
-      reportHtml=bwBuildFallbackReportHtml({score,max,level});
+    /* Only save a genuine, complete report rendered by EIT. Never fabricate a short fallback. */
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    const reportHtml=bwBuildStandaloneReportHtml();
+    const reportLooksComplete = reportHtml
+      && reportHtml.length >= 3000
+      && reportHtml.includes('resultDetails')
+      && reportHtml.includes('scoreExplain')
+      && reportHtml.includes('rangeMap');
+    if(!reportLooksComplete){
+      console.warn('Complete report HTML was not ready; result was not saved.');
+      showToast('完整報告尚未建立，這次未保存；請稍後再按完成');
+      return null;
     }
 
     const row={
@@ -697,6 +696,7 @@ async function bwSavePersonalityResult({score,max,level}){
     if(!r.ok){
       const msg=await r.text();
       console.warn('Save test result failed',r.status,msg);
+      showToast('報告儲存失敗：'+r.status);
       return null;
     }
     let saved=await r.json();
@@ -1125,7 +1125,8 @@ async function finish(options={}){
 
   const gauge = data.result_gauge || {};
   const calculatedMax = data.questions.reduce((sum,q)=>sum+Math.max(0,...q.choices.map(getChoiceScore)),0);
-  const max = Number(gauge.max_score ?? gauge.standard_max_score ?? calculatedMax ?? 300);
+  const explicitMax = data.score_max ?? data.score_model?.max_score ?? data.score_model?.score_range?.max;
+  const max = Number(explicitMax ?? gauge.max_score ?? gauge.standard_max_score ?? calculatedMax ?? 300);
   const levels = data.analysis?.result_levels || data.result_levels || [];
   const level = levels.find(x => score >= Number(x.from) && score <= Number(x.to)) || levels[levels.length - 1] || {};
 
