@@ -293,6 +293,7 @@ header{display:flex;align-items:center;gap:10px;min-height:72px;margin-bottom:3p
   </div>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 const $ = s => document.querySelector(s);
 const qs = new URLSearchParams(location.search);
@@ -528,9 +529,27 @@ let owner = qs.get('name')
   || localStorage.getItem('bookwide_name')
   || '受測者';
 const BW_PROFILE_REST='https://jeajrwpmrgczimmrflxo.supabase.co/rest/v1/profiles';
-const BW_PROFILE_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJIUzI1NiIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+const BW_PROFILE_ANON='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 let bwReportProfilePhotoUrl='';
 const BW_RESULTS_REST='https://jeajrwpmrgczimmrflxo.supabase.co/rest/v1/personality_test_results';
+let bwEitSupabaseClient=null;
+function bwEitSupabase(){
+  if(bwEitSupabaseClient) return bwEitSupabaseClient;
+  if(!window.supabase?.createClient) return null;
+  bwEitSupabaseClient=window.supabase.createClient(
+    'https://jeajrwpmrgczimmrflxo.supabase.co',
+    BW_PROFILE_ANON,
+    {
+      auth:{
+        persistSession:true,
+        autoRefreshToken:true,
+        detectSessionInUrl:true,
+        storageKey:BOOKWIDE_AUTH_KEY
+      }
+    }
+  );
+  return bwEitSupabaseClient;
+}
 let bwHistorySaving=false;
 let bwHistorySavedId='';
 
@@ -640,36 +659,49 @@ body{display:block!important;padding:18px!important;font-family:Arial,"Noto Sans
 }
 
 async function bwSavePersonalityResult({score,max,level}){
-  if(!isLoggedIn || !bookWideUser?.id || bwHistorySaving) return null;
-  const token=getSupabaseAccessToken();
-  if(!token) return null;
-
+  if(bwHistorySaving) return null;
   bwHistorySaving=true;
+
   try{
-    /* Wait until the final report DOM is fully painted. */
+    const sb=bwEitSupabase();
+    if(!sb){
+      showToast('Supabase SDK 尚未載入，報告未保存');
+      return null;
+    }
+
+    /* Use the same authenticated client pattern as heart-mbti/profile. */
+    const {data:userRes,error:userErr}=await sb.auth.getUser();
+    const user=userRes?.user||null;
+    if(userErr || !user?.id){
+      console.error('[BookWide EIT] auth.getUser failed',userErr);
+      showToast('登入狀態失效，完整報告未保存');
+      return null;
+    }
+
     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
 
     const src=document.querySelector('#resultView.show .report');
     if(!src){
-      showToast('完整報告尚未顯示，未保存');
+      showToast('完整報告尚未建立，未保存');
       return null;
     }
 
     const reportHtml=bwBuildStandaloneReportHtml();
-    if(!reportHtml || reportHtml.length<1000){
-      console.warn('reportHtml too short',reportHtml?.length||0);
-      showToast('完整報告建立失敗，未保存');
+    const visibleText=String(src.innerText||src.textContent||'').trim();
+    if(!reportHtml || reportHtml.length<1200 || visibleText.length<80){
+      console.error('[BookWide EIT] invalid report snapshot',{
+        html_length:reportHtml?.length||0,
+        text_length:visibleText.length
+      });
+      showToast('完整報告內容不足，未保存');
       return null;
     }
 
     const nowIso=new Date().toISOString();
-
-    /* Every completed test gets its own attempt ID.
-       Repeated clicks during the same completed screen reuse the same ID. */
-    const attemptId=bwResultAttemptId();
+    const attemptId=(crypto?.randomUUID?.() || ('eit-'+Date.now()+'-'+Math.random().toString(36).slice(2)));
 
     const row={
-      user_id:bookWideUser.id,
+      user_id:user.id,
       attempt_id:attemptId,
       test_slug:data.slug || currentJsonName().replace(/\.json$/,''),
       test_file:currentJsonName(),
@@ -683,12 +715,15 @@ async function bwSavePersonalityResult({score,max,level}){
       summary_zh:level?.summary_zh || level?.description_zh || null,
       answers:bwBuildAnswerSnapshot(),
       report_snapshot:{
+        source:'eit-full-report',
         analysis_mode:data.analysis_mode || null,
         report_title_en:data.report_profile?.title_en || data.title_en || null,
         report_title_zh:data.report_profile?.title_zh || data.title_zh || null,
         disclaimer_en:data.analysis?.disclaimer_en || null,
         disclaimer_zh:data.analysis?.disclaimer_zh || null,
-        html_length:reportHtml.length
+        html_length:reportHtml.length,
+        text_length:visibleText.length,
+        saved_at:nowIso
       },
       report_html:reportHtml,
       report_kind:'full_report',
@@ -696,93 +731,66 @@ async function bwSavePersonalityResult({score,max,level}){
       completed_at:nowIso
     };
 
-    /* Same proven pattern as MBTI:
-       save metadata and complete HTML in ONE request. */
-    const saveUrl=BW_RESULTS_REST+'?on_conflict=user_id,attempt_id';
-    const r=await fetch(saveUrl,{
-      method:'POST',
-      headers:{
-        apikey:BW_PROFILE_ANON,
-        Authorization:'Bearer '+token,
-        'Content-Type':'application/json',
-        Prefer:'resolution=merge-duplicates,return=representation'
-      },
-      body:JSON.stringify(row)
-    });
+    /* One SDK INSERT: no raw REST token parsing and no second PATCH. */
+    const {data:inserted,error:insertErr}=await sb
+      .from('personality_test_results')
+      .insert(row)
+      .select('id,user_id,score,max_score,report_html,report_kind,report_updated_at')
+      .single();
 
-    if(!r.ok){
-      const msg=await r.text();
-      console.warn('EIT complete report save failed',r.status,msg);
+    if(insertErr){
+      console.error('[BookWide EIT] INSERT failed',insertErr);
       try{
         localStorage.setItem('bw_last_eit_report_save_error',JSON.stringify({
-          status:r.status,
-          message:msg,
-          html_len:reportHtml.length,
+          code:insertErr.code||'',
+          message:insertErr.message||String(insertErr),
+          details:insertErr.details||'',
+          hint:insertErr.hint||'',
+          html_length:reportHtml.length,
+          test_slug:row.test_slug,
           at:nowIso
         }));
       }catch(_e){}
-      showToast('完整報告儲存失敗：'+r.status);
+      showToast('完整報告儲存失敗：'+(insertErr.code||insertErr.message||'資料庫錯誤'));
       return null;
     }
 
-    const savedRows=await r.json();
-    const saved=savedRows?.[0]||null;
-    const savedId=saved?.id;
-
-    if(!savedId){
-      showToast('報告寫入後未取得紀錄 ID');
+    if(!inserted?.id){
+      showToast('資料庫沒有回傳報告紀錄');
       return null;
     }
 
-    /* Read back exactly what Profile will read. */
-    const verifyUrl=BW_RESULTS_REST
-      +'?id=eq.'+encodeURIComponent(savedId)
-      +'&user_id=eq.'+encodeURIComponent(bookWideUser.id)
-      +'&select=id,score,max_score,report_html,report_kind,report_updated_at&limit=1';
+    /* Read back through the same SDK/RLS path used by Profile. */
+    const {data:verified,error:verifyErr}=await sb
+      .from('personality_test_results')
+      .select('id,user_id,score,max_score,report_html,report_kind,report_updated_at')
+      .eq('id',inserted.id)
+      .eq('user_id',user.id)
+      .single();
 
-    const rv=await fetch(verifyUrl,{
-      headers:{
-        apikey:BW_PROFILE_ANON,
-        Authorization:'Bearer '+token,
-        Accept:'application/json'
-      }
-    });
-
-    if(!rv.ok){
-      const msg=await rv.text();
-      console.warn('EIT report verify request failed',rv.status,msg);
-      showToast('報告已寫入，但回讀驗證失敗：'+rv.status);
+    if(verifyErr){
+      console.error('[BookWide EIT] verify failed',verifyErr);
+      showToast('報告已寫入，但回讀驗證失敗');
       return null;
     }
 
-    const verified=(await rv.json())?.[0]||null;
-    const ok=verified
-      && verified.report_kind==='full_report'
-      && String(verified.report_html||'').length>=1000;
-
-    if(!ok){
-      console.warn('EIT report verify content failed',verified);
-      try{
-        localStorage.setItem('bw_last_eit_report_verify_error',JSON.stringify({
-          id:savedId,
-          verified,
-          expected_html_len:reportHtml.length,
-          at:nowIso
-        }));
-      }catch(_e){}
-      showToast('完整報告沒有真正寫入資料庫');
+    const savedHtml=String(verified?.report_html||'');
+    if(verified?.report_kind!=='full_report' || savedHtml.length<1200){
+      console.error('[BookWide EIT] report_html missing after INSERT',verified);
+      showToast('資料庫沒有收到完整報告 HTML');
       return null;
     }
 
-    bwHistorySavedId=savedId;
+    bwHistorySavedId=inserted.id;
     try{
       localStorage.setItem('bw_last_eit_report_save',JSON.stringify({
         ok:true,
-        id:savedId,
+        id:inserted.id,
+        user_id:user.id,
         test_slug:row.test_slug,
         score:row.score,
         max_score:row.max_score,
-        html_len:String(verified.report_html||'').length,
+        html_length:savedHtml.length,
         saved_at:nowIso
       }));
     }catch(_e){}
@@ -790,7 +798,7 @@ async function bwSavePersonalityResult({score,max,level}){
     showToast('完整報告已存入個人 Profile');
     return verified;
   }catch(e){
-    console.warn('Save personality result failed',e);
+    console.error('[BookWide EIT] save exception',e);
     try{
       localStorage.setItem('bw_last_eit_report_save_error',JSON.stringify({
         error:String(e?.message||e),
