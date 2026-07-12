@@ -2469,20 +2469,41 @@ ${viewerToolbar}
       return '/eit.html?json='+encodeURIComponent(file)+'&reset=1';
     }
 
-    function openSavedPersonalityReport(row){
-      const html=String(row?.report_html||'').trim();
-      if(!html){
-        alert('這筆舊紀錄尚未保存完整報告。請按「再測一次」完成後，系統會保存正式報告。');
-        return;
-      }
+    function buildFallbackSavedReport(row){
+      const esc=bwEscapeHtml;
+      const title=esc(row?.test_title||row?.test_slug||'BookWide 心理測驗報告');
+      const result=esc(row?.result_title_zh||row?.result_title_en||'分析完成');
+      const summary=esc(row?.summary_zh||row?.summary_en||'測驗已完成。');
+      const score=esc(row?.score??'—'), max=esc(row?.max_score??'—');
+      const date=esc(bwFmtResultDate(row?.completed_at));
+      return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>html,body{margin:0;background:#eef3f9;color:#172033;font-family:Arial,"Noto Sans TC","Microsoft JhengHei",sans-serif}body{padding:18px}.toolbar{max-width:860px;margin:0 auto 12px;text-align:right}.toolbar button{border:0;border-radius:999px;padding:10px 16px;background:#7c3aed;color:#fff;font-weight:900}.report{max-width:860px;margin:auto;background:#fff;border:1px solid #d7e1ef;border-radius:22px;padding:24px;box-shadow:0 18px 50px rgba(15,23,42,.10)}h1{margin:0 0 6px;color:#174b91}h2{color:#2563eb}.meta{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin:16px 0}.meta div{background:#f6f9fd;border-radius:14px;padding:12px}.meta small{display:block;color:#71839a}.score{font-size:28px;font-weight:950}.summary{line-height:1.8}@media(max-width:640px){.meta{grid-template-columns:1fr}.report{padding:16px}}@media print{body{background:#fff;padding:0}.toolbar{display:none}.report{border:0;box-shadow:none;max-width:none}}</style></head><body><div class="toolbar"><button onclick="window.print()">列印／存 PDF</button></div><main class="report"><h1>${title}</h1><div>BookWide 正式心理測驗報告</div><section class="meta"><div><small>完成時間</small><b>${date}</b></div><div><small>分數</small><b class="score">${score} / ${max}</b></div></section><h2>${result}</h2><p class="summary">${summary}</p><p style="margin-top:24px;color:#64748b;font-size:12px">本報告由已保存的測驗紀錄重建，供自我觀察，不是醫療或心理診斷。</p></main></body></html>`;
+    }
+
+    async function ensureSavedReportHtml(row){
+      let html=String(row?.report_html||'').trim();
+      if(html) return html;
+      html=buildFallbackSavedReport(row);
+      try{
+        const { error }=await supabase
+          .from('personality_test_results')
+          .update({report_html:html,report_kind:'reconstructed_report',report_updated_at:new Date().toISOString()})
+          .eq('id',row.id)
+          .eq('user_id',currentUser.id);
+        if(error) throw error;
+        row.report_html=html;
+        row.report_kind='reconstructed_report';
+      }catch(e){console.warn('backfill report_html failed',e);}
+      return html;
+    }
+
+    async function openSavedPersonalityReport(row){
+      if(!row) return;
+      const html=await ensureSavedReportHtml(row);
+      if(!html){alert('無法建立這筆報告。');return;}
       const blob=new Blob([html],{type:'text/html;charset=utf-8'});
       const url=URL.createObjectURL(blob);
-      const win=window.open(url,'_blank','noopener');
-      if(!win){
-        URL.revokeObjectURL(url);
-        alert('瀏覽器阻擋了報告視窗，請允許此網站開啟新視窗。');
-        return;
-      }
+      const win=window.open(url,'_blank');
+      if(!win){URL.revokeObjectURL(url);alert('瀏覽器阻擋了報告視窗，請允許此網站開啟新視窗。');return;}
       setTimeout(()=>URL.revokeObjectURL(url),60000);
     }
 
@@ -2526,7 +2547,7 @@ ${viewerToolbar}
             ${summary?`<div class="personalityHistoryMeta">${summary.length>120?summary.slice(0,120)+'…':summary}</div>`:''}
           </div>
           <div class="personalityHistoryActions">
-            <button class="personalityHistoryBtn" type="button" data-open-report="${bwEscapeHtml(row.id)}"${row.report_html?'':' disabled title="舊紀錄尚未保存完整報告"'}>查看報告</button>
+            <button class="personalityHistoryBtn" type="button" data-open-report="${bwEscapeHtml(row.id)}">查看報告</button>
             <a class="personalityHistoryBtn" href="${bwEscapeHtml(bwEitRetakeUrl(row))}">再測一次</a>
             <button class="personalityHistoryBtn danger" type="button" data-delete-result="${bwEscapeHtml(row.id)}">刪除</button>
           </div>
