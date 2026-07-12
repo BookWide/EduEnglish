@@ -646,7 +646,7 @@ async function bwSavePersonalityResult({score,max,level}){
 
   bwHistorySaving=true;
   try{
-    /* Wait until the completed report is visibly rendered, exactly like heart-mbti. */
+    /* Wait until the final report DOM is fully painted. */
     await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
 
     const src=document.querySelector('#resultView.show .report');
@@ -656,16 +656,19 @@ async function bwSavePersonalityResult({score,max,level}){
     }
 
     const reportHtml=bwBuildStandaloneReportHtml();
-    if(!reportHtml || !String(src.textContent||'').trim()){
-      showToast('完整報告內容為空，未保存');
+    if(!reportHtml || reportHtml.length<1000){
+      console.warn('reportHtml too short',reportHtml?.length||0);
+      showToast('完整報告建立失敗，未保存');
       return null;
     }
 
     const nowIso=new Date().toISOString();
+
+    /* Every completed test gets its own attempt ID.
+       Repeated clicks during the same completed screen reuse the same ID. */
     const attemptId=bwResultAttemptId();
 
-    /* Step 1: save result metadata first. */
-    const metaRow={
+    const row={
       user_id:bookWideUser.id,
       attempt_id:attemptId,
       test_slug:data.slug || currentJsonName().replace(/\.json$/,''),
@@ -684,12 +687,19 @@ async function bwSavePersonalityResult({score,max,level}){
         report_title_en:data.report_profile?.title_en || data.title_en || null,
         report_title_zh:data.report_profile?.title_zh || data.title_zh || null,
         disclaimer_en:data.analysis?.disclaimer_en || null,
-        disclaimer_zh:data.analysis?.disclaimer_zh || null
+        disclaimer_zh:data.analysis?.disclaimer_zh || null,
+        html_length:reportHtml.length
       },
+      report_html:reportHtml,
+      report_kind:'full_report',
+      report_updated_at:nowIso,
       completed_at:nowIso
     };
 
-    const r1=await fetch(BW_RESULTS_REST+'?on_conflict=user_id,attempt_id',{
+    /* Same proven pattern as MBTI:
+       save metadata and complete HTML in ONE request. */
+    const saveUrl=BW_RESULTS_REST+'?on_conflict=user_id,attempt_id';
+    const r=await fetch(saveUrl,{
       method:'POST',
       headers:{
         apikey:BW_PROFILE_ANON,
@@ -697,54 +707,38 @@ async function bwSavePersonalityResult({score,max,level}){
         'Content-Type':'application/json',
         Prefer:'resolution=merge-duplicates,return=representation'
       },
-      body:JSON.stringify(metaRow)
+      body:JSON.stringify(row)
     });
-    if(!r1.ok){
-      const msg=await r1.text();
-      console.warn('EIT metadata save failed',r1.status,msg);
-      showToast('測驗紀錄儲存失敗：'+r1.status);
+
+    if(!r.ok){
+      const msg=await r.text();
+      console.warn('EIT complete report save failed',r.status,msg);
+      try{
+        localStorage.setItem('bw_last_eit_report_save_error',JSON.stringify({
+          status:r.status,
+          message:msg,
+          html_len:reportHtml.length,
+          at:nowIso
+        }));
+      }catch(_e){}
+      showToast('完整報告儲存失敗：'+r.status);
       return null;
     }
 
-    const rows1=await r1.json();
-    const savedId=rows1?.[0]?.id;
+    const savedRows=await r.json();
+    const saved=savedRows?.[0]||null;
+    const savedId=saved?.id;
+
     if(!savedId){
-      showToast('測驗紀錄未取得 ID，報告未保存');
+      showToast('報告寫入後未取得紀錄 ID');
       return null;
     }
 
-    /* Step 2: save the complete HTML separately, same pattern as MBTI profile save. */
-    const htmlPayload={
-      report_html:reportHtml,
-      report_kind:'full_report',
-      report_updated_at:nowIso
-    };
-
-    const r2=await fetch(
-      BW_RESULTS_REST+'?id=eq.'+encodeURIComponent(savedId)+'&user_id=eq.'+encodeURIComponent(bookWideUser.id),
-      {
-        method:'PATCH',
-        headers:{
-          apikey:BW_PROFILE_ANON,
-          Authorization:'Bearer '+token,
-          'Content-Type':'application/json',
-          Prefer:'return=representation'
-        },
-        body:JSON.stringify(htmlPayload)
-      }
-    );
-    if(!r2.ok){
-      const msg=await r2.text();
-      console.warn('EIT report_html save failed',r2.status,msg);
-      showToast('完整報告 HTML 儲存失敗：'+r2.status);
-      return null;
-    }
-
-    /* Step 3: read back and verify — do not claim success before verification. */
+    /* Read back exactly what Profile will read. */
     const verifyUrl=BW_RESULTS_REST
       +'?id=eq.'+encodeURIComponent(savedId)
       +'&user_id=eq.'+encodeURIComponent(bookWideUser.id)
-      +'&select=id,report_html,report_kind,report_updated_at&limit=1';
+      +'&select=id,score,max_score,report_html,report_kind,report_updated_at&limit=1';
 
     const rv=await fetch(verifyUrl,{
       headers:{
@@ -753,19 +747,30 @@ async function bwSavePersonalityResult({score,max,level}){
         Accept:'application/json'
       }
     });
+
     if(!rv.ok){
-      showToast('報告已送出，但驗證讀取失敗：'+rv.status);
+      const msg=await rv.text();
+      console.warn('EIT report verify request failed',rv.status,msg);
+      showToast('報告已寫入，但回讀驗證失敗：'+rv.status);
       return null;
     }
 
     const verified=(await rv.json())?.[0]||null;
     const ok=verified
       && verified.report_kind==='full_report'
-      && !!String(verified.report_html||'').trim();
+      && String(verified.report_html||'').length>=1000;
 
     if(!ok){
-      console.warn('EIT report_html verify failed',verified);
-      showToast('測驗紀錄已存，但完整報告驗證失敗');
+      console.warn('EIT report verify content failed',verified);
+      try{
+        localStorage.setItem('bw_last_eit_report_verify_error',JSON.stringify({
+          id:savedId,
+          verified,
+          expected_html_len:reportHtml.length,
+          at:nowIso
+        }));
+      }catch(_e){}
+      showToast('完整報告沒有真正寫入資料庫');
       return null;
     }
 
@@ -774,16 +779,24 @@ async function bwSavePersonalityResult({score,max,level}){
       localStorage.setItem('bw_last_eit_report_save',JSON.stringify({
         ok:true,
         id:savedId,
-        test_slug:metaRow.test_slug,
-        html_len:reportHtml.length,
+        test_slug:row.test_slug,
+        score:row.score,
+        max_score:row.max_score,
+        html_len:String(verified.report_html||'').length,
         saved_at:nowIso
       }));
     }catch(_e){}
 
     showToast('完整報告已存入個人 Profile');
-    return {...metaRow,id:savedId,...htmlPayload};
+    return verified;
   }catch(e){
     console.warn('Save personality result failed',e);
+    try{
+      localStorage.setItem('bw_last_eit_report_save_error',JSON.stringify({
+        error:String(e?.message||e),
+        at:new Date().toISOString()
+      }));
+    }catch(_e){}
     showToast('完整報告儲存失敗：'+String(e?.message||e).slice(0,80));
     return null;
   }finally{
