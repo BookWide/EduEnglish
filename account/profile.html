@@ -1434,8 +1434,12 @@ label{
             <h2 class="section-title" style="margin-bottom:4px">我的心理測驗紀錄</h2>
             <div class="section-desc" style="margin:0">完成 EIT 測驗後自動保存，可重新查看、列印或再測一次。</div>
           </div>
-          <div id="personalityHistoryStats" class="personalityHistoryStats">讀取中…</div>
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <div id="personalityHistoryStats" class="personalityHistoryStats">讀取中…</div>
+            <button id="btnImportLegacyTests" class="personalityHistoryBtn" type="button">匯入舊測驗</button>
+          </div>
         </div>
+        <div id="legacyImportStatus" class="personalityHistoryStats" style="margin:8px 0"></div>
         <div id="personalityHistoryList" class="personalityHistoryList">
           <div class="personalityHistoryEmpty">正在讀取測驗紀錄…</div>
         </div>
@@ -2514,7 +2518,178 @@ ${viewerToolbar}
       });
     }
 
-    async function loadPersonalityHistory(){
+    function bwLegacyChoiceScore(choice){
+      const n=Number(choice?.aptitude_score ?? choice?.score?.total_score ?? choice?.score ?? 0);
+      return Number.isFinite(n)?n:0;
+    }
+
+    function bwLegacyLevels(testData){
+      return testData?.analysis?.result_levels
+        || testData?.result_levels
+        || testData?.levels
+        || [];
+    }
+
+    function bwLegacyPickLevel(testData,score){
+      const levels=bwLegacyLevels(testData);
+      return levels.find(x=>score>=Number(x.from??-Infinity) && score<=Number(x.to??Infinity))
+        || levels[levels.length-1]
+        || {};
+    }
+
+    function bwLegacyMaxScore(testData){
+      const direct=Number(
+        testData?.score_max
+        ?? testData?.result_gauge?.max_score
+        ?? testData?.score_model?.max_score
+        ?? testData?.score_model?.score_range?.max
+      );
+      if(Number.isFinite(direct) && direct>0) return direct;
+      return (testData?.questions?.length||0)*10;
+    }
+
+    function bwLegacyCompleteKey(file){
+      return 'bookwide_eit_complete_'+String(file||'').split('/').pop().replace(/\.json$/,'');
+    }
+
+    function bwLegacyAnswersKey(file){
+      return 'bookwide_eit_answers_'+String(file||'').split('/').pop().replace(/\.json$/,'');
+    }
+
+    async function bwFetchLegacyIndex(){
+      const urls=[
+        '/data/monk/aptitude/eit-tests.json',
+        '../data/monk/aptitude/eit-tests.json',
+        '/eit-tests.json'
+      ];
+      for(const url of urls){
+        try{
+          const r=await fetch(url+'?v='+Date.now(),{cache:'no-store'});
+          if(!r.ok) continue;
+          const j=await r.json();
+          if(Array.isArray(j) && j.length) return j;
+        }catch(e){}
+      }
+      return [];
+    }
+
+    async function bwFetchLegacyTest(file){
+      const name=String(file||'').split('/').pop();
+      const urls=[
+        '/data/monk/aptitude/'+name,
+        '../data/monk/aptitude/'+name,
+        '/'+name
+      ];
+      for(const url of urls){
+        try{
+          const r=await fetch(url+'?v='+Date.now(),{cache:'no-store'});
+          if(!r.ok) continue;
+          return await r.json();
+        }catch(e){}
+      }
+      return null;
+    }
+
+    async function importLegacyPersonalityTests({silent=false}={}){
+      const status=$('#legacyImportStatus');
+      const btn=$('#btnImportLegacyTests');
+      if(btn) btn.disabled=true;
+      try{
+        if(!currentUser) currentUser=await getCurrentUser();
+        if(!currentUser) throw new Error('請先登入');
+
+        const index=await bwFetchLegacyIndex();
+        if(!index.length) throw new Error('讀不到 eit-tests.json');
+
+        let found=0, imported=0, skipped=0;
+        if(status) status.textContent='正在掃描舊測驗紀錄…';
+
+        for(const item of index){
+          const file=String(item?.file||'').split('/').pop();
+          if(!file) continue;
+
+          const completed=localStorage.getItem(bwLegacyCompleteKey(file))==='1';
+          const rawAnswers=localStorage.getItem(bwLegacyAnswersKey(file));
+          if(!completed || !rawAnswers) continue;
+
+          found++;
+          let answers;
+          try{ answers=JSON.parse(rawAnswers); }catch(e){ skipped++; continue; }
+
+          const testData=await bwFetchLegacyTest(file);
+          if(!testData?.questions?.length){ skipped++; continue; }
+
+          const answerRows=[];
+          let score=0;
+          testData.questions.forEach((q,i)=>{
+            const selectedKey=answers?.[i] ?? answers?.[String(i)];
+            const choice=(q.choices||[]).find(c=>String(c.key)===String(selectedKey))||{};
+            const s=bwLegacyChoiceScore(choice);
+            score+=s;
+            answerRows.push({
+              question_index:i,
+              question_id:q.id ?? q.day ?? (i+1),
+              question_zh:q.zh||'',
+              selected_key:selectedKey ?? null,
+              selected_zh:choice.zh||'',
+              score:s
+            });
+          });
+
+          if(answerRows.some(x=>x.selected_key==null)){ skipped++; continue; }
+
+          const max=bwLegacyMaxScore(testData);
+          const level=bwLegacyPickLevel(testData,score);
+          const slug=testData.slug || file.replace(/\.json$/,'');
+          const attemptId='legacy-'+slug+'-'+String(score);
+
+          const row={
+            user_id:currentUser.id,
+            attempt_id:attemptId,
+            test_slug:slug,
+            test_file:file,
+            test_title:testData.title_zh || testData.title_en || item.title || slug,
+            score,
+            max_score:max,
+            result_key:level.key || null,
+            result_title_en:level.label_en || level.title_en || null,
+            result_title_zh:level.label_zh || level.title_zh || '分析完成',
+            summary_en:level.summary_en || level.description_en || null,
+            summary_zh:level.summary_zh || level.description_zh || null,
+            answers:answerRows,
+            report_snapshot:{
+              imported_from:'legacy_localStorage',
+              analysis_mode:testData.analysis_mode || null,
+              imported_at:new Date().toISOString()
+            },
+            completed_at:new Date().toISOString()
+          };
+
+          const { error }=await supabase
+            .from('personality_test_results')
+            .upsert(row,{onConflict:'user_id,attempt_id',ignoreDuplicates:false});
+          if(error){ skipped++; console.warn('legacy import failed',file,error); }
+          else imported++;
+        }
+
+        if(status){
+          status.textContent=found
+            ? `找到 ${found} 套舊測驗，成功匯入 ${imported} 套${skipped?`，略過 ${skipped} 套`:''}。`
+            : '這個瀏覽器沒有找到舊 EIT 測驗紀錄。';
+        }
+        await loadPersonalityHistory({skipAutoImport:true});
+        return {found,imported,skipped};
+      }catch(e){
+        console.warn('importLegacyPersonalityTests failed',e);
+        if(status) status.textContent='舊紀錄匯入失敗：'+(e.message||e);
+        if(!silent) alert('舊紀錄匯入失敗：'+(e.message||e));
+        return null;
+      }finally{
+        if(btn) btn.disabled=false;
+      }
+    }
+
+    async function loadPersonalityHistory(options={}){
       const box=$('#personalityHistoryList');
       try{
         if(!currentUser) currentUser=await getCurrentUser();
@@ -2529,7 +2704,14 @@ ${viewerToolbar}
           .order('completed_at',{ascending:false})
           .limit(100);
         if(error) throw error;
-        renderPersonalityHistory(rows||[]);
+        const list=rows||[];
+        renderPersonalityHistory(list);
+
+        /* 首次看到空白時，自動嘗試從同一網域 localStorage 匯入舊測驗。 */
+        if(!list.length && !options.skipAutoImport){
+          const migrated=await importLegacyPersonalityTests({silent:true});
+          if(migrated?.imported>0) return;
+        }
       }catch(e){
         console.warn('loadPersonalityHistory failed',e);
         if(box) box.innerHTML='<div class="personalityHistoryEmpty">目前無法讀取測驗紀錄。請先確認 Supabase 已執行 personality_test_results SQL。</div>';
@@ -2706,6 +2888,9 @@ ${viewerToolbar}
         loadPersonalityHistory();
       }
     });
+
+    const legacyImportBtn=$('#btnImportLegacyTests');
+    if(legacyImportBtn) legacyImportBtn.addEventListener('click',()=>importLegacyPersonalityTests());
 
     loadProfile();
     loadPersonalityHistory();
