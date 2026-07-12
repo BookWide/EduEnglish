@@ -560,6 +560,77 @@ function bwBuildAnswerSnapshot(){
   });
 }
 
+
+function bwAbsoluteUrl(value){
+  if(!value) return '';
+  try{return new URL(value,location.href).href;}catch(e){return String(value);}
+}
+
+function bwBuildStandaloneReportHtml(){
+  const source=document.querySelector('#resultView .report');
+  if(!source) return '';
+
+  const clone=source.cloneNode(true);
+  clone.querySelectorAll('.reportActions,button,.noPrint').forEach(el=>el.remove());
+
+  const srcImgs=[...source.querySelectorAll('img')];
+  const cloneImgs=[...clone.querySelectorAll('img')];
+  cloneImgs.forEach((img,i)=>{
+    const original=srcImgs[i];
+    if(original?.src) img.setAttribute('src',bwAbsoluteUrl(original.src));
+  });
+
+  /* Keep the final profile-photo background as an absolute URL. */
+  const originalHero=source.querySelector('#reportHero,.reportHero');
+  const clonedHero=clone.querySelector('#reportHero,.reportHero');
+  if(originalHero && clonedHero){
+    const bg=getComputedStyle(originalHero).backgroundImage;
+    if(bg && bg!=='none') clonedHero.style.backgroundImage=bg;
+    const reportPhoto=originalHero.style.getPropertyValue('--report-photo');
+    if(reportPhoto) clonedHero.style.setProperty('--report-photo',reportPhoto);
+  }
+
+  const allCss=[...document.querySelectorAll('style')]
+    .map(style=>style.textContent||'')
+    .join('\n');
+
+  const title=(data?.report_profile?.title_zh || data?.title_zh || 'BookWide 心理測驗報告')
+    .replace(/[<>&"]/g,'');
+
+  return `<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<style>
+${allCss}
+html,body{margin:0!important;min-height:100%!important;background:#eaf0f8!important;color:#111827!important}
+body{display:block!important;padding:18px!important;font-family:Arial,"Noto Sans TC","Microsoft JhengHei",sans-serif!important}
+.bwSavedReportToolbar{position:sticky;top:0;z-index:9999;display:flex;justify-content:flex-end;gap:8px;margin:0 auto 12px;width:min(900px,100%)}
+.bwSavedReportToolbar button{border:0;border-radius:999px;padding:10px 16px;color:#fff;font-weight:900;cursor:pointer}
+.bwSavedReportToolbar .print{background:#7c3aed}.bwSavedReportToolbar .close{background:#475569}
+.bwSavedReportShell{width:min(900px,100%);margin:0 auto}
+.bwSavedReportShell .report{display:block!important;width:100%!important;max-width:none!important}
+.bwSavedReportShell .reportActions{display:none!important}
+@media print{
+  @page{size:A4 portrait;margin:8mm}
+  html,body{background:#fff!important;padding:0!important}
+  .bwSavedReportToolbar{display:none!important}
+  .bwSavedReportShell{width:100%!important}
+}
+</style>
+</head>
+<body>
+<div class="bwSavedReportToolbar">
+  <button class="print" onclick="window.print()">列印／存 PDF</button>
+  <button class="close" onclick="window.close()">關閉</button>
+</div>
+<main class="bwSavedReportShell">${clone.outerHTML}</main>
+</body>
+</html>`;
+}
+
 async function bwSavePersonalityResult({score,max,level}){
   if(!isLoggedIn || !bookWideUser?.id || bwHistorySaving) return null;
   const token=getSupabaseAccessToken();
@@ -588,6 +659,9 @@ async function bwSavePersonalityResult({score,max,level}){
         disclaimer_en:data.analysis?.disclaimer_en || null,
         disclaimer_zh:data.analysis?.disclaimer_zh || null
       },
+      report_html:bwBuildStandaloneReportHtml(),
+      report_kind:'full_report',
+      report_updated_at:new Date().toISOString(),
       completed_at:new Date().toISOString()
     };
 
@@ -1323,27 +1397,14 @@ ${location.href}`); showToast('結果連結已複製'); }
 
 
 async function loadJSON(){
-  const name=currentJsonName();
-  const tries = [
-    file,
-    '/' + file.replace(/^\//,''),
-    TEST_BASE + name,
-    '/' + TEST_BASE.replace(/^\//,'') + name,
-    name,
-    '/' + name,
-    './' + name
-  ];
-  let lastStatus='';
-  for(const url of [...new Set(tries.filter(Boolean))]){
+  const tries = [file, '/' + file.replace(/^\//,'')];
+  for(const url of [...new Set(tries)]){
     try{
-      const r = await fetch(url + (url.includes('?') ? '&' : '?') + 'v=' + Date.now(),{cache:'no-store'});
-      if(!r.ok){lastStatus=url+' → '+r.status;continue;}
-      const j=await r.json();
-      if(j && Array.isArray(j.questions)) return j;
-      lastStatus=url+' → invalid-json-shape';
-    }catch(err){lastStatus=url+' → '+(err?.message||err);}
+      const r = await fetch(url + (url.includes('?') ? '&' : '?') + 'v=' + Date.now());
+      if(!r.ok) continue;
+      return await r.json();
+    }catch(err){}
   }
-  console.warn('JSON load failed:',lastStatus,tries);
   throw new Error('json-load-failed');
 }
 
