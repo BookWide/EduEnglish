@@ -734,6 +734,71 @@ body{display:block!important;padding:18px!important;font-family:Arial,"Noto Sans
 </html>`;
 }
 
+
+function bwGuestVisitorId(){
+  const key='bookwide_eit_guest_visitor_id';
+  let id='';
+  try{id=localStorage.getItem(key)||'';}catch(_e){}
+  if(!id){
+    id=(crypto?.randomUUID?.() || ('guest-'+Date.now()+'-'+Math.random().toString(36).slice(2)));
+    try{localStorage.setItem(key,id);}catch(_e){}
+  }
+  return id;
+}
+
+async function bwSaveGuestResult({score,max,level}){
+  const sb=bwEitSupabase();
+  if(!sb) return null;
+
+  try{
+    const nowIso=new Date().toISOString();
+    const visitorId=bwGuestVisitorId();
+    const attemptId=(crypto?.randomUUID?.() || ('guest-attempt-'+Date.now()+'-'+Math.random().toString(36).slice(2)));
+    const row={
+      visitor_id:visitorId,
+      attempt_id:attemptId,
+      test_slug:data.slug || currentJsonName().replace(/\.json$/,''),
+      test_file:currentJsonName(),
+      test_title:data.title_zh || data.title_en || currentJsonName(),
+      score:Number(score)||0,
+      max_score:Number(max)||0,
+      result_key:level?.key || null,
+      result_title_zh:level?.label_zh || level?.title_zh || '分析完成',
+      completed_at:nowIso
+    };
+
+    const {data:inserted,error}=await sb
+      .from('eit_public_results')
+      .insert(row)
+      .select('id')
+      .single();
+
+    if(error){
+      console.error('[BookWide EIT] guest result save failed',error);
+      try{
+        localStorage.setItem('bw_last_eit_guest_save_error',JSON.stringify({
+          code:error.code||'',
+          message:error.message||String(error),
+          at:nowIso
+        }));
+      }catch(_e){}
+      showToast('免費測驗統計儲存失敗');
+      return null;
+    }
+
+    try{
+      localStorage.setItem('bw_last_eit_guest_save',JSON.stringify({
+        ok:true,id:inserted?.id||'',test_slug:row.test_slug,score:row.score,saved_at:nowIso
+      }));
+    }catch(_e){}
+    showToast('免費測驗結果已匿名計入統計');
+    return inserted;
+  }catch(e){
+    console.error('[BookWide EIT] guest save exception',e);
+    return null;
+  }
+}
+
 async function bwSavePersonalityResult({score,max,level}){
   if(bwHistorySaving) return null;
   bwHistorySaving=true;
@@ -1373,7 +1438,11 @@ async function finish(options={}){
   if(typeof refreshMobilePrintMount==='function') refreshMobilePrintMount();
 
   if(!options.skipHistorySave){
-    await bwSavePersonalityResult({score,max,level});
+    if(isLoggedIn){
+      await bwSavePersonalityResult({score,max,level});
+    }else if(shortJsonName(file)===GUEST_TEST){
+      await bwSaveGuestResult({score,max,level});
+    }
   }
   if(!isLoggedIn && shortJsonName(file)===GUEST_TEST){
     sessionStorage.setItem('bookwide_guest_left_right_complete','1');
