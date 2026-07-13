@@ -189,7 +189,7 @@ header{display:flex;align-items:center;gap:10px;min-height:72px;margin-bottom:3p
 <header>
   <img class="logo" alt="BookWide" src="/data/monk/aptitude/bookwide_logo.png">
   <div class="brand"><b>BookWide</b><small id="subtitle">通用心理測驗｜英・日・中</small></div>
-  <select class="testPicker" id="testPicker" title="第一套免登入；登入後可免費使用全部 13 套測驗">
+  <select class="testPicker" id="testPicker" title="第一套免登入；登入後依序完成，下一套自動開放">
     <option value="">載入測驗清單中…</option>
   </select>
   <button class="console" onclick="location.href='/eit-market.html'">心理測驗大盤</button>
@@ -309,7 +309,7 @@ header{display:flex;align-items:center;gap:10px;min-height:72px;margin-bottom:3p
       ✓ 保留本次測驗結果<br>
       ✓ 查看完整人格分析<br>
       ✓ 登入後免費使用全部 13 套測驗
-      <div style="margin-top:8px;color:#ffe7a3;font-size:12px">第一套免登入；登入後其餘 12 套全部免費，不扣金幣。</div>
+      <div style="margin-top:8px;color:#ffe7a3;font-size:12px">第一套免登入；登入後依序完成，下一套自動開放，全部免費、不扣金幣。</div>
     </div>
     <div class="guestGateActions">
       <a class="guestSignUp" id="guestSignUp" href="#">免費註冊</a>
@@ -415,6 +415,15 @@ function rebuildTestPicker(){
   });
 }
 function shortJsonName(value){ return String(value||'').split('/').pop(); }
+const EIT_FILE_ALIASES={
+  'cheating-betrayal-hunter.json':'betrayal-risk.json',
+  'cheating-betrayal-risk.json':'betrayal-risk.json',
+  'betrayal-hunter.json':'betrayal-risk.json'
+};
+function normalizeEitFileName(value){
+  const name=shortJsonName(value);
+  return EIT_FILE_ALIASES[name] || name;
+}
 function eitCompleteKey(fileName){return 'bookwide_eit_complete_'+shortJsonName(fileName).replace(/\.json$/,'');}
 function eitPaidKey(fileName){
   const uid=bookWideUser?.id||'guest';
@@ -494,9 +503,14 @@ async function ensureEitPaidAccess(targetFile,{askConfirm=true}={}){
   }
   return true;
 }
-function testIndex(fileName){return EIT_TESTS.findIndex(x=>x.file===shortJsonName(fileName));}
+function testIndex(fileName){return EIT_TESTS.findIndex(x=>x.file===normalizeEitFileName(fileName));}
+function firstIncompleteBefore(targetFile){
+  const idx=testIndex(targetFile);
+  if(idx<=0) return null;
+  return EIT_TESTS.slice(0,idx).find(t=>!isTestComplete(t.file)) || null;
+}
 function canOpenBySequence(targetFile){
-  return isLoggedIn || shortJsonName(targetFile)===GUEST_TEST;
+  return !firstIncompleteBefore(targetFile);
 }
 function showGuestGate(){
   const gate=$('#guestGate');
@@ -529,24 +543,27 @@ for(let i=0;i<52;i++){
 
 const TEST_BASE = 'data/monk/aptitude/';
 /* 第一套免登入；登入後全部 13 套免費開放。 */
-let file = qs.get('json') || GUEST_TEST;
-if(!isLoggedIn && shortJsonName(file)!==GUEST_TEST){
-  file=GUEST_TEST;
-  const u=new URL(location.href);
-  u.searchParams.set('json',GUEST_TEST);
-  history.replaceState(null,'',u.pathname+u.search+u.hash);
-}
-if(!file.includes('/')) file = TEST_BASE + file;
-const requestedName=shortJsonName(file);
+let file = normalizeEitFileName(qs.get('json') || GUEST_TEST);
+const requestedName=normalizeEitFileName(file);
 const requestedIdx=testIndex(requestedName);
-if(requestedIdx>0 && !canOpenBySequence(requestedName)){
-  file=TEST_BASE+EIT_TESTS[requestedIdx-1].file;
-  const u=new URL(location.href);u.searchParams.set('json',shortJsonName(file));history.replaceState(null,'',u.pathname+u.search+u.hash);
-}
+
 if(requestedIdx>0 && !isLoggedIn){
-  file=TEST_BASE+GUEST_TEST;
-  const u=new URL(location.href);u.searchParams.set('json',GUEST_TEST);history.replaceState(null,'',u.pathname+u.search+u.hash);
+  location.replace(eitLoginUrl(requestedName));
+  throw new Error('redirect-login');
 }
+
+if(requestedIdx>0 && isLoggedIn && !canOpenBySequence(requestedName)){
+  const firstIncomplete=firstIncompleteBefore(requestedName);
+  const target=firstIncomplete?.file || GUEST_TEST;
+  const u=new URL(location.href);
+  u.searchParams.set('json',target);
+  u.searchParams.delete('result_id');
+  u.searchParams.delete('resume_report');
+  location.replace(u.toString());
+  throw new Error('redirect-sequence');
+}
+
+if(!file.includes('/')) file = TEST_BASE + requestedName;
 const photosManifest = qs.get('photos') || 'assets/hiking/photos.json';
 let owner = qs.get('name')
   || bookWideUser?.user_metadata?.display_name
@@ -1132,56 +1149,92 @@ function getLiveScore(){
   return total;
 }
 
-function currentJsonName(){ return file.split('/').pop(); }
+function currentJsonName(){ return normalizeEitFileName(file.split('/').pop()); }
 function syncTestPicker(){
   const picker=$('#testPicker');
   const current=currentJsonName();
-  if(![...picker.options].some(o=>o.value===current)){
-    const opt=document.createElement('option'); opt.value=current; opt.textContent=current; picker.appendChild(opt);
+  if(![...picker.options].some(o=>normalizeEitFileName(o.value)===current)){
+    const opt=document.createElement('option');
+    opt.value=current;
+    opt.textContent=current;
+    picker.appendChild(opt);
   }
+
   [...picker.options].forEach(o=>{
-    const name=shortJsonName(o.value);
+    const name=normalizeEitFileName(o.value);
     const idx=testIndex(name);
-    const loginAllowed=isLoggedIn || name===GUEST_TEST;
-    const allowed=loginAllowed;
-    o.disabled=!allowed;
     const t=EIT_TESTS[idx];
-    const base=t ? `${idx+1}. ${t.title}${idx===0?'｜免登入免費':'｜登入免費'}` : name;
+    const loginAllowed=isLoggedIn || name===GUEST_TEST;
+    const sequenceAllowed=canOpenBySequence(name);
+    const allowed=loginAllowed && sequenceAllowed;
+
+    o.disabled=!allowed;
+
+    let status='';
+    if(idx===0){
+      status='免登入免費';
+    }else if(!isLoggedIn){
+      status='登入後依序開放';
+    }else if(!sequenceAllowed){
+      status='完成前一套後開放';
+    }else{
+      status='登入免費';
+    }
+
+    const base=t ? `${idx+1}. ${t.title}｜${status}` : name;
     o.textContent=(allowed?'':'🔒 ')+base+(isTestComplete(name)?' ✓':'');
   });
+
   if(!isLoggedIn) $('#guestOnlyBadge')?.classList.add('show');
   picker.value=current;
 }
 
 function goToNextEitTest(){
-  const current=shortJsonName(file);
-  const idx=EIT_TESTS.findIndex(t=>t.file===current);
+  const current=currentJsonName();
+  const idx=testIndex(current);
   const next=EIT_TESTS[idx+1];
+
   if(!next){
     location.href='/eit-market.html';
     return;
   }
-  const picker=$('#testPicker');
-  if(!picker){
-    location.href='/eit.html?json='+encodeURIComponent(next.file);
+
+  if(!isTestComplete(current)){
+    showToast('請先完成目前這套測驗');
     return;
   }
-  picker.value=next.file;
-  picker.dispatchEvent(new Event('change',{bubbles:true}));
+
+  if(!isLoggedIn){
+    location.href=eitLoginUrl(next.file);
+    return;
+  }
+
+  location.href='/eit.html?json='+encodeURIComponent(next.file);
 }
 
 $('#testPicker').onchange=async e=>{
-  const selected=shortJsonName(e.target.value);
+  const selected=normalizeEitFileName(e.target.value);
   const current=currentJsonName();
   if(selected===current) return;
+
   if(!isLoggedIn && selected!==GUEST_TEST){
     e.target.value=current;
-    showGuestGate();
+    location.href=eitLoginUrl(selected);
     return;
   }
+
+  const missing=firstIncompleteBefore(selected);
+  if(missing){
+    e.target.value=current;
+    showToast(`請先完成：${missing.title}`);
+    return;
+  }
+
   const url=new URL(location.href);
   url.searchParams.set('json',selected);
   url.searchParams.delete('reset');
+  url.searchParams.delete('result_id');
+  url.searchParams.delete('resume_report');
   location.href=url.toString();
 };
 
@@ -1701,12 +1754,22 @@ async function loadJSON(){
     const isHistoryView=!!historyResultId && isLoggedIn;
     const openingName=currentJsonName();
     const openingIdx=testIndex(openingName);
+
     if(!isHistoryView && openingIdx>0 && !isLoggedIn){
-      const u=new URL(location.href);
-      u.searchParams.set('json',GUEST_TEST);
-      u.searchParams.delete('resume_report');
-      location.replace(u.toString());
+      location.replace(eitLoginUrl(openingName));
       return;
+    }
+
+    if(!isHistoryView && openingIdx>0 && isLoggedIn){
+      const missing=firstIncompleteBefore(openingName);
+      if(missing){
+        const u=new URL(location.href);
+        u.searchParams.set('json',missing.file);
+        u.searchParams.delete('result_id');
+        u.searchParams.delete('resume_report');
+        location.replace(u.toString());
+        return;
+      }
     }
 
     await loadPhotoPool();
