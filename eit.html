@@ -1052,37 +1052,50 @@ function bwAuthAccessToken(){
   }catch(e){return '';}
 }
 
-async function bwFetchProfilePhoto(){
-  const cached=bwCachedProfilePhoto();
-  if(cached) return cached;
+
+async function bwResolveCurrentProfile(){
   try{
-    const uid=bookWideUser?.id;
-    const token=bwAuthAccessToken();
-    if(!uid||!token) return '';
-    const url=BW_PROFILE_REST+'?id=eq.'+encodeURIComponent(uid)+'&select=mbti_cover_url,avatar_url,display_name&limit=1';
-    const r=await fetch(url,{
-      headers:{apikey:BW_PROFILE_ANON,Authorization:'Bearer '+token,Accept:'application/json'}
-    });
-    if(!r.ok) return '';
-    const rows=await r.json();
-    const profile=rows?.[0] || {};
-    const photo=profile?.mbti_cover_url || profile?.avatar_url || '';
-    const profileName=String(profile?.display_name || '').trim();
-    if(profileName && !qs.get('name')){
-      owner=profileName;
-      try{localStorage.setItem('bookwide_name',profileName)}catch(e){}
-    }
-    if(photo){
-      try{localStorage.setItem('mbti_cover_url',photo)}catch(e){}
-    }
-    return photo;
+    const client=bwEitSupabase();
+    if(!client) return null;
+    const {data:userData,error:userError}=await client.auth.getUser();
+    if(userError || !userData?.user) return null;
+    const authUser=userData.user;
+    const {data:profile,error:profileError}=await client
+      .from('profiles')
+      .select('id,display_name,mbti_cover_url,avatar_url')
+      .eq('id',authUser.id)
+      .maybeSingle();
+    if(profileError) console.warn('Profile owner load failed',profileError);
+    const resolvedName=String(
+      profile?.display_name
+      || authUser?.user_metadata?.display_name
+      || authUser?.user_metadata?.full_name
+      || authUser?.user_metadata?.name
+      || (authUser?.email ? authUser.email.split('@')[0] : '')
+      || '受測者'
+    ).trim();
+    owner=resolvedName || '受測者';
+    const ownerEl=document.getElementById('owner');
+    if(ownerEl) ownerEl.textContent=owner;
+    return {user:authUser,profile:profile||null,photo:profile?.mbti_cover_url || profile?.avatar_url || ''};
   }catch(e){
-    console.warn('Profile photo load failed',e);
-    return '';
+    console.warn('Resolve current profile failed',e);
+    return null;
   }
 }
 
+async function bwFetchProfilePhoto(){
+  const resolved=await bwResolveCurrentProfile();
+  if(resolved?.photo){
+    try{localStorage.setItem('mbti_cover_url',resolved.photo)}catch(_e){}
+    return resolved.photo;
+  }
+  const cached=bwCachedProfilePhoto();
+  return cached || '';
+}
+
 async function applyReportProfilePhoto(){
+  await bwResolveCurrentProfile();
   const img=document.getElementById('reportLogo');
   const hero=document.getElementById('reportHero');
   if(!img) return '';
