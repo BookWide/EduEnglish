@@ -369,17 +369,26 @@ let EIT_TESTS=[
 
 function normalizeEitTests(list){
   if(!Array.isArray(list)) return [];
-  return list.map((item,index)=>{
-    const file=shortJsonName(item?.file||item?.json||'');
-    if(!file || !file.endsWith('.json')) return null;
-    const free=true;
-    return {
+
+  const fallbackByFile=new Map(EIT_TESTS.map(t=>[t.file,{...t}]));
+  const allowed=new Set(fallbackByFile.keys());
+  const loadedByFile=new Map();
+
+  list.forEach(item=>{
+    const raw=shortJsonName(item?.file||item?.json||'');
+    const file=normalizeEitFileName(raw);
+    if(!allowed.has(file) || loadedByFile.has(file)) return;
+
+    const fallback=fallbackByFile.get(file);
+    loadedByFile.set(file,{
       file,
-      title:String(item?.title||item?.title_zh||file.replace(/\.json$/,'')),
-      free,
+      title:String(item?.title||item?.title_zh||fallback?.title||file.replace(/\.json$/,'')),
+      free:true,
       cost:0
-    };
-  }).filter(Boolean);
+    });
+  });
+
+  return EIT_TESTS.map(t=>loadedByFile.get(t.file)||t);
 }
 
 async function loadEitTestsIndex(){
@@ -410,12 +419,14 @@ function rebuildTestPicker(){
   EIT_TESTS.forEach((t,index)=>{
     const opt=document.createElement('option');
     opt.value=t.file;
-    opt.textContent=`${index+1}. ${t.title}${index===0?'｜免登入免費':'｜登入免費'}`;
+    opt.textContent=`${index+1}. ${t.title}`;
     picker.appendChild(opt);
   });
 }
 function shortJsonName(value){ return String(value||'').split('/').pop(); }
 const EIT_FILE_ALIASES={
+  'left-right-zodiac-potential.json':'emotion-regulation.json',
+  'aptitude-analysis.json':'attachment-trust.json',
   'cheating-betrayal-hunter.json':'betrayal-risk.json',
   'cheating-betrayal-risk.json':'betrayal-risk.json',
   'betrayal-hunter.json':'betrayal-risk.json'
@@ -1152,26 +1163,35 @@ function getLiveScore(){
 function currentJsonName(){ return normalizeEitFileName(file.split('/').pop()); }
 function syncTestPicker(){
   const picker=$('#testPicker');
-  const current=currentJsonName();
-  if(![...picker.options].some(o=>normalizeEitFileName(o.value)===current)){
-    const opt=document.createElement('option');
-    opt.value=current;
-    opt.textContent=current;
-    picker.appendChild(opt);
+  if(!picker) return;
+
+  const current=normalizeEitFileName(currentJsonName());
+  const currentIdx=testIndex(current);
+
+  if(currentIdx<0){
+    const fallback=EIT_TESTS.find(t=>canOpenBySequence(t.file) && (isLoggedIn || t.file===GUEST_TEST)) || EIT_TESTS[0];
+    const u=new URL(location.href);
+    u.searchParams.set('json',fallback.file);
+    u.searchParams.delete('result_id');
+    u.searchParams.delete('resume_report');
+    location.replace(u.toString());
+    return;
   }
 
-  [...picker.options].forEach(o=>{
-    const name=normalizeEitFileName(o.value);
-    const idx=testIndex(name);
-    const t=EIT_TESTS[idx];
+  [...picker.options].forEach((o,index)=>{
+    const t=EIT_TESTS[index];
+    if(!t) return;
+
+    const name=t.file;
     const loginAllowed=isLoggedIn || name===GUEST_TEST;
     const sequenceAllowed=canOpenBySequence(name);
     const allowed=loginAllowed && sequenceAllowed;
 
+    o.value=name;
     o.disabled=!allowed;
 
     let status='';
-    if(idx===0){
+    if(index===0){
       status='免登入免費';
     }else if(!isLoggedIn){
       status='登入後依序開放';
@@ -1181,8 +1201,7 @@ function syncTestPicker(){
       status='登入免費';
     }
 
-    const base=t ? `${idx+1}. ${t.title}｜${status}` : name;
-    o.textContent=(allowed?'':'🔒 ')+base+(isTestComplete(name)?' ✓':'');
+    o.textContent=(allowed?'':'🔒 ')+`${index+1}. ${t.title}｜${status}`+(isTestComplete(name)?' ✓':'');
   });
 
   if(!isLoggedIn) $('#guestOnlyBadge')?.classList.add('show');
@@ -1190,7 +1209,7 @@ function syncTestPicker(){
 }
 
 function goToNextEitTest(){
-  const current=currentJsonName();
+  const current=normalizeEitFileName(currentJsonName());
   const idx=testIndex(current);
   const next=EIT_TESTS[idx+1];
 
