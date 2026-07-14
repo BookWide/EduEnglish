@@ -86,7 +86,7 @@
  <div class="card">
   <div class="toolbar"><div><h2 style="margin:0">活動相簿</h2><p class="small" style="margin:8px 0 0">先看活動列表；點「展開照片」才看該次照片，避免 6/13、6/20 混在一起。</p></div><div class="btns" style="margin-top:0"><button class="btn secondary" onclick="toggleAlbumForm()">新增照片</button><button class="btn secondary" onclick="togglePhotoOrganizer('summary')">整理照片</button><button class="btn gold" onclick="openDuplicateFinder()">找重複</button></div></div>
  </div>
- <div class="card" id="albumForm" style="display:none"><h2>新增／補照片</h2><p class="small">只在要補照片時打開。可只填日期、路線、代表照片或相簿連結。</p><div class="filters"><div class="field"><label>日期</label><input id="aDate" type="date"></div><div class="field"><label>路線</label><input id="aRoute" placeholder="例如：改大坑1號體能步道"></div><div class="field"><label>相簿連結 / R2資料夾</label><input id="aAlbumUrl" placeholder="https://... 相簿或資料夾連結"></div><div class="field"><label>代表照片</label><input id="aCoverUrl" placeholder="https://...jpg，可空白"></div><div class="field"><label>備註</label><input id="aNote" placeholder="路況／集合／天氣"></div></div><div class="field" style="margin-top:10px"><label>其他照片網址（可貼多行，可空白）</label><textarea id="aPhotoUrls" placeholder="https://.../416668_0.jpg&#10;https://.../416669_0.jpg"></textarea></div><div class="btns"><button class="btn" onclick="saveAlbum()">加入相簿紀錄</button><button class="btn gray" onclick="toggleAlbumForm(false)">收起</button></div></div>
+ <div class="card" id="albumForm" style="display:none"><h2>新增／補照片</h2><p class="small">只在要補照片時打開。可只填日期、路線、代表照片或相簿連結。</p><div class="filters"><div class="field"><label>日期</label><input id="aDate" type="date"></div><div class="field"><label>路線</label><input id="aRoute" placeholder="例如：改大坑1號體能步道"></div><div class="field"><label>相簿連結 / R2資料夾</label><input id="aAlbumUrl" placeholder="https://... 相簿或資料夾連結"></div><div class="field"><label>代表照片</label><input id="aCoverUrl" placeholder="https://...jpg，可空白"></div><div class="field"><label>備註</label><input id="aNote" placeholder="路況／集合／天氣"></div></div><div class="field" style="margin-top:10px"><label>直接選照片（可多選）</label><input id="aFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple></div><div class="field" style="margin-top:10px"><label>其他照片網址（可貼多行，可空白）</label><textarea id="aPhotoUrls" placeholder="https://.../416668_0.jpg&#10;https://.../416669_0.jpg"></textarea></div><div id="apiStatus" class="small" style="margin-top:8px">Worker 未設定時仍可本機整理；設定後會直接上傳 R2 並自動維護活動與路線。</div><div class="btns"><button class="btn" onclick="saveAlbum()">上傳並建立相簿</button><button class="btn gray" onclick="toggleAlbumForm(false)">收起</button></div></div>
  <div id="albumList" class="route-list"></div>
  <div id="photoOrgPanel" class="card photo-org-panel"></div>
 </section>
@@ -115,6 +115,50 @@
 const DATA_PATH='/data/hiking/';
 const DATA_PATHS=['/data/hiking/','/assets/hiking/'];
 const PHOTO_PATHS=['/assets/hiking/'];
+
+// Cloudflare Worker API：部署後只要改這一行。
+const HIKING_API_BASE='https://YOUR-WORKER.workers.dev';
+const HIKING_API_TOKEN_KEY='bw_hiking_admin_token';
+
+function apiEnabled(){
+  return /^https:\/\//.test(HIKING_API_BASE) && !HIKING_API_BASE.includes('YOUR-WORKER');
+}
+function getApiToken(){
+  let token=sessionStorage.getItem(HIKING_API_TOKEN_KEY)||'';
+  if(!token && apiEnabled()){
+    token=prompt('請輸入相簿管理密碼')||'';
+    if(token) sessionStorage.setItem(HIKING_API_TOKEN_KEY,token);
+  }
+  return token;
+}
+async function apiFetch(path,options={}){
+  if(!apiEnabled()) throw new Error('尚未設定 Cloudflare Worker 網址');
+  const headers=new Headers(options.headers||{});
+  const token=getApiToken();
+  if(token) headers.set('Authorization','Bearer '+token);
+  const res=await fetch(HIKING_API_BASE+path,{...options,headers,cache:'no-store'});
+  let data=null;
+  try{data=await res.json()}catch(e){}
+  if(!res.ok) throw new Error((data&&data.error)||('API '+res.status));
+  return data;
+}
+async function reloadFromWorker(){
+  const data=await apiFetch('/api/bootstrap');
+  state.routes=Array.isArray(data.routes)?data.routes:[];
+  state.albums=Array.isArray(data.events)?data.events:[];
+  state.photos=Array.isArray(data.photos)?data.photos:[];
+  renderAlbum();
+  renderHistoryBoard();
+  applyFilters();
+}
+async function syncEventToWorker(event,route){
+  if(!apiEnabled()) return null;
+  return apiFetch('/api/event',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({event,route})
+  });
+}
 const tabs=[['sec-find','找路線'],['sec-line','LINE整理'],['sec-album','相簿'],['sec-post','公告']];
 const LINE_PROTECT_PASSWORD='bwline2026'; // LINE整理前端密碼；要改密碼改這裡。
 const state={routes:[],calendar:[],photos:[],albums:[],selected:null,currentWeek:null,currentPlans:[],filtered:[],albumRouteId:null};
@@ -162,7 +206,35 @@ async function fetchJson(name,key){
   }
   return emptyCandidate || fallback[key] || [];
 }
-async function init(){renderTabs(); state.routes=await fetchJson('routes.json','routes'); state.calendar=await fetchJson('calendar-2026.json','calendar'); state.photos=await fetchJson('photos.json','photos'); state.albums=await fetchJson('event-photos.json','photos'); setupFilters(); let sat=nextSaturday(new Date()); $('fDate').value=localDate(sat); $('aDate').value=localDate(sat); $('fTime').value='half'; $('fLevel').value='A'; $('fWeather').value='stable'; selectWeekByDate(sat); applyFilters(); renderAlbum(); renderHistoryBoard(); $('todayText').textContent='今天 '+localDate(new Date());}
+async function init(){
+  renderTabs();
+  state.calendar=await fetchJson('calendar-2026.json','calendar');
+  let workerLoaded=false;
+  if(apiEnabled()){
+    try{
+      const data=await apiFetch('/api/bootstrap');
+      state.routes=Array.isArray(data.routes)?data.routes:[];
+      state.photos=Array.isArray(data.photos)?data.photos:[];
+      state.albums=Array.isArray(data.events)?data.events:[];
+      workerLoaded=true;
+    }catch(e){
+      console.warn('Worker 載入失敗，改讀 GitHub JSON：',e);
+    }
+  }
+  if(!workerLoaded){
+    state.routes=await fetchJson('routes.json','routes');
+    state.photos=await fetchJson('photos.json','photos');
+    state.albums=await fetchJson('event-photos.json','photos');
+  }
+  setupFilters();
+  let sat=nextSaturday(new Date());
+  $('fDate').value=localDate(sat); $('aDate').value=localDate(sat);
+  $('fTime').value='half'; $('fLevel').value='A'; $('fWeather').value='stable';
+  selectWeekByDate(sat); applyFilters(); renderAlbum(); renderHistoryBoard();
+  $('todayText').textContent='今天 '+localDate(new Date());
+  const status=$('apiStatus');
+  if(status) status.textContent=workerLoaded?'已連線 Worker：照片、活動、路線會自動維護。':'目前為 GitHub JSON 備援模式；請設定 HIKING_API_BASE。';
+}
 function renderTabs(){let box=$('tabs');box.innerHTML=tabs.map((t,i)=>{
   const action=t[0]==='sec-line'?`showLineProtected(this)`:`show('${t[0]}',this)`;
   return `<button class="tab ${i?'':'active'}" onclick="${action}">${t[1]}</button>`;
@@ -718,7 +790,7 @@ function parseLineActivity(){
   state.lastLineActivity=summary;
   const table=members.length?`<div class="table"><table><tr><th>#</th><th>姓名</th><th>繳費</th></tr>${members.map((m,i)=>`<tr><td>${i+1}</td><td>${m.name}</td><td>${m.paid?'已繳 '+(m.amount||''):''}</td></tr>`).join('')}</table></div>`:'<div class="empty">沒有抓到名單，可先手動整理。</div>';
   const copy=`【活動紀錄】\n日期：${date}\n路線：${routeName}\n交通：${vehicleLine||'未填'}\n集合：${meetingTime||''} ${meetingPlace||''}\n人數：${members.length} 人\n已繳：${paidCount} 人\n裝備提醒：${equipLines.join('／')||'未填'}\n\n名單：\n${members.map((m,i)=>`${i+1}. ${m.name}${m.paid?'／已繳'+(m.amount||''):''}`).join('\n')}`;
-  $('lineResult').innerHTML=`<div class="notice"><b>已解析：</b>${routeName}｜${date}｜${members.length}人｜已繳 ${paidCount}人<br>按「存成去過紀錄」後，會加入相簿紀錄；之後可下載 event-photos.json 覆蓋 GitHub。</div>${table}<div class="copybox" id="lineCopy">${copy}</div>`;
+  $('lineResult').innerHTML=`<div class="notice"><b>已解析：</b>${routeName}｜${date}｜${members.length}人｜已繳 ${paidCount}人<br>按「存成去過紀錄」後，會直接寫入 Worker 並自動建立／更新路線。</div>${table}<div class="copybox" id="lineCopy">${copy}</div>`;
 }
 function normalizeRouteName(name){
   return String(name||'')
@@ -776,7 +848,7 @@ function upsertRouteFromLineActivity(a){
   state.routes.unshift(newRoute);
   return {route:newRoute, created:true};
 }
-function saveLineActivityRecord(){
+async function saveLineActivityRecord(){
   if(!state.lastLineActivity) parseLineActivity();
   const a=state.lastLineActivity; if(!a) return;
   if(!/^20\d{2}-\d{2}-\d{2}$/.test(a.date||'')){
@@ -813,7 +885,17 @@ function saveLineActivityRecord(){
   renderHistoryBoard();
   renderAlbum();
   applyFilters();
-  $('lineResult').innerHTML += `<div class="notice"><b>已存成去過紀錄。</b> ${up.created?'路線庫也已補入新路線。':'路線庫已存在，沒有重複新增。'}<br>接著下載 event-photos.json；若有補新路線，再下載 routes.json 覆蓋 GitHub。</div>`;
+  if(apiEnabled()){
+    try{
+      await syncEventToWorker(record,route);
+      await reloadFromWorker();
+      $('lineResult').innerHTML += `<div class="notice"><b>已直接存入 Worker。</b> ${up.created?'新路線已自動建立。':'既有路線已更新。'} 不需要再下載 JSON。</div>`;
+    }catch(e){
+      $('lineResult').innerHTML += `<div class="notice"><b>本機已建立，但 Worker 寫入失敗：</b>${escHtml(e.message)}</div>`;
+    }
+  }else{
+    $('lineResult').innerHTML += `<div class="notice"><b>已存成本機紀錄。</b> 尚未設定 Worker，重新整理後不會保留。</div>`;
+  }
 }
 function downloadJson(filename,obj){
   const blob=new Blob([JSON.stringify(obj,null,2)],{type:'application/json'});
@@ -827,28 +909,70 @@ function downloadRoutes(){
 
 function parseLine(){let lines=($('lineText').value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean); let rows=[]; for(let l of lines){let raw=l; l=l.replace(/^\d+[\.、\-\s]*/,''); let paid=/已繳|繳|匯|1300|\$/.test(l); let car=/開車|自駕|可載|車/.test(l); let people=(l.match(/(\d+)人/)||[])[1]||'1'; let name=l.replace(/已繳.*|繳.*|開車.*|自駕.*|可載.*|\d+人.*/g,'').trim(); rows.push({name:name||raw,people,car:car?'有車/提到車':'',paid:paid?'已繳/提到費用':''})} $('lineResult').innerHTML=rows.length?`<div class="table"><table><tr><th>#</th><th>姓名</th><th>人數</th><th>交通</th><th>繳費</th></tr>${rows.map((r,i)=>`<tr><td>${i+1}</td><td>${r.name}</td><td>${r.people}</td><td>${r.car}</td><td>${r.paid}</td></tr>`).join('')}</table></div><div class="copybox" id="lineCopy">【目前報名名單】\n${rows.map((r,i)=>`${i+1}. ${r.name}／${r.people}人${r.car?'／'+r.car:''}${r.paid?'／'+r.paid:''}`).join('\n')}\n\n目前共：${rows.reduce((a,b)=>a+Number(b.people||1),0)} 人</div>`:'<div class="empty">沒有可整理資料。</div>'}
 function copyLineResult(){let el=$('lineCopy'); if(el) navigator.clipboard.writeText(el.textContent)}
-function saveAlbum(){
+async function saveAlbum(){
+  const date=($('aDate')?.value||'').trim();
+  const routeName=($('aRoute')?.value||'').trim();
+  const note=($('aNote')?.value||'').trim();
+  const files=[...( $('aFiles')?.files || [] )];
   let photoUrls=($('aPhotoUrls')?.value||'').split(/\n+/).map(s=>s.trim()).filter(Boolean);
   let cover=($('aCoverUrl')?.value||'').trim();
-  if(cover && !photoUrls.includes(cover)) photoUrls.unshift(cover);
   let album=($('aAlbumUrl')?.value||'').trim();
-  let routeName=($('aRoute')?.value||'').trim();
-  let route=(state.routes||[]).find(r=>routeName && (routeName.includes(r.name_zh)||String(r.name_zh||'').includes(routeName)));
-  let o={
-    id:'album_'+Date.now(),
-    record_type:'album_record',
-    date:$('aDate').value,
-    route_id:route?route.id:'',
-    route_name:route?route.name_zh:routeName,
-    route:routeName,
-    album_url:album,
-    cover_url:cover,
-    photo_urls:photoUrls,
-    note:$('aNote').value
-  };
-  state.albums.unshift(o);
-  renderAlbum();
-  renderHistoryBoard();
+
+  if(!date){alert('請先選活動日期。');return;}
+  if(!routeName){alert('請輸入路線名稱。');return;}
+  if(!files.length && !photoUrls.length && !cover && !album){
+    alert('請選照片，或貼入照片／相簿網址。');
+    return;
+  }
+
+  const status=$('apiStatus');
+  try{
+    if(apiEnabled()){
+      const fd=new FormData();
+      fd.append('date',date);
+      fd.append('route_name',routeName);
+      fd.append('note',note);
+      fd.append('album_url',album);
+      fd.append('cover_url',cover);
+      for(const u of photoUrls) fd.append('photo_url',u);
+      for(const f of files) fd.append('files',f,f.name);
+
+      if(status) status.textContent=`正在上傳 ${files.length} 張照片…`;
+      const result=await apiFetch('/api/upload',{method:'POST',body:fd});
+      await reloadFromWorker();
+      if(status) status.textContent=`完成：新增 ${result.uploaded_count||0} 張，活動與路線已自動更新。`;
+      $('aFiles').value='';
+      $('aPhotoUrls').value='';
+      $('aCoverUrl').value='';
+      $('aAlbumUrl').value='';
+      $('aNote').value='';
+      toggleAlbumForm(false);
+      return;
+    }
+
+    if(cover && !photoUrls.includes(cover)) photoUrls.unshift(cover);
+    let route=(state.routes||[]).find(r=>routeName && (routeName.includes(r.name_zh)||String(r.name_zh||'').includes(routeName)));
+    let o={
+      id:'album_'+Date.now(),
+      record_type:'album_record',
+      date,
+      route_id:route?route.id:'',
+      route_name:route?route.name_zh:routeName,
+      route:routeName,
+      album_url:album,
+      cover_url:cover,
+      photo_urls:photoUrls,
+      note
+    };
+    state.albums.unshift(o);
+    renderAlbum();
+    renderHistoryBoard();
+    if(status) status.textContent='已加入本機資料；尚未設定 Worker，因此重新整理後不會保留。';
+  }catch(e){
+    console.error(e);
+    if(status) status.textContent='失敗：'+e.message;
+    alert('上傳失敗：'+e.message);
+  }
 }
 function escHtml(v){return String(v||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
 function openPhotoModal(url){$('photoModalImg').src=url;$('photoModal').classList.add('active')}
