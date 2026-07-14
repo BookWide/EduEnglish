@@ -630,13 +630,30 @@ function copyPost(){navigator.clipboard.writeText(postBoxGet())}
 
 function normalizeLineDigits(s){return String(s||'').replace(/[：:]/g,'：').replace(/[－—–]/g,'一').trim()}
 function parseChineseDateFromLine(text){
+  const s=String(text||'').trim();
   const now=new Date();
-  let m=String(text||'').match(/(\d{1,2})\s*[月/]\s*(\d{1,2})\s*[日號]?/);
-  if(m){let mm=String(m[1]).padStart(2,'0'), dd=String(m[2]).padStart(2,'0'); return `${now.getFullYear()}-${mm}-${dd}`}
-  m=String(text||'').match(/([一二三四五六七八九十]{1,3})月\s*(\d{1,2})日/);
+
+  // 完整日期：2026-07-12、2026/7/12、2026.7.12
+  let m=s.match(/\b(20\d{2})\s*[-\/.]\s*(\d{1,2})\s*[-\/.]\s*(\d{1,2})\b/);
+  if(m){
+    return `${m[1]}-${String(m[2]).padStart(2,'0')}-${String(m[3]).padStart(2,'0')}`;
+  }
+
+  // 中文數字月份：六月28日
+  m=s.match(/([一二三四五六七八九十]{1,3})月\s*(\d{1,2})\s*[日號]?/);
   const map={一:1,二:2,三:3,四:4,五:5,六:6,七:7,八:8,九:9,十:10,十一:11,十二:12};
-  if(m && map[m[1]]) return `${now.getFullYear()}-${String(map[m[1]]).padStart(2,'0')}-${String(m[2]).padStart(2,'0')}`;
-  return localDate(nextSaturday(now));
+  if(m && map[m[1]]){
+    return `${now.getFullYear()}-${String(map[m[1]]).padStart(2,'0')}-${String(m[2]).padStart(2,'0')}`;
+  }
+
+  // 阿拉伯數字月份：6月28日、6/28
+  m=s.match(/\b(\d{1,2})\s*(?:月|\/)\s*(\d{1,2})\s*[日號]?\b/);
+  if(m){
+    return `${now.getFullYear()}-${String(m[1]).padStart(2,'0')}-${String(m[2]).padStart(2,'0')}`;
+  }
+
+  // 找不到就留空，禁止再自動猜成下個星期六。
+  return '';
 }
 function cleanNameFromSignupLine(line){
   let s=normalizeLineDigits(line);
@@ -649,17 +666,47 @@ function cleanNameFromSignupLine(line){
 function parseLineActivity(){
   const raw=$('lineText').value||'';
   const lines=raw.split(/\n+/).map(x=>x.trim()).filter(Boolean);
-  const routeLine=lines.find(l=>/線|山|步道|古道|一日遊|半日/.test(l) && !/集合|帶|早餐|晚餐|第\d+台車|已繳/.test(l)) || lines[0] || '未命名路線';
-  const routeName=routeLine.replace(/\s+/g,'').replace(/一日遊|半日遊/g,m=>m).trim();
-  const dateLine=lines.find(l=>/(\d{1,2}|[一二三四五六七八九十]{1,3})月\s*\d{1,2}日|\d{1,2}\/\d{1,2}/.test(l)) || '';
+
+  // 優先抓「含日期＋路線名稱」的標題行，排除雨天策略、集合與備註文字。
+  const routeCandidates=lines.filter(l=>
+    /線|山|步道|古道|一日遊|半日遊/.test(l) &&
+    !/集合|姓名|人數|開車|搭車|可載人|帶|早餐|晚餐|第\d+台車|已繳|小雨|雨大|雨天|山下用餐|備註/.test(l)
+  );
+  const routeLine=
+    routeCandidates.find(l=>/(20\d{2})\s*[-\/.]\s*\d{1,2}\s*[-\/.]\s*\d{1,2}/.test(l)) ||
+    routeCandidates[0] ||
+    lines[0] ||
+    '未命名路線';
+
+  // 移除標題前面的日期、星期與符號，只留下真正路線名。
+  const routeName=routeLine
+    .replace(/^\s*[🏔📍🚗✅🌧🎡🔴🟢⭐★☆]+\s*/,'')
+    .replace(/^\s*20\d{2}\s*[-\/.]\s*\d{1,2}\s*[-\/.]\s*\d{1,2}\s*/,'')
+    .replace(/^\s*\d{1,2}\s*(?:月|\/)\s*\d{1,2}\s*[日號]?\s*/,'')
+    .replace(/^\s*[（(][日一二三四五六][）)]\s*/,'')
+    .replace(/\s+/g,'')
+    .trim();
+
+  const dateLine=lines.find(l=>
+    /(20\d{2})\s*[-\/.]\s*\d{1,2}\s*[-\/.]\s*\d{1,2}|(\d{1,2}|[一二三四五六七八九十]{1,3})月\s*\d{1,2}\s*[日號]?|\b\d{1,2}\/\d{1,2}\b/.test(l)
+  ) || '';
   const date=parseChineseDateFromLine(dateLine||raw);
+  if(!date){
+    state.lastLineActivity=null;
+    $('lineResult').innerHTML='<div class="notice"><b>找不到活動日期。</b><br>請在公告中保留完整日期，例如：2026-07-12（六）大坑日光溫泉隨意繞。系統不再自行猜日期。</div>';
+    return;
+  }
   const vehicleLine=lines.find(l=>/巴士|車|自駕|共乘|遊覽車/.test(l) && !/^\d+/.test(l) && !/第\d+台車|集合/.test(l)) || '';
   const timeLine=lines.find(l=>/集合時間/.test(l)) || '';
   const placeLine=lines.find(l=>/集合(?!時間)/.test(l)) || '';
   const meetingTime=(timeLine.match(/早上?\s*\d+點\d*分?|\d+點\d*分?/ )||[''])[0];
   const meetingPlace=placeLine.replace(/^\d+[：:]?/,'').replace(/集合地點|集合/g,'').trim();
   const equipLines=lines.filter(l=>/帶|身份證|頭燈|手電筒|雨鞋|防水|保暖|雨具|中餐|水|水果|點心/.test(l)).slice(0,8);
-  const memberLines=lines.filter(l=>/^\d+\s*[\.、．：:一\-]/.test(l) && !/集合|集合時間|集合地點|早餐|晚餐|沒有|泡茶|泡咖啡|帶|身份證|頭燈|手電筒|中餐|水|水果|點心|雨鞋|防水|保暖/.test(l));
+  const memberLines=lines.filter(l=>
+    /^\d+\s*[\.、．：:一\-]/.test(l) &&
+    !/^20\d{2}\s*[-\/.]\s*\d{1,2}\s*[-\/.]\s*\d{1,2}/.test(l) &&
+    !/集合|集合時間|集合地點|早餐|晚餐|沒有|泡茶|泡咖啡|帶|身份證|頭燈|手電筒|中餐|水|水果|點心|雨鞋|防水|保暖/.test(l)
+  );
   const members=memberLines.map(l=>({
     raw:l,
     name:cleanNameFromSignupLine(l),
@@ -732,6 +779,14 @@ function upsertRouteFromLineActivity(a){
 function saveLineActivityRecord(){
   if(!state.lastLineActivity) parseLineActivity();
   const a=state.lastLineActivity; if(!a) return;
+  if(!/^20\d{2}-\d{2}-\d{2}$/.test(a.date||'')){
+    alert('活動日期格式不正確，請使用 YYYY-MM-DD。');
+    return;
+  }
+  if(!a.routeName || /小雨|雨大|山下用餐|姓名|人數|集合/.test(a.routeName)){
+    alert('路線名稱解析不正確，請確認公告第一行包含「日期＋真正路線名稱」。');
+    return;
+  }
   const up=upsertRouteFromLineActivity(a);
   const route=up.route;
   const eventId=(a.date+'_'+a.routeName).replace(/[^\w\u4e00-\u9fa5-]+/g,'_');
