@@ -12,8 +12,11 @@
 .album-title{font-size:22px;font-weight:900}
 .album-meta{color:var(--muted);font-size:14px;line-height:1.7}
 .photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
-.photo-tile{border-radius:14px;overflow:hidden;background:#eef4ee;border:1px solid var(--line);cursor:pointer;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;color:var(--muted);font-weight:900}
+.photo-tile{position:relative;border-radius:14px;overflow:hidden;background:#eef4ee;border:1px solid var(--line);cursor:pointer;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;color:var(--muted);font-weight:900}
 .photo-tile img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .18s ease}.photo-tile:hover img{transform:scale(1.04)}
+.photo-delete-btn{position:absolute;right:7px;top:7px;z-index:3;border:0;border-radius:999px;background:rgba(200,64,50,.94);color:#fff;font-weight:900;padding:7px 10px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.22)}
+.photo-delete-btn:hover{filter:brightness(.92)}
+.photo-delete-btn:disabled{opacity:.55;cursor:wait}
 .photo-modal{position:fixed;inset:0;background:rgba(0,0,0,.82);display:none;align-items:center;justify-content:center;z-index:99;padding:24px}
 .photo-modal.active{display:flex}.photo-modal img{max-width:96vw;max-height:90vh;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
 .photo-close{position:fixed;right:18px;top:14px;background:#fff;color:#111;border:0;border-radius:999px;padding:9px 13px;font-weight:900;cursor:pointer}
@@ -826,7 +829,7 @@ function parseLineActivity(){
   state.lastLineActivity=summary;
   const table=members.length?`<div class="table"><table><tr><th>#</th><th>姓名</th><th>繳費</th></tr>${members.map((m,i)=>`<tr><td>${i+1}</td><td>${m.name}</td><td>${m.paid?'已繳 '+(m.amount||''):''}</td></tr>`).join('')}</table></div>`:'<div class="empty">沒有抓到名單，可先手動整理。</div>';
   const copy=`【活動紀錄】\n日期：${date}\n路線：${routeName}\n交通：${vehicleLine||'未填'}\n集合：${meetingTime||''} ${meetingPlace||''}\n人數：${members.length} 人\n已繳：${paidCount} 人\n裝備提醒：${equipLines.join('／')||'未填'}\n\n名單：\n${members.map((m,i)=>`${i+1}. ${m.name}${m.paid?'／已繳'+(m.amount||''):''}`).join('\n')}`;
-  $('lineResult').innerHTML=`<div class="notice"><b>已解析：</b>${routeName}｜${date}｜${members.length}人｜已繳 ${paidCount}人<br>按「存成去過紀錄」後，會加入相簿紀錄；之後可下載 event-photos.json 覆蓋 GitHub。</div>${table}<div class="copybox" id="lineCopy">${copy}</div>`;
+  $('lineResult').innerHTML=`<div class="notice"><b>已解析：</b>${routeName}｜${date}｜${members.length}人｜已繳 ${paidCount}人<br>按「存成去過紀錄」後，會直接寫入 Worker，不需要下載或覆蓋 JSON。</div>${table}<div class="copybox" id="lineCopy">${copy}</div>`;
 }
 function normalizeRouteName(name){
   return String(name||'')
@@ -1060,12 +1063,37 @@ async function saveAlbum(){
   }
 }
 function escHtml(v){return String(v||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+async function deleteSinglePhoto(url,button){
+  if(!url) return;
+  if(!confirm('確定刪除這張照片？\n\n這會同步刪除：\n• R2 原始照片\n• 活動相簿紀錄\n• 照片清單')) return;
+
+  const oldText=button?button.textContent:'';
+  try{
+    if(button){
+      button.disabled=true;
+      button.textContent='刪除中';
+    }
+    await hikingApi('/api/photo',{
+      method:'DELETE',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({url})
+    });
+    await refreshWorkerData();
+  }catch(e){
+    alert('刪除失敗：'+e.message);
+    if(button){
+      button.disabled=false;
+      button.textContent=oldText||'刪除';
+    }
+  }
+}
+
 function openPhotoModal(url){$('photoModalImg').src=url;$('photoModal').classList.add('active')}
 function closePhotoModal(ev){if(ev){ev.stopPropagation()}$('photoModal').classList.remove('active')}
 function photoGridHtml(urls){
   urls=[...new Set((urls||[]).map(normalizePhotoUrl).filter(isImageUrl))];
   if(!urls.length) return '<div class="empty" style="padding:18px">尚未貼照片網址；可先保留紀錄，之後再補 R2 相簿連結或代表照片。</div>';
-  return `<div class="photo-grid">${urls.map(u=>`<div class="photo-tile" onclick="openPhotoModal('${String(u).replace(/'/g,"%27")}')"><img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"></div>`).join('')}</div>`;
+  return `<div class="photo-grid">${urls.map(u=>`<div class="photo-tile" onclick="openPhotoModal('${String(u).replace(/'/g,"%27")}')"><button class="photo-delete-btn" title="刪除這張照片" onclick="event.stopPropagation();deleteSinglePhoto('${String(u).replace(/'/g,"%27")}',this)">刪除</button><img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"></div>`).join('')}</div>`;
 }
 function viewAlbumRecord(key){
   state.activeAlbumKey=key;
@@ -1451,7 +1479,7 @@ function renderShaDuplicateGroups(){
     const headExtra=g.type==='完全相同' ? `｜SHA-256：${escHtml(String(g.sha256||'').slice(0,16))}...` : '｜裁切／局部畫面相似，不是只比網址';
     return `<div class="dup-group"><div class="dup-head">Group ${g.id}｜${escHtml(g.type)} ${g.items.length} 張${headExtra}</div><div class="org-photo-row">${g.items.map((it,idx)=>`<div class="org-photo" onclick="openPhotoModal('${String(it.url).replace(/'/g,'%27')}')"><img src="${escHtml(it.url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"><span class="${idx===0?'keep-badge':'del-badge'}">${idx===0?'⭐ 保留':(g.type==='完全相同'?'重複刪除':'相似刪除')}</span></div>`).join('')}</div></div>`;
   }).join(''):'<div class="empty">沒有找到完全相同或影像相似的照片。</div>';
-  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">重複／相似群組 ${groups.length} 組｜可刪 ${totalRemove} 張。第一張自動保留。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">完全相同＝SHA-256 一樣；畫面相似＝照片重新壓縮、裁切、解析度不同，或同場景連拍但畫面接近。刪除前請看一下 Group 內容。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">重新掃描</button><button class="btn red" ${totalRemove?'':'disabled'} onclick="deleteShaDuplicates()">刪除重複</button><button class="btn secondary" onclick="downloadAlbums()">下載 event-photos.json</button><button class="btn secondary" onclick="downloadPhotosJson()">下載 photos.json</button></div>${body}`;
+  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">重複／相似群組 ${groups.length} 組｜可刪 ${totalRemove} 張。第一張自動保留。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">完全相同＝SHA-256 一樣；畫面相似＝照片重新壓縮、裁切、解析度不同，或同場景連拍但畫面接近。刪除前請看一下 Group 內容。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">重新掃描</button><button class="btn red" ${totalRemove?'':'disabled'} onclick="deleteShaDuplicates()">刪除重複</button></div>${body}`;
 }
 function removePhotoUrlFromAlbumRecord(a,url){
   const same=x=>normalizePhotoUrl(x)===url;
