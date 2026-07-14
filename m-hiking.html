@@ -24,6 +24,14 @@ body.photo-admin-mode .photo-delete-btn{display:block}
 body.photo-admin-mode .admin-photo-check{display:block}
 .admin-album-actions{display:none}
 body.photo-admin-mode .admin-album-actions{display:flex}
+.photo-fav-btn{position:absolute;left:7px;bottom:7px;z-index:5;border:0;border-radius:999px;background:rgba(255,255,255,.92);padding:6px 9px;font-weight:900;cursor:pointer}
+.photo-fav-btn.active{background:#ffd85a;color:#5a4300}
+.photo-view-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.photo-view-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.photo-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
+.photo-stat{border:1px solid var(--line);border-radius:14px;padding:12px;background:#fff}
+.photo-stat b{display:block;font-size:22px;color:var(--green)}
+@media(max-width:720px){.photo-stat-grid{grid-template-columns:1fr 1fr}}
 .photo-admin-note{display:none}
 body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-weight:900}
 .dup-select{position:absolute;right:7px;top:7px;z-index:4;width:25px;height:25px;accent-color:var(--red);cursor:pointer}
@@ -102,7 +110,19 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
 
 <section id="sec-album" class="section">
  <div class="card">
-  <div class="toolbar"><div><h2 style="margin:0">活動相簿</h2><p class="small" style="margin:8px 0 0">回補以前的歷史照片，或管理既有活動相簿。<span class="photo-admin-note">目前為管理刪除模式：可勾選一般照片批次刪除，也可掃描重複／相似照片。</span></p></div><div class="btns" style="margin-top:0"><button class="btn secondary" onclick="openAlbumMode('history')">回補歷史</button><button class="btn secondary" onclick="togglePhotoOrganizer('summary')">整理照片</button><button class="btn gold" onclick="openDuplicateFinder()">找重複</button><button id="photoAdminBtn" class="btn gray" onclick="togglePhotoAdminMode()">管理刪除</button></div></div>
+  <div class="toolbar">
+  <div>
+    <h2 id="photoCenterTitle" style="margin:0">活動相簿</h2>
+    <p id="photoCenterHint" class="small" style="margin:8px 0 0">所有照片只存一份；這裡依活動分類顯示。</p>
+  </div>
+  <div class="btns" style="margin-top:0">
+    <button id="photoViewEventsBtn" class="btn" onclick="setPhotoCenterView('events')">活動相簿</button>
+    <button id="photoViewMineBtn" class="btn secondary" onclick="setPhotoCenterView('mine')">我的上傳</button>
+    <button id="photoViewFavBtn" class="btn secondary" onclick="setPhotoCenterView('favorites')">我的收藏</button>
+    <button id="photoAdminBtn" class="btn gray" onclick="togglePhotoAdminMode()">管理中心</button>
+    <button class="btn secondary" onclick="openAlbumMode('history')">回補歷史</button>
+  </div>
+</div>
  </div>
  <div class="card" id="albumForm" style="display:none">
   <div class="toolbar">
@@ -152,7 +172,7 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
     <button id="albumSubmitBtn" class="btn" onclick="saveAlbum()">建立活動並上傳</button>
   </div>
 </div>
-<div id="albumList" class="route-list"></div>
+<div id="photoCenterSummary" class="card" style="display:none"></div><div id="albumList" class="route-list"></div>
  <div id="photoOrgPanel" class="card photo-org-panel"></div>
 </section>
 
@@ -233,17 +253,18 @@ async function loadWorkerData(){
   state.albums=Array.isArray(data.events)?data.events:[];
   state.photos=Array.isArray(data.photos)?data.photos:[];
   state.photoOwners=(data.photo_owners&&typeof data.photo_owners==='object')?data.photo_owners:{};
+  state.favorites=Array.isArray(data.favorites)?data.favorites:[];
   return data;
 }
 async function refreshWorkerData(){
   await loadWorkerData();
   applyFilters();
-  renderAlbum();
+  renderPhotoCenterView();
   renderHistoryBoard();
 }
 const tabs=[['sec-find','找路線'],['sec-line','LINE整理'],['sec-album','相簿'],['sec-post','公告']];
 const LINE_PROTECT_PASSWORD='BookWide2026'; // LINE整理前端密碼；要改密碼改這裡。
-const state={routes:[],calendar:[],photos:[],albums:[],photoOwners:{},selected:null,currentWeek:null,currentPlans:[],filtered:[],albumRouteId:null};
+const state={routes:[],calendar:[],photos:[],albums:[],photoOwners:{},favorites:[],photoView:'events',selected:null,currentWeek:null,currentPlans:[],filtered:[],albumRouteId:null};
 const fallback={routes:[{id:'demo_dakeng',name_zh:'大坑步道',city:'台中',area:'北屯',level:'A',duration_hours:'2-3',option_slot:'half_clear',option_label:'半天｜天氣穩',tags:['半天','新手','台中'],rain_policy:'小雨可走，雨大縮短',downhill_backup:['大坑午餐','咖啡'],notice:'示範資料，請上傳 routes.json'}],calendar:[]};
 function $(id){return document.getElementById(id)}
 function pad(n){return String(n).padStart(2,'0')}
@@ -312,7 +333,7 @@ async function init(){
   $('fWeather').value='stable';
   selectWeekByDate(sat);
   applyFilters();
-  renderAlbum();
+  renderPhotoCenterView();
   renderHistoryBoard();
   $('todayText').textContent='今天 '+localDate(new Date());
   fillUploadEventSelect();
@@ -1014,6 +1035,148 @@ function openAlbumMode(mode){
   }
 }
 
+
+function currentUploaderId(){
+  return getUploaderIdentity().uploaderId;
+}
+
+function favoritePhotoUrls(){
+  const me=currentUploaderId();
+  return new Set((state.favorites||[])
+    .filter(x=>x && x.user_id===me && x.url)
+    .map(x=>x.url));
+}
+
+function isFavoritePhoto(url){
+  return favoritePhotoUrls().has(url);
+}
+
+async function toggleFavoritePhoto(url,button){
+  const me=getUploaderIdentity();
+  try{
+    const data=await hikingApi('/api/favorite',{
+      method:'POST',
+      admin:false,
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        url,
+        user_id:me.uploaderId,
+        user_token:me.uploaderToken
+      })
+    });
+    state.favorites=Array.isArray(data.favorites)?data.favorites:state.favorites;
+    if(button){
+      const active=isFavoritePhoto(url);
+      button.classList.toggle('active',active);
+      button.textContent=active?'★ 已收藏':'☆ 收藏';
+    }
+    if(state.photoView==='favorites') renderPhotoCenterView();
+  }catch(e){
+    alert('收藏失敗：'+e.message);
+  }
+}
+
+function photoEventForUrl(url){
+  return (state.albums||[]).find(a=>albumAllPhotoUrls(a).includes(url))||null;
+}
+
+function renderPhotoTileForView(url,{showOwnerDelete=false}={}){
+  const own=currentUploaderOwns(url);
+  const fav=isFavoritePhoto(url);
+  const event=photoEventForUrl(url);
+  return `<div class="photo-tile" onclick="openPhotoModal('${String(url).replace(/'/g,"%27")}')">
+    ${own?'<span class="photo-owner-badge">我上傳的</span>':''}
+    ${showOwnerDelete&&own?`<button class="photo-owner-delete" onclick="event.stopPropagation();deleteOwnPhoto('${String(url).replace(/'/g,"%27")}',this)">刪除</button>`:''}
+    <button class="photo-fav-btn ${fav?'active':''}" onclick="event.stopPropagation();toggleFavoritePhoto('${String(url).replace(/'/g,"%27")}',this)">${fav?'★ 已收藏':'☆ 收藏'}</button>
+    <input class="admin-photo-check" type="checkbox" value="${escHtml(url)}" onclick="event.stopPropagation();updateAdminSelectionCount()">
+    <img src="${escHtml(url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'">
+  </div>`;
+}
+
+function setPhotoCenterView(view){
+  state.photoView=view;
+  ['events','mine','favorites'].forEach(v=>{
+    const id=v==='events'?'photoViewEventsBtn':v==='mine'?'photoViewMineBtn':'photoViewFavBtn';
+    const b=$(id);
+    if(b){
+      b.className='btn '+(view===v?'':'secondary');
+    }
+  });
+  renderPhotoCenterView();
+}
+
+function renderPhotoCenterView(){
+  const list=$('albumList');
+  const summary=$('photoCenterSummary');
+  const title=$('photoCenterTitle');
+  const hint=$('photoCenterHint');
+  if(!list||!summary) return;
+
+  if(state.photoView==='events'){
+    summary.style.display='none';
+    title.textContent='活動相簿';
+    hint.textContent='所有照片只存一份；這裡依活動分類顯示。';
+    renderAlbum();
+    return;
+  }
+
+  const all=[...new Set((state.photos||[]).map(normalizePhotoUrl).filter(isImageUrl))];
+  let urls=[];
+  if(state.photoView==='mine'){
+    const me=currentUploaderId();
+    urls=all.filter(u=>(state.photoOwners||{})[u]===me);
+    title.textContent='我的上傳';
+    hint.textContent='只篩選你在這台裝置上傳的照片；照片仍在同一個活動相簿中。';
+  }else{
+    const fav=favoritePhotoUrls();
+    urls=all.filter(u=>fav.has(u));
+    title.textContent='我的收藏';
+    hint.textContent='收藏只是清單，不會複製照片。';
+  }
+
+  summary.style.display='block';
+  summary.innerHTML=`<div class="photo-view-head">
+    <div><b>${state.photoView==='mine'?'我的上傳':'我的收藏'}</b><div class="small">共 ${urls.length} 張</div></div>
+    ${photoAdminMode()?`<div class="btns admin-album-actions" style="display:flex;margin:0">
+      <button class="btn secondary" onclick="selectAllAdminPhotos(true)">全選</button>
+      <button class="btn gray" onclick="selectAllAdminPhotos(false)">取消全選</button>
+      <button class="btn red" onclick="adminDeleteSelectedPhotos()">刪除已勾選（<span data-admin-selected-count>0</span>）</button>
+    </div>`:''}
+  </div>`;
+  list.innerHTML=urls.length
+    ? `<div class="photo-view-grid">${urls.map(u=>renderPhotoTileForView(u,{showOwnerDelete:state.photoView==='mine'})).join('')}</div>`
+    : '<div class="card empty">目前沒有照片。</div>';
+}
+
+function renderPhotoAdminDashboard(){
+  const list=$('albumList');
+  const summary=$('photoCenterSummary');
+  const title=$('photoCenterTitle');
+  const hint=$('photoCenterHint');
+  if(!list||!summary) return;
+
+  const all=[...new Set((state.photos||[]).map(normalizePhotoUrl).filter(isImageUrl))];
+  const mine=all.filter(u=>(state.photoOwners||{})[u]===currentUploaderId()).length;
+  const broken=all.filter(u=>!u).length;
+
+  title.textContent='管理中心';
+  hint.textContent='管理員可刪全部、刪重複、刪單張或批次刪除。';
+  summary.style.display='block';
+  summary.innerHTML=`<div class="photo-stat-grid">
+    <div class="photo-stat"><b>${all.length}</b>全部照片</div>
+    <div class="photo-stat"><b>${(state.albums||[]).length}</b>活動數</div>
+    <div class="photo-stat"><b>${mine}</b>本裝置上傳</div>
+    <div class="photo-stat"><b>${favoritePhotoUrls().size}</b>我的收藏</div>
+  </div>
+  <div class="btns">
+    <button class="btn gold" onclick="openDuplicateFinder()">掃描重複／相似</button>
+    <button class="btn secondary" onclick="selectAllAdminPhotos(true)">全選目前照片</button>
+    <button class="btn gray" onclick="selectAllAdminPhotos(false)">取消全選</button>
+    <button class="btn red" onclick="adminDeleteSelectedPhotos()">刪除已勾選（<span data-admin-selected-count>0</span>）</button>
+  </div>`;
+  list.innerHTML=`<div class="photo-view-grid">${all.map(u=>renderPhotoTileForView(u)).join('')}</div>`;
+}
+
 function sortedUploadEvents(){
   return [...(state.albums||[])]
     .filter(a=>a && a.date && (a.route_name||a.route))
@@ -1179,6 +1342,8 @@ async function togglePhotoAdminMode(){
     const b=$('photoAdminBtn');
     if(b) b.textContent='管理刪除';
     togglePhotoOrganizer(false);
+    state.photoView='events';
+    renderPhotoCenterView();
     return;
   }
 
@@ -1190,12 +1355,8 @@ async function togglePhotoAdminMode(){
   const b=$('photoAdminBtn');
   if(b) b.textContent='退出管理';
 
-  let el=$('photoOrgPanel');
-  if(el){
-    el.classList.add('active');
-    renderDuplicateFinderIdle();
-    el.scrollIntoView({behavior:'smooth',block:'start'});
-  }
+  state.photoView='admin';
+  renderPhotoAdminDashboard();
 }
 
 
@@ -1315,11 +1476,7 @@ function photoGridHtml(urls){
     </div>
     <div class="photo-grid">${urls.map(u=>{
       const own=currentUploaderOwns(u);
-      return `<div class="photo-tile" onclick="openPhotoModal('${String(u).replace(/'/g,"%27")}')">
-        ${own?`<span class="photo-owner-badge">我上傳的</span><button class="photo-owner-delete" onclick="event.stopPropagation();deleteOwnPhoto('${String(u).replace(/'/g,"%27")}',this)">刪除自己照片</button>`:''}
-        <input class="admin-photo-check" type="checkbox" value="${escHtml(u)}" onclick="event.stopPropagation();updateAdminSelectionCount()">
-        <img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'">
-      </div>`;
+      return renderPhotoTileForView(u,{showOwnerDelete:true});
     }).join('')}</div>`;
 }
 function viewAlbumRecord(key){
