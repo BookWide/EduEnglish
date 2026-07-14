@@ -1346,6 +1346,39 @@ function openQuickUploadForEvent(eventKey){
   setTimeout(()=>$('aFiles')?.click(),80);
 }
 
+function splitUploadBatches(files,maxFiles=20,maxBytes=24*1024*1024){
+  const batches=[];
+  let current=[];
+  let bytes=0;
+  for(const file of files){
+    const size=Number(file.size||0);
+    if(current.length && (current.length>=maxFiles || bytes+size>maxBytes)){
+      batches.push(current);
+      current=[];
+      bytes=0;
+    }
+    current.push(file);
+    bytes+=size;
+  }
+  if(current.length) batches.push(current);
+  return batches;
+}
+
+async function uploadBatchWithRetry(path,options,retries=2){
+  let lastError=null;
+  for(let attempt=0;attempt<=retries;attempt++){
+    try{
+      return await hikingApi(path,options);
+    }catch(e){
+      lastError=e;
+      if(attempt<retries){
+        await new Promise(r=>setTimeout(r,1200*(attempt+1)));
+      }
+    }
+  }
+  throw lastError||new Error('上傳失敗');
+}
+
 async function saveAlbum(){
   const isHistory=albumEntryMode==='history';
 
@@ -1394,36 +1427,64 @@ async function saveAlbum(){
     return;
   }
 
-  try{
-    const fd=new FormData();
-    fd.append('date',date);
-    fd.append('route_name',routeName);
-    fd.append('album_url',album);
-    fd.append('cover_url',cover);
-    fd.append('note',note);
-    const uploader=getUploaderIdentity();
-    fd.append('uploader_id',uploader.uploaderId);
-    fd.append('uploader_token',uploader.uploaderToken);
-    photoUrls.forEach(u=>fd.append('photo_url',u));
-    files.forEach(f=>fd.append('files',f,f.name));
+  const batches=splitUploadBatches(files);
+  const totalBytes=files.reduce((s,f)=>s+Number(f.size||0),0);
+  const uploader=getUploaderIdentity();
+  let uploaded=0;
+  let lastResult=null;
 
-    if(status) status.textContent=`正在上傳 ${files.length} 張到「${routeName}」…`;
-    const result=await hikingApi('/api/upload',{method:'POST',body:fd,admin:false});
+  try{
+    if(status){
+      status.textContent=`準備分 ${Math.max(1,batches.length)} 批上傳 ${files.length} 張（約 ${(totalBytes/1024/1024).toFixed(1)} MB）。請保持頁面開啟。`;
+    }
+
+    // 沒有實體檔案時，仍送一批以處理網址。
+    const workBatches=batches.length?batches:[[]];
+
+    for(let i=0;i<workBatches.length;i++){
+      const batch=workBatches[i];
+      const fd=new FormData();
+      fd.append('date',date);
+      fd.append('route_name',routeName);
+      fd.append('album_url',album);
+      fd.append('cover_url',i===0?cover:'');
+      fd.append('note',note);
+      fd.append('uploader_id',uploader.uploaderId);
+      fd.append('uploader_token',uploader.uploaderToken);
+
+      if(i===0) photoUrls.forEach(u=>fd.append('photo_url',u));
+      batch.forEach(f=>fd.append('files',f,f.name));
+
+      if(status){
+        status.textContent=`正在上傳第 ${i+1}/${workBatches.length} 批｜已完成 ${uploaded}/${files.length} 張。請勿關閉頁面。`;
+      }
+
+      lastResult=await uploadBatchWithRetry(
+        '/api/upload',
+        {method:'POST',body:fd,admin:false},
+        2
+      );
+      uploaded+=batch.length;
+    }
+
     await refreshWorkerData();
 
-    const count=result.added_url_count||result.uploaded_count||0;
+    const urlCount=photoUrls.length;
+    const totalAdded=uploaded+urlCount;
     if(status) status.textContent=isHistory
-      ?`完成：已回補 ${count} 張到 ${date}｜${routeName}。`
-      :`完成：已建立／更新活動，加入 ${count} 張照片。`;
+      ?`完成：已回補 ${totalAdded} 張到 ${date}｜${routeName}。`
+      :`完成：已加入 ${totalAdded} 張照片。`;
 
     if($('aFiles')) $('aFiles').value='';
     if($('aPhotoUrls')) $('aPhotoUrls').value='';
     previewSelectedUploadFiles();
 
-    if(isHistory) fillUploadEventSelect(result.event?.event_id||'');
+    if(isHistory) fillUploadEventSelect(lastResult?.event?.event_id||'');
   }catch(e){
-    if(status) status.textContent='上傳失敗：'+e.message;
-    alert('上傳失敗：'+e.message);
+    if(status){
+      status.textContent=`上傳中斷：已完成約 ${uploaded}/${files.length} 張。可重新選取尚未上傳的照片繼續。錯誤：${e.message}`;
+    }
+    alert(`上傳中斷：已完成約 ${uploaded}/${files.length} 張。\n\n請不要再一次送 786 MB；新版會分批，但網路中斷時仍需重傳未完成部分。\n\n錯誤：${e.message}`);
   }
 }
 function escHtml(v){return String(v||'').replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
