@@ -20,6 +20,12 @@ body.photo-admin-mode .photo-delete-btn{display:block}
 .photo-delete-btn:disabled{opacity:.55;cursor:wait}
 .photo-admin-note{display:none}
 body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-weight:900}
+.dup-select{position:absolute;right:7px;top:7px;z-index:4;width:25px;height:25px;accent-color:var(--red);cursor:pointer}
+.dup-photo-card{position:relative}
+.dup-confidence{display:inline-block;margin-left:6px;border-radius:999px;padding:3px 8px;font-size:12px;font-weight:900;background:#eef6ef;color:var(--green)}
+.dup-confidence.warn{background:#fff3d5;color:#855a00}
+.dup-help{line-height:1.7}
+
 .photo-modal{position:fixed;inset:0;background:rgba(0,0,0,.82);display:none;align-items:center;justify-content:center;z-index:99;padding:24px}
 .photo-modal.active{display:flex}.photo-modal img{max-width:96vw;max-height:90vh;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35)}
 .photo-close{position:fixed;right:18px;top:14px;background:#fff;color:#111;border:0;border-radius:999px;padding:9px 13px;font-weight:900;cursor:pointer}
@@ -1048,7 +1054,7 @@ async function saveAlbum(){
     files.forEach(f=>fd.append('files',f,f.name));
 
     if(status) status.textContent=`正在上傳 ${files.length} 張到「${routeName}」…`;
-    const result=await hikingApi('/api/upload',{method:'POST',body:fd});
+    const result=await hikingApi('/api/upload',{method:'POST',body:fd,admin:false});
     await refreshWorkerData();
 
     const count=result.added_url_count||result.uploaded_count||0;
@@ -1070,23 +1076,35 @@ function photoAdminMode(){
   return document.body.classList.contains('photo-admin-mode');
 }
 
-function togglePhotoAdminMode(){
+async function verifyPhotoAdmin(){
+  const token=getHikingAdminToken();
+  if(!token) return false;
+  try{
+    await hikingApi('/api/auth',{method:'GET'});
+    return true;
+  }catch(e){
+    sessionStorage.removeItem(HIKING_ADMIN_TOKEN_KEY);
+    alert('管理密碼錯誤。');
+    return false;
+  }
+}
+
+async function togglePhotoAdminMode(){
   if(photoAdminMode()){
     document.body.classList.remove('photo-admin-mode');
     const b=$('photoAdminBtn');
     if(b) b.textContent='管理刪除';
+    togglePhotoOrganizer(false);
     return;
   }
 
-  // 刪除按鈕平常完全隱藏；只有管理者輸入 ADMIN_TOKEN 後才顯示。
-  const token=getHikingAdminToken();
-  if(!token) return;
-
+  if(!await verifyPhotoAdmin()) return;
   document.body.classList.add('photo-admin-mode');
   const b=$('photoAdminBtn');
   if(b) b.textContent='退出管理';
-  alert('已進入管理刪除模式。\n一般瀏覽者看不到刪除按鈕。');
+  alert('管理密碼正確。\n現在可以掃描相似照片及刪除；一般群友看不到刪除功能。');
 }
+
 
 async function deleteSinglePhoto(url,button){
   if(!url) return;
@@ -1120,7 +1138,7 @@ function closePhotoModal(ev){if(ev){ev.stopPropagation()}$('photoModal').classLi
 function photoGridHtml(urls){
   urls=[...new Set((urls||[]).map(normalizePhotoUrl).filter(isImageUrl))];
   if(!urls.length) return '<div class="empty" style="padding:18px">尚未貼照片網址；可先保留紀錄，之後再補 R2 相簿連結或代表照片。</div>';
-  return `<div class="photo-grid">${urls.map(u=>`<div class="photo-tile" onclick="openPhotoModal('${String(u).replace(/'/g,"%27")}')"><button class="photo-delete-btn" title="刪除這張照片" onclick="event.stopPropagation();deleteSinglePhoto('${String(u).replace(/'/g,"%27")}',this)">刪除</button><img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"></div>`).join('')}</div>`;
+  return `<div class="photo-grid">${urls.map(u=>`<div class="photo-tile" onclick="openPhotoModal('${String(u).replace(/'/g,"%27")}')"><img src="${escHtml(u)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"></div>`).join('')}</div>`;
 }
 function viewAlbumRecord(key){
   state.activeAlbumKey=key;
@@ -1440,7 +1458,12 @@ function makeDisjointSet(n){
   const union=(a,b)=>{a=find(a);b=find(b);if(a!==b)p[b]=a};
   return {find,union};
 }
-function openDuplicateFinder(){
+async function openDuplicateFinder(){
+  if(!photoAdminMode()){
+    if(!await verifyPhotoAdmin()) return;
+    document.body.classList.add('photo-admin-mode');
+    const b=$('photoAdminBtn'); if(b) b.textContent='退出管理';
+  }
   let el=$('photoOrgPanel'); if(!el)return;
   el.classList.add('active');
   renderDuplicateFinderIdle();
@@ -1464,7 +1487,7 @@ async function scanCurrentAlbumDuplicates(){
     try{ it.visual=await visualSignaturePhotoUrl(it.url); it.visualError=''; }
     catch(e){ it.visual=null; it.visualError=String(e&&e.message?e.message:e); }
     scanned.push(it);
-    box.innerHTML=`<div class="notice">正在掃描 ${i+1} / ${items.length} 張...<br><span class="small">SHA-256 + SHA-256 + 裁切容錯影像指紋比對中</span></div>`;
+    box.innerHTML=`<div class="notice">正在掃描 ${i+1} / ${items.length} 張...<br><span class="small">SHA-256 + 裁切容錯影像指紋比對中</span></div>`;
   }
 
   const exactGroups=groupBy(scanned.filter(x=>x.sha256),x=>x.sha256)
@@ -1499,14 +1522,84 @@ async function scanCurrentAlbumDuplicates(){
   state.shaDuplicateGroups=groups;
   renderShaDuplicateGroups();
 }
+function suggestedDuplicateUrls(){
+  const groups=state.shaDuplicateGroups||[];
+  // 完全相同：預選除第一張外的照片。
+  // 畫面相似：不預選，管理者看圖後自行勾選，避免誤刪連拍。
+  return new Set(groups.flatMap(g=>g.type==='完全相同'?g.remove.map(x=>x.url):[]));
+}
+
+function selectedDuplicateUrls(){
+  return new Set([...document.querySelectorAll('.dup-select:checked')].map(x=>x.value));
+}
+
+function updateDuplicateSelectionCount(){
+  const n=selectedDuplicateUrls().size;
+  const el=$('dupSelectedCount');
+  if(el) el.textContent=String(n);
+  const btn=$('deleteSelectedDupBtn');
+  if(btn) btn.disabled=!n;
+}
+
+function selectDuplicateSuggestions(){
+  const suggested=suggestedDuplicateUrls();
+  document.querySelectorAll('.dup-select').forEach(x=>x.checked=suggested.has(x.value));
+  updateDuplicateSelectionCount();
+}
+
+function clearDuplicateSelections(){
+  document.querySelectorAll('.dup-select').forEach(x=>x.checked=false);
+  updateDuplicateSelectionCount();
+}
+
 function renderShaDuplicateGroups(){
   const groups=state.shaDuplicateGroups||[];
-  const totalRemove=groups.reduce((n,g)=>n+g.remove.length,0);
+  const suggested=suggestedDuplicateUrls();
   const body=groups.length?groups.map(g=>{
-    const headExtra=g.type==='完全相同' ? `｜SHA-256：${escHtml(String(g.sha256||'').slice(0,16))}...` : '｜裁切／局部畫面相似，不是只比網址';
-    return `<div class="dup-group"><div class="dup-head">Group ${g.id}｜${escHtml(g.type)} ${g.items.length} 張${headExtra}</div><div class="org-photo-row">${g.items.map((it,idx)=>`<div class="org-photo" onclick="openPhotoModal('${String(it.url).replace(/'/g,'%27')}')"><img src="${escHtml(it.url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'"><span class="${idx===0?'keep-badge':'del-badge'}">${idx===0?'⭐ 保留':(g.type==='完全相同'?'重複刪除':'相似刪除')}</span></div>`).join('')}</div></div>`;
+    const exact=g.type==='完全相同';
+    const confidence=exact
+      ? '<span class="dup-confidence">100% 完全重複</span>'
+      : '<span class="dup-confidence warn">疑似相似，人工確認</span>';
+    const instruction=exact
+      ? '第一張保留，其餘已預先勾選。'
+      : '這可能是連拍或同場景，不會自動勾選；請管理者比較後自行選刪。';
+    const headExtra=exact
+      ? `｜SHA-256：${escHtml(String(g.sha256||'').slice(0,16))}...`
+      : '｜裁切／局部畫面相似';
+    return `<div class="dup-group">
+      <div class="dup-head">Group ${g.id}｜${escHtml(g.type)} ${g.items.length} 張 ${confidence}${headExtra}</div>
+      <div class="small dup-help">${instruction}</div>
+      <div class="org-photo-row">
+        ${g.items.map((it,idx)=>{
+          const checked=suggested.has(it.url)?'checked':'';
+          const disabled=idx===0?'disabled':'';
+          return `<div class="org-photo dup-photo-card" onclick="openPhotoModal('${String(it.url).replace(/'/g,'%27')}')">
+            ${idx===0?'':`<input class="dup-select" type="checkbox" value="${escHtml(it.url)}" ${checked} ${disabled} onclick="event.stopPropagation();updateDuplicateSelectionCount()">`}
+            <img src="${escHtml(it.url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'">
+            <span class="${idx===0?'keep-badge':'org-badge'}">${idx===0?'⭐ 保留':(exact?'完全重複':'相似候選')}</span>
+          </div>`;
+        }).join('')}
+      </div>
+    </div>`;
   }).join(''):'<div class="empty">沒有找到完全相同或影像相似的照片。</div>';
-  $('photoOrgPanel').innerHTML=`<div class="toolbar"><div><h2 style="margin:0">找重複</h2><div class="small">重複／相似群組 ${groups.length} 組｜可刪 ${totalRemove} 張。第一張自動保留。</div></div><button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button></div><div class="notice">完全相同＝SHA-256 一樣；畫面相似＝照片重新壓縮、裁切、解析度不同，或同場景連拍但畫面接近。刪除前請看一下 Group 內容。</div><div class="btns"><button class="btn gold" onclick="scanCurrentAlbumDuplicates()">重新掃描</button><button class="btn red" ${totalRemove?'':'disabled'} onclick="deleteShaDuplicates()">刪除重複</button></div>${body}`;
+
+  $('photoOrgPanel').innerHTML=`<div class="toolbar">
+    <div><h2 style="margin:0">管理重複／相似照片</h2>
+      <div class="small">找到 ${groups.length} 組｜目前勾選 <b id="dupSelectedCount">0</b> 張待刪。</div>
+    </div>
+    <button class="btn gray" onclick="togglePhotoOrganizer(false)">收起</button>
+  </div>
+  <div class="notice dup-help">
+    <b>完全相同：</b>系統可安全預選重複檔。<br>
+    <b>畫面相似：</b>可能只是連拍、人物表情不同，所以不會自動刪除；由管理者逐張勾選。
+  </div>
+  <div class="btns">
+    <button class="btn gold" onclick="scanCurrentAlbumDuplicates()">重新掃描</button>
+    <button class="btn secondary" onclick="selectDuplicateSuggestions()">只選完全重複</button>
+    <button class="btn gray" onclick="clearDuplicateSelections()">清除勾選</button>
+    <button id="deleteSelectedDupBtn" class="btn red" disabled onclick="deleteSelectedDuplicates()">刪除已勾選</button>
+  </div>${body}`;
+  selectDuplicateSuggestions();
 }
 function removePhotoUrlFromAlbumRecord(a,url){
   const same=x=>normalizePhotoUrl(x)===url;
@@ -1518,14 +1611,15 @@ function removePhotoUrlFromAlbumRecord(a,url){
     a.cover_url=next||'';
   }
 }
-async function deleteShaDuplicates(){
-  const groups=state.shaDuplicateGroups||[];
-  const removeUrls=new Set(groups.flatMap(g=>g.remove.map(x=>x.url)));
-  if(!removeUrls.size){renderShaDuplicateGroups();return;}
+async function deleteSelectedDuplicates(){
+  if(!photoAdminMode()){alert('請先輸入管理密碼。');return;}
+  const removeUrls=selectedDuplicateUrls();
+  if(!removeUrls.size){alert('尚未勾選要刪除的照片。');return;}
 
-  if(!confirm(`確定刪除 ${removeUrls.size} 張重複／相似照片？\n這會同時刪除 R2 原始檔與活動紀錄。`)) return;
+  const confirmText=prompt(`準備刪除 ${removeUrls.size} 張照片。\n相似照片可能只是連拍差異，刪除後無法復原。\n\n請輸入「刪除」確認：`);
+  if(confirmText!=='刪除') return;
 
-  const box=$('dupScanResult')||$('photoOrgPanel');
+  const box=$('photoOrgPanel');
   try{
     let done=0;
     for(const url of removeUrls){
@@ -1539,15 +1633,12 @@ async function deleteShaDuplicates(){
     }
     state.shaDuplicateGroups=[];
     await refreshWorkerData();
-    openDuplicateFinder();
-    const resultBox=$('dupScanResult')||$('photoOrgPanel');
-    if(resultBox) resultBox.innerHTML=`<div class="notice"><b>已刪除：</b>${done} 張。R2 原始檔、活動相簿與照片清單都已同步更新。</div>`;
+    if(box) box.innerHTML=`<div class="notice"><b>已刪除 ${done} 張。</b>R2 原始照片、活動相簿與照片清單都已同步更新。</div>`;
   }catch(e){
     if(box) box.innerHTML=`<div class="notice"><b>刪除失敗：</b>${escHtml(e.message)}</div>`;
     alert('刪除失敗：'+e.message);
   }
 }
-
 function togglePhotoOrganizer(force){
   let el=$('photoOrgPanel'); if(!el)return;
   const view=(typeof force==='string')?force:'summary';
