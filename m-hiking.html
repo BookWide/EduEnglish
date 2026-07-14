@@ -169,10 +169,10 @@ const PHOTO_PATHS=['/assets/hiking/'];
 const HIKING_API_BASE='https://bookwide-hiking-api.pmktools.workers.dev';
 const HIKING_ADMIN_TOKEN_KEY='bw_hiking_admin_token';
 
-function getHikingAdminToken(){
-  let token=sessionStorage.getItem(HIKING_ADMIN_TOKEN_KEY)||'';
+function getHikingAdminToken(forcePrompt=false){
+  let token=forcePrompt?'':(sessionStorage.getItem(HIKING_ADMIN_TOKEN_KEY)||'');
   if(!token){
-    token=prompt('請輸入相簿管理密碼（ADMIN_TOKEN）')||'';
+    token=prompt('請輸入管理密碼（ADMIN_TOKEN）')||'';
     if(token) sessionStorage.setItem(HIKING_ADMIN_TOKEN_KEY,token);
   }
   return token;
@@ -1076,14 +1076,16 @@ function photoAdminMode(){
   return document.body.classList.contains('photo-admin-mode');
 }
 
-async function verifyPhotoAdmin(){
-  const token=getHikingAdminToken();
+async function verifyPhotoAdmin(forcePrompt=false){
+  const token=getHikingAdminToken(forcePrompt);
   if(!token) return false;
   try{
     await hikingApi('/api/auth',{method:'GET'});
+    sessionStorage.setItem('bw_hiking_admin_verified','1');
     return true;
   }catch(e){
     sessionStorage.removeItem(HIKING_ADMIN_TOKEN_KEY);
+    sessionStorage.removeItem('bw_hiking_admin_verified');
     alert('管理密碼錯誤。');
     return false;
   }
@@ -1098,19 +1100,27 @@ async function togglePhotoAdminMode(){
     return;
   }
 
-  if(!await verifyPhotoAdmin()) return;
+  // 同一個瀏覽器分頁只驗證一次；離開管理區再進來不重問密碼。
+  const alreadyVerified=sessionStorage.getItem('bw_hiking_admin_verified')==='1';
+  if(!alreadyVerified && !await verifyPhotoAdmin(false)) return;
+
   document.body.classList.add('photo-admin-mode');
   const b=$('photoAdminBtn');
   if(b) b.textContent='退出管理';
-  alert('管理密碼正確。\n現在可以掃描相似照片及刪除；一般群友看不到刪除功能。');
+
+  let el=$('photoOrgPanel');
+  if(el){
+    el.classList.add('active');
+    renderDuplicateFinderIdle();
+    el.scrollIntoView({behavior:'smooth',block:'start'});
+  }
 }
 
 
 async function deleteSinglePhoto(url,button){
   if(!url) return;
   if(!photoAdminMode()){alert('請先進入「管理刪除」模式。');return;}
-  const confirmText=prompt('刪除後無法復原。\n請輸入「刪除」兩個字確認：');
-  if(confirmText!=='刪除') return;
+  if(!confirm('確定刪除這張照片？\n刪除後無法復原。')) return;
 
   const oldText=button?button.textContent:'';
   try{
@@ -1460,7 +1470,7 @@ function makeDisjointSet(n){
 }
 async function openDuplicateFinder(){
   if(!photoAdminMode()){
-    if(!await verifyPhotoAdmin()) return;
+    if(sessionStorage.getItem('bw_hiking_admin_verified')!=='1' && !await verifyPhotoAdmin(false)) return;
     document.body.classList.add('photo-admin-mode');
     const b=$('photoAdminBtn'); if(b) b.textContent='退出管理';
   }
@@ -1616,8 +1626,7 @@ async function deleteSelectedDuplicates(){
   const removeUrls=selectedDuplicateUrls();
   if(!removeUrls.size){alert('尚未勾選要刪除的照片。');return;}
 
-  const confirmText=prompt(`準備刪除 ${removeUrls.size} 張照片。\n相似照片可能只是連拍差異，刪除後無法復原。\n\n請輸入「刪除」確認：`);
-  if(confirmText!=='刪除') return;
+  if(!confirm(`確定刪除已勾選的 ${removeUrls.size} 張照片？\n\n刪除後無法復原。`)) return;
 
   const box=$('photoOrgPanel');
   try{
