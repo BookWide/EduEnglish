@@ -153,7 +153,7 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   <div class="card">
     <h2 style="margin-top:0">② 加入候選路線</h2>
     <div class="filters">
-      <div class="field"><label>預定日期</label><input id="fDate" type="date"></div>
+      <div class="field"><label>預定日期</label><input id="fDate" type="date" onchange="renderHistoryBoard()"></div>
       <div class="field"><label>路線名稱</label><input id="v3RouteName" placeholder="例如：東卯山步道"></div>
       <div class="field"><label>健行筆記網址</label><input id="v3RouteUrl" placeholder="貼上路線網址"></div>
       <div class="field"><label>備註</label><input id="v3RouteNote" placeholder="例如：下週候選／雨備"></div>
@@ -183,7 +183,7 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   </div>
 
   <div class="card" id="historyCard">
-    <div class="toolbar"><h2 style="margin:0">本團去過紀錄</h2><div class="small">直接回讀 Worker 內全部活動相簿，依日期由新到舊顯示。</div></div>
+    <div class="toolbar"><h2 style="margin:0">歷年同期選路參考</h2><div class="small">依預定日期找出前後 45 天曾走過的路線；同一路線自動累加次數。</div></div>
     <div id="historyBoard" class="history-grid"></div>
   </div>
 </section>
@@ -1020,30 +1020,99 @@ function renderHistoryBoard(){
   const box=$('historyBoard');
   if(!box) return;
 
-  const arr=(state.albums||[])
-    .filter(a=>a && (a.date || a.route || a.route_name))
-    .slice()
-    .sort((a,b)=>String(b.date||'').localeCompare(String(a.date||'')));
+  const targetRaw=String($('fDate')?.value||'');
+  const target=targetRaw?parseDate(targetRaw):nextSaturday(new Date());
+  const targetMonth=target.getMonth()+1;
+  const targetDay=target.getDate();
+
+  function dayOfYear(month,day){
+    const d=new Date(2024,month-1,day);
+    const start=new Date(2024,0,1);
+    return Math.round((d-start)/86400000)+1;
+  }
+  const targetDOY=dayOfYear(targetMonth,targetDay);
+
+  function seasonalDistance(dateStr){
+    const d=normDateStr(dateStr||'');
+    const m=d.match(/^\d{4}-(\d{2})-(\d{2})$/);
+    if(!m) return 999;
+    const doy=dayOfYear(Number(m[1]),Number(m[2]));
+    const raw=Math.abs(doy-targetDOY);
+    return Math.min(raw,366-raw);
+  }
+
+  function routeGroupKey(a){
+    const rid=String(a.route_id||a.routeId||'').trim();
+    if(rid) return 'id:'+rid;
+    return 'name:'+String(a.route||a.route_name||a.name||'未命名路線')
+      .replace(/[（(].*?[）)]/g,'')
+      .replace(/\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/g,'')
+      .replace(/\s+/g,'')
+      .trim();
+  }
+
+  const grouped=new Map();
+
+  for(const a of (state.albums||[])){
+    if(!a || !a.date) continue;
+    const dist=seasonalDistance(a.date);
+    if(dist>45) continue;
+
+    const key=routeGroupKey(a);
+    if(!grouped.has(key)){
+      grouped.set(key,{
+        key,
+        title:String(a.route||a.route_name||a.name||'活動紀錄'),
+        visits:0,
+        dates:[],
+        photos:0,
+        cover:'',
+        bestDistance:999,
+        latest:'',
+        eventKeys:[]
+      });
+    }
+
+    const g=grouped.get(key);
+    const urls=albumAllPhotoUrls(a);
+    g.visits+=1;
+    g.dates.push(String(a.date));
+    g.photos+=urls.length;
+    g.cover=g.cover||urls[0]||albumCoverUrl(a)||'';
+    g.bestDistance=Math.min(g.bestDistance,dist);
+    g.latest=String(a.date)>g.latest?String(a.date):g.latest;
+    g.eventKeys.push(String(a.id||a.event_id||''));
+  }
+
+  const arr=[...grouped.values()]
+    .map(g=>{
+      g.dates=[...new Set(g.dates)].sort().reverse();
+      return g;
+    })
+    .sort((a,b)=>
+      a.bestDistance-b.bestDistance ||
+      b.visits-a.visits ||
+      String(b.latest).localeCompare(String(a.latest))
+    )
+    .slice(0,9);
 
   if(!arr.length){
-    box.innerHTML='<div class="empty" style="grid-column:1/-1">目前沒有去過紀錄。活動相簿建立後會自動出現在這裡。</div>';
+    box.innerHTML='<div class="empty" style="grid-column:1/-1">這個季節目前沒有歷史路線可參考。</div>';
     return;
   }
 
-  box.innerHTML=arr.map(a=>{
-    const key=String(a.id||a.event_id||'').replace(/'/g,'&#39;');
-    const urls=albumAllPhotoUrls(a);
-    const cover=urls[0]||albumCoverUrl(a)||'';
-    const title=escHtml(a.route||a.route_name||'活動紀錄');
-    const date=escHtml(a.date||'');
-    const people=a.people_count?`｜人數 ${a.people_count}`:'';
-    const paid=typeof a.paid_count!=='undefined'?`｜已繳 ${a.paid_count}`:'';
-
+  box.innerHTML=arr.map(g=>{
+    const key=String(g.eventKeys[0]||'').replace(/'/g,'&#39;');
+    const recent=g.dates.slice(0,3).join('、');
     return `<div class="history-item" onclick="openHistoryItem('${key}')">
-      <div class="history-thumb">${cover?`<img src="${escHtml(cover)}" loading="lazy" onerror="this.remove()">`:'相簿'}</div>
+      <div class="history-thumb">${g.cover?`<img src="${escHtml(g.cover)}" loading="lazy" onerror="this.remove()">`:'相簿'}</div>
       <div>
-        <div class="history-title">${title}</div>
-        <div class="history-meta">${date}${people}${paid}<br>照片：${urls.length} 張</div>
+        <div class="history-title">${escHtml(g.title)}</div>
+        <div class="history-meta">
+          本團去過：${g.visits} 次
+          ${recent?`<br>最近日期：${escHtml(recent)}`:''}
+          <br>累計照片：${g.photos} 張
+        </div>
       </div>
       <div class="rank-badge">›</div>
     </div>`;
