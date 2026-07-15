@@ -94,9 +94,54 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   .auth-link,.auth-logout{padding:7px 9px;font-size:12px}
 }
 
+
+/* 登山頁內直接登入，不跳回 BookWide 首頁 */
+body.auth-pending > header,
+body.auth-pending > main,
+body.auth-pending > .photo-modal{visibility:hidden}
+.hiking-login-gate{
+  position:fixed;inset:0;z-index:9999;display:none;align-items:center;justify-content:center;
+  padding:20px;background:linear-gradient(135deg,#edf5ee,#f7f4e8)
+}
+.hiking-login-gate.active{display:flex}
+.hiking-login-card{
+  width:min(440px,100%);background:#fff;border:1px solid var(--line);border-radius:22px;
+  box-shadow:0 18px 50px rgba(20,45,28,.18);padding:24px
+}
+.hiking-login-brand{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.hiking-login-brand b{background:var(--green);color:#fff;border-radius:12px;padding:9px 12px;font-size:20px}
+.hiking-login-card h2{margin:0 0 8px;font-size:25px}
+.hiking-login-card p{margin:0 0 16px;color:var(--muted);line-height:1.6}
+.hiking-login-card input{
+  width:100%;border:1px solid var(--line);border-radius:12px;padding:12px 13px;
+  font:inherit;margin-bottom:10px
+}
+.hiking-login-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.hiking-login-msg{display:none;margin-top:12px;padding:10px 12px;border-radius:12px;line-height:1.5;font-size:14px}
+.hiking-login-msg.ok{display:block;background:#edf8ef;color:#25663a;border:1px solid #bcdcc4}
+.hiking-login-msg.err{display:block;background:#fff1ef;color:#a62f23;border:1px solid #efc2bc}
+.hiking-login-note{font-size:12px;color:var(--muted);margin-top:12px;line-height:1.5}
+
 </style>
 </head>
-<body>
+<body class="auth-pending">
+
+<div id="hikingLoginGate" class="hiking-login-gate" aria-modal="true" role="dialog">
+  <div class="hiking-login-card">
+    <div class="hiking-login-brand"><b>BookWide</b><strong>中部週六山行</strong></div>
+    <h2>山友登入</h2>
+    <p>登入後即可查看活動相簿、上傳照片與使用山行功能。</p>
+    <input id="hikingLoginEmail" type="email" autocomplete="email" placeholder="Email">
+    <input id="hikingLoginPassword" type="password" autocomplete="current-password" placeholder="密碼">
+    <div class="hiking-login-actions">
+      <button class="btn" type="button" onclick="hikingLogin()">登入</button>
+      <button class="btn secondary" type="button" onclick="hikingRegister()">免費註冊</button>
+    </div>
+    <div id="hikingLoginMsg" class="hiking-login-msg"></div>
+    <div class="hiking-login-note">這裡直接使用 BookWide 帳號，不會跳到教材首頁。</div>
+  </div>
+</div>
+
 <header><div class="wrap"><div class="top">
   <div class="brand"><b>BookWide</b><span>中部週六山行</span></div>
   <div class="auth-area" id="authArea">
@@ -239,16 +284,15 @@ const bookwideSupa=window.bookwideSupa || window.supabase.createClient(
 );
 window.bookwideSupa=bookwideSupa;
 let BOOKWIDE_USER=null;
+window.addEventListener('DOMContentLoaded',()=>{document.getElementById('hikingLoginPassword')?.addEventListener('keydown',e=>{if(e.key==='Enter') hikingLogin();});});
 
-function bookWideLoginUrl(){
-  return '/login.html?next='+encodeURIComponent('/m-hiking.html');
-}
+function bookWideLoginUrl(){ return '/m-hiking.html'; }
 
 function renderBookWideAuth(user){
   const box=document.getElementById('authArea');
   if(!box) return;
   if(!user){
-    box.innerHTML=`<a class="auth-link primary" href="${bookWideLoginUrl()}">登入／註冊</a>`;
+    box.innerHTML=`<button class="auth-link primary" type="button" onclick="openHikingLoginGate()">登入／註冊</button>`;
     return;
   }
   const email=String(user.email||user.user_metadata?.email||'BookWide 山友');
@@ -256,6 +300,60 @@ function renderBookWideAuth(user){
     <span class="auth-email" title="${email.replace(/"/g,'&quot;')}">${email}</span>
     <a class="auth-link primary" href="/index.html">瀏覽教材</a>
     <button class="auth-logout" type="button" onclick="bookWideLogout()">登出</button>`;
+}
+
+let HIKING_AUTH_RESOLVE=null;
+
+function showHikingLoginMsg(text,kind='err'){
+  const el=document.getElementById('hikingLoginMsg');
+  if(!el) return;
+  el.textContent=text;
+  el.className='hiking-login-msg '+kind;
+}
+
+function openHikingLoginGate(){
+  document.getElementById('hikingLoginGate')?.classList.add('active');
+  document.body.classList.add('auth-pending');
+  setTimeout(()=>document.getElementById('hikingLoginEmail')?.focus(),50);
+}
+
+function closeHikingLoginGate(){
+  document.getElementById('hikingLoginGate')?.classList.remove('active');
+  document.body.classList.remove('auth-pending');
+}
+
+async function hikingLogin(){
+  const email=String(document.getElementById('hikingLoginEmail')?.value||'').trim();
+  const password=String(document.getElementById('hikingLoginPassword')?.value||'');
+  if(!email||!password){showHikingLoginMsg('請輸入 Email 與密碼。');return;}
+  showHikingLoginMsg('登入中…','ok');
+  const {data,error}=await bookwideSupa.auth.signInWithPassword({email,password});
+  if(error){showHikingLoginMsg('登入失敗：'+error.message);return;}
+  BOOKWIDE_USER=data.user;
+  renderBookWideAuth(data.user);
+  closeHikingLoginGate();
+  if(HIKING_AUTH_RESOLVE){HIKING_AUTH_RESOLVE(data.user);HIKING_AUTH_RESOLVE=null;}
+}
+
+async function hikingRegister(){
+  const email=String(document.getElementById('hikingLoginEmail')?.value||'').trim();
+  const password=String(document.getElementById('hikingLoginPassword')?.value||'');
+  if(!email||!password){showHikingLoginMsg('請輸入 Email 與密碼。');return;}
+  if(password.length<6){showHikingLoginMsg('密碼至少需要 6 碼。');return;}
+  showHikingLoginMsg('建立帳號中…','ok');
+  const {data,error}=await bookwideSupa.auth.signUp({
+    email,password,
+    options:{emailRedirectTo:location.origin+'/m-hiking.html'}
+  });
+  if(error){showHikingLoginMsg('註冊失敗：'+error.message);return;}
+  if(data.session&&data.user){
+    BOOKWIDE_USER=data.user;
+    renderBookWideAuth(data.user);
+    closeHikingLoginGate();
+    if(HIKING_AUTH_RESOLVE){HIKING_AUTH_RESOLVE(data.user);HIKING_AUTH_RESOLVE=null;}
+  }else{
+    showHikingLoginMsg('註冊完成，請到信箱完成驗證後，再回來登入。','ok');
+  }
 }
 
 async function requireBookWideLogin(){
@@ -268,11 +366,12 @@ async function requireBookWideLogin(){
   const user=data?.session?.user||null;
   BOOKWIDE_USER=user;
   renderBookWideAuth(user);
-  if(!user){
-    location.replace(bookWideLoginUrl());
-    throw new Error('BookWide login required');
+  if(user){
+    closeHikingLoginGate();
+    return user;
   }
-  return user;
+  openHikingLoginGate();
+  return await new Promise(resolve=>{HIKING_AUTH_RESOLVE=resolve;});
 }
 
 async function bookWideLogout(){
@@ -281,7 +380,9 @@ async function bookWideLogout(){
   }catch(e){
     console.warn(e);
   }
-  location.href='/index.html';
+  BOOKWIDE_USER=null;
+  renderBookWideAuth(null);
+  openHikingLoginGate();
 }
 
 
