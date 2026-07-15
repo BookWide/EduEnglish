@@ -286,7 +286,7 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
 
   <div class="card">
     <h2 style="margin-top:0">本週公告</h2>
-    <textarea id="postBox" class="copybox" style="width:100%;min-height:420px;border:0;resize:vertical" readonly>目前尚無網站公告。</textarea>
+    <textarea id="postBox" class="copybox" style="width:100%;min-height:420px;border:0;resize:vertical" oninput="scheduleNoticeSave()" readonly>目前尚無網站公告。</textarea>
     <p class="small" style="margin-bottom:0">群主發布後，山友就在這一頁查看；後續再加入活動留言與討論。</p>
   </div>
 </section>
@@ -452,6 +452,8 @@ async function loadWorkerData(){
   state.favorites=Array.isArray(data.favorites)?data.favorites:[];
   state.trash=Array.isArray(data.trash)?data.trash:[];
   state.candidates=Array.isArray(data.candidates)?data.candidates:[];
+  state.notice=(data.notice&&typeof data.notice==='object')?data.notice:null;
+  if(state.notice?.text) postBoxSet(state.notice.text);
   return data;
 }
 async function refreshWorkerData(){
@@ -569,7 +571,7 @@ function renderV3Candidates(){
   }).join('');
 }
 
-const state={routes:[],calendar:[],photos:[],albums:[],photoOwners:{},favorites:[],trash:[],candidates:[],photoView:'events',selected:null,currentWeek:null,currentPlans:[],filtered:[],routeMatches:[],routePage:0,routeShowAll:false,albumRouteId:null};
+const state={routes:[],calendar:[],photos:[],albums:[],photoOwners:{},favorites:[],trash:[],candidates:[],notice:null,photoView:'events',selected:null,currentWeek:null,currentPlans:[],filtered:[],routeMatches:[],routePage:0,routeShowAll:false,albumRouteId:null};
 const fallback={routes:[{id:'demo_dakeng',name_zh:'大坑步道',city:'台中',area:'北屯',level:'A',duration_hours:'2-3',option_slot:'half_clear',option_label:'半天｜天氣穩',tags:['半天','新手','台中'],rain_policy:'小雨可走，雨大縮短',downhill_backup:['大坑午餐','咖啡'],notice:'示範資料，請上傳 routes.json'}],calendar:[]};
 function $(id){return document.getElementById(id)}
 function pad(n){return String(n).padStart(2,'0')}
@@ -682,7 +684,7 @@ function applyNoticeRole(){
   const actions=$('noticeAdminActions');
   const box=$('postBox');
   if(actions) actions.style.display=BOOKWIDE_IS_ADMIN?'flex':'none';
-  if(box) box.readOnly=!BOOKWIDE_IS_ADMIN;
+  if(box){ box.readOnly=!BOOKWIDE_IS_ADMIN; if(state.notice?.text && !postBoxGet().trim()) postBoxSet(state.notice.text); }
 }
 
 
@@ -1243,6 +1245,30 @@ function chooseRoute(id){let r=state.routes.find(x=>x.id===id); if(!r)return; st
 function renderSelected(){let r=state.selected;if(!r){$('selectedBox').innerHTML='<div class="empty">尚未選路線。</div>';return}$('selectedBox').innerHTML=`<div class="result"><h2>${r.name_zh}</h2><div class="meta">${r.city||''} ${r.area||''}<br>難度 ${levelName(r.level)}｜路線 ${routeDurationText(r)}｜估算 ${adjustedDurationText(r)}｜${displayTimeLabel(r)}｜${displayWeatherLabel(r)}<br>雨天策略：${r.rain_policy||''}<br>山下備案：${(r.downhill_backup||[]).join('／')||'午餐／咖啡'}</div><div class="btns">${BOOKWIDE_IS_ADMIN?'<button class="btn" onclick="openNoticeFromSelected()">前往公告</button>':''}</div></div>`}
 function postBoxSet(text){let el=$('postBox'); if(!el)return; if('value' in el) el.value=text; else el.textContent=text;}
 function postBoxGet(){let el=$('postBox'); if(!el)return ''; return ('value' in el)?el.value:(el.textContent||'');}
+let noticeSaveTimer=null;
+async function saveCurrentNotice(showMessage=false){
+  if(!BOOKWIDE_IS_ADMIN) return false;
+  const text=postBoxGet().trim();
+  if(!text) return false;
+  const result=await hikingApi('/api/notice',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      text,
+      route_name:state.selected?.name_zh||'',
+      planned_date:$('fDate')?.value||'',
+      updated_by:String(BOOKWIDE_USER?.email||'admin')
+    })
+  });
+  state.notice=result.notice||null;
+  if(showMessage) alert('公告已存入系統。');
+  return true;
+}
+function scheduleNoticeSave(){
+  if(!BOOKWIDE_IS_ADMIN) return;
+  clearTimeout(noticeSaveTimer);
+  noticeSaveTimer=setTimeout(()=>saveCurrentNotice(false).catch(e=>console.warn('公告自動儲存失敗',e)),700);
+}
 
 function zhWeekday(d){return ['日','一','二','三','四','五','六'][d.getDay()]}
 function localDateSlash(d){return `${d.getFullYear()}/${pad(d.getMonth()+1)}/${pad(d.getDate())}`}
@@ -1295,10 +1321,11 @@ function makeMonthPost(){
   lines.push('想參加哪一週，可以先留言。');
   lines.push('實際路線、集合與裝備，出發前會再公告。');
   postBoxSet(lines.join('\n'));
+  saveCurrentNotice(false).catch(e=>console.warn(e));
   openNoticePage();
 }
 
-function makePost(id){
+async function makePost(id){
   if(id) chooseRoute(id);
   let r=state.selected;
   if(!r){postBoxSet('請先選一條路線。');return}
@@ -1311,7 +1338,7 @@ function makePost(id){
   let text=`${d}（六）${r.name_zh||''}
 地區：${r.city||''} ${r.area||''}  難度：${levelName(r.level)}
 活動時間估算：${total}
-集合時間：AM: 6:30
+集合時間：AM: 8:00
 集合地點：${place}
 地圖參考： ${map}
 
@@ -1336,10 +1363,12 @@ ${rain}
 9:
 10:`;
   postBoxSet(text);
+  await saveCurrentNotice(false);
   openNoticePage();
 }
 async function copyPost(){
   try{
+    await saveCurrentNotice(false);
     await navigator.clipboard.writeText(postBoxGet());
     alert('公告文字已複製，請到 LINE 貼上。');
   }catch(e){
