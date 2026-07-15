@@ -151,13 +151,13 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   </div>
 
   <div class="card">
-    <h2 style="margin-top:0">② 推薦到 BookWide</h2>
+    <h2 style="margin-top:0">② 推薦路線給管理人</h2>
     <div class="filters">
       <div class="field"><label>預定日期</label><input id="fDate" type="date" onchange="renderHistoryBoard()"></div>
       <div class="field"><label>路線名稱</label><input id="v3RouteName" placeholder="例如：東卯山步道"></div>
       <div class="field"><label>健行筆記網址</label><input id="v3RouteUrl" placeholder="貼上路線網址"></div>
-      <div class="field"><label>備註</label><input id="v3RouteNote" placeholder="例如：下週候選／雨備"></div>
-      <div class="field"><label>&nbsp;</label><button class="btn" style="width:100%" onclick="addV3Candidate()">推薦</button></div>
+      <div class="field"><label>備註</label><input id="v3RouteNote" placeholder="例如：想走原因／雨備"></div>
+      <div class="field"><label>&nbsp;</label><button class="btn" style="width:100%" onclick="addV3Candidate()">推薦給管理人</button></div>
     </div>
 
     <!-- 保留舊程式需要的欄位，但不再作主要路線篩選 -->
@@ -174,8 +174,8 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   <div class="card">
     <div class="toolbar">
       <div>
-        <h2 style="margin:0">本團候選路線</h2>
-        <p class="small" style="margin:8px 0 0">群主選定後可直接產生公告；活動完成後再存入去過紀錄與相簿。</p>
+        <h2 style="margin:0">群友推薦路線</h2>
+        <p class="small" style="margin:8px 0 0">群友可推薦並按「我也想走」累計意願；時間到了，管理人仍可直接選定並產生公告貼到 LINE。</p>
       </div>
       <button class="btn gray" onclick="renderV3Candidates()">重新整理</button>
     </div>
@@ -463,6 +463,7 @@ const tabs=[];
 const LINE_PROTECT_PASSWORD='BookWide2026'; // LINE整理前端密碼；要改密碼改這裡。
 
 const V3_CANDIDATE_KEY='bw_hiking_v3_candidates';
+const V3_ENDORSE_KEY='bw_hiking_v3_endorse_user';
 
 function loadV3Candidates(){
   try{
@@ -485,26 +486,90 @@ function candidateVisitInfo(name){
   return {count:dates.length,last:dates.at(-1)||''};
 }
 
+function currentRecommendationUser(){
+  const email=String(BOOKWIDE_USER?.email||'').trim().toLowerCase();
+  const id=String(BOOKWIDE_USER?.id||email||localStorage.getItem(V3_ENDORSE_KEY)||'').trim();
+  if(!localStorage.getItem(V3_ENDORSE_KEY)) localStorage.setItem(V3_ENDORSE_KEY,id||('guest_'+crypto.randomUUID()));
+  return {
+    id:id||localStorage.getItem(V3_ENDORSE_KEY),
+    label:email||'群友'
+  };
+}
+
+async function shareCandidateToLine(c){
+  if(!c) return;
+  const text=[
+    '【BookWide 路線推薦】',
+    c.name||'',
+    c.url||'',
+    c.note?('推薦原因：'+c.note):'',
+    '推薦人：'+(c.recommender_label||'群友'),
+    '請管理人參考。'
+  ].filter(Boolean).join('\n');
+  try{
+    if(navigator.share){
+      await navigator.share({title:'BookWide 路線推薦',text});
+      return;
+    }
+    await navigator.clipboard.writeText(text);
+    alert('推薦內容已複製，可直接貼到 LINE 給管理人。');
+  }catch(e){
+    try{
+      const ta=document.createElement('textarea'); ta.value=text; document.body.appendChild(ta); ta.select();
+      document.execCommand('copy'); ta.remove();
+      alert('推薦內容已複製，可直接貼到 LINE 給管理人。');
+    }catch(_){ alert(text); }
+  }
+}
+
 function addV3Candidate(){
+  if(!BOOKWIDE_USER){ location.href=bookWideLoginUrl(); return; }
   const name=String($('v3RouteName')?.value||'').trim();
   const url=String($('v3RouteUrl')?.value||'').trim();
   const note=String($('v3RouteNote')?.value||'').trim();
   if(!name){alert('請輸入路線名稱。');return;}
   if(url && !/^https?:\/\//i.test(url)){alert('請貼上完整網址。');return;}
 
+  const user=currentRecommendationUser();
   const items=loadV3Candidates();
-  items.unshift({
+  const item={
     id:'cand_'+Date.now(),
     name,
     url,
     note,
+    recommender_id:user.id,
+    recommender_label:user.label,
+    endorsements:[],
     created_at:new Date().toISOString()
-  });
+  };
+  items.unshift(item);
   saveV3Candidates(items);
 
   if($('v3RouteName')) $('v3RouteName').value='';
   if($('v3RouteUrl')) $('v3RouteUrl').value='';
   if($('v3RouteNote')) $('v3RouteNote').value='';
+  renderV3Candidates();
+  shareCandidateToLine(item);
+}
+
+function endorseV3Candidate(id){
+  if(!BOOKWIDE_USER){ location.href=bookWideLoginUrl(); return; }
+  const items=loadV3Candidates();
+  const c=items.find(x=>x.id===id);
+  if(!c) return;
+  const user=currentRecommendationUser();
+  if(c.recommender_id && c.recommender_id===user.id){
+    alert('推薦人不列入附議，需由另一位群友按「我也想走」。');
+    return;
+  }
+  c.endorsements=Array.isArray(c.endorsements)?c.endorsements:[];
+  const idx=c.endorsements.findIndex(x=>(typeof x==='string'?x:x.id)===user.id);
+  if(idx>=0){
+    c.endorsements.splice(idx,1);
+  }else{
+    c.endorsements.push({id:user.id,label:user.label,at:new Date().toISOString()});
+  }
+  saveV3Candidates(items);
   renderV3Candidates();
 }
 
@@ -516,6 +581,7 @@ function deleteV3Candidate(id){
 }
 
 function chooseV3Candidate(id){
+  if(!BOOKWIDE_IS_ADMIN){alert('只有管理人可以選定活動路線。');return;}
   const c=loadV3Candidates().find(x=>x.id===id);
   if(!c) return;
   state.selected={
@@ -540,32 +606,46 @@ function announceV3Candidate(id){
 function renderV3Candidates(){
   const box=$('v3CandidateList');
   if(!box) return;
-  const items=loadV3Candidates();
+  const me=currentRecommendationUser();
+  const items=loadV3Candidates().map(c=>({
+    ...c,
+    endorsements:Array.isArray(c.endorsements)?c.endorsements:[]
+  })).sort((a,b)=>b.endorsements.length-a.endorsements.length || String(b.created_at||'').localeCompare(String(a.created_at||'')));
   if($('routeCount')) $('routeCount').textContent=items.length;
 
   if(!items.length){
-    box.innerHTML='<div class="v3-empty" style="grid-column:1/-1">尚無候選路線。先到健行筆記找到路線，再貼回來。</div>';
+    box.innerHTML='<div class="v3-empty" style="grid-column:1/-1">尚無推薦路線。先到健行筆記找到路線，再推薦給管理人。</div>';
     return;
   }
 
   box.innerHTML=items.map(c=>{
     const v=candidateVisitInfo(c.name);
     const safeId=String(c.id).replace(/'/g,'&#39;');
+    const count=c.endorsements.length;
+    const mine=c.endorsements.some(x=>(typeof x==='string'?x:x.id)===me.id);
     const url=c.url
       ? `<a class="btn gray" target="_blank" rel="noopener" href="${escHtml(c.url)}" style="text-decoration:none">查看路線</a>`
       : '';
     const adminDelete=BOOKWIDE_IS_ADMIN
       ? `<button class="btn red" onclick="deleteV3Candidate('${safeId}')">刪除</button>`
       : '';
-    const announce=BOOKWIDE_IS_ADMIN
-      ? `<button class="btn secondary" onclick="announceV3Candidate('${safeId}')">產公告</button>`
+    const adminChoose=BOOKWIDE_IS_ADMIN
+      ? `<button class="btn" onclick="chooseV3Candidate('${safeId}')">★★★★★ 選定本週</button><button class="btn secondary" onclick="announceV3Candidate('${safeId}')">選定並產公告</button>`
       : '';
+    const endorseBtn=!BOOKWIDE_IS_ADMIN
+      ? `<button class="btn ${mine?'secondary':''}" onclick="endorseV3Candidate('${safeId}')">${mine?'✓ 已附議':'👍 我也想走'}</button>`
+      : '';
+    const lineBtn=`<button class="btn secondary" onclick="shareCandidateToLine(loadV3Candidates().find(x=>x.id==='${safeId}'))">複製到 LINE</button>`;
+    const status=count>=1
+      ? '<span class="tag">已達候選條件</span>'
+      : '<span class="tag" style="background:#edf1ec;color:#59635b">等待附議</span>';
     return `<div class="v3-candidate">
       <h3>${escHtml(c.name)}</h3>
-      <div class="meta">來源：健行筆記<br>本團去過：${v.count} 次${v.last?`<br>最近一次：${escHtml(v.last)}`:''}</div>
+      <div class="meta">來源：健行筆記<br>推薦人：${escHtml(c.recommender_label||'群友')}<br><b>附議：👍 ${count} 人</b><br>本團去過：${v.count} 次${v.last?`<br>最近一次：${escHtml(v.last)}`:''}</div>
+      <div style="margin-top:8px">${status}</div>
       ${c.note?`<div class="notice" style="margin-top:10px">${escHtml(c.note)}</div>`:''}
       ${c.url?`<div class="url" style="margin-top:9px">${escHtml(c.url)}</div>`:''}
-      <div class="btns">${url}<button class="btn" onclick="chooseV3Candidate('${safeId}')">選這條</button>${announce}${adminDelete}</div>
+      <div class="btns">${url}${endorseBtn}${lineBtn}${adminChoose}${adminDelete}</div>
     </div>`;
   }).join('');
 }
