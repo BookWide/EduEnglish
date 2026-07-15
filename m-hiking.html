@@ -353,18 +353,27 @@ const HIKING_API_BASE='https://bookwide-hiking-api.pmktools.workers.dev';
 const HIKING_ADMIN_TOKEN_KEY='bw_hiking_admin_token';
 const HIKING_UPLOADER_ID_KEY='bw_hiking_uploader_id';
 const HIKING_UPLOADER_TOKEN_KEY='bw_hiking_uploader_token';
+// V2：照片擁有權改綁 Supabase user.id；同一瀏覽器切換帳號不會互相取得刪除權。
 
 function getUploaderIdentity(){
-  let uploaderId=localStorage.getItem(HIKING_UPLOADER_ID_KEY)||'';
-  let uploaderToken=localStorage.getItem(HIKING_UPLOADER_TOKEN_KEY)||'';
-  if(!uploaderId){
-    uploaderId='u_'+crypto.randomUUID();
-    localStorage.setItem(HIKING_UPLOADER_ID_KEY,uploaderId);
+  /*
+   * 照片擁有權必須綁 BookWide 帳號，不能再綁同一台手機／瀏覽器。
+   * 否則更換登入帳號時，會誤把前一個帳號的照片當成自己的。
+   */
+  if(!BOOKWIDE_USER?.id){
+    return {uploaderId:'',uploaderToken:''};
   }
+
+  const userId=String(BOOKWIDE_USER.id);
+  const uploaderId='auth_'+userId;
+  const tokenKey=HIKING_UPLOADER_TOKEN_KEY+'_'+userId;
+  let uploaderToken=localStorage.getItem(tokenKey)||'';
+
   if(!uploaderToken){
     uploaderToken=crypto.randomUUID()+crypto.randomUUID();
-    localStorage.setItem(HIKING_UPLOADER_TOKEN_KEY,uploaderToken);
+    localStorage.setItem(tokenKey,uploaderToken);
   }
+
   return {uploaderId,uploaderToken};
 }
 
@@ -1333,6 +1342,10 @@ function isFavoritePhoto(url){
 
 async function toggleFavoritePhoto(url,button){
   const me=getUploaderIdentity();
+  if(!me.uploaderId||!me.uploaderToken){
+    alert('無法確認目前登入帳號，請重新登入。');
+    return;
+  }
   try{
     const data=await hikingApi('/api/favorite',{
       method:'POST',
@@ -1659,6 +1672,10 @@ async function uploadBatchWithRetry(path,options,retries=2){
 }
 
 async function saveAlbum(){
+  if(!BOOKWIDE_USER?.id){
+    location.href=bookWideLoginUrl();
+    return;
+  }
   const isHistory=albumEntryMode==='history';
 
   let date='';
@@ -1819,8 +1836,10 @@ async function togglePhotoAdminMode(){
 
 
 function currentUploaderOwns(url){
+  if(!BOOKWIDE_USER?.id) return false;
   const me=getUploaderIdentity();
-  return (state.photoOwners||{})[url]===me.uploaderId;
+  const owner=String((state.photoOwners||{})[url]||'');
+  return !!me.uploaderId && owner===me.uploaderId;
 }
 
 function toggleOwnerPhotoMenu(id,event){
