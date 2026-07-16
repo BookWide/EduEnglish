@@ -204,6 +204,17 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
 
 
 
+
+/* ===== 公告：單日／多日＋Journey 套用 ===== */
+.notice-plan-box{margin-top:14px;border:1px solid var(--line);border-radius:15px;background:#fbfdfb;padding:13px}
+.notice-plan-grid{display:grid;grid-template-columns:.75fr .9fr .9fr .8fr .8fr 1.2fr;gap:9px;align-items:end}
+.notice-mode-tabs{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:10px}
+.notice-mode-btn{border:1px solid var(--line);background:#fff;border-radius:999px;padding:8px 12px;font-weight:900;cursor:pointer}
+.notice-mode-btn.active{background:var(--green);color:#fff;border-color:var(--green)}
+.notice-help{margin-top:8px;padding:9px 11px;border-radius:11px;background:#eef7f0;color:#365842;font-size:13px;line-height:1.55}
+@media(max-width:1050px){.notice-plan-grid{grid-template-columns:1fr 1fr 1fr}}
+@media(max-width:680px){.notice-plan-grid{grid-template-columns:1fr}.notice-mode-tabs{display:grid;grid-template-columns:1fr 1fr}}
+
 /* ===== 多來源找行程＋多天推薦 ===== */
 .route-source-actions{display:flex;gap:8px;flex-wrap:wrap}
 .route-source-actions .btn{min-width:150px}
@@ -398,13 +409,56 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   <div class="card">
     <div class="toolbar">
       <div>
-        <h2 style="margin:0">山行公告</h2>
-        <p class="small" style="margin:8px 0 0">活動資訊與討論都集中在這裡，不再有第二個公告入口。</p>
+        <h2 style="margin:0">山行／旅行公告</h2>
+        <p class="small" style="margin:8px 0 0">單日活動可設定起訖時間；多日活動可設定起訖日期、時間，並直接套入 journeys.html 已規劃的每日行程。</p>
       </div>
       <div id="noticeAdminActions" class="btns" style="margin-top:0;display:none">
-        <button class="btn" onclick="makePost()">產生單週公告</button>
+        <button class="btn" onclick="makePost()">產生活動公告</button>
         <button class="btn secondary" onclick="makeMonthPost()">產生未來 4 週</button>
         <button class="btn gold" onclick="copyPost()">📋 複製公告</button>
+      </div>
+    </div>
+
+    <div id="noticePlanBox" class="notice-plan-box">
+      <div class="notice-mode-tabs">
+        <button id="noticeModeSingleBtn" class="notice-mode-btn active" type="button" onclick="setNoticeMode('single')">單日活動</button>
+        <button id="noticeModeMultiBtn" class="notice-mode-btn" type="button" onclick="setNoticeMode('multi')">多日行程</button>
+      </div>
+
+      <div class="notice-plan-grid">
+        <div class="field">
+          <label>活動類型</label>
+          <select id="noticeMode" onchange="setNoticeMode(this.value)">
+            <option value="single">單日</option>
+            <option value="multi">多日</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>出發日期</label>
+          <input id="noticeStartDate" type="date" onchange="syncNoticeDates()">
+        </div>
+        <div class="field">
+          <label>回程日期</label>
+          <input id="noticeEndDate" type="date">
+        </div>
+        <div class="field">
+          <label>出發時間</label>
+          <input id="noticeStartTime" type="time" value="08:00">
+        </div>
+        <div class="field">
+          <label>結束／回程時間</label>
+          <input id="noticeEndTime" type="time" value="17:00">
+        </div>
+        <div class="field" id="noticeJourneyField" style="display:none">
+          <label>套用 Journey 行程</label>
+          <select id="noticeJourneySelect" onchange="previewNoticeJourney()">
+            <option value="">不套用 Journey</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="noticeJourneyHint" class="notice-help">
+        單日活動：公告會顯示活動日期、開始時間與預計結束時間。
       </div>
     </div>
   </div>
@@ -1018,6 +1072,10 @@ async function init(){
   let sat=nextSaturday(new Date());
   $('fDate').value=localDate(sat);
   if($('fEndDate')) $('fEndDate').value=localDate(sat);
+  if($('noticeStartDate')) $('noticeStartDate').value=localDate(sat);
+  if($('noticeEndDate')) $('noticeEndDate').value=localDate(sat);
+  loadNoticeJourneys();
+  setNoticeMode('single');
   $('aDate').value=localDate(sat);
   $('fTime').value='half';
   $('fLevel').value='A';
@@ -1775,7 +1833,12 @@ async function saveCurrentNotice(showMessage=false){
     body:JSON.stringify({
       text,
       route_name:state.selected?.name_zh||'',
-      planned_date:$('fDate')?.value||'',
+      planned_date:$('noticeStartDate')?.value||$('fDate')?.value||'',
+      planned_end_date:$('noticeEndDate')?.value||$('noticeStartDate')?.value||'',
+      start_time:$('noticeStartTime')?.value||'',
+      end_time:$('noticeEndTime')?.value||'',
+      activity_mode:$('noticeMode')?.value||'single',
+      journey_id:$('noticeJourneySelect')?.value||'',
       updated_by:String(BOOKWIDE_USER?.email||'admin')
     })
   });
@@ -1844,32 +1907,143 @@ function makeMonthPost(){
   openNoticePage();
 }
 
+
+const JOURNEY_LOCAL_KEY='bookwide_journeys_local_v1';
+let NOTICE_MODE='single';
+
+function localJourneys(){
+  try{
+    const rows=JSON.parse(localStorage.getItem(JOURNEY_LOCAL_KEY)||'[]');
+    return Array.isArray(rows)?rows:[];
+  }catch(e){return[]}
+}
+function getNoticeJourney(){
+  const id=$('noticeJourneySelect')?.value||'';
+  return localJourneys().find(x=>String(x.id)===String(id))||null;
+}
+function setNoticeMode(mode){
+  NOTICE_MODE=mode==='multi'?'multi':'single';
+  if($('noticeMode')) $('noticeMode').value=NOTICE_MODE;
+  $('noticeModeSingleBtn')?.classList.toggle('active',NOTICE_MODE==='single');
+  $('noticeModeMultiBtn')?.classList.toggle('active',NOTICE_MODE==='multi');
+  if($('noticeJourneyField')) $('noticeJourneyField').style.display=NOTICE_MODE==='multi'?'block':'none';
+
+  const start=$('noticeStartDate')?.value||$('fDate')?.value||localDate(nextSaturday());
+  if($('noticeStartDate')&&!$('noticeStartDate').value) $('noticeStartDate').value=start;
+  if($('noticeEndDate')){
+    if(NOTICE_MODE==='single') $('noticeEndDate').value=start;
+    else if(!$('noticeEndDate').value||$('noticeEndDate').value<start) $('noticeEndDate').value=start;
+  }
+
+  if($('noticeJourneyHint')){
+    $('noticeJourneyHint').textContent=NOTICE_MODE==='single'
+      ?'單日活動：公告會顯示活動日期、開始時間與預計結束時間。'
+      :'多日行程：可手動設定日期與時間，也可直接套入 journeys.html 已建立的 Day 0～Day N 行程。';
+  }
+}
+function syncNoticeDates(){
+  const start=$('noticeStartDate')?.value||'';
+  if(!start)return;
+  if(NOTICE_MODE==='single'){
+    $('noticeEndDate').value=start;
+  }else if(!$('noticeEndDate').value||$('noticeEndDate').value<start){
+    $('noticeEndDate').value=start;
+  }
+}
+function loadNoticeJourneys(){
+  const sel=$('noticeJourneySelect');if(!sel)return;
+  const current=sel.value;
+  const rows=localJourneys();
+  sel.innerHTML='<option value="">不套用 Journey</option>'+rows.map(j=>
+    `<option value="${escHtml(j.id)}">${escHtml(j.title||'未命名旅程')}｜${escHtml(j.start||'')}～${escHtml(j.end||'')}</option>`
+  ).join('');
+  if(rows.some(x=>String(x.id)===String(current))) sel.value=current;
+}
+function previewNoticeJourney(){
+  const j=getNoticeJourney();
+  if(!j){
+    if($('noticeJourneyHint')) $('noticeJourneyHint').textContent='多日行程：可手動設定日期與時間，也可直接套入 journeys.html 已建立的 Day 0～Day N 行程。';
+    return;
+  }
+  if($('noticeStartDate')) $('noticeStartDate').value=j.start||$('noticeStartDate').value;
+  if($('noticeEndDate')) $('noticeEndDate').value=j.end||j.start||$('noticeEndDate').value;
+  const count=Array.isArray(j.days)?j.days.length:0;
+  if($('noticeJourneyHint')) $('noticeJourneyHint').textContent=`已選：${j.title||'未命名旅程'}，將套入 ${count} 天行程。`;
+}
+function noticeDateLabel(dateText){
+  if(!dateText)return'';
+  const d=parseDate(dateText);
+  return `${dateText}（${zhWeekday(d)}）`;
+}
+function journeyDayText(day,index){
+  const title=day.title?`｜${day.title}`:'';
+  const lines=[];
+  lines.push(`Day ${Number.isFinite(Number(day.day_no))?day.day_no:index}｜${day.date||''}${title}`);
+  const plan=String(day.plan||day.planned_route||'').trim();
+  const actual=String(day.actual||day.actual_route||'').trim();
+  const hotel=String(day.hotel||'').trim();
+  const gps=String(day.gps_url||'').trim();
+  const note=String(day.note||day.notes||'').trim();
+  if(plan) lines.push(`行程：${plan.replace(/\n+/g,' → ')}`);
+  else if(actual) lines.push(`行程：${actual.replace(/\n+/g,' → ')}`);
+  if(hotel) lines.push(`住宿：${hotel}`);
+  if(gps) lines.push(`地圖：${gps}`);
+  if(note) lines.push(`備註：${note.replace(/\n+/g,'；')}`);
+  return lines.join('\n');
+}
+
 async function makePost(id){
   if(id) chooseRoute(id);
+
+  const mode=$('noticeMode')?.value||NOTICE_MODE||'single';
+  const startDate=$('noticeStartDate')?.value||$('fDate')?.value||localDate(nextSaturday());
+  const endDate=mode==='single'?startDate:($('noticeEndDate')?.value||startDate);
+  const startTime=$('noticeStartTime')?.value||'08:00';
+  const endTime=$('noticeEndTime')?.value||'17:00';
+
+  if(endDate<startDate){
+    alert('回程日期不可早於出發日期。');
+    return;
+  }
+
+  const journey=mode==='multi'?getNoticeJourney():null;
   let r=state.selected;
-  if(!r){postBoxSet('請先選一條路線。');return}
-  let d=$('fDate').value||localDate(nextSaturday());
-  let total=adjustedDurationText(r);
-  let place=firstNonEmpty(r,['meeting_point','meeting_place','trailhead','parking','parking_place'])||'報名後公告';
-  let map=r.external_url||routeMapQuery(r);
-  let rain=r.rain_policy||'週五依天氣最後確認，必要時改短線或山下備案。';
-  let note=r.notice||'主辦人可依天氣、人數與當天體力調整。';
-  let text=`${d}（六）${r.name_zh||''}
+
+  if(mode==='single'&&!r){
+    postBoxSet('請先選一條路線。');
+    return;
+  }
+  if(mode==='multi'&&!journey&&!r){
+    postBoxSet('請選擇 Journey，或先選一條路線作為多日行程主題。');
+    return;
+  }
+
+  let text='';
+
+  if(mode==='single'){
+    const total=adjustedDurationText(r);
+    const place=firstNonEmpty(r,['meeting_point','meeting_place','trailhead','parking','parking_place'])||'報名後公告';
+    const map=r.external_url||routeMapQuery(r);
+    const rain=r.rain_policy||'週五依天氣最後確認，必要時改短線或山下備案。';
+    const note=r.notice||'主辦人可依天氣、人數與當天體力調整。';
+
+    text=`${noticeDateLabel(startDate)} ${r.name_zh||''}
 地區：${r.city||''} ${r.area||''}  難度：${levelName(r.level)}
+活動時間：${startTime} ～ ${endTime}
 活動時間估算：${total}
-集合時間：AM: 8:00
+集合時間：${startTime}
 集合地點：${place}
-地圖參考： ${map}
+地圖參考：${map}
 
 ✅ 請攜帶：
-雨具、防滑鞋、飲水、
+雨具、防滑鞋、飲水
 
 🌧 天氣提醒：
 ${rain}
 
 備註：${note}
-可以一起爬爬爬的 請報:
-    姓名／人數／開車或搭車／是否可載人
+可以一起參加的請報：
+姓名／人數／開車或搭車／是否可載人
 
 1:
 2:
@@ -1881,6 +2055,47 @@ ${rain}
 8:
 9:
 10:`;
+  }else{
+    const title=journey?.title||r?.name_zh||'多日行程';
+    const countryCity=[journey?.country,journey?.city].filter(Boolean).join('／');
+    const people=Number(journey?.participants?.length||journey?.people||0);
+    const days=Array.isArray(journey?.days)?journey.days:[];
+    const journeyLines=days.length
+      ? days.map((d,i)=>journeyDayText(d,i)).join('\n\n')
+      : `Day 0｜${startDate}\n行程：${r?.name_zh||'行程待補'}`;
+
+    text=`${noticeDateLabel(startDate)} ～ ${noticeDateLabel(endDate)}
+${title}
+${countryCity?`地區：${countryCity}\n`:''}活動時間：出發 ${startTime}／回程 ${endTime}
+${people?`預計人數：${people} 人\n`:''}
+📅 行程規劃：
+${journeyLines}
+
+✅ 共同準備：
+護照／證件、個人藥品、雨具、飲水、充電設備
+（其他裝備依各 Day 行程補充）
+
+🏨 航班與住宿：
+請查看 Journey 內的航班、住宿與訂房資料。
+
+🌧 天氣提醒：
+出發前依各地最新天氣確認；必要時調整每日行程。
+
+可以一起參加的請報：
+姓名／人數／房型或床位需求／飲食需求／緊急聯絡方式
+
+1:
+2:
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+10:`;
+  }
+
   postBoxSet(text);
   await saveCurrentNotice(false);
   openNoticePage();
