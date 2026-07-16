@@ -167,6 +167,28 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
 .group-denied h2{margin-top:0}
 .group-denied p{color:var(--muted);line-height:1.65}
 
+
+/* ===== 群主邀請群友 ===== */
+.group-member-panel{margin-top:14px;border-top:1px solid var(--line);padding-top:14px}
+.group-member-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;align-items:end}
+.group-member-list{display:grid;gap:8px;margin-top:12px}
+.group-member-row{
+  display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:8px;align-items:center;
+  border:1px solid var(--line);border-radius:12px;background:#f8faf8;padding:9px 10px;
+}
+.group-member-email{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:800}
+.group-member-role{border-radius:999px;background:var(--green2);color:var(--green);padding:4px 8px;font-size:12px;font-weight:900}
+.group-member-remove{border:1px solid #efb6af;border-radius:999px;background:#fff;color:var(--red);padding:6px 9px;font-weight:900;cursor:pointer}
+.group-member-remove:disabled{opacity:.55;cursor:wait}
+.group-invite-status{margin-top:9px;font-size:13px;font-weight:800}
+.group-invite-status.ok{color:var(--green)}
+.group-invite-status.err{color:var(--red)}
+@media(max-width:600px){
+  .group-member-form{grid-template-columns:1fr}
+  .group-member-row{grid-template-columns:minmax(0,1fr) auto}
+  .group-member-remove{grid-column:2}
+}
+
 /* ===== BookWide 山行 V2 ===== */
 .admin-menu-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .admin-menu-card{border:1px solid var(--line);border-radius:16px;background:#fff;padding:16px;cursor:pointer;text-align:left}
@@ -207,6 +229,7 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   <span>目前群組：</span>
   <b id="currentGroupName">讀取中…</b>
   <span id="currentGroupRole" class="group-role-badge"></span>
+  <select id="adminGroupSwitcher" style="display:none;margin-left:auto;border:1px solid var(--line);border-radius:999px;padding:7px 10px;background:#fff;font-weight:900" onchange="switchAdminGroup(this.value)"></select>
 </div>
 <section id="sec-find" class="section active">
   <div class="v3-hero">
@@ -381,6 +404,33 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
         <b>🖼 照片管理</b>
         <span>管理活動相簿與需要移除的照片。</span>
       </button>
+      <button class="admin-menu-card" onclick="openGroupMemberManager()">
+        <b>👥 邀請群友</b>
+        <span>輸入已註冊 BookWide 的 Email，加入目前群組。</span>
+      </button>
+    </div>
+
+    <div id="groupMemberPanel" class="group-member-panel" style="display:none">
+      <div class="toolbar">
+        <div>
+          <h3 style="margin:0">邀請群友加入 <span id="memberPanelGroupName"></span></h3>
+          <p class="small" style="margin:6px 0 0">對方必須先完成 BookWide 註冊；加入群組不會改變訂閱與金幣。</p>
+        </div>
+        <button class="btn gray" type="button" onclick="closeGroupMemberManager()">收起</button>
+      </div>
+
+      <div class="group-member-form" style="margin-top:12px">
+        <div class="field">
+          <label>BookWide 帳號 Email</label>
+          <input id="groupInviteEmail" type="email" placeholder="member@example.com">
+        </div>
+        <button id="groupInviteBtn" class="btn" type="button" onclick="inviteGroupMember(this)">加入群組</button>
+      </div>
+
+      <div id="groupInviteStatus" class="group-invite-status"></div>
+      <div id="groupMemberList" class="group-member-list">
+        <div class="empty">尚未讀取群員。</div>
+      </div>
     </div>
   </div>
 </section>
@@ -398,7 +448,7 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
 
 /* ========= BookWide 共用登入 ========= */
 const BOOKWIDE_SUPABASE_URL='https://jeajrwpmrgczimmrflxo.supabase.co';
-const BOOKWIDE_SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJIUzI1NiIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
+const BOOKWIDE_SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 const bookwideSupa=window.bookwideSupa || window.supabase.createClient(
   BOOKWIDE_SUPABASE_URL,
   BOOKWIDE_SUPABASE_ANON_KEY,
@@ -484,25 +534,25 @@ async function resolveBookWideGroupAccess(user){
   let selected=null;
 
   if(BOOKWIDE_IS_SUPER_ADMIN){
-    // 最高權限：可由 ?group= 指定任何群；沒有指定時先取第一個群。
-    let targetId=requested;
-    if(!targetId){
-      const {data:firstGroup}=await bookwideSupa
-        .from('community_groups')
-        .select('id,name,status')
-        .eq('status','active')
-        .order('created_at',{ascending:true})
-        .limit(1)
-        .maybeSingle();
-      if(firstGroup) selected={...firstGroup,role:'super_admin'};
+    // BookWide Admin 最高權限：不需要加入群組，也能進入所有 active 群。
+    // 有 ?group= 時進指定群；沒有時自動進第一個 active 群。
+    const {data:allGroups,error:groupsError}=await bookwideSupa
+      .from('community_groups')
+      .select('id,name,status,created_at')
+      .eq('status','active')
+      .order('created_at',{ascending:true});
+
+    if(groupsError){
+      return {ok:false,reason:'group_table',message:groupsError.message};
     }
-    if(targetId){
-      const {data:g}=await bookwideSupa
-        .from('community_groups')
-        .select('id,name,status')
-        .eq('id',targetId)
-        .maybeSingle();
-      if(g) selected={...g,role:'super_admin'};
+
+    const activeGroups=Array.isArray(allGroups)?allGroups:[];
+    if(requested){
+      const target=activeGroups.find(g=>g.id===requested);
+      if(target) selected={...target,role:'super_admin'};
+    }
+    if(!selected && activeGroups.length){
+      selected={...activeGroups[0],role:'super_admin'};
     }
   }else{
     // 一般帳號：只能進自己所屬群組。
@@ -534,6 +584,36 @@ async function resolveBookWideGroupAccess(user){
   return {ok:true,group:selected};
 }
 
+async function setupAdminGroupSwitcher(){
+  const sel=document.getElementById('adminGroupSwitcher');
+  if(!sel) return;
+  if(!BOOKWIDE_IS_SUPER_ADMIN){
+    sel.style.display='none';
+    return;
+  }
+
+  const {data,error}=await bookwideSupa
+    .from('community_groups')
+    .select('id,name,status,created_at')
+    .eq('status','active')
+    .order('created_at',{ascending:true});
+
+  if(error){
+    console.warn('admin group switcher',error);
+    sel.style.display='none';
+    return;
+  }
+
+  const rows=Array.isArray(data)?data:[];
+  sel.innerHTML=rows.map(g=>`<option value="${escHtml(g.id)}" ${g.id===BOOKWIDE_GROUP_ID?'selected':''}>切換：${escHtml(g.name)}</option>`).join('');
+  sel.style.display=rows.length?'block':'none';
+}
+
+function switchAdminGroup(groupId){
+  if(!BOOKWIDE_IS_SUPER_ADMIN || !groupId) return;
+  location.href='/m-hiking.html?group='+encodeURIComponent(groupId);
+}
+
 function applyCurrentGroupUi(){
   const banner=document.getElementById('groupAccessBanner');
   const nameEl=document.getElementById('currentGroupName');
@@ -546,6 +626,7 @@ function applyCurrentGroupUi(){
       BOOKWIDE_ROLE==='group_admin'?'群主':'群友';
   }
   if(banner) banner.style.display='flex';
+  setupAdminGroupSwitcher();
 
   document.querySelectorAll('.brand b,.v3-hero h1').forEach(el=>{
     el.textContent=BOOKWIDE_GROUP_NAME||'BookWide Mountain';
@@ -596,7 +677,8 @@ async function requireBookWideLogin(){
 
     const msg=
       access.reason==='paused'?'此帳號已被暫停使用。':
-      access.reason==='member_table'?'群組資料表讀取失敗：'+(access.message||'請聯絡 BookWide Admin。'):
+      access.reason==='member_table'?'群組成員資料讀取失敗：'+(access.message||'請聯絡 BookWide Admin。'):
+      access.reason==='group_table'?'群組資料讀取失敗：'+(access.message||'請聯絡 BookWide Admin。'):
       '此帳號尚未被加入任何群組，請聯絡 BookWide Admin 指定群組。';
 
     showGroupAccessDenied(msg);
@@ -973,6 +1055,150 @@ async function adminManageActivities(){
   }
 }
 
+
+
+function setGroupInviteStatus(message,type=''){
+  const el=$('groupInviteStatus');
+  if(!el) return;
+  el.textContent=message||'';
+  el.className='group-invite-status '+type;
+}
+
+async function openGroupMemberManager(){
+  if(!BOOKWIDE_IS_ADMIN){
+    alert('只有本群群主或 BookWide Admin 可以邀請群友。');
+    return;
+  }
+  const panel=$('groupMemberPanel');
+  if(panel) panel.style.display='block';
+  if($('memberPanelGroupName')) $('memberPanelGroupName').textContent=BOOKWIDE_GROUP_NAME||BOOKWIDE_GROUP_ID;
+  await loadCurrentGroupMembers();
+  panel?.scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function closeGroupMemberManager(){
+  const panel=$('groupMemberPanel');
+  if(panel) panel.style.display='none';
+}
+
+async function loadCurrentGroupMembers(){
+  if(!BOOKWIDE_GROUP_ID) return;
+  const box=$('groupMemberList');
+  if(box) box.innerHTML='<div class="empty">讀取群員中…</div>';
+
+  const {data,error}=await bookwideSupa
+    .from('community_group_members')
+    .select('group_id,user_email,role,created_at')
+    .eq('group_id',BOOKWIDE_GROUP_ID)
+    .order('created_at',{ascending:true});
+
+  if(error){
+    if(box) box.innerHTML='<div class="empty">讀取失敗：'+escHtml(error.message)+'</div>';
+    return;
+  }
+
+  const rows=Array.isArray(data)?data:[];
+  if(!rows.length){
+    if(box) box.innerHTML='<div class="empty">目前尚無群員。</div>';
+    return;
+  }
+
+  if(box) box.innerHTML=rows.map(m=>{
+    const email=String(m.user_email||'');
+    const role=m.role==='group_admin'?'群主':'群友';
+    const canRemove=m.role!=='group_admin' || BOOKWIDE_IS_SUPER_ADMIN;
+    return `<div class="group-member-row">
+      <div class="group-member-email" title="${escHtml(email)}">${escHtml(email)}</div>
+      <span class="group-member-role">${role}</span>
+      ${canRemove
+        ? `<button class="group-member-remove" type="button" onclick="removeGroupMember('${email.replace(/'/g,"&#39;")}',this)">移除</button>`
+        : '<span class="small">由 Admin 指定</span>'}
+    </div>`;
+  }).join('');
+}
+
+async function inviteGroupMember(button){
+  if(!BOOKWIDE_IS_ADMIN){
+    alert('只有本群群主或 BookWide Admin 可以邀請群友。');
+    return;
+  }
+
+  const email=normalizeEmail($('groupInviteEmail')?.value);
+  if(!email || !email.includes('@')){
+    setGroupInviteStatus('請輸入正確的 BookWide 帳號 Email。','err');
+    return;
+  }
+
+  const oldText=button?.textContent||'加入群組';
+  if(button){button.disabled=true;button.textContent='確認帳號…';}
+
+  try{
+    // 先確認對方已經是 BookWide 註冊帳號。
+    const {data:profile,error:profileError}=await bookwideSupa
+      .from('profiles')
+      .select('email,is_paused')
+      .eq('email',email)
+      .maybeSingle();
+
+    if(profileError) throw profileError;
+    if(!profile) throw new Error('找不到此 BookWide 註冊帳號。請對方先註冊。');
+    if(profile.is_paused) throw new Error('此帳號目前已被暫停。');
+
+    if(button) button.textContent='加入中…';
+
+    // 群主只能邀請成群友；群主角色仍由 BookWide Admin 在第 17 項指定。
+    const {error}=await bookwideSupa
+      .from('community_group_members')
+      .upsert({
+        group_id:BOOKWIDE_GROUP_ID,
+        user_email:email,
+        role:'member'
+      },{onConflict:'group_id,user_email'});
+
+    if(error) throw error;
+
+    $('groupInviteEmail').value='';
+    setGroupInviteStatus(email+' 已加入 '+BOOKWIDE_GROUP_NAME+'。','ok');
+    await loadCurrentGroupMembers();
+  }catch(e){
+    setGroupInviteStatus('加入失敗：'+e.message,'err');
+  }finally{
+    if(button){button.disabled=false;button.textContent=oldText;}
+  }
+}
+
+async function removeGroupMember(email,button){
+  if(!BOOKWIDE_IS_ADMIN) return;
+  if(!confirm('確定把 '+email+' 移出 '+BOOKWIDE_GROUP_NAME+'？')) return;
+
+  if(button) button.disabled=true;
+  try{
+    const {data:target,error:readError}=await bookwideSupa
+      .from('community_group_members')
+      .select('role')
+      .eq('group_id',BOOKWIDE_GROUP_ID)
+      .eq('user_email',normalizeEmail(email))
+      .maybeSingle();
+
+    if(readError) throw readError;
+    if(target?.role==='group_admin' && !BOOKWIDE_IS_SUPER_ADMIN){
+      throw new Error('群主不能移除群主；請由 BookWide Admin 處理。');
+    }
+
+    const {error}=await bookwideSupa
+      .from('community_group_members')
+      .delete()
+      .eq('group_id',BOOKWIDE_GROUP_ID)
+      .eq('user_email',normalizeEmail(email));
+
+    if(error) throw error;
+    setGroupInviteStatus(email+' 已移出群組。','ok');
+    await loadCurrentGroupMembers();
+  }catch(e){
+    setGroupInviteStatus('移除失敗：'+e.message,'err');
+    if(button) button.disabled=false;
+  }
+}
 
 function lineUnlocked(){return sessionStorage.getItem('bw_line_unlocked')==='1'}
 function showLineProtected(btn){
