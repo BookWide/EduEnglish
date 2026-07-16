@@ -14,6 +14,28 @@
 .photo-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
 .photo-tile{position:relative;border-radius:14px;overflow:hidden;background:#eef4ee;border:1px solid var(--line);cursor:pointer;aspect-ratio:4/3;display:flex;align-items:center;justify-content:center;color:var(--muted);font-weight:900}
 .photo-tile img{width:100%;height:100%;object-fit:cover;display:block;transition:transform .18s ease}.photo-tile:hover img{transform:scale(1.04)}
+.photo-download-btn{
+  position:absolute;right:7px;bottom:7px;z-index:8;border:0;border-radius:999px;
+  background:rgba(255,255,255,.95);color:#176b35;font-weight:950;padding:7px 10px;
+  cursor:pointer;box-shadow:0 3px 12px rgba(0,0,0,.22);font-size:12px;
+}
+.photo-download-btn:hover{background:#fff;transform:translateY(-1px)}
+.photo-download-btn:disabled{opacity:.65;cursor:wait;transform:none}
+.photo-modal-actions{
+  position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:102;
+  display:flex;gap:8px;align-items:center;padding:8px;border-radius:999px;
+  background:rgba(255,255,255,.96);box-shadow:0 8px 28px rgba(0,0,0,.30);
+}
+.photo-modal-download{
+  border:0;border-radius:999px;background:var(--green);color:#fff;
+  padding:10px 16px;font-weight:950;cursor:pointer;white-space:nowrap;
+}
+@media(max-width:520px){
+  .photo-download-btn{right:5px;bottom:5px;padding:6px 8px;font-size:11px}
+  .photo-modal-actions{bottom:max(12px,env(safe-area-inset-bottom));}
+  .photo-modal-download{padding:9px 14px;font-size:13px}
+}
+
 .photo-delete-btn{display:none;position:absolute;right:7px;top:7px;z-index:3;border:0;border-radius:999px;background:rgba(200,64,50,.94);color:#fff;font-weight:900;padding:7px 10px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.22)}
 body.photo-admin-mode .photo-delete-btn{display:block}
 .photo-delete-btn:hover{filter:brightness(.92)}
@@ -308,7 +330,13 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   </div>
 </section>
 </main>
-<div id="photoModal" class="photo-modal" onclick="closePhotoModal()"><button class="photo-close" onclick="closePhotoModal(event)">關閉</button><img id="photoModalImg" alt="活動照片"></div>
+<div id="photoModal" class="photo-modal" onclick="closePhotoModal()">
+  <button class="photo-close" onclick="closePhotoModal(event)">關閉</button>
+  <img id="photoModalImg" alt="活動照片">
+  <div class="photo-modal-actions" onclick="event.stopPropagation()">
+    <button id="photoModalDownloadBtn" class="photo-modal-download" type="button" onclick="downloadCurrentModalPhoto(this)">⬇ 下載原圖</button>
+  </div>
+</div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
 <script>
 
@@ -346,7 +374,6 @@ function renderBookWideAuth(user){
   const roleLabel=BOOKWIDE_ROLE==='admin'?'管理人':'群友';
   box.innerHTML=`
     <span class="auth-email" title="${email.replace(/"/g,'&quot;')}">${email}｜${roleLabel}</span>
-    <a class="auth-link" href="/account/profile.html">我的空間</a>
     <a class="auth-link primary" href="/index.html">瀏覽教材</a>
     <button class="auth-logout" type="button" onclick="bookWideLogout()">登出</button>`;
 }
@@ -1668,6 +1695,8 @@ function renderPhotoTileForView(url,{showOwnerDelete=false}={}){
       </div>`:''}
     
     <input class="admin-photo-check" type="checkbox" value="${escHtml(url)}" onclick="event.stopPropagation();updateAdminSelectionCount()">
+    <button class="photo-download-btn" type="button" title="下載原圖"
+      onclick="event.stopPropagation();downloadPhotoToDevice('${String(url).replace(/'/g,"%27")}',this)">⬇ 下載</button>
     <img src="${escHtml(url)}" loading="lazy" onerror="this.parentNode.innerHTML='照片失效'">
   </div>`;
 }
@@ -2118,8 +2147,61 @@ function toggleOwnerPhotoMenu(id,event){
   if(menu) menu.classList.toggle('active');
 }
 
+function safePhotoFilename(url){
+  try{
+    const u=new URL(url,location.href);
+    let name=decodeURIComponent((u.pathname.split('/').pop()||'').trim());
+    name=name.replace(/[\\/:*?"<>|]+/g,'_');
+    if(!/\.(jpe?g|png|webp|gif)$/i.test(name)) name=(name||'BookWide-photo')+'.jpg';
+    return name||('BookWide-photo-'+Date.now()+'.jpg');
+  }catch(e){
+    return 'BookWide-photo-'+Date.now()+'.jpg';
+  }
+}
+
+async function downloadPhotoToDevice(url,button){
+  if(!url) return;
+  const oldText=button?.textContent||'⬇ 下載';
+  if(button){button.disabled=true;button.textContent='下載中…';}
+  try{
+    const res=await fetch(url,{mode:'cors',cache:'no-store'});
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    const blob=await res.blob();
+    const filename=safePhotoFilename(url);
+    const file=new File([blob],filename,{type:blob.type||'image/jpeg'});
+
+    // 手機優先叫出系統分享／儲存選單，使用者可存到「照片」或「檔案」。
+    if(navigator.canShare && navigator.share && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file],title:filename});
+      return;
+    }
+
+    // 電腦與支援 download 的瀏覽器直接下載到預設下載資料夾。
+    const objectUrl=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=objectUrl;
+    a.download=filename;
+    a.rel='noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(()=>URL.revokeObjectURL(objectUrl),1500);
+  }catch(e){
+    // iPhone/Safari 或 R2 CORS 不允許時，開啟原圖，讓使用者長按儲存。
+    window.open(url,'_blank','noopener');
+    alert('已開啟原圖。手機請長按照片選「儲存到照片」；電腦可按右鍵另存圖片。');
+  }finally{
+    if(button){button.disabled=false;button.textContent=oldText;}
+  }
+}
+
 function downloadPhoto(url){
-  window.open(url,'_blank','noopener');
+  downloadPhotoToDevice(url,null);
+}
+
+function downloadCurrentModalPhoto(button){
+  const img=$('photoModalImg'); const url=img?.dataset?.originalUrl||img?.src||'';
+  downloadPhotoToDevice(url,button);
 }
 
 function closeOwnerMenus(){
@@ -2225,7 +2307,13 @@ async function deleteSinglePhoto(url,button){
   }
 }
 
-function openPhotoModal(url){$('photoModalImg').src=url;$('photoModal').classList.add('active')}
+function openPhotoModal(url){
+  $('photoModalImg').src=url;
+  $('photoModalImg').dataset.originalUrl=url;
+  const b=$('photoModalDownloadBtn');
+  if(b){b.disabled=false;b.textContent='⬇ 下載原圖';}
+  $('photoModal').classList.add('active');
+}
 function closePhotoModal(ev){if(ev){ev.stopPropagation()}$('photoModal').classList.remove('active')}
 function photoGridHtml(urls){
   urls=[...new Set((urls||[]).map(normalizePhotoUrl).filter(isImageUrl))];
