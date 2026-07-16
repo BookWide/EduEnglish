@@ -21,6 +21,37 @@
 }
 .photo-download-btn:hover{background:#fff;transform:translateY(-1px)}
 .photo-download-btn:disabled{opacity:.65;cursor:wait;transform:none}
+.photo-pick-check{
+  position:absolute;left:7px;top:7px;z-index:12;width:24px;height:24px;
+  accent-color:var(--green);cursor:pointer;filter:drop-shadow(0 2px 4px rgba(0,0,0,.25));
+}
+.photo-tile:has(.photo-pick-check:checked){
+  outline:4px solid rgba(43,122,66,.68);outline-offset:-4px;
+}
+.photo-tile .photo-owner-badge{top:38px}
+.photo-batch-bar{
+  position:sticky;top:105px;z-index:18;display:flex;align-items:center;justify-content:space-between;
+  gap:10px;flex-wrap:wrap;margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);
+  border-radius:14px;background:rgba(255,255,255,.96);box-shadow:0 8px 22px rgba(20,45,28,.12);
+  backdrop-filter:blur(10px);
+}
+.photo-batch-left{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-weight:900}
+.photo-batch-count{color:var(--green)}
+.photo-batch-actions{display:flex;gap:7px;flex-wrap:wrap}
+.photo-batch-btn{
+  border:1px solid var(--green);border-radius:999px;background:#fff;color:var(--green);
+  padding:8px 11px;font-weight:900;cursor:pointer;
+}
+.photo-batch-btn.primary{background:var(--green);color:#fff}
+.photo-batch-btn:disabled{opacity:.55;cursor:wait}
+@media(max-width:520px){
+  .photo-pick-check{left:5px;top:5px;width:22px;height:22px}
+  .photo-tile .photo-owner-badge{top:33px;left:5px;font-size:10px;padding:3px 6px}
+  .photo-batch-bar{top:92px;padding:8px;gap:7px}
+  .photo-batch-actions{width:100%;display:grid;grid-template-columns:1fr 1fr 1.35fr}
+  .photo-batch-btn{padding:8px 5px;font-size:11px}
+}
+
 .photo-modal-actions{
   position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:102;
   display:flex;gap:8px;align-items:center;padding:8px;border-radius:999px;
@@ -337,6 +368,7 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
     <button id="photoModalDownloadBtn" class="photo-modal-download" type="button" onclick="downloadCurrentModalPhoto(this)">⬇ 下載原圖</button>
   </div>
 </div>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
 <script>
 
@@ -1694,6 +1726,8 @@ function renderPhotoTileForView(url,{showOwnerDelete=false}={}){
         <button class="danger" onclick="deleteOwnPhoto('${String(url).replace(/'/g,"%27")}',this)">刪除這張照片</button>
       </div>`:''}
     
+    <input class="photo-pick-check" type="checkbox" value="${escHtml(url)}"
+      aria-label="選取這張照片" onclick="event.stopPropagation();updatePhotoPickCount()">
     <input class="admin-photo-check" type="checkbox" value="${escHtml(url)}" onclick="event.stopPropagation();updateAdminSelectionCount()">
     <button class="photo-download-btn" type="button" title="下載原圖"
       onclick="event.stopPropagation();downloadPhotoToDevice('${String(url).replace(/'/g,"%27")}',this)">⬇ 下載</button>
@@ -2147,6 +2181,92 @@ function toggleOwnerPhotoMenu(id,event){
   if(menu) menu.classList.toggle('active');
 }
 
+
+function pickedPhotoInputs(){
+  return [...document.querySelectorAll('.photo-pick-check')];
+}
+
+function pickedPhotoUrls(){
+  return pickedPhotoInputs().filter(x=>x.checked).map(x=>x.value).filter(Boolean);
+}
+
+function updatePhotoPickCount(){
+  const count=pickedPhotoUrls().length;
+  document.querySelectorAll('[data-photo-pick-count]').forEach(x=>x.textContent=String(count));
+}
+
+function selectAllPickedPhotos(checked){
+  pickedPhotoInputs().forEach(x=>x.checked=!!checked);
+  updatePhotoPickCount();
+}
+
+function uniqueZipFilename(name,used){
+  let base=name,ext='';
+  const m=name.match(/^(.*?)(\.[^.]+)$/);
+  if(m){base=m[1];ext=m[2];}
+  let result=name,n=2;
+  while(used.has(result)){result=`${base}_${n++}${ext}`;}
+  used.add(result);
+  return result;
+}
+
+async function downloadPickedPhotos(button){
+  const urls=[...new Set(pickedPhotoUrls())];
+  if(!urls.length){alert('請先勾選要下載的照片。');return;}
+  if(urls.length===1){await downloadPhotoToDevice(urls[0],button);return;}
+  if(!window.JSZip){alert('多張下載元件尚未載入，請重新整理後再試。');return;}
+
+  const oldText=button?.textContent||'⬇ 下載已選';
+  if(button){button.disabled=true;button.textContent=`整理 0/${urls.length}`;}
+
+  try{
+    const zip=new JSZip();
+    const used=new Set();
+    let success=0;
+    for(let i=0;i<urls.length;i++){
+      if(button) button.textContent=`整理 ${i+1}/${urls.length}`;
+      try{
+        const res=await fetch(urls[i],{mode:'cors',cache:'no-store'});
+        if(!res.ok) throw new Error('HTTP '+res.status);
+        const blob=await res.blob();
+        const filename=uniqueZipFilename(safePhotoFilename(urls[i]),used);
+        zip.file(filename,blob);
+        success++;
+      }catch(e){
+        console.warn('照片下載失敗',urls[i],e);
+      }
+    }
+    if(!success) throw new Error('照片無法讀取，請確認 R2 CORS 設定。');
+
+    if(button) button.textContent='正在打包…';
+    const zipBlob=await zip.generateAsync({type:'blob',compression:'DEFLATE',compressionOptions:{level:5}});
+    const title=String(state.currentAlbumScopeTitle||'BookWide相簿').replace(/[\\/:*?"<>|]+/g,'_');
+    const filename=`${title}_${success}張照片.zip`;
+    const file=new File([zipBlob],filename,{type:'application/zip'});
+
+    // 手機優先顯示系統分享／儲存選單，可存到「檔案」。
+    if(navigator.canShare && navigator.share && navigator.canShare({files:[file]})){
+      await navigator.share({files:[file],title:filename});
+    }else{
+      const objectUrl=URL.createObjectURL(zipBlob);
+      const a=document.createElement('a');
+      a.href=objectUrl;
+      a.download=filename;
+      a.rel='noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(()=>URL.revokeObjectURL(objectUrl),3000);
+    }
+
+    if(success<urls.length) alert(`已打包 ${success} 張；另有 ${urls.length-success} 張讀取失敗。`);
+  }catch(e){
+    alert('多張下載失敗：'+e.message);
+  }finally{
+    if(button){button.disabled=false;button.textContent=oldText;}
+  }
+}
+
 function safePhotoFilename(url){
   try{
     const u=new URL(url,location.href);
@@ -2316,19 +2436,27 @@ function openPhotoModal(url){
 }
 function closePhotoModal(ev){if(ev){ev.stopPropagation()}$('photoModal').classList.remove('active')}
 function photoGridHtml(urls){
-  urls=[...new Set((urls||[]).map(normalizePhotoUrl).filter(isImageUrl))];
   if(!urls.length) return '<div class="empty" style="padding:18px">尚未貼照片網址；可先保留紀錄，之後再補 R2 相簿連結或代表照片。</div>';
   return `
+    <div class="photo-batch-bar">
+      <div class="photo-batch-left">
+        <span>勾選照片後一次下載</span>
+        <span class="photo-batch-count">已選 <b data-photo-pick-count>0</b> 張</span>
+      </div>
+      <div class="photo-batch-actions">
+        <button class="photo-batch-btn" type="button" onclick="selectAllPickedPhotos(true)">全選</button>
+        <button class="photo-batch-btn" type="button" onclick="selectAllPickedPhotos(false)">取消</button>
+        <button class="photo-batch-btn primary" type="button" onclick="downloadPickedPhotos(this)">⬇ 下載已選</button>
+      </div>
+    </div>
     <div class="btns admin-album-actions" style="margin:0 0 12px">
       <button class="btn secondary" onclick="selectAllAdminPhotos(true)">全選本頁</button>
       <button class="btn gray" onclick="selectAllAdminPhotos(false)">取消全選</button>
       <button class="btn red" onclick="adminDeleteSelectedPhotos()">刪除已勾選（<span data-admin-selected-count>0</span>）</button>
     </div>
-    <div class="photo-grid">${urls.map(u=>{
-      const own=currentUploaderOwns(u);
-      return renderPhotoTileForView(u,{showOwnerDelete:true});
-    }).join('')}</div>`;
+    <div class="photo-grid">${urls.map(u=>renderPhotoTileForView(u,{showOwnerDelete:true})).join('')}</div>`;
 }
+
 function viewAlbumRecord(key){
   state.activeAlbumKey=key;
   renderAlbum(null,key);
@@ -2395,6 +2523,7 @@ function renderAlbum(routeId,eventKey){
     }).join('');
   }
   $('albumList').innerHTML=html;
+  updatePhotoPickCount();
 }
 function toggleAlbumForm(force){
   const box=$('albumForm');
