@@ -148,6 +148,25 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
 }
 
 
+
+/* ===== 群組登入與角色 ===== */
+.group-access-banner{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  margin:0 0 14px;padding:10px 12px;border:1px solid var(--line);
+  border-radius:14px;background:#fff;box-shadow:var(--shadow);
+}
+.group-access-banner b{font-size:16px}
+.group-role-badge{
+  display:inline-flex;align-items:center;border-radius:999px;padding:4px 9px;
+  font-size:12px;font-weight:900;background:var(--green2);color:var(--green);
+}
+.group-denied{
+  max-width:720px;margin:60px auto;padding:24px;border:1px solid var(--line);
+  border-radius:18px;background:#fff;text-align:center;box-shadow:var(--shadow);
+}
+.group-denied h2{margin-top:0}
+.group-denied p{color:var(--muted);line-height:1.65}
+
 /* ===== BookWide 山行 V2 ===== */
 .admin-menu-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .admin-menu-card{border:1px solid var(--line);border-radius:16px;background:#fff;padding:16px;cursor:pointer;text-align:left}
@@ -184,6 +203,11 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   </div>
 </div><nav class="tabs" id="tabs"></nav></div></header>
 <main>
+<div id="groupAccessBanner" class="group-access-banner" style="display:none">
+  <span>目前群組：</span>
+  <b id="currentGroupName">讀取中…</b>
+  <span id="currentGroupRole" class="group-role-badge"></span>
+</div>
 <section id="sec-find" class="section active">
   <div class="v3-hero">
     <h1>BookWide Mountain</h1>
@@ -382,17 +406,19 @@ const bookwideSupa=window.bookwideSupa || window.supabase.createClient(
 );
 window.bookwideSupa=bookwideSupa;
 let BOOKWIDE_USER=null;
-let BOOKWIDE_ROLE='visitor'; // visitor | member | admin
-let BOOKWIDE_IS_ADMIN=false;
-// 登山功能只判斷登入角色，不檢查金幣或訂閱。
-// 需要金幣的教材仍由 BookWide 原本教材流程處理。
-const BOOKWIDE_HIKING_ADMINS=new Set([
-  'pmktools@gmail.com',
-  '384246452@qq.com'
-]);
+let BOOKWIDE_ROLE='visitor'; // visitor | member | group_admin | super_admin
+let BOOKWIDE_IS_ADMIN=false; // 群主或 BookWide Admin 皆為 true
+let BOOKWIDE_IS_SUPER_ADMIN=false;
+let BOOKWIDE_GROUP_ID='';
+let BOOKWIDE_GROUP_NAME='';
+let BOOKWIDE_GROUP_MEMBERSHIPS=[];
+
+// 登山功能只判斷登入與群組權限，不檢查金幣或訂閱。
+// BookWide Admin 來源：profiles.is_admin。
+// 群主／群友來源：community_group_members。
 
 function bookWideLoginUrl(){
-  return '/login.html?next='+encodeURIComponent('/m-hiking.html');
+  return '/login.html?next='+encodeURIComponent('/m-hiking.html'+(BOOKWIDE_GROUP_ID?('?group='+encodeURIComponent(BOOKWIDE_GROUP_ID)):''));
 }
 
 function renderBookWideAuth(user){
@@ -402,20 +428,145 @@ function renderBookWideAuth(user){
     box.innerHTML=`<a class="auth-link primary" href="${bookWideLoginUrl()}">登入／註冊</a>`;
     return;
   }
-  const email=String(user.email||user.user_metadata?.email||'BookWide 山友');
-  const roleLabel=BOOKWIDE_ROLE==='admin'?'管理人':'群友';
+  const email=String(user.email||user.user_metadata?.email||'BookWide 群友');
+  const roleLabel=
+    BOOKWIDE_ROLE==='super_admin'?'BookWide Admin':
+    BOOKWIDE_ROLE==='group_admin'?'群主':'群友';
   box.innerHTML=`
     <span class="auth-email" title="${email.replace(/"/g,'&quot;')}">${email}｜${roleLabel}</span>
     <a class="auth-link primary" href="/index.html">瀏覽教材</a>
     <button class="auth-logout" type="button" onclick="bookWideLogout()">登出</button>`;
 }
 
+function normalizeEmail(v){return String(v||'').trim().toLowerCase();}
+
+async function loadBookWideProfile(user){
+  const email=normalizeEmail(user?.email);
+  let q=await bookwideSupa
+    .from('profiles')
+    .select('email,is_admin,is_paused')
+    .eq('id',user.id)
+    .maybeSingle();
+
+  if((q.error||!q.data) && email){
+    q=await bookwideSupa
+      .from('profiles')
+      .select('email,is_admin,is_paused')
+      .eq('email',email)
+      .maybeSingle();
+  }
+  return q.data||null;
+}
+
+async function resolveBookWideGroupAccess(user){
+  const email=normalizeEmail(user?.email);
+  const profile=await loadBookWideProfile(user);
+
+  if(profile?.is_paused){
+    return {ok:false,reason:'paused'};
+  }
+
+  BOOKWIDE_IS_SUPER_ADMIN=!!profile?.is_admin;
+
+  const {data:membershipRows,error:memberError}=await bookwideSupa
+    .from('community_group_members')
+    .select('group_id,user_email,role')
+    .eq('user_email',email);
+
+  if(memberError){
+    console.warn('community_group_members',memberError);
+    return {ok:false,reason:'member_table',message:memberError.message};
+  }
+
+  BOOKWIDE_GROUP_MEMBERSHIPS=Array.isArray(membershipRows)?membershipRows:[];
+
+  const requested=new URLSearchParams(location.search).get('group')||'';
+  let selected=null;
+
+  if(BOOKWIDE_IS_SUPER_ADMIN){
+    // 最高權限：可由 ?group= 指定任何群；沒有指定時先取第一個群。
+    let targetId=requested;
+    if(!targetId){
+      const {data:firstGroup}=await bookwideSupa
+        .from('community_groups')
+        .select('id,name,status')
+        .eq('status','active')
+        .order('created_at',{ascending:true})
+        .limit(1)
+        .maybeSingle();
+      if(firstGroup) selected={...firstGroup,role:'super_admin'};
+    }
+    if(targetId){
+      const {data:g}=await bookwideSupa
+        .from('community_groups')
+        .select('id,name,status')
+        .eq('id',targetId)
+        .maybeSingle();
+      if(g) selected={...g,role:'super_admin'};
+    }
+  }else{
+    // 一般帳號：只能進自己所屬群組。
+    let membership=BOOKWIDE_GROUP_MEMBERSHIPS.find(x=>x.group_id===requested);
+    if(!membership) membership=BOOKWIDE_GROUP_MEMBERSHIPS[0]||null;
+
+    if(membership){
+      const {data:g}=await bookwideSupa
+        .from('community_groups')
+        .select('id,name,status')
+        .eq('id',membership.group_id)
+        .eq('status','active')
+        .maybeSingle();
+      if(g) selected={...g,role:membership.role||'member'};
+    }
+  }
+
+  if(!selected){
+    return {ok:false,reason:'no_group'};
+  }
+
+  BOOKWIDE_GROUP_ID=selected.id;
+  BOOKWIDE_GROUP_NAME=selected.name||selected.id;
+  BOOKWIDE_ROLE=
+    selected.role==='super_admin'?'super_admin':
+    selected.role==='group_admin'?'group_admin':'member';
+  BOOKWIDE_IS_ADMIN=BOOKWIDE_ROLE==='group_admin'||BOOKWIDE_ROLE==='super_admin';
+
+  return {ok:true,group:selected};
+}
+
+function applyCurrentGroupUi(){
+  const banner=document.getElementById('groupAccessBanner');
+  const nameEl=document.getElementById('currentGroupName');
+  const roleEl=document.getElementById('currentGroupRole');
+
+  if(nameEl) nameEl.textContent=BOOKWIDE_GROUP_NAME||BOOKWIDE_GROUP_ID;
+  if(roleEl){
+    roleEl.textContent=
+      BOOKWIDE_ROLE==='super_admin'?'BookWide Admin':
+      BOOKWIDE_ROLE==='group_admin'?'群主':'群友';
+  }
+  if(banner) banner.style.display='flex';
+
+  document.querySelectorAll('.brand b,.v3-hero h1').forEach(el=>{
+    el.textContent=BOOKWIDE_GROUP_NAME||'BookWide Mountain';
+  });
+  document.title=(BOOKWIDE_GROUP_NAME||'BookWide Mountain')+'｜BookWide 群組';
+}
+
+function showGroupAccessDenied(message){
+  document.querySelector('main').innerHTML=`
+    <section class="group-denied">
+      <h2>無法進入群組</h2>
+      <p>${message}</p>
+      <div class="btns" style="justify-content:center">
+        <a class="btn" href="/activity.html" style="text-decoration:none">返回活動中心</a>
+        <button class="btn gray" type="button" onclick="bookWideLogout()">切換帳號</button>
+      </div>
+    </section>`;
+}
 async function requireBookWideLogin(){
   if(!window.supabase){
     console.warn('BookWide 登入元件載入失敗');
-    BOOKWIDE_USER=null;
-    BOOKWIDE_ROLE='visitor';
-    BOOKWIDE_IS_ADMIN=false;
     renderBookWideAuth(null);
     return null;
   }
@@ -429,17 +580,34 @@ async function requireBookWideLogin(){
   if(!user){
     BOOKWIDE_ROLE='visitor';
     BOOKWIDE_IS_ADMIN=false;
-  }else{
-    const email=String(user.email||'').trim().toLowerCase();
-    BOOKWIDE_IS_ADMIN=BOOKWIDE_HIKING_ADMINS.has(email);
-    BOOKWIDE_ROLE=BOOKWIDE_IS_ADMIN?'admin':'member';
+    BOOKWIDE_IS_SUPER_ADMIN=false;
+    renderBookWideAuth(null);
+    location.href=bookWideLoginUrl();
+    return null;
+  }
+
+  const access=await resolveBookWideGroupAccess(user);
+
+  if(!access.ok){
+    BOOKWIDE_ROLE='member';
+    BOOKWIDE_IS_ADMIN=false;
+    BOOKWIDE_IS_SUPER_ADMIN=false;
+    renderBookWideAuth(user);
+
+    const msg=
+      access.reason==='paused'?'此帳號已被暫停使用。':
+      access.reason==='member_table'?'群組資料表讀取失敗：'+(access.message||'請聯絡 BookWide Admin。'):
+      '此帳號尚未被加入任何群組，請聯絡 BookWide Admin 指定群組。';
+
+    showGroupAccessDenied(msg);
+    return null;
   }
 
   renderBookWideAuth(user);
+  applyCurrentGroupUi();
   setTimeout(applyNoticeRole,0);
   return user;
 }
-
 async function bookWideLogout(){
   try{
     await bookwideSupa.auth.signOut();
@@ -449,7 +617,7 @@ async function bookWideLogout(){
   BOOKWIDE_USER=null;
   BOOKWIDE_ROLE='visitor';
   BOOKWIDE_IS_ADMIN=false;
-  location.href='/m-hiking.html';
+  location.href='/m-hiking.html'+(BOOKWIDE_GROUP_ID?('?group='+encodeURIComponent(BOOKWIDE_GROUP_ID)):'');
 }
 
 
@@ -493,8 +661,28 @@ async function hikingApi(path,options={}){
     if(!token) throw new Error('未輸入管理密碼');
     headers.set('Authorization','Bearer '+token);
   }
-  const res=await fetch(HIKING_API_BASE+path,{
-    ...options,
+
+  // 所有 Worker 請求都帶目前 group_id，為後端分群做準備。
+  let requestPath=path;
+  if(BOOKWIDE_GROUP_ID){
+    const joiner=requestPath.includes('?')?'&':'?';
+    requestPath+=joiner+'group_id='+encodeURIComponent(BOOKWIDE_GROUP_ID);
+    headers.set('X-BookWide-Group',BOOKWIDE_GROUP_ID);
+  }
+
+  let nextOptions={...options};
+  if(BOOKWIDE_GROUP_ID && typeof nextOptions.body==='string'){
+    try{
+      const parsed=JSON.parse(nextOptions.body);
+      if(parsed && typeof parsed==='object' && !Array.isArray(parsed)){
+        parsed.group_id=BOOKWIDE_GROUP_ID;
+        nextOptions.body=JSON.stringify(parsed);
+      }
+    }catch(e){}
+  }
+
+  const res=await fetch(HIKING_API_BASE+requestPath,{
+    ...nextOptions,
     headers,
     cache:'no-store'
   });
@@ -596,7 +784,7 @@ async function endorseV3Candidate(id){
 }
 
 async function deleteV3Candidate(id){
-  if(!BOOKWIDE_IS_ADMIN){alert('只有管理人可以刪除推薦路線。');return;}
+  if(!BOOKWIDE_IS_ADMIN){alert('只有本群群主或 BookWide Admin 可以刪除推薦路線。');return;}
   if(!confirm('確定刪除這條推薦路線？'))return;
   try{
     const result=await hikingApi('/api/candidate',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidate_id:id})});
@@ -605,7 +793,7 @@ async function deleteV3Candidate(id){
 }
 
 function chooseV3Candidate(id){
-  if(!BOOKWIDE_IS_ADMIN){alert('只有管理人可以選定活動路線。');return;}
+  if(!BOOKWIDE_IS_ADMIN){alert('只有本群群主或 BookWide Admin 可以選定活動路線。');return;}
   const c=loadV3Candidates().find(x=>x.id===id);if(!c)return;
   state.selected={id:c.id,name_zh:c.name,city:'',area:'',level:'A',duration_hours:'',notice:c.note||'路線資訊請查看健行筆記。',external_url:c.url||'',map_url:c.url||''};
   makePost();
@@ -677,7 +865,8 @@ async function fetchJson(name,key){
   return emptyCandidate || fallback[key] || [];
 }
 async function init(){
-  await requireBookWideLogin();
+  const loginUser=await requireBookWideLogin();
+  if(!loginUser || !BOOKWIDE_GROUP_ID) return;
   renderTabs();
   document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
   $('sec-find').classList.add('active');
@@ -764,7 +953,7 @@ function activateSectionOnly(id){
 }
 
 function openAdminSection(id){
-  if(!BOOKWIDE_IS_ADMIN){alert('只有群主／管理員可使用。');return;}
+  if(!BOOKWIDE_IS_ADMIN){alert('只有本群群主或 BookWide Admin 可使用。');return;}
   activateSectionOnly(id);
 }
 
