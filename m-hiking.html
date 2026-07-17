@@ -242,7 +242,7 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
   .route-source-actions .btn{width:100%}
 }
 
-/* ===== BookWide Mountain V3 ===== */
+/* ===== BookWide Mountain V4 ===== */
 .v3-hero{background:linear-gradient(135deg,#ffffff,#e9f5ec);border:1px solid var(--line);border-radius:22px;padding:20px;margin-bottom:16px;box-shadow:var(--shadow)}
 .v3-hero h1{margin:0 0 8px;font-size:28px}
 .v3-hero p{margin:5px 0;color:var(--muted);line-height:1.65}
@@ -290,7 +290,7 @@ body.photo-admin-mode .photo-admin-note{display:inline;color:var(--red);font-wei
         <a class="btn secondary" target="_blank" rel="noopener"
            href="https://tw.trip.com/"
            style="text-decoration:none">✈ Trip.com</a>
-        <a class="btn gold" href="/journeys.html"
+        <a class="btn gold" id="journeysSourceLink" href="/journeys.html"
            style="text-decoration:none">🌏 我的 Journeys</a>
       </div>
     </div>
@@ -729,6 +729,8 @@ function applyCurrentGroupUi(){
   }
   if(banner) banner.style.display='flex';
   setupAdminGroupSwitcher();
+  const journeyLink=document.getElementById('journeysSourceLink');
+  if(journeyLink) journeyLink.href='/journeys.html?group='+encodeURIComponent(BOOKWIDE_GROUP_ID);
 
   document.querySelectorAll('.brand b,.v3-hero h1').forEach(el=>{
     el.textContent=BOOKWIDE_GROUP_NAME||'BookWide Mountain';
@@ -886,6 +888,11 @@ async function loadWorkerData(){
   state.favorites=Array.isArray(data.favorites)?data.favorites:[];
   state.trash=Array.isArray(data.trash)?data.trash:[];
   state.candidates=Array.isArray(data.candidates)?data.candidates:[];
+  state.journeys=Array.isArray(data.journeys)?data.journeys:[];
+  try{
+    const mine=state.journeys.map(normalizeRecommendationJourney);
+    localStorage.setItem(RECOMMEND_JOURNEY_KEY,JSON.stringify(mine));
+  }catch(e){console.warn('同步 Journey 到本機失敗',e)}
   state.notice=(data.notice&&typeof data.notice==='object')?data.notice:null;
   if(state.notice?.text) postBoxSet(state.notice.text);
   return data;
@@ -949,7 +956,28 @@ async function shareCandidateToLine(c){
 
 const RECOMMEND_JOURNEY_KEY='bookwide_journeys_local_v1';
 let NOTICE_CANDIDATE_JOURNEY=null;
-function recommendationJourneys(){try{const rows=JSON.parse(localStorage.getItem(RECOMMEND_JOURNEY_KEY)||'[]');return Array.isArray(rows)?rows:[]}catch(e){return[]}}
+function normalizeRecommendationJourney(j){
+  if(!j||typeof j!=='object')return null;
+  return {...j,
+    start:j.start||j.start_date||'',
+    end:j.end||j.end_date||j.start||j.start_date||'',
+    people:Number(j.people||j.member_count||j.participants?.length||1),
+    days:(Array.isArray(j.days)?j.days:[]).map((d,i)=>({...d,
+      day_no:Number.isFinite(Number(d?.day_no))?Number(d.day_no):i,
+      plan:d?.plan||d?.planned_route||'',
+      actual:d?.actual||d?.actual_route||'',
+      note:d?.note||d?.notes||''
+    }))
+  };
+}
+function recommendationJourneys(){
+  let local=[];
+  try{const rows=JSON.parse(localStorage.getItem(RECOMMEND_JOURNEY_KEY)||'[]');local=Array.isArray(rows)?rows:[]}catch(e){}
+  const server=Array.isArray(state?.journeys)?state.journeys:[];
+  const merged=new Map();
+  [...server,...local].forEach(raw=>{const j=normalizeRecommendationJourney(raw);if(j?.id)merged.set(String(j.id),j)});
+  return [...merged.values()].sort((a,b)=>String(b.updated_at||b.start||'').localeCompare(String(a.updated_at||a.start||'')));
+}
 function loadRecommendationJourneys(){const sel=$('v3JourneySelect');if(!sel)return;const rows=recommendationJourneys();sel.innerHTML='<option value="">不套用 Journey</option>'+rows.map(j=>`<option value="${escHtml(j.id||'')}">${escHtml(j.title||'未命名旅程')}｜${escHtml(j.start||'')}～${escHtml(j.end||'')}</option>`).join('')}
 function changeRecommendationMode(){const mode=$('v3ActivityMode')?.value||'single';if($('v3JourneyField'))$('v3JourneyField').style.display=mode==='multi'?'block':'none';if(mode==='single'){if($('fEndDate'))$('fEndDate').value=$('fDate')?.value||'';if($('v3JourneySelect'))$('v3JourneySelect').value='';if($('v3JourneyPreview'))$('v3JourneyPreview').style.display='none'}else{loadRecommendationJourneys();syncTripEndDate()}}
 function selectedRecommendationJourney(){const id=$('v3JourneySelect')?.value||'';return recommendationJourneys().find(j=>String(j.id)===String(id))||null}
@@ -1215,6 +1243,25 @@ function chooseV3Candidate(id){
   makePost();
 }
 
+function toggleCandidateJourneyPreview(candidateId){
+  const box=document.getElementById('candidateJourneyPreview_'+candidateId);
+  if(!box)return;
+  const opening=box.style.display==='none'||!box.style.display;
+  box.style.display=opening?'block':'none';
+  const btn=document.getElementById('candidateJourneyPreviewBtn_'+candidateId);
+  if(btn)btn.textContent=opening?'收起 Journey':'📄 預覽 Journey';
+}
+function candidateJourneyPreviewHtml(journey){
+  if(!journey)return '';
+  const flights=Array.isArray(journey.flights)?journey.flights:[];
+  const hotels=Array.isArray(journey.hotels)?journey.hotels:[];
+  const days=Array.isArray(journey.days)?journey.days:[];
+  const flightHtml=flights.length?`<div class="small"><b>航班</b><br>${flights.map(f=>escHtml([f.direction==='outbound'?'去程':f.direction==='return'?'回程':'航班',f.airline,f.flight_no,f.departure_airport&&f.arrival_airport?(f.departure_airport+' → '+f.arrival_airport):'',f.departure_time].filter(Boolean).join('｜'))).join('<br>')}</div>`:'';
+  const hotelHtml=hotels.length?`<div class="small" style="margin-top:8px"><b>住宿</b><br>${hotels.map(h=>escHtml([h.name,h.check_in&&h.check_out?(h.check_in+'～'+h.check_out):'',h.address].filter(Boolean).join('｜'))).join('<br>')}</div>`:'';
+  const daysHtml=days.length?days.map((d,i)=>`<div style="border-top:1px solid var(--line);padding:8px 0"><b>Day ${Number.isFinite(Number(d.day_no))?Number(d.day_no):i}${d.date?'｜'+escHtml(d.date):''}${d.title?'｜'+escHtml(d.title):''}</b><div class="small" style="white-space:pre-wrap;margin-top:4px">${escHtml(d.plan||d.planned_route||d.actual||d.actual_route||'尚未填每日行程')}</div>${d.hotel?`<div class="small">住宿：${escHtml(d.hotel)}</div>`:''}</div>`).join(''):'<div class="small">尚未建立每日行程。</div>';
+  return `<div class="notice-help" style="margin-top:10px"><b>${escHtml(journey.title||'Journey')}</b>｜${escHtml(journey.start||journey.start_date||'')}～${escHtml(journey.end||journey.end_date||'')} ${flightHtml}${hotelHtml}<div style="margin-top:8px">${daysHtml}</div></div>`;
+}
+
 function renderV3Candidates(){
   const box=$('v3CandidateList');if(!box)return;
   const me=currentRecommendationUser();
@@ -1242,6 +1289,7 @@ function renderV3Candidates(){
     const endorseBtn=!BOOKWIDE_IS_ADMIN?`<button class="btn ${mine?'secondary':''}" onclick="endorseV3Candidate('${safeId}')">${mine?'✓ 已附議':'👍 我也想走'}</button>`:'';
     const status=count>=1?'<span class="tag">已達候選條件</span>':'<span class="tag" style="background:#edf1ec;color:#59635b">等待附議</span>';
     return `<div class="v3-candidate"><h3>${escHtml(c.name)}</h3><div class="meta">類型：<b>${escHtml(modeLabel)}</b><br>來源：${escHtml(sourceLabel)}${tripDates?`<br>日期：${escHtml(tripDates)}`:''}${timeLabel?`<br>時間：${escHtml(timeLabel)}`:''}${journeyLine}<br>推薦人：${escHtml(c.recommender_label||'群友')}<br><b>附議：👍 ${count} 人</b>${endorsementHtml}<br>本團去過：${v.count} 次${v.last?`<br>最近一次：${escHtml(v.last)}`:''}</div><div style="margin-top:8px">${status}</div>${c.note?`<div class="notice" style="margin-top:10px">${escHtml(c.note)}</div>`:''}${c.url?`<div class="url" style="margin-top:9px">${escHtml(c.url)}</div>`:''}
+    ${effectiveJourney?`<button id="candidateJourneyPreviewBtn_${safeId}" class="btn secondary" type="button" style="margin-top:10px" onclick="toggleCandidateJourneyPreview('${safeId}')">📄 預覽 Journey</button><div id="candidateJourneyPreview_${safeId}" style="display:none">${candidateJourneyPreviewHtml(effectiveJourney)}</div>`:''}
     ${canEdit&&c.activity_mode==='multi'?`<div class="candidate-journey-apply">
       <label>多日公告套用的 Journey</label>
       <div class="candidate-journey-row">
