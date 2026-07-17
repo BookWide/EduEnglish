@@ -1156,9 +1156,19 @@ function syncTripEndDate(){
 
 let EDITING_CANDIDATE_ID='';
 
-function canEditV3Candidate(c){
+function isJourneyConfirmed(journey){
+  const status=String(journey?.approval_status||'').trim().toLowerCase();
+  return status==='confirmed'||status==='approved';
+}
+function isCandidateOwner(c){
   const me=currentRecommendationUser();
-  return !!(BOOKWIDE_IS_ADMIN || (c && String(c.recommender_id||'')===String(me.id||'')));
+  return !!(c && String(c.recommender_id||'')===String(me.id||''));
+}
+function canEditV3Candidate(c){
+  return !!(BOOKWIDE_IS_ADMIN || isCandidateOwner(c));
+}
+function canCancelV3Candidate(c){
+  return !!(BOOKWIDE_IS_ADMIN || (isCandidateOwner(c) && !isJourneyConfirmed(effectiveCandidateJourney(c))));
 }
 function resetV3CandidateForm(){
   EDITING_CANDIDATE_ID='';
@@ -1244,12 +1254,17 @@ async function endorseV3Candidate(id){
 }
 
 async function deleteV3Candidate(id){
-  if(!BOOKWIDE_IS_ADMIN){alert('只有本群群主或 BookWide Admin 可以刪除推薦路線。');return;}
-  if(!confirm('確定刪除這條推薦路線？'))return;
+  const candidate=loadV3Candidates().find(x=>String(x.id)===String(id));
+  if(!candidate){alert('找不到這筆推薦。');return;}
+  const owner=isCandidateOwner(candidate);
+  const confirmed=isJourneyConfirmed(effectiveCandidateJourney(candidate));
+  if(!BOOKWIDE_IS_ADMIN&&!owner){alert('只有原推薦人、群主或 BookWide Admin 可以取消推薦。');return;}
+  if(!BOOKWIDE_IS_ADMIN&&confirmed){alert('這筆 Journey 已確認為紅字，推薦人不能再自行取消。請聯絡群主處理。');return;}
+  if(!confirm(BOOKWIDE_IS_ADMIN?'確定刪除這條推薦路線？':'確定取消這筆推薦？'))return;
   try{
     const result=await hikingApi('/api/candidate',{admin:false,method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidate_id:id})});
     setV3Candidates(result.candidates||[]);renderV3Candidates();
-  }catch(e){alert('刪除失敗：'+e.message);}
+  }catch(e){alert((BOOKWIDE_IS_ADMIN?'刪除':'取消推薦')+'失敗：'+e.message);}
 }
 
 function chooseV3Candidate(id){
@@ -1308,11 +1323,13 @@ function renderV3Candidates(){
     const journeyTitle=effectiveJourney?.title||c.journey_title||'';
     const journeyLine=journeyTitle?`<br>Journey：${escHtml(journeyTitle)}${journeyDays?`（${journeyDays} 天）`:''}`:'';
     const canEdit=canEditV3Candidate(c);
+    const confirmedJourney=isJourneyConfirmed(effectiveJourney);
+    const canCancel=canCancelV3Candidate(c);
     const editBtn=canEdit?`<button class="btn secondary" onclick="editV3Candidate('${safeId}')">✏ 修改推薦</button>`:'';
-    const deleteBtn=canEdit?`<button class="btn red" onclick="deleteV3Candidate('${safeId}')">刪除推薦</button>`:'';
+    const deleteBtn=canCancel?`<button class="btn red" onclick="deleteV3Candidate('${safeId}')">${BOOKWIDE_IS_ADMIN?'刪除推薦':'取消推薦'}</button>`:'';
     const approvalStatus=String(effectiveJourney?.approval_status||'pending');
-    const approvalBadge=effectiveJourney?(approvalStatus==='confirmed'?'<span class="tag" style="background:#fde8e6;color:#c62828">● 已確認｜行事曆紅字</span>':'<span class="tag" style="background:#e8f1ff;color:#175dcc">● 未確認｜行事曆藍字</span>'):'';
-    const approvalBtn=(BOOKWIDE_IS_ADMIN&&effectiveJourney)?(approvalStatus==='confirmed'?`<button class="btn secondary" onclick="setCandidateJourneyApproval('${safeId}','pending')">取消確認 Journey</button>`:`<button class="btn red" onclick="setCandidateJourneyApproval('${safeId}','confirmed')">✓ 確認 Journey（轉紅字）</button>`):'';
+    const approvalBadge=effectiveJourney?(confirmedJourney?'<span class="tag" style="background:#fde8e6;color:#c62828">● 已確認｜行事曆紅字</span>':'<span class="tag" style="background:#e8f1ff;color:#175dcc">● 未確認｜行事曆藍字</span>'):'';
+    const approvalBtn=(BOOKWIDE_IS_ADMIN&&effectiveJourney)?(confirmedJourney?`<button class="btn secondary" onclick="setCandidateJourneyApproval('${safeId}','pending')">取消確認 Journey</button>`:`<button class="btn red" onclick="setCandidateJourneyApproval('${safeId}','confirmed')">✓ 確認 Journey（轉紅字）</button>`):'';
     const adminChoose=BOOKWIDE_IS_ADMIN?`<button class="btn" onclick="chooseV3Candidate('${safeId}')">★★★★★ 選為本週活動</button>`:'';
     const endorseBtn=!BOOKWIDE_IS_ADMIN?`<button class="btn ${mine?'secondary':''}" onclick="endorseV3Candidate('${safeId}')">${mine?'✓ 已附議':'👍 我也想走'}</button>`:'';
     const status=count>=1?'<span class="tag">已達候選條件</span>':'<span class="tag" style="background:#edf1ec;color:#59635b">等待附議</span>';
