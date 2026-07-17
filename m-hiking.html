@@ -992,9 +992,46 @@ async function deleteV3Candidate(id){
   }catch(e){alert('刪除失敗：'+e.message);}
 }
 
-function chooseV3Candidate(id){
-  if(!BOOKWIDE_IS_ADMIN){alert('只有本群群主或 BookWide Admin 可以選定活動路線。');return;}
+
+let NOTICE_POST_PURPOSE='official';
+
+function startOfCurrentWeek(base=new Date()){
+  const d=new Date(base.getFullYear(),base.getMonth(),base.getDate());
+  const day=d.getDay();
+  const diff=day===0?-6:1-day; // Monday
+  d.setDate(d.getDate()+diff);
+  d.setHours(0,0,0,0);
+  return d;
+}
+function endOfCurrentWeek(base=new Date()){
+  const d=startOfCurrentWeek(base);
+  d.setDate(d.getDate()+6);
+  d.setHours(23,59,59,999);
+  return d;
+}
+function isCandidateThisWeek(c){
+  if(!c?.planned_date)return false;
+  const d=parseDate(c.planned_date);
+  if(!(d instanceof Date)||isNaN(d))return false;
+  return d>=startOfCurrentWeek()&&d<=endOfCurrentWeek();
+}
+function candidateScheduleLabel(c){
+  if(!c?.planned_date)return'未排日期';
+  if(isCandidateThisWeek(c))return'本週活動';
+  const d=parseDate(c.planned_date),today=new Date();
+  today.setHours(0,0,0,0);
+  return d<today?'過期行程':'預定行程／調查';
+}
+
+function chooseV3Candidate(id,purpose){
+  if(!BOOKWIDE_IS_ADMIN){alert('只有本群群主或 BookWide Admin 可以處理推薦行程。');return;}
   const c=loadV3Candidates().find(x=>x.id===id);if(!c)return;
+  const thisWeek=isCandidateThisWeek(c);
+  NOTICE_POST_PURPOSE=thisWeek?'official':'survey';
+  if(purpose==='official'&&!thisWeek){
+    alert('這不是本週行程，只能列為預定行程／調查。');
+    return;
+  }
   state.selected={id:c.id,name_zh:c.name,city:c.journey_snapshot?.city||'',area:c.journey_snapshot?.country||'',level:'A',duration_hours:'',notice:c.note||'路線／行程資訊請查看參考網址。',external_url:c.url||'',map_url:c.url||''};
   const mode=c.activity_mode==='multi'?'multi':'single';
   NOTICE_CANDIDATE_JOURNEY=c.journey_snapshot||null;
@@ -1026,10 +1063,16 @@ function renderV3Candidates(){
     const journeyDays=Array.isArray(c.journey_snapshot?.days)?c.journey_snapshot.days.length:0;
     const journeyLine=c.journey_title?`<br>Journey：${escHtml(c.journey_title)}${journeyDays?`（${journeyDays} 天）`:''}`:'';
     const adminDelete=BOOKWIDE_IS_ADMIN?`<button class="btn red" onclick="deleteV3Candidate('${safeId}')">刪除</button>`:'';
-    const adminChoose=BOOKWIDE_IS_ADMIN?`<button class="btn" onclick="chooseV3Candidate('${safeId}')">★★★★★ 選為本週活動</button>`:'';
+    const scheduleLabel=candidateScheduleLabel(c);
+    const isThisWeek=isCandidateThisWeek(c);
+    const adminChoose=BOOKWIDE_IS_ADMIN
+      ?(isThisWeek
+        ?`<button class="btn" onclick="chooseV3Candidate('${safeId}','official')">★★★★★ 選為本週活動</button>`
+        :`<button class="btn gold" onclick="chooseV3Candidate('${safeId}','survey')">📋 列為預定行程／調查</button>`)
+      :'';
     const endorseBtn=!BOOKWIDE_IS_ADMIN?`<button class="btn ${mine?'secondary':''}" onclick="endorseV3Candidate('${safeId}')">${mine?'✓ 已附議':'👍 我也想走'}</button>`:'';
     const status=count>=1?'<span class="tag">已達候選條件</span>':'<span class="tag" style="background:#edf1ec;color:#59635b">等待附議</span>';
-    return `<div class="v3-candidate"><h3>${escHtml(c.name)}</h3><div class="meta">類型：<b>${escHtml(modeLabel)}</b><br>來源：${escHtml(sourceLabel)}${tripDates?`<br>日期：${escHtml(tripDates)}`:''}${timeLabel?`<br>時間：${escHtml(timeLabel)}`:''}${journeyLine}<br>推薦人：${escHtml(c.recommender_label||'群友')}<br><b>附議：👍 ${count} 人</b>${endorsementHtml}<br>本團去過：${v.count} 次${v.last?`<br>最近一次：${escHtml(v.last)}`:''}</div><div style="margin-top:8px">${status}</div>${c.note?`<div class="notice" style="margin-top:10px">${escHtml(c.note)}</div>`:''}${c.url?`<div class="url" style="margin-top:9px">${escHtml(c.url)}</div>`:''}<div class="btns">${url}${endorseBtn}${adminChoose}${adminDelete}</div></div>`;
+    return `<div class="v3-candidate"><h3>${escHtml(c.name)}</h3><div class="meta">狀態：<b>${escHtml(scheduleLabel)}</b><br>類型：<b>${escHtml(modeLabel)}</b><br>來源：${escHtml(sourceLabel)}${tripDates?`<br>日期：${escHtml(tripDates)}`:''}${timeLabel?`<br>時間：${escHtml(timeLabel)}`:''}${journeyLine}<br>推薦人：${escHtml(c.recommender_label||'群友')}<br><b>附議：👍 ${count} 人</b>${endorsementHtml}<br>本團去過：${v.count} 次${v.last?`<br>最近一次：${escHtml(v.last)}`:''}</div><div style="margin-top:8px">${status}</div>${c.note?`<div class="notice" style="margin-top:10px">${escHtml(c.note)}</div>`:''}${c.url?`<div class="url" style="margin-top:9px">${escHtml(c.url)}</div>`:''}<div class="btns">${url}${endorseBtn}${adminChoose}${adminDelete}</div></div>`;
   }).join('');
 }
 
@@ -2031,7 +2074,10 @@ function journeyDayText(day,index){
 }
 
 async function makePost(id){
-  if(id) chooseRoute(id);
+  if(id){
+    NOTICE_POST_PURPOSE='official';
+    chooseRoute(id);
+  }
 
   const mode=$('noticeMode')?.value||NOTICE_MODE||'single';
   const startDate=$('noticeStartDate')?.value||$('fDate')?.value||localDate(nextSaturday());
@@ -2057,6 +2103,7 @@ async function makePost(id){
   }
 
   let text='';
+  const purposePrefix=NOTICE_POST_PURPOSE==='survey'?'【預定行程調查】\n':'';
 
   if(mode==='single'){
     const total=adjustedDurationText(r);
@@ -2065,7 +2112,7 @@ async function makePost(id){
     const rain=r.rain_policy||'週五依天氣最後確認，必要時改短線或山下備案。';
     const note=r.notice||'主辦人可依天氣、人數與當天體力調整。';
 
-    text=`${noticeDateLabel(startDate)} ${r.name_zh||''}
+    text=`${purposePrefix}${noticeDateLabel(startDate)} ${r.name_zh||''}
 地區：${r.city||''} ${r.area||''}  難度：${levelName(r.level)}
 活動時間：${startTime} ～ ${endTime}
 活動時間估算：${total}
@@ -2080,7 +2127,7 @@ async function makePost(id){
 ${rain}
 
 備註：${note}
-可以一起參加的請報：
+${NOTICE_POST_PURPOSE==='survey'?'有興趣參加請先登記（此為意願調查，尚未正式成團）：':'可以一起參加的請報：'}
 姓名／人數／開車或搭車／是否可載人
 
 1:
@@ -2102,7 +2149,7 @@ ${rain}
       ? days.map((d,i)=>journeyDayText(d,i)).join('\n\n')
       : `Day 0｜${startDate}\n行程：${r?.name_zh||'行程待補'}`;
 
-    text=`${noticeDateLabel(startDate)} ～ ${noticeDateLabel(endDate)}
+    text=`${purposePrefix}${noticeDateLabel(startDate)} ～ ${noticeDateLabel(endDate)}
 ${title}
 ${countryCity?`地區：${countryCity}\n`:''}活動時間：出發 ${startTime}／回程 ${endTime}
 ${people?`預計人數：${people} 人\n`:''}
@@ -2119,7 +2166,7 @@ ${journeyLines}
 🌧 天氣提醒：
 出發前依各地最新天氣確認；必要時調整每日行程。
 
-可以一起參加的請報：
+${NOTICE_POST_PURPOSE==='survey'?'有興趣參加請先登記（此為預定行程調查，尚未正式成團）：':'可以一起參加的請報：'}
 姓名／人數／房型或床位需求／飲食需求／緊急聯絡方式
 
 1:
