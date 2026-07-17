@@ -920,10 +920,10 @@ function candidateVisitInfo(name){
 }
 
 function currentRecommendationUser(){
+  // 顯示用；真正的推薦人身分由 Worker 依 Supabase access token 判定。
   const email=String(BOOKWIDE_USER?.email||'').trim().toLowerCase();
-  const id=String(BOOKWIDE_USER?.id||email||localStorage.getItem(V3_ENDORSE_KEY)||'').trim();
-  if(!localStorage.getItem(V3_ENDORSE_KEY)) localStorage.setItem(V3_ENDORSE_KEY,id||('guest_'+crypto.randomUUID()));
-  return {id:id||localStorage.getItem(V3_ENDORSE_KEY),label:email||'群友'};
+  const id=String(BOOKWIDE_USER?.id||'').trim();
+  return {id,label:email||'群友'};
 }
 
 async function shareCandidateToLine(c){
@@ -1071,9 +1071,25 @@ async function attachJourneyToCandidate(candidateId){
     alert('Journey 已套入並保存。');
   }catch(e){alert('套入 Journey 失敗：'+e.message);}
 }
-function clearCandidateJourney(candidateId){
-  saveCandidateJourneyOverride(candidateId,null);
-  renderV3Candidates();
+async function clearCandidateJourney(candidateId){
+  const candidate=loadV3Candidates().find(c=>String(c.id)===String(candidateId))||null;
+  if(!candidate||!canEditV3Candidate(candidate)){alert('只有原推薦人、群主或 BookWide Admin 可以修改。');return;}
+  const me=currentRecommendationUser();
+  try{
+    const result=await hikingApi('/api/candidate',{admin:false,method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      candidate_id:candidate.id,
+      name:candidate.name,url:candidate.url,note:candidate.note,
+      activity_mode:candidate.activity_mode||'multi',
+      planned_date:candidate.planned_date||'',planned_end_date:candidate.planned_end_date||candidate.planned_date||'',
+      start_time:candidate.start_time||'',end_time:candidate.end_time||'',
+      journey_id:'',journey_title:'',journey_snapshot:null,
+      user_id:me.id,user_label:me.label
+    })});
+    setV3Candidates(result.candidates||[]);
+    saveCandidateJourneyOverride(candidateId,null);
+    renderV3Candidates();
+    alert('已取消套用 Journey 並保存。');
+  }catch(e){alert('取消 Journey 失敗：'+e.message);}
 }
 
 function applyJourneyToRecommendation(){const j=selectedRecommendationJourney(),preview=$('v3JourneyPreview');if(!j){if(preview)preview.style.display='none';return}$('v3ActivityMode').value='multi';if($('fDate'))$('fDate').value=j.start||$('fDate').value;if($('fEndDate'))$('fEndDate').value=j.end||j.start||$('fEndDate').value;if($('v3RouteName')&&!$('v3RouteName').value.trim())$('v3RouteName').value=j.title||'';if(preview){preview.style.display='block';preview.textContent=`已套用 Journey：${j.title||'未命名旅程'}｜${j.start||''}～${j.end||''}｜共 ${Array.isArray(j.days)?j.days.length:0} 天。推薦後，管理人可直接把每日行程帶入公告。`}}
@@ -1162,7 +1178,7 @@ async function addV3Candidate(){
     resetV3CandidateForm();
     renderV3Candidates();
     if(!editing) await shareCandidateToLine(result.candidate);
-  }catch(e){alert('推薦失敗：'+e.message);}
+  }catch(e){alert((EDITING_CANDIDATE_ID?'修改失敗：':'推薦失敗：')+e.message);}
 }
 
 async function endorseV3Candidate(id){
@@ -1178,7 +1194,7 @@ async function deleteV3Candidate(id){
   if(!BOOKWIDE_IS_ADMIN){alert('只有本群群主或 BookWide Admin 可以刪除推薦路線。');return;}
   if(!confirm('確定刪除這條推薦路線？'))return;
   try{
-    const result=await hikingApi('/api/candidate',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidate_id:id})});
+    const result=await hikingApi('/api/candidate',{admin:false,method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({candidate_id:id})});
     setV3Candidates(result.candidates||[]);renderV3Candidates();
   }catch(e){alert('刪除失敗：'+e.message);}
 }
@@ -1221,7 +1237,7 @@ function renderV3Candidates(){
     const journeyLine=journeyTitle?`<br>Journey：${escHtml(journeyTitle)}${journeyDays?`（${journeyDays} 天）`:''}`:'';
     const canEdit=canEditV3Candidate(c);
     const editBtn=canEdit?`<button class="btn secondary" onclick="editV3Candidate('${safeId}')">✏ 修改推薦</button>`:'';
-    const adminDelete=BOOKWIDE_IS_ADMIN?`<button class="btn red" onclick="deleteV3Candidate('${safeId}')">刪除</button>`:'';
+    const deleteBtn=canEdit?`<button class="btn red" onclick="deleteV3Candidate('${safeId}')">刪除推薦</button>`:'';
     const adminChoose=BOOKWIDE_IS_ADMIN?`<button class="btn" onclick="chooseV3Candidate('${safeId}')">★★★★★ 選為本週活動</button>`:'';
     const endorseBtn=!BOOKWIDE_IS_ADMIN?`<button class="btn ${mine?'secondary':''}" onclick="endorseV3Candidate('${safeId}')">${mine?'✓ 已附議':'👍 我也想走'}</button>`:'';
     const status=count>=1?'<span class="tag">已達候選條件</span>':'<span class="tag" style="background:#edf1ec;color:#59635b">等待附議</span>';
@@ -1234,7 +1250,7 @@ function renderV3Candidates(){
       </div>
       ${effectiveJourney?`<div class="small" style="margin-top:7px">目前已套：${escHtml(effectiveJourney.title||'未命名旅程')}｜${journeyDays} 天 <button class="mini" type="button" onclick="clearCandidateJourney('${safeId}')">取消套用</button></div>`:''}
     </div>`:''}
-    <div class="btns">${url}${endorseBtn}${editBtn}${adminChoose}${adminDelete}</div></div>`;
+    <div class="btns">${url}${endorseBtn}${editBtn}${adminChoose}${deleteBtn}</div></div>`;
   }).join('');
 }
 
