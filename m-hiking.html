@@ -1044,7 +1044,32 @@ function saveCandidateJourneyOverride(candidateId,journey){
 }
 function effectiveCandidateJourney(c){
   const override=candidateJourneyOverrides()[String(c?.id||'')];
-  return override||c?.journey_snapshot||null;
+  const embedded=override||c?.journey_snapshot||null;
+  const journeyId=String(embedded?.id||c?.journey_id||'');
+  const live=(Array.isArray(state?.journeys)?state.journeys:[]).find(j=>String(j?.id||'')===journeyId);
+  return live||embedded||null;
+}
+
+async function setCandidateJourneyApproval(candidateId,nextStatus){
+  if(!BOOKWIDE_IS_ADMIN){alert('只有本群群主或 BookWide Admin 可以確認 Journey。');return;}
+  const candidate=loadV3Candidates().find(x=>String(x.id)===String(candidateId));
+  const journey=effectiveCandidateJourney(candidate);
+  if(!journey?.id){alert('這筆推薦尚未套入可確認的 Journey。');return;}
+  const isConfirm=nextStatus==='confirmed';
+  if(!confirm(isConfirm?'確定確認這個 Journey？確認後會在行事曆以紅字提醒。':'確定取消確認？取消後會恢復藍字，且只讓提案人與管理員看見。'))return;
+  try{
+    const result=await hikingApi('/api/journey',{admin:false,method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:journey.id,approval_status:isConfirm?'confirmed':'pending'})});
+    if(result?.journeys) state.journeys=result.journeys;
+    else if(result?.journey){
+      state.journeys=Array.isArray(state.journeys)?state.journeys:[];
+      const i=state.journeys.findIndex(j=>String(j.id)===String(result.journey.id));
+      if(i>=0)state.journeys[i]=result.journey;else state.journeys.unshift(result.journey);
+    }
+    const updated=result?.journey||state.journeys.find(j=>String(j.id)===String(journey.id));
+    if(updated) saveCandidateJourneyOverride(candidateId,updated);
+    renderV3Candidates();
+    alert(isConfirm?'已確認 Journey；行事曆會改為紅字提醒。':'已取消確認；行事曆會恢復藍字。');
+  }catch(e){alert('Journey 確認失敗：'+e.message);}
 }
 function candidateJourneyOptions(selectedId,embeddedJourney){
   const rows=recommendationJourneys().slice();
@@ -1285,10 +1310,13 @@ function renderV3Candidates(){
     const canEdit=canEditV3Candidate(c);
     const editBtn=canEdit?`<button class="btn secondary" onclick="editV3Candidate('${safeId}')">✏ 修改推薦</button>`:'';
     const deleteBtn=canEdit?`<button class="btn red" onclick="deleteV3Candidate('${safeId}')">刪除推薦</button>`:'';
+    const approvalStatus=String(effectiveJourney?.approval_status||'pending');
+    const approvalBadge=effectiveJourney?(approvalStatus==='confirmed'?'<span class="tag" style="background:#fde8e6;color:#c62828">● 已確認｜行事曆紅字</span>':'<span class="tag" style="background:#e8f1ff;color:#175dcc">● 未確認｜行事曆藍字</span>'):'';
+    const approvalBtn=(BOOKWIDE_IS_ADMIN&&effectiveJourney)?(approvalStatus==='confirmed'?`<button class="btn secondary" onclick="setCandidateJourneyApproval('${safeId}','pending')">取消確認 Journey</button>`:`<button class="btn red" onclick="setCandidateJourneyApproval('${safeId}','confirmed')">✓ 確認 Journey（轉紅字）</button>`):'';
     const adminChoose=BOOKWIDE_IS_ADMIN?`<button class="btn" onclick="chooseV3Candidate('${safeId}')">★★★★★ 選為本週活動</button>`:'';
     const endorseBtn=!BOOKWIDE_IS_ADMIN?`<button class="btn ${mine?'secondary':''}" onclick="endorseV3Candidate('${safeId}')">${mine?'✓ 已附議':'👍 我也想走'}</button>`:'';
     const status=count>=1?'<span class="tag">已達候選條件</span>':'<span class="tag" style="background:#edf1ec;color:#59635b">等待附議</span>';
-    return `<div class="v3-candidate"><h3>${escHtml(c.name)}</h3><div class="meta">類型：<b>${escHtml(modeLabel)}</b><br>來源：${escHtml(sourceLabel)}${tripDates?`<br>日期：${escHtml(tripDates)}`:''}${timeLabel?`<br>時間：${escHtml(timeLabel)}`:''}${journeyLine}<br>推薦人：${escHtml(c.recommender_label||'群友')}<br><b>附議：👍 ${count} 人</b>${endorsementHtml}<br>本團去過：${v.count} 次${v.last?`<br>最近一次：${escHtml(v.last)}`:''}</div><div style="margin-top:8px">${status}</div>${c.note?`<div class="notice" style="margin-top:10px">${escHtml(c.note)}</div>`:''}${c.url?`<div class="url" style="margin-top:9px">${escHtml(c.url)}</div>`:''}
+    return `<div class="v3-candidate"><h3>${escHtml(c.name)}</h3><div class="meta">類型：<b>${escHtml(modeLabel)}</b><br>來源：${escHtml(sourceLabel)}${tripDates?`<br>日期：${escHtml(tripDates)}`:''}${timeLabel?`<br>時間：${escHtml(timeLabel)}`:''}${journeyLine}<br>推薦人：${escHtml(c.recommender_label||'群友')}<br><b>附議：👍 ${count} 人</b>${endorsementHtml}<br>本團去過：${v.count} 次${v.last?`<br>最近一次：${escHtml(v.last)}`:''}</div><div style="margin-top:8px">${status}${approvalBadge?` ${approvalBadge}`:''}</div>${c.note?`<div class="notice" style="margin-top:10px">${escHtml(c.note)}</div>`:''}${c.url?`<div class="url" style="margin-top:9px">${escHtml(c.url)}</div>`:''}
     ${effectiveJourney?`<button id="candidateJourneyPreviewBtn_${safeId}" class="btn secondary" type="button" style="margin-top:10px" onclick="toggleCandidateJourneyPreview('${safeId}')">📄 預覽 Journey</button><div id="candidateJourneyPreview_${safeId}" style="display:none">${candidateJourneyPreviewHtml(effectiveJourney)}</div>`:''}
     ${canEdit&&c.activity_mode==='multi'?`<div class="candidate-journey-apply">
       <label>多日公告套用的 Journey</label>
@@ -1298,7 +1326,7 @@ function renderV3Candidates(){
       </div>
       ${effectiveJourney?`<div class="small" style="margin-top:7px">目前已套：${escHtml(effectiveJourney.title||'未命名旅程')}｜${journeyDays} 天 <button class="mini" type="button" onclick="clearCandidateJourney('${safeId}')">取消套用</button></div>`:''}
     </div>`:''}
-    <div class="btns">${url}${endorseBtn}${editBtn}${adminChoose}${deleteBtn}</div></div>`;
+    <div class="btns">${url}${endorseBtn}${editBtn}${approvalBtn}${adminChoose}${deleteBtn}</div></div>`;
   }).join('');
 }
 
