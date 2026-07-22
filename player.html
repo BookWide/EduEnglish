@@ -4263,7 +4263,7 @@ async function loadAI(){
       `ai.json`
     ]);
 
-    const topics = normalizeAiTopics(hit.data).filter(t => t && t.disabled !== true);
+    const topics = normalizeAiTopics(hit.data);
 
     if(!topics.length){
       if(sel) sel.innerHTML = '<option value="">沒有 AI 題目</option>';
@@ -4390,50 +4390,29 @@ async function loadAI(){
 
 
 
-/* ==== V92 AI互動：三次引導式老師判斷（不影響 Talk） ==== */
+/* ==== V88 AI互動：JSON 劇本式老師判斷（不影響 Talk） ==== */
 (function(){
   const submitBtn = $('#btnAiSubmit');
   const answerEl = $('#aiAnswer');
   const replyEl = $('#aiReply');
-  const hintEl = $('#aiHint');
   const autoNextEl = $('#aiAutoNext');
   const nextBtn = $('#btnNextTopic');
   if(!submitBtn || !answerEl || !replyEl) return;
-
-  let trackedIndex = -1;
-  let wrongCount = 0;
-  let repeatModelMode = false;
 
   function norm(s){
     return String(s || '').toLowerCase().replace(/[’']/g, "'")
       .replace(/[^a-z0-9\u4e00-\u9fff\s']/g, ' ')
       .replace(/\s+/g, ' ').trim();
   }
-
-  function currentIndex(){
-    return Number(window.__AI_CURRENT_INDEX__) || 0;
-  }
-
   function currentTopic(){
     const topics = Array.isArray(window.__AI_TOPICS__) ? window.__AI_TOPICS__ : [];
-    return topics[currentIndex()] || {};
+    return topics[Number(window.__AI_CURRENT_INDEX__) || 0] || {};
   }
-
-  function resetForCurrentTopic(){
-    const idx = currentIndex();
-    if(idx !== trackedIndex){
-      trackedIndex = idx;
-      wrongCount = 0;
-      repeatModelMode = false;
-    }
-  }
-
   function values(t){
     const raw = t.expect || t.accept || t.answers || [];
     if(Array.isArray(raw)) return raw.map(norm).filter(Boolean);
     return typeof raw === 'string' ? raw.split('|').map(norm).filter(Boolean) : [];
   }
-
   function similarity(a,b){
     const A=norm(a).split(' ').filter(Boolean);
     const B=norm(b).split(' ').filter(Boolean);
@@ -4472,111 +4451,30 @@ async function loadAI(){
     }
     return false;
   }
-
-  function speakEnglish(text){
-    if(!text) return;
-    try{ window.speechSynthesis && window.speechSynthesis.cancel(); }catch(_e){}
-    speakText(text, 'en-US', 0.72);
-  }
-
-  function pass(t){
-    wrongCount = 0;
-    repeatModelMode = false;
-    const msg = t.correct_reply || 'Good job. That is correct.';
-    const model = t.model_answer || t.modelAnswer || t.sample || '';
-    replyEl.textContent = msg + (model ? '\n\nModel answer: ' + model : '');
-    speakEnglish(msg);
-
-    if(autoNextEl && autoNextEl.checked && nextBtn){
-      setTimeout(()=>{
-        answerEl.value='';
-        nextBtn.click();
-      },1100);
+  function show(ok,t){
+    const model=t.model_answer || t.modelAnswer || t.sample || '';
+    if(ok){
+      const msg=t.correct_reply || '很好，答對了。';
+      replyEl.textContent=msg + (model ? '\n\n標準說法：' + model : '');
+      speakText(msg,'zh-TW',0.9);
+      if(autoNextEl && autoNextEl.checked && nextBtn){
+        setTimeout(()=>{ answerEl.value=''; nextBtn.click(); },900);
+      }
+    }else{
+      const msg=t.retry_reply || '我沒有聽清楚，請再說一次，或直接輸入答案。';
+      replyEl.textContent=msg + (model ? '\n\n可以這樣回答：' + model : '');
+      speakText(msg,'zh-TW',0.9);
     }
   }
-
-  function guide(t){
-    wrongCount += 1;
-
-    if(wrongCount === 1){
-      const text = t.hint1 || t.hint || 'Try again. Listen carefully to the key words.';
-      replyEl.textContent = 'Try again.\n\nHint 1: ' + text;
-      if(hintEl) hintEl.textContent = text;
-      speakEnglish(text);
-      return;
-    }
-
-    if(wrongCount === 2){
-      const text = t.hint2 || t.hint1 || t.hint || 'Use the key words and answer in one short English sentence.';
-      replyEl.textContent = 'One more try.\n\nHint 2: ' + text;
-      if(hintEl) hintEl.textContent = text;
-      speakEnglish(text);
-      return;
-    }
-
-    const model = t.model_answer || t.modelAnswer || t.sample || '';
-    repeatModelMode = false;
-    replyEl.textContent =
-      'Model answer:\n\n' +
-      (model || 'Please listen to the model answer.') +
-      '\n\nThis question is complete. Moving to the next question.';
-    if(hintEl) hintEl.textContent = 'AI 已示範標準答案，將自動進入下一題。';
-    speakEnglish(model);
-
-    // V93：第三次答錯後不再卡住要求重複。
-    // 播放標準答案後，自動進入下一題。
-    setTimeout(()=>{
-      answerEl.value = '';
-      wrongCount = 0;
-      if(nextBtn) nextBtn.click();
-    }, 4200);
-  }
-
   submitBtn.addEventListener('click',()=>{
-    resetForCurrentTopic();
-
     const user=answerEl.value.trim();
-    if(!user){
-      replyEl.textContent='Please answer first, or press the microphone and speak.';
-      answerEl.focus();
-      return;
-    }
-
+    if(!user){ replyEl.textContent='請先輸入或說出你的答案。'; answerEl.focus(); return; }
     const t=currentTopic();
-
-    if(correct(user,t)){
-      pass(t);
-      return;
-    }
-
-    guide(t);
+    show(correct(user,t),t);
   });
-
   answerEl.addEventListener('keydown',e=>{
     if((e.ctrlKey || e.metaKey) && e.key==='Enter') submitBtn.click();
   });
-
-  // Reset attempts when learner manually changes question.
-  document.addEventListener('click',e=>{
-    if(e.target && (e.target.id==='btnNextTopic' || e.target.id==='btnPrevTopic')){
-      setTimeout(()=>{
-        trackedIndex=currentIndex();
-        wrongCount=0;
-        repeatModelMode=false;
-      },0);
-    }
-  });
-
-  const topicSelect=$('#aiTopicSelect');
-  if(topicSelect){
-    topicSelect.addEventListener('change',()=>{
-      setTimeout(()=>{
-        trackedIndex=currentIndex();
-        wrongCount=0;
-        repeatModelMode=false;
-      },0);
-    });
-  }
 })();
 
 
@@ -5410,19 +5308,6 @@ function showTab(name){
   paneTalk.style.display=(name==='talk')?'':'none';
   $$('.tabs .tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
   if(name==='talk' && !talkLoaded){ loadTalk(); }
-
-  // V91：進入 AI互動時，自動朗讀目前題目。
-  // 每次離開再進入都會朗讀，讓學員立刻知道要和 AI 回答什麼。
-  if(name==='ai'){
-    setTimeout(()=>{
-      const box = $('#aiPrompt');
-      const text = box ? String(box.value || box.textContent || '').trim() : '';
-      if(text){
-        try{ window.speechSynthesis && window.speechSynthesis.cancel(); }catch(_e){}
-        speakText(text, 'en-US', AI_SLOW_RATE);
-      }
-    }, 300);
-  }
 
   if(name!=='sub' && window.matchMedia('(max-width:860px) and (orientation:portrait)').matches){
     const track=$('#track');
