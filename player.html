@@ -4343,6 +4343,14 @@ async function loadAI(){
     $('#btnNextTopic').onclick=()=>{
       idx=(idx+1)%topics.length;
       render();
+
+      // V90：按「下一題」後，自動朗讀新題目，讓學員立即知道要回答什麼。
+      const answerBox = $('#aiAnswer');
+      if(answerBox) answerBox.value = '';
+      setTimeout(()=>{
+        const text = (prompt && prompt.value) || '';
+        if(text) speakText(text, 'en-US', AI_SLOW_RATE);
+      }, 180);
     };
     $('#btnTts').onclick=()=>speakText((prompt && prompt.value) || '','en-US', AI_SLOW_RATE);
 
@@ -4405,16 +4413,41 @@ async function loadAI(){
     if(Array.isArray(raw)) return raw.map(norm).filter(Boolean);
     return typeof raw === 'string' ? raw.split('|').map(norm).filter(Boolean) : [];
   }
+  function similarity(a,b){
+    const A=norm(a).split(' ').filter(Boolean);
+    const B=norm(b).split(' ').filter(Boolean);
+    if(!A.length || !B.length) return 0;
+    const setA=new Set(A), setB=new Set(B);
+    let hit=0;
+    setA.forEach(w=>{ if(setB.has(w)) hit++; });
+    return hit / Math.max(setA.size,setB.size);
+  }
+
   function correct(user,t){
     const u=norm(user);
     if(!u) return false;
-    if(values(t).some(a=>u===a || u.includes(a) || a.includes(u))) return true;
+
+    const model=norm(t.model_answer || t.modelAnswer || t.sample || '');
+    if(model){
+      const uw=u.split(' ').filter(Boolean);
+      const mw=model.split(' ').filter(Boolean);
+      if(uw.length > Math.max(mw.length * 1.8, mw.length + 4)) return false;
+    }
+
+    const accepted=values(t);
+    if(accepted.some(a=>{
+      if(u===a) return true;
+      if(a.split(' ').length <= 2) return u===a || similarity(u,a) >= 0.8;
+      return similarity(u,a) >= 0.72;
+    })) return true;
+
     const groups=Array.isArray(t.keywords)?t.keywords:[];
-    if(groups.length){
-      return groups.every(g=>{
+    if(groups.length && model){
+      const hasAll=groups.every(g=>{
         const arr=Array.isArray(g)?g:[g];
-        return arr.map(norm).some(k=>k && u.includes(k));
+        return arr.map(norm).some(k=>k && u.split(' ').includes(k));
       });
+      if(hasAll && similarity(u,model) >= 0.65) return true;
     }
     return false;
   }
@@ -4428,7 +4461,7 @@ async function loadAI(){
         setTimeout(()=>{ answerEl.value=''; nextBtn.click(); },900);
       }
     }else{
-      const msg=t.retry_reply || '還差一點，請看提示後再回答一次。';
+      const msg=t.retry_reply || '我沒有聽清楚，請再說一次，或直接輸入答案。';
       replyEl.textContent=msg + (model ? '\n\n可以這樣回答：' + model : '');
       speakText(msg,'zh-TW',0.9);
     }
