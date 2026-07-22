@@ -1921,6 +1921,7 @@ th,td{
                 <button id="btnTts" class="btn sm">題目朗讀</button>
                 <button id="btnRec" class="btn sm">🎙️ 開始說</button>
                 <button id="btnStop" class="btn sm" disabled>⛔ 停止</button>
+                <button id="btnAiSubmit" class="btn sm blue">送出回答</button>
                 <label class="muted"><input id="aiAutoNext" type="checkbox" /> 作答後自動下一題</label>
                 <span id="aiProgress" class="muted">第 0/0 題</span>
               </div>
@@ -1929,7 +1930,7 @@ th,td{
               <div style="margin:8px 0 4px">
                 <span class="muted">提示：</span><span id="aiHint" class="muted">—</span>
               </div>
-              <div id="aiEasyTip">簡單模式：只要回答一句短英文即可。例：I think it is interesting. / It is about travel. / I like this place.</div>
+              <div id="aiEasyTip">AI老師會依你的回答判斷、糾正，再帶你進入下一步。</div>
               <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0">
                 <span class="muted">AI 示範：</span>
                 <button id="aiDemoEn" class="btn sm">英</button>
@@ -4249,15 +4250,11 @@ async function loadAI(){
   const AI_SLOW_RATE = 0.72;
 
   function BW_aiEasyQuestion(t){
-    const raw = String(t.easy_prompt || t.easyPrompt || t.beginner_prompt || t.beginnerPrompt || t.simple_prompt || t.simplePrompt || t.prompt || t.q || '').trim();
-    if(!raw) return '';
-    const clean = raw.replace(/\s+/g,' ').trim();
-    if(/^\[?簡單模式\]?/.test(clean)) return clean;
-    return '簡單模式：請用一句短英文回答。\n' + clean + '\n\n回答可以很短，例如：I think it is interesting.';
+    return String(t.teacher || t.prompt || t.q || '').trim();
   }
 
   function BW_aiEasyHint(t){
-    return String(t.easy_hint || t.easyHint || t.hint || '不用完整長句。用 3～8 個英文單字回答也可以。').trim();
+    return String(t.hint || t.easy_hint || t.easyHint || '請直接回答老師現在問的內容。').trim();
   }
 
   try{
@@ -4382,6 +4379,70 @@ async function loadAI(){
     window.__AI_CURRENT_INDEX__ = 0;
   }
 }
+
+
+
+/* ==== V88 AI互動：JSON 劇本式老師判斷（不影響 Talk） ==== */
+(function(){
+  const submitBtn = $('#btnAiSubmit');
+  const answerEl = $('#aiAnswer');
+  const replyEl = $('#aiReply');
+  const autoNextEl = $('#aiAutoNext');
+  const nextBtn = $('#btnNextTopic');
+  if(!submitBtn || !answerEl || !replyEl) return;
+
+  function norm(s){
+    return String(s || '').toLowerCase().replace(/[’']/g, "'")
+      .replace(/[^a-z0-9\u4e00-\u9fff\s']/g, ' ')
+      .replace(/\s+/g, ' ').trim();
+  }
+  function currentTopic(){
+    const topics = Array.isArray(window.__AI_TOPICS__) ? window.__AI_TOPICS__ : [];
+    return topics[Number(window.__AI_CURRENT_INDEX__) || 0] || {};
+  }
+  function values(t){
+    const raw = t.expect || t.accept || t.answers || [];
+    if(Array.isArray(raw)) return raw.map(norm).filter(Boolean);
+    return typeof raw === 'string' ? raw.split('|').map(norm).filter(Boolean) : [];
+  }
+  function correct(user,t){
+    const u=norm(user);
+    if(!u) return false;
+    if(values(t).some(a=>u===a || u.includes(a) || a.includes(u))) return true;
+    const groups=Array.isArray(t.keywords)?t.keywords:[];
+    if(groups.length){
+      return groups.every(g=>{
+        const arr=Array.isArray(g)?g:[g];
+        return arr.map(norm).some(k=>k && u.includes(k));
+      });
+    }
+    return false;
+  }
+  function show(ok,t){
+    const model=t.model_answer || t.modelAnswer || t.sample || '';
+    if(ok){
+      const msg=t.correct_reply || '很好，答對了。';
+      replyEl.textContent=msg + (model ? '\n\n標準說法：' + model : '');
+      speakText(msg,'zh-TW',0.9);
+      if(autoNextEl && autoNextEl.checked && nextBtn){
+        setTimeout(()=>{ answerEl.value=''; nextBtn.click(); },900);
+      }
+    }else{
+      const msg=t.retry_reply || '還差一點，請看提示後再回答一次。';
+      replyEl.textContent=msg + (model ? '\n\n可以這樣回答：' + model : '');
+      speakText(msg,'zh-TW',0.9);
+    }
+  }
+  submitBtn.addEventListener('click',()=>{
+    const user=answerEl.value.trim();
+    if(!user){ replyEl.textContent='請先輸入或說出你的答案。'; answerEl.focus(); return; }
+    const t=currentTopic();
+    show(correct(user,t),t);
+  });
+  answerEl.addEventListener('keydown',e=>{
+    if((e.ctrlKey || e.metaKey) && e.key==='Enter') submitBtn.click();
+  });
+})();
 
 
 /* ==== AI 語音作答（瀏覽器語音辨識） ==== */
