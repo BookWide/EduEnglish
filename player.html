@@ -1921,7 +1921,6 @@ th,td{
                 <button id="btnTts" class="btn sm">題目朗讀</button>
                 <button id="btnRec" class="btn sm">🎙️ 開始說</button>
                 <button id="btnStop" class="btn sm" disabled>⛔ 停止</button>
-                <button id="btnAiSubmit" class="btn sm blue">送出回答</button>
                 <label class="muted"><input id="aiAutoNext" type="checkbox" /> 作答後自動下一題</label>
                 <span id="aiProgress" class="muted">第 0/0 題</span>
               </div>
@@ -1930,7 +1929,7 @@ th,td{
               <div style="margin:8px 0 4px">
                 <span class="muted">提示：</span><span id="aiHint" class="muted">—</span>
               </div>
-              <div id="aiEasyTip">AI老師會依你的回答判斷、糾正，再帶你進入下一步。</div>
+              <div id="aiEasyTip">簡單模式：只要回答一句短英文即可。例：I think it is interesting. / It is about travel. / I like this place.</div>
               <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0">
                 <span class="muted">AI 示範：</span>
                 <button id="aiDemoEn" class="btn sm">英</button>
@@ -2523,10 +2522,9 @@ async function fetchJsonFirstHit(fileNames = []){
 }
 
 function normalizeAiTopics(raw){
-  // V107：5 題全部保留。缺少 expect 的題目改用 sample / model_answer 判定。
-  if (Array.isArray(raw)) return raw.filter(Boolean);
-  if (raw && Array.isArray(raw.items)) return raw.items.filter(Boolean);
-  if (raw && Array.isArray(raw.topics)) return raw.topics.filter(Boolean);
+  if (Array.isArray(raw)) return raw;
+  if (raw && Array.isArray(raw.items)) return raw.items;
+  if (raw && Array.isArray(raw.topics)) return raw.topics;
   return [];
 }
 
@@ -4251,11 +4249,15 @@ async function loadAI(){
   const AI_SLOW_RATE = 0.72;
 
   function BW_aiEasyQuestion(t){
-    return String(t.teacher || t.prompt || t.q || '').trim();
+    const raw = String(t.easy_prompt || t.easyPrompt || t.beginner_prompt || t.beginnerPrompt || t.simple_prompt || t.simplePrompt || t.prompt || t.q || '').trim();
+    if(!raw) return '';
+    const clean = raw.replace(/\s+/g,' ').trim();
+    if(/^\[?簡單模式\]?/.test(clean)) return clean;
+    return '簡單模式：請用一句短英文回答。\n' + clean + '\n\n回答可以很短，例如：I think it is interesting.';
   }
 
   function BW_aiEasyHint(t){
-    return String(t.hint || t.easy_hint || t.easyHint || '請直接回答老師現在問的內容。').trim();
+    return String(t.easy_hint || t.easyHint || t.hint || '不用完整長句。用 3～8 個英文單字回答也可以。').trim();
   }
 
   try{
@@ -4284,27 +4286,6 @@ async function loadAI(){
 
     let idx = 0;
     let currentLang = 'en';
-    let aiFinished = false;
-
-    function finishAI(){
-      if(aiFinished) return;
-      aiFinished = true;
-      const payload = { category:cat, slug, completed:true, completed_at:new Date().toISOString(), total:topics.length };
-      try{ localStorage.setItem(`BW_AI_COMPLETE_${cat}_${slug}`, JSON.stringify(payload)); }catch(_e){}
-      window.__AI_COMPLETED__ = true;
-      window.dispatchEvent(new CustomEvent('bookwide:ai-complete', {detail:payload}));
-      if(progress) progress.textContent = `✅ AI 完成 ${topics.length}/${topics.length}`;
-      if(reply) reply.textContent = '🎉 恭喜！你已完成本課全部 AI 互動題。';
-      const submit = $('#btnAiSubmit');
-      if(submit){ submit.disabled=true; submit.textContent='✅ 已完成'; }
-      const next = $('#btnNextTopic');
-      if(next){ next.disabled=true; next.textContent='完成'; }
-      const answerBox = $('#aiAnswer');
-      if(answerBox) answerBox.value='';
-      speakText('恭喜，你已完成本課全部 AI 互動題。','zh-TW',0.9);
-    }
-    window.__BW_FINISH_AI__ = finishAI;
-    window.__BW_AI_IS_LAST__ = ()=> idx >= topics.length - 1;
 
     function getSamples(t){
       const localObj = BW_localObject(t);
@@ -4363,16 +4344,8 @@ async function loadAI(){
       render();
     };
     $('#btnNextTopic').onclick=()=>{
-      // V107：最後一題不再跳回第 1 題。
-      if(idx >= topics.length - 1){ finishAI(); return; }
-      idx += 1;
+      idx=(idx+1)%topics.length;
       render();
-      const answerBox = $('#aiAnswer');
-      if(answerBox) answerBox.value = '';
-      setTimeout(()=>{
-        const text = (prompt && prompt.value) || '';
-        if(text) speakText(text, 'en-US', AI_SLOW_RATE);
-      }, 180);
     };
     $('#btnTts').onclick=()=>speakText((prompt && prompt.value) || '','en-US', AI_SLOW_RATE);
 
@@ -4409,101 +4382,6 @@ async function loadAI(){
     window.__AI_CURRENT_INDEX__ = 0;
   }
 }
-
-
-
-/* ==== V88 AI互動：JSON 劇本式老師判斷（不影響 Talk） ==== */
-(function(){
-  const submitBtn = $('#btnAiSubmit');
-  const answerEl = $('#aiAnswer');
-  const replyEl = $('#aiReply');
-  const autoNextEl = $('#aiAutoNext');
-  const nextBtn = $('#btnNextTopic');
-  if(!submitBtn || !answerEl || !replyEl) return;
-
-  function norm(s){
-    return String(s || '').toLowerCase().replace(/[’']/g, "'")
-      .replace(/[^a-z0-9\u4e00-\u9fff\s']/g, ' ')
-      .replace(/\s+/g, ' ').trim();
-  }
-  function currentTopic(){
-    const topics = Array.isArray(window.__AI_TOPICS__) ? window.__AI_TOPICS__ : [];
-    return topics[Number(window.__AI_CURRENT_INDEX__) || 0] || {};
-  }
-  function values(t){
-    // V107：第 4、5 題沒有 expect 時，直接用 sample / model_answer 當標準答案。
-    const raw = t.expect || t.accept || t.answers || t.model_answer || t.modelAnswer || t.sample || [];
-    if(Array.isArray(raw)) return raw.map(norm).filter(Boolean);
-    return typeof raw === 'string' ? raw.split('|').map(norm).filter(Boolean) : [];
-  }
-  function similarity(a,b){
-    const A=norm(a).split(' ').filter(Boolean);
-    const B=norm(b).split(' ').filter(Boolean);
-    if(!A.length || !B.length) return 0;
-    const setA=new Set(A), setB=new Set(B);
-    let hit=0;
-    setA.forEach(w=>{ if(setB.has(w)) hit++; });
-    return hit / Math.max(setA.size,setB.size);
-  }
-
-  function correct(user,t){
-    const u=norm(user);
-    if(!u) return false;
-
-    const model=norm(t.model_answer || t.modelAnswer || t.sample || '');
-    if(model){
-      const uw=u.split(' ').filter(Boolean);
-      const mw=model.split(' ').filter(Boolean);
-      if(uw.length > Math.max(mw.length * 1.8, mw.length + 4)) return false;
-    }
-
-    const accepted=values(t);
-    if(accepted.some(a=>{
-      if(u===a) return true;
-      if(a.split(' ').length <= 2) return u===a || similarity(u,a) >= 0.8;
-      return similarity(u,a) >= 0.72;
-    })) return true;
-
-    const groups=Array.isArray(t.keywords)?t.keywords:[];
-    if(groups.length && model){
-      const hasAll=groups.every(g=>{
-        const arr=Array.isArray(g)?g:[g];
-        return arr.map(norm).some(k=>k && u.split(' ').includes(k));
-      });
-      if(hasAll) return true; // V107: keyword groups are sufficient for understand/apply questions
-    }
-    return false;
-  }
-  function show(ok,t){
-    const model=t.model_answer || t.modelAnswer || t.sample || '';
-    if(ok){
-      const msg=t.correct_reply || '很好，答對了。';
-      replyEl.textContent=msg + (model ? '\n\n標準說法：' + model : '');
-      speakText(msg,'zh-TW',0.9);
-      if(window.__BW_AI_IS_LAST__ && window.__BW_AI_IS_LAST__()){
-        setTimeout(()=>{
-          answerEl.value='';
-          if(typeof window.__BW_FINISH_AI__ === 'function') window.__BW_FINISH_AI__();
-        },700);
-      }else if(autoNextEl && autoNextEl.checked && nextBtn){
-        setTimeout(()=>{ answerEl.value=''; nextBtn.click(); },900);
-      }
-    }else{
-      const msg=t.retry_reply || '我沒有聽清楚，請再說一次，或直接輸入答案。';
-      replyEl.textContent=msg + (model ? '\n\n可以這樣回答：' + model : '');
-      speakText(msg,'zh-TW',0.9);
-    }
-  }
-  submitBtn.addEventListener('click',()=>{
-    const user=answerEl.value.trim();
-    if(!user){ replyEl.textContent='請先輸入或說出你的答案。'; answerEl.focus(); return; }
-    const t=currentTopic();
-    show(correct(user,t),t);
-  });
-  answerEl.addEventListener('keydown',e=>{
-    if((e.ctrlKey || e.metaKey) && e.key==='Enter') submitBtn.click();
-  });
-})();
 
 
 /* ==== AI 語音作答（瀏覽器語音辨識） ==== */
