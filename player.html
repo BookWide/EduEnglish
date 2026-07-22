@@ -2523,13 +2523,11 @@ async function fetchJsonFirstHit(fileNames = []){
 }
 
 function normalizeAiTopics(raw){
-  let list = [];
-  if (Array.isArray(raw)) list = raw;
-  else if (raw && Array.isArray(raw.items)) list = raw.items;
-  else if (raw && Array.isArray(raw.topics)) list = raw.topics;
-
-  // AI 題庫：disabled:true 為暫停題，不顯示、不列入總題數、不參與過關判定。
-  return list.filter(item => item && item.disabled !== true);
+  // V107：5 題全部保留。缺少 expect 的題目改用 sample / model_answer 判定。
+  if (Array.isArray(raw)) return raw.filter(Boolean);
+  if (raw && Array.isArray(raw.items)) return raw.items.filter(Boolean);
+  if (raw && Array.isArray(raw.topics)) return raw.topics.filter(Boolean);
+  return [];
 }
 
 function normalizeTalkItems(raw){
@@ -4286,6 +4284,27 @@ async function loadAI(){
 
     let idx = 0;
     let currentLang = 'en';
+    let aiFinished = false;
+
+    function finishAI(){
+      if(aiFinished) return;
+      aiFinished = true;
+      const payload = { category:cat, slug, completed:true, completed_at:new Date().toISOString(), total:topics.length };
+      try{ localStorage.setItem(`BW_AI_COMPLETE_${cat}_${slug}`, JSON.stringify(payload)); }catch(_e){}
+      window.__AI_COMPLETED__ = true;
+      window.dispatchEvent(new CustomEvent('bookwide:ai-complete', {detail:payload}));
+      if(progress) progress.textContent = `✅ AI 完成 ${topics.length}/${topics.length}`;
+      if(reply) reply.textContent = '🎉 恭喜！你已完成本課全部 AI 互動題。';
+      const submit = $('#btnAiSubmit');
+      if(submit){ submit.disabled=true; submit.textContent='✅ 已完成'; }
+      const next = $('#btnNextTopic');
+      if(next){ next.disabled=true; next.textContent='完成'; }
+      const answerBox = $('#aiAnswer');
+      if(answerBox) answerBox.value='';
+      speakText('恭喜，你已完成本課全部 AI 互動題。','zh-TW',0.9);
+    }
+    window.__BW_FINISH_AI__ = finishAI;
+    window.__BW_AI_IS_LAST__ = ()=> idx >= topics.length - 1;
 
     function getSamples(t){
       const localObj = BW_localObject(t);
@@ -4344,10 +4363,10 @@ async function loadAI(){
       render();
     };
     $('#btnNextTopic').onclick=()=>{
-      idx=(idx+1)%topics.length;
+      // V107：最後一題不再跳回第 1 題。
+      if(idx >= topics.length - 1){ finishAI(); return; }
+      idx += 1;
       render();
-
-      // V90：按「下一題」後，自動朗讀新題目，讓學員立即知道要回答什麼。
       const answerBox = $('#aiAnswer');
       if(answerBox) answerBox.value = '';
       setTimeout(()=>{
@@ -4412,7 +4431,8 @@ async function loadAI(){
     return topics[Number(window.__AI_CURRENT_INDEX__) || 0] || {};
   }
   function values(t){
-    const raw = t.expect || t.accept || t.answers || [];
+    // V107：第 4、5 題沒有 expect 時，直接用 sample / model_answer 當標準答案。
+    const raw = t.expect || t.accept || t.answers || t.model_answer || t.modelAnswer || t.sample || [];
     if(Array.isArray(raw)) return raw.map(norm).filter(Boolean);
     return typeof raw === 'string' ? raw.split('|').map(norm).filter(Boolean) : [];
   }
@@ -4450,33 +4470,23 @@ async function loadAI(){
         const arr=Array.isArray(g)?g:[g];
         return arr.map(norm).some(k=>k && u.split(' ').includes(k));
       });
-      if(hasAll && similarity(u,model) >= 0.65) return true;
+      if(hasAll) return true; // V107: keyword groups are sufficient for understand/apply questions
     }
     return false;
   }
   function show(ok,t){
     const model=t.model_answer || t.modelAnswer || t.sample || '';
     if(ok){
-      const topics = Array.isArray(window.__AI_TOPICS__) ? window.__AI_TOPICS__ : [];
-      const currentIndex = Number(window.__AI_CURRENT_INDEX__) || 0;
-      const isLast = topics.length > 0 && currentIndex >= topics.length - 1;
       const msg=t.correct_reply || '很好，答對了。';
-
-      if(isLast){
-        const doneMsg = '恭喜，AI 互動全部完成！';
-        replyEl.textContent=msg + (model ? '\n\n標準說法：' + model : '') + '\n\n✅ ' + doneMsg;
-        speakText(doneMsg,'zh-TW',0.9);
-        try{
-          window.dispatchEvent(new CustomEvent('bw-ai-complete', {
-            detail:{ slug, total:topics.length }
-          }));
-        }catch(_e){}
-      }else{
-        replyEl.textContent=msg + (model ? '\n\n標準說法：' + model : '');
-        speakText(msg,'zh-TW',0.9);
-        if(autoNextEl && autoNextEl.checked && nextBtn){
-          setTimeout(()=>{ answerEl.value=''; nextBtn.click(); },900);
-        }
+      replyEl.textContent=msg + (model ? '\n\n標準說法：' + model : '');
+      speakText(msg,'zh-TW',0.9);
+      if(window.__BW_AI_IS_LAST__ && window.__BW_AI_IS_LAST__()){
+        setTimeout(()=>{
+          answerEl.value='';
+          if(typeof window.__BW_FINISH_AI__ === 'function') window.__BW_FINISH_AI__();
+        },700);
+      }else if(autoNextEl && autoNextEl.checked && nextBtn){
+        setTimeout(()=>{ answerEl.value=''; nextBtn.click(); },900);
       }
     }else{
       const msg=t.retry_reply || '我沒有聽清楚，請再說一次，或直接輸入答案。';
