@@ -4562,64 +4562,123 @@ async function loadAI(){
     return K.every(kw=>U.some(uw=>aiWordMatch(uw,kw)));
   }
 
-  function correct(user,t){
+  function evaluateAnswer(user,t){
     const u=norm(user);
-    if(!u) return false;
+    if(!u) return {status:'retry',matched:0,total:0,similarity:0};
 
     const model=norm(t.model_answer || t.modelAnswer || t.sample || '');
     if(model){
       const uw=u.split(' ').filter(Boolean);
       const mw=model.split(' ').filter(Boolean);
-      // 只排除明顯把影片聲音整段收進來的超長答案。
-      if(uw.length > Math.max(mw.length * 3, mw.length + 18)) return false;
+      // 只排除明顯把影片或老師聲音整段收進來的超長內容。
+      if(uw.length > Math.max(mw.length * 3, mw.length + 18)){
+        return {status:'retry',matched:0,total:0,similarity:0};
+      }
     }
 
     const accepted=values(t);
+    let best=0;
+    accepted.forEach(a=>{ best=Math.max(best,similarity(u,a)); });
+    if(model) best=Math.max(best,similarity(u,model));
+
     if(accepted.some(a=>{
       if(u===a) return true;
       const words=a.split(' ').filter(Boolean).length;
-      if(words<=2) return similarity(u,a)>=0.60;
-      return similarity(u,a)>=0.45;
-    })) return true;
+      return words<=2 ? similarity(u,a)>=0.60 : similarity(u,a)>=0.45;
+    })){
+      return {status:'full',matched:0,total:0,similarity:best};
+    }
 
     const groups=Array.isArray(t.keywords)?t.keywords:[];
+    let matched=0;
+    groups.forEach(g=>{
+      const arr=Array.isArray(g)?g:[g];
+      if(arr.some(k=>aiContainsLoose(u,k))) matched++;
+    });
+
     if(groups.length){
-      let matched=0;
-      groups.forEach(g=>{
-        const arr=Array.isArray(g)?g:[g];
-        if(arr.some(k=>aiContainsLoose(u,k))) matched++;
-      });
-
-      // 至少符合 60% 關鍵概念；只有 1～2 組時仍須全部符合。
-      const need=groups.length<=2 ? groups.length : Math.max(2,Math.ceil(groups.length*0.60));
-      if(matched>=need) return true;
-    }
-
-    // 長句即使語音辨識有少量錯字，只要和示範答案有四成概念重疊也接受。
-    if(model && model.split(' ').length>=6 && similarity(u,model)>=0.40) return true;
-
-    return false;
-  }
-  function show(ok,t){
-    const model=t.model_answer || t.modelAnswer || t.sample || '';
-    if(ok){
-      const msg=t.correct_reply || '很好，答對了。';
-      replyEl.textContent=msg + (model ? '\n\n標準說法：' + model : '');
-      speakText(msg,'zh-TW',0.9);
-      if(autoNextEl && autoNextEl.checked && nextBtn){
-        setTimeout(()=>{ answerEl.value=''; nextBtn.click(); },900);
+      const fullNeed=groups.length<=2 ? groups.length : Math.max(2,Math.ceil(groups.length*0.60));
+      if(matched>=fullNeed){
+        return {status:'full',matched,total:groups.length,similarity:best};
       }
-    }else{
-      const msg=t.retry_reply || '我沒有聽清楚，請再說一次，或直接輸入答案。';
-      replyEl.textContent=msg + (model ? '\n\n可以這樣回答：' + model : '');
-      speakText(msg,'zh-TW',0.9);
+
+      // 已說到至少一個核心概念，就視為「部分完成」並由老師補成完整答案。
+      if(matched>=1 || best>=0.20){
+        return {status:'partial',matched,total:groups.length,similarity:best};
+      }
     }
+
+    if(model && model.split(' ').length>=6){
+      if(best>=0.40) return {status:'full',matched,total:groups.length,similarity:best};
+      if(best>=0.20) return {status:'partial',matched,total:groups.length,similarity:best};
+    }
+
+    return {status:'retry',matched,total:groups.length,similarity:best};
   }
+
+  async function waitAiVoiceDone(maxMs=15000){
+    const start=Date.now();
+    await new Promise(resolve=>{
+      const timer=setInterval(()=>{
+        const browserDone=!window.speechSynthesis || !window.speechSynthesis.speaking;
+        const cloudDone=(typeof __ttsAudio==='undefined') || !__ttsAudio || __ttsAudio.paused || __ttsAudio.ended;
+        if((browserDone && cloudDone) || Date.now()-start>maxMs){
+          clearInterval(timer);
+          resolve();
+        }
+      },100);
+    });
+  }
+
+  async function speakAiStep(text,lang,rate){
+    if(!text) return;
+    await speakText(text,lang,rate);
+    await waitAiVoiceDone();
+  }
+
+  async function show(result,t){
+    const model=t.model_answer || t.modelAnswer || t.sample || '';
+
+    if(result.status==='full'){
+      const msg=t.correct_reply || '很好，你已經回答到重點。';
+      replyEl.textContent=msg + (model ? '\n\n老師幫你整理成完整說法：' + model : '');
+
+      await speakAiStep(msg,'zh-TW',0.9);
+      if(model) await speakAiStep(model,'en-US',0.82);
+
+      if(autoNextEl && autoNextEl.checked && nextBtn){
+        await new Promise(r=>setTimeout(r,1000));
+        answerEl.value='';
+        nextBtn.click();
+      }
+      return;
+    }
+
+    if(result.status==='partial'){
+      const msg='很好，你已經說到重點了。老師幫你補成完整、自然的英文。';
+      replyEl.textContent=msg + (model ? '\n\n完整說法：' + model : '');
+
+      await speakAiStep(msg,'zh-TW',0.9);
+      if(model) await speakAiStep(model,'en-US',0.82);
+
+      if(autoNextEl && autoNextEl.checked && nextBtn){
+        await new Promise(r=>setTimeout(r,1000));
+        answerEl.value='';
+        nextBtn.click();
+      }
+      return;
+    }
+
+    const msg=t.retry_reply || '再試一次。先依照提示說出一個重點即可。';
+    replyEl.textContent=msg + (model ? '\n\n老師提示：你可以先說前半句。' : '');
+    await speakAiStep(msg,'zh-TW',0.9);
+  }
+
   submitBtn.addEventListener('click',()=>{
     const user=answerEl.value.trim();
     if(!user){ replyEl.textContent='請先輸入或說出你的答案。'; answerEl.focus(); return; }
     const t=currentTopic();
-    show(correct(user,t),t);
+    show(evaluateAnswer(user,t),t);
   });
   answerEl.addEventListener('keydown',e=>{
     if((e.ctrlKey || e.metaKey) && e.key==='Enter') submitBtn.click();
