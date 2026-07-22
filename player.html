@@ -1921,7 +1921,8 @@ th,td{
                 <button id="btnTts" class="btn sm">題目朗讀</button>
                 <button id="btnRec" class="btn sm">🎙️ 開始說</button>
                 <button id="btnStop" class="btn sm" disabled>⛔ 停止</button>
-                <label class="muted"><input id="aiAutoNext" type="checkbox" /> 作答後自動下一題</label>
+                <button id="btnAiSubmit" class="btn sm blue">送出回答</button>
+                <label class="muted"><input id="aiAutoNext" type="checkbox" checked /> 作答後自動下一題</label>
                 <span id="aiProgress" class="muted">第 0/0 題</span>
               </div>
               <textarea id="aiPrompt" rows="3" readonly placeholder="題目會顯示在這裡…"></textarea>
@@ -4239,13 +4240,16 @@ async function loadVocab(){
 }
 
 
-/* ==== AI（三語示範 + 對應朗讀） ==== */
+/* ==== AI（三語示範 + 五題正式過關） ==== */
 async function loadAI(){
   const sel = $('#aiTopic');
   const prompt = $('#aiPrompt');
+  const answer = $('#aiAnswer');
   const hint = $('#aiHint');
   const reply = $('#aiReply');
   const progress = $('#aiProgress');
+  const submitBtn = $('#btnAiSubmit');
+  const autoNext = $('#aiAutoNext');
   const AI_SLOW_RATE = 0.72;
 
   function BW_aiEasyQuestion(t){
@@ -4260,13 +4264,79 @@ async function loadAI(){
     return String(t.easy_hint || t.easyHint || t.hint || '不用完整長句。用 3～8 個英文單字回答也可以。').trim();
   }
 
-  try{
-    const hit = await fetchJsonFirstHit([
-      `ai-${slug}.json`,
-      `ai.json`
-    ]);
+  function BW_aiNormalizeText(v){
+    return String(v || '')
+      .toLowerCase()
+      .replace(/[’‘]/g,"'")
+      .replace(/[^a-z0-9'\s]/g,' ')
+      .replace(/\s+/g,' ')
+      .trim();
+  }
 
-    const topics = normalizeAiTopics(hit.data);
+  function BW_aiWords(v){
+    const stop = new Set(['a','an','the','to','of','for','and','or','is','are','am','be','we','i','you','it','this','that','our','your','in','on','at','with','can','could','should','would','do','does']);
+    return BW_aiNormalizeText(v).split(' ').filter(w => w.length > 1 && !stop.has(w));
+  }
+
+  function BW_aiFlatten(value){
+    if(value == null) return [];
+    if(Array.isArray(value)) return value.flatMap(BW_aiFlatten);
+    if(typeof value === 'object') return Object.values(value).flatMap(BW_aiFlatten);
+    const text = String(value).trim();
+    return text ? [text] : [];
+  }
+
+  function BW_aiAcceptedAnswers(t){
+    const enObj = (t.en && typeof t.en === 'object') ? t.en : null;
+    const candidates = [
+      t.expect, t.accept, t.accepts, t.answers, t.answer,
+      t.model_answer, t.modelAnswer, t.correct_reply, t.correctReply,
+      t.sample_en, t.sampleEn,
+      enObj && (enObj.sample || enObj.reply || enObj.answer),
+      typeof t.en === 'string' ? t.en : '',
+      t.sample, t.demo
+    ];
+    return [...new Set(candidates.flatMap(BW_aiFlatten).map(x=>String(x).trim()).filter(Boolean))];
+  }
+
+  function BW_aiJudge(userText, t){
+    const clean = BW_aiNormalizeText(userText);
+    const words = BW_aiWords(userText);
+    if(!clean) return {pass:false, message:'請先輸入或說出一句英文。'};
+    if(words.length < 2 && clean.split(' ').length < 3){
+      return {pass:false, message:'再多說一點，至少用 3 個英文單字回答。'};
+    }
+
+    const refs = BW_aiAcceptedAnswers(t);
+    if(!refs.length){
+      return {pass:true, message:'回答清楚，可以進入下一題。'};
+    }
+
+    let best = 0;
+    let bestRef = refs[0];
+    for(const ref of refs){
+      const refClean = BW_aiNormalizeText(ref);
+      const refWords = BW_aiWords(ref);
+      if(clean === refClean || clean.includes(refClean) || refClean.includes(clean)){
+        best = 1; bestRef = ref; break;
+      }
+      const a = new Set(words), b = new Set(refWords);
+      const overlap = [...a].filter(w=>b.has(w)).length;
+      const coverage = b.size ? overlap / b.size : 0;
+      const precision = a.size ? overlap / a.size : 0;
+      const score = Math.max(coverage, (coverage + precision) / 2);
+      if(score > best){ best = score; bestRef = ref; }
+    }
+
+    const pass = best >= 0.34 || (words.length >= 4 && best >= 0.22);
+    return pass
+      ? {pass:true, message:'意思正確，表達也能理解。', sample:bestRef}
+      : {pass:false, message:'意思還不夠接近題目。請參考提示再回答一次。', sample:bestRef};
+  }
+
+  try{
+    const hit = await fetchJsonFirstHit([`ai-${slug}.json`, `ai.json`]);
+    const topics = normalizeAiTopics(hit.data); // 保留題庫原有 5 題，不刪 disabled 題
 
     if(!topics.length){
       if(sel) sel.innerHTML = '<option value="">沒有 AI 題目</option>';
@@ -4274,38 +4344,28 @@ async function loadAI(){
       if(hint) hint.textContent = '—';
       if(reply) reply.textContent = '（AI 題目是空的）';
       if(progress) progress.textContent = '第 0/0 題';
+      if(submitBtn) submitBtn.disabled = true;
       window.__AI_TOPICS__ = [];
       window.__AI_CURRENT_INDEX__ = 0;
       return;
     }
 
     if(sel){
-      sel.innerHTML = topics.map((t,i)=>`
-        <option value="${i}">${esc(t.title||t.q||('題目'+(i+1)))}</option>`).join('');
+      sel.innerHTML = topics.map((t,i)=>`<option value="${i}">${esc(t.title||t.q||('題目'+(i+1)))}</option>`).join('');
     }
 
     let idx = 0;
     let currentLang = 'en';
+    let completed = false;
+    const passed = new Set();
 
     function getSamples(t){
       const localObj = BW_localObject(t);
       const zhObj=(t.zh && typeof t.zh==='object')?t.zh:null;
       const enObj=(t.en && typeof t.en==='object')?t.en:null;
-
-      const sampleEn=t.sample_en || t.sampleEn ||
-        (enObj && (enObj.sample || enObj.reply)) ||
-        (typeof t.en==='string'?t.en:'') ||
-        t.sample || t.demo || '';
-
-      const sampleZh=t.sample_zh || t.sampleZh ||
-        (zhObj && (zhObj.sample || zhObj.reply)) ||
-        (typeof t.zh==='string'?t.zh:'') ||
-        t.cn || '';
-
-      const sampleLocal=t.sample_local || t.sample_it || t.sample_es || t.sample_fr || t.sample_de || t.sample_ko || t.sample_ja ||
-        (localObj && (localObj.sample || localObj.reply)) ||
-        BW_localText(t) || '';
-
+      const sampleEn=t.sample_en || t.sampleEn || (enObj && (enObj.sample || enObj.reply)) || (typeof t.en==='string'?t.en:'') || t.sample || t.demo || '';
+      const sampleZh=t.sample_zh || t.sampleZh || (zhObj && (zhObj.sample || zhObj.reply)) || (typeof t.zh==='string'?t.zh:'') || t.cn || '';
+      const sampleLocal=t.sample_local || t.sample_it || t.sample_es || t.sample_fr || t.sample_de || t.sample_ko || t.sample_ja || (localObj && (localObj.sample || localObj.reply)) || BW_localText(t) || '';
       return {sampleEn,sampleZh,sampleLocal};
     }
 
@@ -4315,43 +4375,72 @@ async function loadAI(){
       if(lang==='zh') text=sampleZh||sampleEn||sampleLocal;
       else if(lang==='ja') text=sampleLocal||sampleEn||sampleZh;
       else text=sampleEn||sampleZh||sampleLocal;
-      if(reply) reply.textContent=text||'(尚無示範句)';
+      if(reply) reply.textContent=text ? ('示範：' + text) : '(尚無示範句)';
     }
 
-    function render(){
+    function render(options={}){
       const t = topics[idx] || {};
       if(prompt) prompt.value = BW_aiEasyQuestion(t);
       if(hint) hint.textContent = BW_aiEasyHint(t);
-      setReplyByLang(t, currentLang);
-      if(progress) progress.textContent = `第 ${idx+1}/${topics.length} 題`;
+      if(answer && !options.keepAnswer) answer.value = '';
+      if(reply && !options.keepReply) reply.textContent = passed.has(idx) ? '✅ 本題已通過。' : 'AI老師會依你的回答判斷、糾正，再帶你進入下一步。';
+      if(progress) progress.textContent = completed ? `✅ AI 完成 ${topics.length}/${topics.length}` : `第 ${idx+1}/${topics.length} 題`;
       if(sel) sel.value = String(idx);
+      if(submitBtn){ submitBtn.disabled = completed; submitBtn.textContent = completed ? '✅ 已完成' : '送出回答'; }
       window.__AI_TOPICS__ = topics;
       window.__AI_CURRENT_INDEX__ = idx;
       BW_updateLocalUI();
     }
 
-    render();
-
-    if(sel){
-      sel.onchange = ()=>{
-        idx = +sel.value|0;
-        render();
-      };
+    function finishAI(){
+      completed = true;
+      if(progress) progress.textContent = `✅ AI 完成 ${topics.length}/${topics.length}`;
+      if(reply) reply.innerHTML = `✅ 恭喜完成全部 ${topics.length} 題 AI 互動！`;
+      if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = '✅ 已完成'; }
+      try{
+        localStorage.setItem(`BW_AI_COMPLETE_${cat}_${slug}`, JSON.stringify({completed:true,total:topics.length,completed_at:new Date().toISOString()}));
+      }catch(_e){}
+      window.dispatchEvent(new CustomEvent('bw-ai-complete',{detail:{cat,slug,total:topics.length}}));
     }
 
-    $('#btnPrevTopic').onclick=()=>{
-      idx=(idx-1+topics.length)%topics.length;
+    function goNextAfterPass(){
+      if(idx >= topics.length - 1){ finishAI(); return; }
+      idx += 1;
       render();
-    };
-    $('#btnNextTopic').onclick=()=>{
-      idx=(idx+1)%topics.length;
-      render();
-    };
-    $('#btnTts').onclick=()=>speakText((prompt && prompt.value) || '','en-US', AI_SLOW_RATE);
+      if(answer) answer.focus();
+    }
 
-    $('#aiDemoEn').onclick=()=>{currentLang='en';render();};
-    $('#aiDemoZh').onclick=()=>{currentLang='zh';render();};
-    $('#aiDemoJa').onclick=()=>{currentLang='ja';BW_updateLocalUI();render();};
+    function submitAnswer(){
+      if(completed) return;
+      const t = topics[idx] || {};
+      const result = BW_aiJudge(answer ? answer.value : '', t);
+      const samples = getSamples(t);
+      if(!result.pass){
+        if(reply) reply.innerHTML = `❌ ${esc(result.message)}${result.sample ? `<br><span class="muted">可參考：${esc(result.sample)}</span>` : ''}`;
+        return;
+      }
+      passed.add(idx);
+      if(reply) reply.innerHTML = `✅ 本題通過！${esc(result.message)}${samples.sampleEn ? `<br><span class="muted">較自然的說法：${esc(samples.sampleEn)}</span>` : ''}`;
+      if(progress) progress.textContent = `已通過 ${passed.size}/${topics.length} 題`;
+      if(autoNext && autoNext.checked){
+        setTimeout(goNextAfterPass, 900);
+      }else if(idx === topics.length - 1){
+        setTimeout(finishAI, 500);
+      }
+    }
+
+    render();
+
+    if(sel) sel.onchange = ()=>{ idx = Math.max(0, Math.min(topics.length-1, +sel.value|0)); completed=false; render(); };
+    $('#btnPrevTopic').onclick=()=>{ if(completed) return; idx=Math.max(0,idx-1); render(); };
+    $('#btnNextTopic').onclick=()=>{ if(completed) return; idx=Math.min(topics.length-1,idx+1); render(); };
+    $('#btnTts').onclick=()=>speakText((prompt && prompt.value) || '','en-US', AI_SLOW_RATE);
+    if(submitBtn) submitBtn.onclick=submitAnswer;
+    if(answer) answer.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey) && e.key==='Enter'){ e.preventDefault(); submitAnswer(); } });
+
+    $('#aiDemoEn').onclick=()=>{currentLang='en';setReplyByLang(topics[idx]||{},currentLang);};
+    $('#aiDemoZh').onclick=()=>{currentLang='zh';setReplyByLang(topics[idx]||{},currentLang);};
+    $('#aiDemoJa').onclick=()=>{currentLang='ja';BW_updateLocalUI();setReplyByLang(topics[idx]||{},currentLang);};
 
     $('#aiDemoTts').onclick=()=>{
       const t=topics[idx]||{};
@@ -4363,11 +4452,8 @@ async function loadAI(){
         if(cat === 'music' && BW_isChineseLocalCode(lcode)){
           text = String(t.ja || t.jp || t.translation_ja || sampleLocal || sampleEn || sampleZh || '').trim();
           langCode = 'ja-JP';
-        }else{
-          text=sampleLocal||sampleEn||sampleZh;langCode=BW_localTtsLang(lcode);
-        }
-      }
-      else {text=sampleEn||sampleZh||sampleLocal;langCode='en-US';}
+        }else{text=sampleLocal||sampleEn||sampleZh;langCode=BW_localTtsLang(lcode);}
+      }else{text=sampleEn||sampleZh||sampleLocal;langCode='en-US';}
       if(text) speakText(text,langCode,AI_SLOW_RATE);
     };
 
@@ -4378,6 +4464,7 @@ async function loadAI(){
     if(hint) hint.textContent = '—';
     if(reply) reply.textContent = '⚠️ AI 題庫讀取失敗';
     if(progress) progress.textContent = '第 0/0 題';
+    if(submitBtn) submitBtn.disabled = true;
     window.__AI_TOPICS__ = [];
     window.__AI_CURRENT_INDEX__ = 0;
   }
