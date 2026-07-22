@@ -4490,14 +4490,76 @@ async function loadAI(){
     if(Array.isArray(raw)) return raw.map(norm).filter(Boolean);
     return typeof raw === 'string' ? raw.split('|').map(norm).filter(Boolean) : [];
   }
+  function aiWordBase(w){
+    w=String(w||'').toLowerCase().trim();
+    const aliases={
+      "mothers":"mother","mother's":"mother",
+      "fathers":"father","father's":"father",
+      "brothers":"brother","brother's":"brother",
+      "sisters":"sister","sister's":"sister",
+      "names":"name","named":"name","man":"name",
+      "years":"year","ages":"age",
+      "children":"child","kids":"child",
+      "advertising":"ad","advertisement":"ad",
+      "campaigns":"campaign","customers":"customer",
+      "meetings":"meeting","began":"begin","started":"start"
+    };
+    if(aliases[w]) return aliases[w];
+    if(w.length>4 && w.endsWith('ing')) w=w.slice(0,-3);
+    else if(w.length>3 && w.endsWith('ed')) w=w.slice(0,-2);
+    else if(w.length>3 && w.endsWith('s')) w=w.slice(0,-1);
+    return aliases[w] || w;
+  }
+
+  function aiEditDistance(a,b){
+    a=String(a||''); b=String(b||'');
+    if(a===b) return 0;
+    if(!a.length) return b.length;
+    if(!b.length) return a.length;
+    const row=Array.from({length:b.length+1},(_,i)=>i);
+    for(let i=1;i<=a.length;i++){
+      let prev=row[0];
+      row[0]=i;
+      for(let j=1;j<=b.length;j++){
+        const old=row[j];
+        row[j]=Math.min(
+          row[j]+1,
+          row[j-1]+1,
+          prev+(a[i-1]===b[j-1]?0:1)
+        );
+        prev=old;
+      }
+    }
+    return row[b.length];
+  }
+
+  function aiWordMatch(a,b){
+    a=aiWordBase(a); b=aiWordBase(b);
+    if(!a || !b) return false;
+    if(a===b) return true;
+    if(a.length>=4 && b.length>=4 && aiEditDistance(a,b)<=1) return true;
+    return false;
+  }
+
   function similarity(a,b){
-    const A=norm(a).split(' ').filter(Boolean);
-    const B=norm(b).split(' ').filter(Boolean);
+    const A=norm(a).split(' ').filter(Boolean).map(aiWordBase);
+    const B=norm(b).split(' ').filter(Boolean).map(aiWordBase);
     if(!A.length || !B.length) return 0;
-    const setA=new Set(A), setB=new Set(B);
+
     let hit=0;
-    setA.forEach(w=>{ if(setB.has(w)) hit++; });
-    return hit / Math.max(setA.size,setB.size);
+    const used=new Set();
+    A.forEach(w=>{
+      const j=B.findIndex((x,i)=>!used.has(i) && aiWordMatch(w,x));
+      if(j>=0){ used.add(j); hit++; }
+    });
+    return hit / Math.max(A.length,B.length);
+  }
+
+  function aiContainsLoose(user,key){
+    const U=norm(user).split(' ').filter(Boolean);
+    const K=norm(key).split(' ').filter(Boolean);
+    if(!K.length) return false;
+    return K.every(kw=>U.some(uw=>aiWordMatch(uw,kw)));
   }
 
   function correct(user,t){
@@ -4508,24 +4570,34 @@ async function loadAI(){
     if(model){
       const uw=u.split(' ').filter(Boolean);
       const mw=model.split(' ').filter(Boolean);
-      if(uw.length > Math.max(mw.length * 1.8, mw.length + 4)) return false;
+      // 只排除明顯把影片聲音整段收進來的超長答案。
+      if(uw.length > Math.max(mw.length * 3, mw.length + 18)) return false;
     }
 
     const accepted=values(t);
     if(accepted.some(a=>{
       if(u===a) return true;
-      if(a.split(' ').length <= 2) return u===a || similarity(u,a) >= 0.8;
-      return similarity(u,a) >= 0.72;
+      const words=a.split(' ').filter(Boolean).length;
+      if(words<=2) return similarity(u,a)>=0.60;
+      return similarity(u,a)>=0.45;
     })) return true;
 
     const groups=Array.isArray(t.keywords)?t.keywords:[];
     if(groups.length){
-      const hasAll=groups.every(g=>{
+      let matched=0;
+      groups.forEach(g=>{
         const arr=Array.isArray(g)?g:[g];
-        return arr.map(norm).some(k=>k && u.includes(k));
+        if(arr.some(k=>aiContainsLoose(u,k))) matched++;
       });
-      if(hasAll) return true;
+
+      // 至少符合 60% 關鍵概念；只有 1～2 組時仍須全部符合。
+      const need=groups.length<=2 ? groups.length : Math.max(2,Math.ceil(groups.length*0.60));
+      if(matched>=need) return true;
     }
+
+    // 長句即使語音辨識有少量錯字，只要和示範答案有四成概念重疊也接受。
+    if(model && model.split(' ').length>=6 && similarity(u,model)>=0.40) return true;
+
     return false;
   }
   function show(ok,t){
