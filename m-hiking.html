@@ -359,7 +359,7 @@ main{padding:12px 16px 58px}
 }
 </style>
 
-<script>window.BOOKWIDE_M_HIKING_BUILD='V95_DIRECT_DELETE_API';</script>
+<script>window.BOOKWIDE_M_HIKING_BUILD='V96_PHOTO_DATE_ROUTE_STAMP';</script>
 </head>
 <body>
 <header><div class="wrap"><div class="top">
@@ -521,7 +521,7 @@ main{padding:12px 16px 58px}
     <textarea id="aPhotoUrls" placeholder="可空白"></textarea>
   </div>
 
-  <div id="uploadStatus" class="small" style="margin-top:10px">照片會直接上傳 R2，活動與路線由 Worker 自動維護。</div>
+  <div id="uploadStatus" class="small" style="margin-top:10px">本機照片會先在左下角印上活動日期＋路線，再上傳 R2；活動與路線由 Worker 自動維護。</div>
   <div class="btns">
     <button id="albumSubmitBtn" class="btn" onclick="saveAlbum()">上傳照片並上傳</button>
   </div>
@@ -3210,6 +3210,72 @@ async function uploadBatchWithRetry(path,options,retries=2){
   throw lastError||new Error('上傳失敗');
 }
 
+function loadUploadImage(file){
+  return new Promise((resolve,reject)=>{
+    const url=URL.createObjectURL(file);
+    const img=new Image();
+    img.onload=()=>{URL.revokeObjectURL(url);resolve(img)};
+    img.onerror=()=>{URL.revokeObjectURL(url);reject(new Error(`無法讀取照片：${file.name}`))};
+    img.src=url;
+  });
+}
+
+function canvasToUploadBlob(canvas,type,quality){
+  return new Promise((resolve,reject)=>{
+    canvas.toBlob(blob=>blob?resolve(blob):reject(new Error('照片壓字轉檔失敗')),type,quality);
+  });
+}
+
+async function stampPhotoFile(file,date,routeName){
+  const img=await loadUploadImage(file);
+  const width=img.naturalWidth||img.width;
+  const height=img.naturalHeight||img.height;
+  if(!width||!height) throw new Error(`照片尺寸異常：${file.name}`);
+
+  const canvas=document.createElement('canvas');
+  canvas.width=width;
+  canvas.height=height;
+  const ctx=canvas.getContext('2d',{alpha:false});
+  if(!ctx) throw new Error('瀏覽器無法處理照片壓字');
+  ctx.drawImage(img,0,0,width,height);
+
+  const shortSide=Math.min(width,height);
+  const margin=Math.max(18,Math.round(shortSide*0.026));
+  const dateSize=Math.max(22,Math.round(shortSide*0.032));
+  const routeSize=Math.max(25,Math.round(shortSide*0.040));
+  const lineGap=Math.max(8,Math.round(shortSide*0.010));
+  const shadow=Math.max(2,Math.round(shortSide*0.004));
+
+  ctx.textAlign='left';
+  ctx.textBaseline='bottom';
+  ctx.fillStyle='#fff';
+  ctx.strokeStyle='rgba(0,0,0,.82)';
+  ctx.lineJoin='round';
+  ctx.shadowColor='rgba(0,0,0,.72)';
+  ctx.shadowBlur=shadow*2.5;
+  ctx.shadowOffsetX=shadow;
+  ctx.shadowOffsetY=shadow;
+
+  const routeY=height-margin;
+  ctx.font=`900 ${routeSize}px -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","Microsoft JhengHei",Arial,sans-serif`;
+  ctx.lineWidth=Math.max(3,routeSize*0.12);
+  ctx.strokeText(routeName,margin,routeY);
+  ctx.fillText(routeName,margin,routeY);
+
+  const dateY=routeY-routeSize-lineGap;
+  ctx.font=`800 ${dateSize}px -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","Microsoft JhengHei",Arial,sans-serif`;
+  ctx.lineWidth=Math.max(3,dateSize*0.12);
+  ctx.strokeText(date,margin,dateY);
+  ctx.fillText(date,margin,dateY);
+
+  const sourceType=String(file.type||'').toLowerCase();
+  const outType=sourceType==='image/png'?'image/png':'image/jpeg';
+  const blob=await canvasToUploadBlob(canvas,outType,outType==='image/jpeg'?0.94:undefined);
+  const base=String(file.name||'photo').replace(/\.[^.]+$/,'');
+  const ext=outType==='image/png'?'.png':'.jpg';
+  return new File([blob],`${base}_bookwide${ext}`,{type:outType,lastModified:file.lastModified||Date.now()});
+}
+
 async function saveAlbum(){
   const isHistory=albumEntryMode==='history';
 
@@ -3284,7 +3350,14 @@ async function saveAlbum(){
       fd.append('uploader_token',uploader.uploaderToken);
 
       if(i===0) photoUrls.forEach(u=>fd.append('photo_url',u));
-      batch.forEach(f=>fd.append('files',f,f.name));
+
+      for(let j=0;j<batch.length;j++){
+        if(status){
+          status.textContent=`正在替第 ${uploaded+j+1}/${files.length} 張印上日期＋路線…`;
+        }
+        const stamped=await stampPhotoFile(batch[j],date,routeName);
+        fd.append('files',stamped,stamped.name);
+      }
 
       if(status){
         status.textContent=`正在上傳第 ${i+1}/${workBatches.length} 批｜已完成 ${uploaded}/${files.length} 張。請勿關閉頁面。`;
