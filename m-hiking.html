@@ -359,7 +359,7 @@ main{padding:12px 16px 58px}
 }
 </style>
 
-<script>window.BOOKWIDE_M_HIKING_BUILD='V103_EXPLICIT_STAMP_UPLOAD';</script>
+<script>window.BOOKWIDE_M_HIKING_BUILD='V104_RESTAMP_EXISTING_ALBUM';</script>
 </head>
 <body>
 <header><div class="wrap"><div class="top">
@@ -524,6 +524,7 @@ main{padding:12px 16px 58px}
   <div id="uploadStatus" class="small" style="margin-top:10px">本機照片會先在左下角印上活動日期＋路線，再上傳 R2；活動與路線由 Worker 自動維護。</div>
   <div class="btns">
     <button id="albumSubmitBtn" class="btn" onclick="saveAlbum()">上傳照片並上傳</button>
+    <button id="albumRestampBtn" class="btn gold" type="button" onclick="restampSelectedExistingAlbumPhotos()">補印本活動既有照片</button>
   </div>
 </div>
 <div id="photoCenterSummary" class="card" style="display:none"></div><div id="albumList" class="route-list"></div>
@@ -3279,6 +3280,115 @@ async function stampPhotoFile(file,date,routeName){
   const base=String(file.name||'photo').replace(/\.[^.]+$/,'');
   const ext=outType==='image/png'?'.png':'.jpg';
   return new File([blob],`${base}_bookwide${ext}`,{type:outType,lastModified:file.lastModified||Date.now()});
+}
+
+
+function currentSelectedUploadEvent(){
+  const sel=$('aEventSelect');
+  const selectedKey=sel?.value||'';
+  if(!selectedKey || selectedKey==='__new__') return null;
+  return sortedUploadEvents().find(x=>
+    String(x.event_id||x.id||`${x.date}_${x.route_name||x.route}`)===selectedKey
+  )||null;
+}
+
+function fileNameFromPhotoUrl(url,index=0){
+  try{
+    const parsed=new URL(String(url),location.href);
+    const name=decodeURIComponent(parsed.pathname.split('/').pop()||'').replace(/[\\/:*?"<>|]/g,'_');
+    return name||`existing_${index+1}.jpg`;
+  }catch{
+    return `existing_${index+1}.jpg`;
+  }
+}
+
+async function restampSelectedExistingAlbumPhotos(){
+  const event=currentSelectedUploadEvent();
+  if(!event){
+    alert('請先在「選擇既有歷史活動」選一個活動。');
+    return;
+  }
+
+  const date=normDateStr(event.date||'');
+  const routeName=String(event.route_name||event.route||'').trim();
+  const allUrls=Array.isArray(event.photo_urls)?event.photo_urls.filter(Boolean):[];
+  const urls=allUrls.filter(url=>!/(?:^|[_-])bookwide(?:[_-]|\.|$)/i.test(fileNameFromPhotoUrl(url)));
+  const status=$('uploadStatus');
+  const button=$('albumRestampBtn');
+
+  if(!date||!routeName){
+    alert('這個活動缺少日期或路線名稱，不能補印。');
+    return;
+  }
+  if(!urls.length){
+    alert('這個活動沒有需要補印的舊照片。');
+    return;
+  }
+  if(!confirm(`確定替「${date}｜${routeName}」的 ${urls.length} 張舊照片補印日期＋路線？\n\n每張會先產生 _bookwide 新照片，成功後再把舊原圖移到回收桶。`)) return;
+
+  const uploader=getUploaderIdentity();
+  let completed=0;
+  const failed=[];
+  if(button) button.disabled=true;
+
+  try{
+    for(let i=0;i<urls.length;i++){
+      const oldUrl=urls[i];
+      try{
+        if(status) status.textContent=`正在補印第 ${i+1}/${urls.length} 張：下載舊照片…`;
+        const res=await fetch(oldUrl,{mode:'cors',cache:'no-store'});
+        if(!res.ok) throw new Error(`下載失敗 HTTP ${res.status}`);
+        const blob=await res.blob();
+        if(!/^image\/(jpeg|png|webp)$/i.test(blob.type||'')) throw new Error(`不是可處理的照片格式：${blob.type||'unknown'}`);
+
+        const originalName=fileNameFromPhotoUrl(oldUrl,i);
+        const sourceFile=new File([blob],originalName,{type:blob.type||'image/jpeg',lastModified:Date.now()});
+        if(status) status.textContent=`正在補印第 ${i+1}/${urls.length} 張：印上日期＋路線…`;
+        const stamped=await stampPhotoFile(sourceFile,date,routeName);
+
+        const fd=new FormData();
+        fd.append('date',date);
+        fd.append('route_name',routeName);
+        fd.append('album_url',String(event.album_url||''));
+        fd.append('cover_url','');
+        fd.append('note',String(event.note||''));
+        fd.append('uploader_id',uploader.uploaderId);
+        fd.append('uploader_token',uploader.uploaderToken);
+        fd.append('files_are_stamped','true');
+        fd.append('stamp_version','m-hiking-v104-restamp-existing');
+        fd.append('stamp_date',date);
+        fd.append('stamp_route_name',routeName);
+        fd.append('stamped_filename',stamped.name);
+        fd.append('files',stamped,stamped.name);
+
+        if(status) status.textContent=`正在補印第 ${i+1}/${urls.length} 張：上傳新照片…`;
+        await uploadBatchWithRetry('/api/upload',{method:'POST',body:fd,admin:false},2);
+
+        if(status) status.textContent=`正在補印第 ${i+1}/${urls.length} 張：移除舊原圖…`;
+        await hikingApi('/api/photo',{
+          method:'DELETE',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({url:oldUrl})
+        });
+
+        completed++;
+      }catch(error){
+        console.error('restampExistingPhoto',oldUrl,error);
+        failed.push({url:oldUrl,error:error?.message||String(error)});
+      }
+    }
+
+    await refreshWorkerData();
+    fillUploadEventSelect(String(event.event_id||event.id||''));
+    if(status) status.textContent=failed.length
+      ?`補印完成 ${completed}/${urls.length} 張；失敗 ${failed.length} 張。失敗舊圖未刪除。`
+      :`補印完成：${completed} 張舊照片已改成真正含日期＋路線的 _bookwide 照片。`;
+    alert(failed.length
+      ?`完成 ${completed}/${urls.length} 張，失敗 ${failed.length} 張。\n\n失敗照片仍保留原圖，可再按一次補印。`
+      :`完成：${completed} 張照片已補印日期＋路線。`);
+  }finally{
+    if(button) button.disabled=false;
+  }
 }
 
 async function saveAlbum(){
