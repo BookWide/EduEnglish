@@ -392,6 +392,11 @@ body.photo-admin-mode .greeting-maker-btn{display:none}
 #greetingMakerSave{background:#edf2ed;color:#174b2c}
 #greetingMakerSave:disabled{opacity:.5;cursor:not-allowed}
 .greeting-maker-status{min-height:22px;font-size:13px;color:var(--muted);font-weight:800}
+.greeting-ai-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.greeting-ai-row select,.greeting-ai-row button{min-height:46px;border:1px solid var(--line);border-radius:12px;padding:9px 10px;font-weight:900;background:#fff}
+#greetingMakerAi{background:#f1eafa;border-color:#7c4d9e;color:#57306e;cursor:pointer}
+#greetingMakerAi:disabled{opacity:.55;cursor:not-allowed}
+#greetingMakerOriginal{background:#edf2ed;color:#174b2c;cursor:pointer}
 .greeting-maker-note{font-size:12px;line-height:1.55;color:var(--muted);background:#f6f8f5;border-radius:12px;padding:10px}
 @media(max-width:820px){
   .greeting-maker-modal{padding:0}.greeting-maker-panel{min-height:100vh;border-radius:0}
@@ -722,12 +727,23 @@ body.photo-admin-mode .greeting-maker-btn{display:none}
           <label><input type="radio" name="greetingMakerPosition" value="sky" checked>天空區</label>
           <label><input type="radio" name="greetingMakerPosition" value="bottom">底部</label>
         </div></div>
+        <div class="field"><label>照片美化</label>
+          <div class="greeting-ai-row">
+            <select id="greetingMakerAiStyle" aria-label="AI 畫作風格">
+              <option value="watercolor">AI 水彩畫</option>
+              <option value="illustration">AI 溫暖插畫</option>
+              <option value="oil">AI 油畫</option>
+            </select>
+            <button id="greetingMakerAi" type="button" onclick="aiBeautifyGreeting(this)">✨ AI 美化照片</button>
+            <button id="greetingMakerOriginal" type="button" onclick="restoreGreetingOriginal()">↩ 使用原照片</button>
+          </div>
+        </div>
         <div id="greetingMakerStatus" class="greeting-maker-status">修改文字即可即時預覽。</div>
         <div class="greeting-maker-actions">
           <button id="greetingMakerGenerate" type="button" onclick="generateGreetingJpg(this)">生成 JPG</button>
           <button id="greetingMakerSave" type="button" onclick="shareOrDownloadGreeting(this)" disabled>手機分享／再次下載</button>
         </div>
-        <div class="greeting-maker-note">桌機按「生成 JPG」後會立即下載到瀏覽器的下載資料夾；手機生成後按「手機分享」選擇 LINE、相簿或其他 App。圖片不會上傳，也不會更改群內資料。</div>
+        <div class="greeting-maker-note">可先按「AI 美化照片」將相片轉成水彩／插畫／油畫，再由本頁附上中文、英文與署名。AI 處理會暫時把照片送到後端影像服務；成品不寫回群組相簿。桌機生成後下載，手機可分享。</div>
       </div>
     </div>
   </div>
@@ -3936,18 +3952,21 @@ async function downloadCurrentModalPhoto(button){
 }
 
 
-/* ========= V108.4 個人日安圖製作器（已載入照片 + 同源代理備援） ========= */
-const greetingMakerState={url:'',image:null,imageObjectUrl:'',blob:null,fileName:'',renderToken:0};
+/* ========= V109.1 AI 畫作日安圖製作器（左下自動帶入日期＋地點） ========= */
+const greetingMakerState={url:'',image:null,originalImage:null,imageObjectUrl:'',aiObjectUrl:'',blob:null,fileName:'',renderToken:0,aiBusy:false,context:{date:'',route:'',location:''}};
 
 function greetingMakerContext(url){
   const target=normalizePhotoUrl(url);
   for(const album of (state.albums||[])){
     const urls=albumAllPhotoUrls(album).map(normalizePhotoUrl);
     if(urls.includes(target)){
-      return {date:String(album.date||''),route:String(album.route||album.route_name||album.title||'')};
+      const date=String(album.date||album.activity_date||album.start_date||'').trim();
+      const route=String(album.route||album.route_name||album.title||'').trim();
+      const location=String(album.location||album.place||album.meeting_place||album.meeting_point||album.trailhead||album.parking||route||'').trim();
+      return {date,route,location};
     }
   }
-  return {date:'',route:''};
+  return {date:'',route:'',location:''};
 }
 function greetingMakerValue(id){return String(document.getElementById(id)?.value||'').trim();}
 function greetingMakerRadio(name,fallback){return document.querySelector(`input[name="${name}"]:checked`)?.value||fallback;}
@@ -4019,10 +4038,11 @@ async function openGreetingMaker(button,url){
   const modal=document.getElementById('greetingMakerModal');
   if(!modal) return;
   greetingMakerState.url=decodeURIComponent(String(url||button?.closest?.('.photo-tile')?.querySelector?.('img')?.currentSrc||button?.closest?.('.photo-tile')?.querySelector?.('img')?.src||''));
-  greetingMakerState.image=null;greetingMakerState.blob=null;
+  greetingMakerState.image=null;greetingMakerState.originalImage=null;greetingMakerState.blob=null;
   if(greetingMakerState.imageObjectUrl){URL.revokeObjectURL(greetingMakerState.imageObjectUrl);greetingMakerState.imageObjectUrl='';}
   document.getElementById('greetingMakerSave').disabled=true;
   const ctx=greetingMakerContext(greetingMakerState.url);
+  greetingMakerState.context=ctx;
   document.getElementById('greetingMakerZh').value=ctx.route?`日安，${ctx.route}的美好風景與你分享。`:'日安，願今天一路有風景，也有好心情。';
   document.getElementById('greetingMakerEn').value='Good day. May every step bring a beautiful view.';
   document.getElementById('greetingMakerSign').value='';
@@ -4030,6 +4050,7 @@ async function openGreetingMaker(button,url){
   greetingMakerStatus('使用相簿中已載入的照片…');
   try{
     greetingMakerState.image=await greetingMakerResolveImage(button,greetingMakerState.url);
+    greetingMakerState.originalImage=greetingMakerState.image;
     greetingMakerState.fileName=greetingMakerSafeName(greetingMakerState.url);
     await renderGreetingMakerPreview();
     greetingMakerStatus('修改文字即可即時預覽。');
@@ -4041,6 +4062,7 @@ function closeGreetingMaker(event){
   document.body.style.overflow='';
   greetingMakerState.blob=null;
   if(greetingMakerState.imageObjectUrl){URL.revokeObjectURL(greetingMakerState.imageObjectUrl);greetingMakerState.imageObjectUrl='';}
+  if(greetingMakerState.aiObjectUrl){URL.revokeObjectURL(greetingMakerState.aiObjectUrl);greetingMakerState.aiObjectUrl='';}
 }
 
 function greetingMakerCoverRect(sw,sh,dw,dh){
@@ -4072,7 +4094,10 @@ function greetingMakerDrawText(ctx,canvas,zh,en,sign,position){
   ctx.font=`900 ${zhSize}px ${family}`;const zhLines=greetingMakerWrap(ctx,zh,maxWidth,2);
   ctx.font=`700 ${enSize}px ${family}`;const enLines=greetingMakerWrap(ctx,en,maxWidth,3);
   const total=zhLines.length*zhSize+(zhLines.length?gap:0)+enLines.length*Math.round(enSize*1.22)+(sign?gap+signSize:0);
-  let y=position==='bottom'?H-pad-total:Math.max(pad,Math.round(H*.105));
+  const meta=greetingMakerState.context||{};
+  const hasMeta=!!(meta.date||meta.location||meta.route);
+  const metaReserve=hasMeta?Math.max(58,Math.round(short*.072)):0;
+  let y=position==='bottom'?H-pad-total-metaReserve:Math.max(pad,Math.round(H*.105));
   const boxPad=Math.max(18,Math.round(short*.022));
   ctx.fillStyle='rgba(0,0,0,.28)';
   ctx.fillRect(pad-boxPad,y-boxPad,maxWidth+boxPad*2,total+boxPad*2);
@@ -4085,6 +4110,67 @@ function greetingMakerDrawText(ctx,canvas,zh,en,sign,position){
   if(sign){y+=gap;ctx.font=`800 ${signSize}px ${family}`;ctx.strokeText('— '+sign,W/2,y,maxWidth);ctx.fillText('— '+sign,W/2,y,maxWidth);}
   ctx.shadowBlur=0;
 }
+
+function greetingMakerDrawMeta(ctx,canvas){
+  const meta=greetingMakerState.context||{};
+  const date=String(meta.date||'').trim();
+  const place=String(meta.location||meta.route||'').trim();
+  if(!date&&!place) return;
+  const W=canvas.width,H=canvas.height,short=Math.min(W,H);
+  const pad=Math.max(22,Math.round(short*.028));
+  const fontSize=Math.max(18,Math.round(short*.025));
+  const lineHeight=Math.round(fontSize*1.25);
+  const family='-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC","Microsoft JhengHei",Arial,sans-serif';
+  const lines=[];
+  if(date) lines.push(date);
+  if(place) lines.push(place);
+  ctx.save();
+  ctx.textAlign='left';ctx.textBaseline='top';ctx.lineJoin='round';
+  ctx.font=`800 ${fontSize}px ${family}`;
+  const maxTextWidth=Math.min(W*.72,Math.max(...lines.map(x=>ctx.measureText(x).width),0));
+  const boxPadX=Math.max(12,Math.round(short*.014));
+  const boxPadY=Math.max(8,Math.round(short*.010));
+  const boxW=Math.min(W-pad*2,maxTextWidth+boxPadX*2);
+  const boxH=lines.length*lineHeight+boxPadY*2;
+  const x=pad,y=H-pad-boxH;
+  ctx.fillStyle='rgba(0,0,0,.48)';
+  ctx.fillRect(x,y,boxW,boxH);
+  ctx.fillStyle='#fff';ctx.strokeStyle='rgba(0,0,0,.78)';ctx.lineWidth=Math.max(2,Math.round(short*.003));
+  lines.forEach((line,i)=>{const yy=y+boxPadY+i*lineHeight;ctx.strokeText(line,x+boxPadX,yy,boxW-boxPadX*2);ctx.fillText(line,x+boxPadX,yy,boxW-boxPadX*2);});
+  ctx.restore();
+}
+
+function greetingMakerBase64Blob(base64,mime='image/png'){
+  const bin=atob(base64),bytes=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i);
+  return new Blob([bytes],{type:mime});
+}
+async function aiBeautifyGreeting(button){
+  if(greetingMakerState.aiBusy) return;
+  if(!greetingMakerState.url){alert('找不到照片來源');return;}
+  const style=document.getElementById('greetingMakerAiStyle')?.value||'watercolor';
+  const old=button.textContent;greetingMakerState.aiBusy=true;button.disabled=true;button.textContent='AI 繪製中…';
+  greetingMakerStatus('AI 正在把照片轉成畫作，通常需要約 20～60 秒…');
+  try{
+    const data=await hikingApi('/api/ai-greeting-art',{admin:false,method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:greetingMakerState.url,style})});
+    if(!data?.image_base64) throw new Error('AI 沒有回傳圖片');
+    const blob=greetingMakerBase64Blob(data.image_base64,data.mime_type||'image/png');
+    if(greetingMakerState.aiObjectUrl) URL.revokeObjectURL(greetingMakerState.aiObjectUrl);
+    greetingMakerState.aiObjectUrl=URL.createObjectURL(blob);
+    const img=new Image();img.decoding='async';img.src=greetingMakerState.aiObjectUrl;
+    try{await img.decode();}catch(_e){await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error('AI 圖片解碼失敗'));});}
+    greetingMakerState.image=img;greetingMakerState.blob=null;
+    await renderGreetingMakerPreview();
+    greetingMakerStatus('AI 畫作已完成；文字仍可修改，再按「生成 JPG」。');
+  }catch(error){greetingMakerStatus(error.message,true);alert('AI 美化失敗：'+error.message);}
+  finally{greetingMakerState.aiBusy=false;button.disabled=false;button.textContent=old;}
+}
+async function restoreGreetingOriginal(){
+  if(!greetingMakerState.originalImage){alert('原照片尚未載入');return;}
+  greetingMakerState.image=greetingMakerState.originalImage;greetingMakerState.blob=null;
+  await renderGreetingMakerPreview();greetingMakerStatus('已恢復原照片。');
+}
+
 async function renderGreetingMakerPreview(){
   const img=greetingMakerState.image;if(!img) return;
   const token=++greetingMakerState.renderToken;
@@ -4101,6 +4187,7 @@ async function renderGreetingMakerPreview(){
     ctx.drawImage(img,r.sx,r.sy,r.sw,r.sh,0,0,canvas.width,canvas.height);
   }else ctx.drawImage(img,0,0,canvas.width,canvas.height);
   greetingMakerDrawText(ctx,canvas,greetingMakerValue('greetingMakerZh'),greetingMakerValue('greetingMakerEn'),greetingMakerValue('greetingMakerSign'),greetingMakerRadio('greetingMakerPosition','sky'));
+  greetingMakerDrawMeta(ctx,canvas);
   if(token===greetingMakerState.renderToken){greetingMakerState.blob=null;document.getElementById('greetingMakerSave').disabled=true;}
 }
 let greetingMakerRenderTimer=0;
