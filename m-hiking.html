@@ -3936,8 +3936,8 @@ async function downloadCurrentModalPhoto(button){
 }
 
 
-/* ========= V108.2 個人日安圖製作器（直接使用相簿已載入照片） ========= */
-const greetingMakerState={url:'',image:null,blob:null,fileName:'',renderToken:0};
+/* ========= V108.3 個人日安圖製作器（已載入照片 + R2 原圖備援） ========= */
+const greetingMakerState={url:'',image:null,imageObjectUrl:'',blob:null,fileName:'',renderToken:0};
 
 function greetingMakerContext(url){
   const target=normalizePhotoUrl(url);
@@ -3965,6 +3965,13 @@ function greetingMakerDownload(blob,fileName){
   setTimeout(()=>URL.revokeObjectURL(objectUrl),2000);
 }
 
+function greetingMakerImageSize(img){
+  return {width:Number(img?.naturalWidth||img?.width||0),height:Number(img?.naturalHeight||img?.height||0)};
+}
+function greetingMakerImageLooksUsable(img){
+  const size=greetingMakerImageSize(img);
+  return !!img && size.width>1 && size.height>1;
+}
 async function greetingMakerUseLoadedImage(button){
   const tile=button?.closest?.('.photo-tile');
   const img=tile?.querySelector?.('img');
@@ -3972,10 +3979,39 @@ async function greetingMakerUseLoadedImage(button){
   if(!img.complete || !img.naturalWidth || !img.naturalHeight){
     try{await img.decode();}catch(_error){}
   }
-  if(!img.complete || !img.naturalWidth || !img.naturalHeight){
-    throw new Error('相簿照片尚未載入完成，請等照片顯示後再按一次');
-  }
+  if(!greetingMakerImageLooksUsable(img)) throw new Error('頁面照片沒有成功載入');
   return img;
+}
+async function greetingMakerLoadFromWorker(url){
+  const params=new URLSearchParams({url:String(url||'')});
+  if(BOOKWIDE_GROUP_ID) params.set('group_id',BOOKWIDE_GROUP_ID);
+  const res=await fetch(`${HIKING_API_BASE}/api/photo-file?${params.toString()}`,{cache:'no-store'});
+  if(!res.ok){
+    let detail='';try{detail=(await res.json())?.error||'';}catch(_e){}
+    throw new Error(detail||`R2 原圖讀取失敗（${res.status}）`);
+  }
+  const blob=await res.blob();
+  if(!blob.size) throw new Error('R2 原圖是空檔案');
+  if(greetingMakerState.imageObjectUrl) URL.revokeObjectURL(greetingMakerState.imageObjectUrl);
+  greetingMakerState.imageObjectUrl=URL.createObjectURL(blob);
+  const img=new Image();
+  img.decoding='async';
+  img.src=greetingMakerState.imageObjectUrl;
+  try{await img.decode();}catch(_e){
+    await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error('R2 原圖解碼失敗'));});
+  }
+  if(!greetingMakerImageLooksUsable(img)) throw new Error('R2 原圖尺寸無效');
+  return img;
+}
+async function greetingMakerResolveImage(button,url){
+  try{
+    const loaded=await greetingMakerUseLoadedImage(button);
+    const probe=document.createElement('canvas');probe.width=2;probe.height=2;
+    const pctx=probe.getContext('2d');pctx.drawImage(loaded,0,0,2,2);
+    try{probe.toDataURL('image/png');return loaded;}catch(_e){}
+  }catch(_e){}
+  greetingMakerStatus('頁面照片無效，改從 R2 讀取原圖…');
+  return await greetingMakerLoadFromWorker(url);
 }
 
 async function openGreetingMaker(button,url){
@@ -3983,6 +4019,7 @@ async function openGreetingMaker(button,url){
   if(!modal) return;
   greetingMakerState.url=decodeURIComponent(String(url||button?.closest?.('.photo-tile')?.querySelector?.('img')?.currentSrc||button?.closest?.('.photo-tile')?.querySelector?.('img')?.src||''));
   greetingMakerState.image=null;greetingMakerState.blob=null;
+  if(greetingMakerState.imageObjectUrl){URL.revokeObjectURL(greetingMakerState.imageObjectUrl);greetingMakerState.imageObjectUrl='';}
   document.getElementById('greetingMakerSave').disabled=true;
   const ctx=greetingMakerContext(greetingMakerState.url);
   document.getElementById('greetingMakerZh').value=ctx.route?`日安，${ctx.route}的美好風景與你分享。`:'日安，願今天一路有風景，也有好心情。';
@@ -3991,7 +4028,7 @@ async function openGreetingMaker(button,url){
   modal.classList.add('active');document.body.style.overflow='hidden';
   greetingMakerStatus('使用相簿中已載入的照片…');
   try{
-    greetingMakerState.image=await greetingMakerUseLoadedImage(button);
+    greetingMakerState.image=await greetingMakerResolveImage(button,greetingMakerState.url);
     greetingMakerState.fileName=greetingMakerSafeName(greetingMakerState.url);
     await renderGreetingMakerPreview();
     greetingMakerStatus('修改文字即可即時預覽。');
@@ -4002,6 +4039,7 @@ function closeGreetingMaker(event){
   document.getElementById('greetingMakerModal')?.classList.remove('active');
   document.body.style.overflow='';
   greetingMakerState.blob=null;
+  if(greetingMakerState.imageObjectUrl){URL.revokeObjectURL(greetingMakerState.imageObjectUrl);greetingMakerState.imageObjectUrl='';}
 }
 
 function greetingMakerCoverRect(sw,sh,dw,dh){
@@ -4052,11 +4090,13 @@ async function renderGreetingMakerPreview(){
   const canvas=document.getElementById('greetingMakerCanvas'),ctx=canvas.getContext('2d',{alpha:false});
   const ratio=greetingMakerRadio('greetingMakerRatio','portrait');
   if(ratio==='portrait'){canvas.width=1080;canvas.height=1350;}else{
-    const maxSide=2400,scale=Math.min(1,maxSide/Math.max(img.naturalWidth,img.naturalHeight));
-    canvas.width=Math.max(1,Math.round(img.naturalWidth*scale));canvas.height=Math.max(1,Math.round(img.naturalHeight*scale));
+    const size=greetingMakerImageSize(img);
+    const maxSide=2400,scale=Math.min(1,maxSide/Math.max(size.width,size.height));
+    canvas.width=Math.max(1,Math.round(size.width*scale));canvas.height=Math.max(1,Math.round(size.height*scale));
   }
   if(ratio==='portrait'){
-    const r=greetingMakerCoverRect(img.naturalWidth,img.naturalHeight,canvas.width,canvas.height);
+    const size=greetingMakerImageSize(img);
+    const r=greetingMakerCoverRect(size.width,size.height,canvas.width,canvas.height);
     ctx.drawImage(img,r.sx,r.sy,r.sw,r.sh,0,0,canvas.width,canvas.height);
   }else ctx.drawImage(img,0,0,canvas.width,canvas.height);
   greetingMakerDrawText(ctx,canvas,greetingMakerValue('greetingMakerZh'),greetingMakerValue('greetingMakerEn'),greetingMakerValue('greetingMakerSign'),greetingMakerRadio('greetingMakerPosition','sky'));
