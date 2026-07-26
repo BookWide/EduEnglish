@@ -733,12 +733,21 @@ body.photo-admin-mode .greeting-maker-btn{display:none}
   <div class="card">
     <div class="toolbar">
       <div>
-        <h2 style="margin:0">LINE 日安自動化｜V7.4.1</h2>
+        <h2 style="margin:0">LINE 日安自動化｜V7.5</h2>
         <p class="small" style="margin:8px 0 0">直接使用 Cloudflare Worker；全域 Cron 每 5 分鐘巡檢所有啟用排程；支援多收件人與自訂收件群組。</p>
       </div>
       <button class="btn gray" type="button" onclick="showAdminHome()">返回管理</button>
     </div>
     <div id="lineAutoStatus" class="notice" style="margin-top:12px">正在讀取雲端設定…</div>
+    <div id="lineScheduleStatus" class="notice" style="margin-top:10px;background:#f8fbf8;border-color:#cfe3d3">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">
+        <div>
+          <b id="lineScheduleStatusTitle">今日排程：讀取中…</b>
+          <div id="lineScheduleStatusDetail" class="small" style="margin-top:5px;line-height:1.7">正在取得最近執行狀態。</div>
+        </div>
+        <button class="btn gray" type="button" onclick="lineAutoRefreshScheduleStatus(true)">重新整理狀態</button>
+      </div>
+    </div>
     <div class="filters" style="margin-top:14px">
       <div class="field line-recipient-field" style="grid-column:1 / -1"><label>LINE 收件人（可複選）</label>
         <div id="laRecipientPanel" class="line-recipient-panel">
@@ -5372,6 +5381,47 @@ const LINE_AUTO_API='/api/line-automation';
 let lineAutoTargets=[];
 let lineAutoRecipientGroups={};
 let lineAutoInitialRecipientIds=[];
+let lineAutoLastConfig=null;
+let lineAutoStatusTimer=null;
+function lineAutoTaipeiText(iso){
+  if(!iso)return '—';
+  const d=new Date(iso);if(Number.isNaN(d.getTime()))return String(iso);
+  return new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d);
+}
+function lineAutoTodayTaipei(){
+  return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+}
+function lineAutoNextCronText(){
+  const d=new Date();d.setSeconds(0,0);const m=d.getMinutes();d.setMinutes(m+(5-(m%5||5)));
+  if(d.getTime()<=Date.now())d.setMinutes(d.getMinutes()+5);
+  return lineAutoTaipeiText(d.toISOString());
+}
+function lineAutoRenderScheduleStatus(c){
+  lineAutoLastConfig=c||lineAutoLastConfig||{};c=lineAutoLastConfig;
+  const title=document.getElementById('lineScheduleStatusTitle');const detail=document.getElementById('lineScheduleStatusDetail');const box=document.getElementById('lineScheduleStatus');
+  if(!title||!detail||!box)return;
+  const today=lineAutoTodayTaipei();const sentToday=String(c.last_sent_date||'')===today;
+  let heading='',parts=[];box.style.background='#f8fbf8';box.style.borderColor='#cfe3d3';
+  if(c.enabled===false){heading='⏸ 今日排程：已停用';parts.push('按「啟用每日排程」後，Cloudflare Cron 才會每 5 分鐘巡檢。');box.style.background='#f6f6f6';}
+  else if(sentToday){heading=`✅ 今日已寄出（${lineAutoTaipeiText(c.last_sent_at)}）`;parts.push('今天後續 Cron 只會檢查，不會重複寄送。');}
+  else if(c.last_schedule_error){heading='⚠️ 上次排程失敗，等待重試';parts.push(`錯誤：${c.last_schedule_error}`);parts.push(`上次檢查：${lineAutoTaipeiText(c.last_schedule_check_at||c.last_schedule_error_at)}`);parts.push(`下一次 Cron：約 ${lineAutoNextCronText()}`);box.style.background='#fff7f1';box.style.borderColor='#efc5a6';}
+  else {
+    const next=c.next_send_at?new Date(c.next_send_at):null;
+    if(next&&!Number.isNaN(next.getTime())&&next.getTime()>Date.now()){heading=`⏳ 尚未到時間（預定 ${lineAutoTaipeiText(c.next_send_at)}）`;parts.push(`下一次 Cron：約 ${lineAutoNextCronText()}`);}
+    else {heading='🔄 已到發送時間，等待下一次 Cron';parts.push(`下一次巡檢：約 ${lineAutoNextCronText()}`);parts.push(`最晚補發：今天 ${c.latest_send_time||'12:00'}`);}
+  }
+  if(c.last_schedule_note)parts.push(`狀態：${c.last_schedule_note}`);
+  if(c.scheduled_composed_url)parts.push(`完整套印 JPG：已準備（${lineAutoTaipeiText(c.scheduled_composed_created_at)}）`);else if(c.enabled!==false&&!sentToday)parts.push('完整套印 JPG：尚未準備，請先按「產生今天日安圖」。');
+  title.textContent=heading;detail.innerHTML=parts.map(x=>`<div>${escHtml(x)}</div>`).join('');
+}
+async function lineAutoRefreshScheduleStatus(showMessage=false){
+  try{const d=await lineAutoApi('/config',{method:'GET'});lineAutoRenderScheduleStatus(d.config||{});if(showMessage)lineAutoShow('✅ 排程狀態已更新。');return d.config||{};}
+  catch(e){if(showMessage)lineAutoShow('❌ 讀取排程狀態失敗：'+e.message,'error');return null;}
+}
+function lineAutoStartStatusTimer(){
+  if(lineAutoStatusTimer)clearInterval(lineAutoStatusTimer);
+  lineAutoStatusTimer=setInterval(()=>{if(document.getElementById('sec-line-auto')?.classList.contains('active'))lineAutoRefreshScheduleStatus(false)},60000);
+}
 function lineAutoValue(id){return document.getElementById(id)?.value||''}
 function lineAutoBool(id){return lineAutoValue(id)==='true'}
 function lineAutoSet(id,v){const e=document.getElementById(id);if(e&&v!==undefined&&v!==null)e.value=String(v)}
@@ -5444,11 +5494,12 @@ async function openLineAutomationAdmin(){
     lineAutoSet('laOpenAI',c.use_openai!==false);lineAutoSet('laVision',c.use_photo_understanding!==false);
     applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS,...(c.greeting_design||{}),image_mode:c.image_mode||(c.greeting_design||{}).image_mode||'real',signature:(c.greeting_design||{}).signature||c.signature||''});
     lineAutoShow(`✅ 已連線 Cloudflare Worker。排程：${c.enabled?'啟用':'停用'}；收件人 ${lineAutoInitialRecipientIds.length} 位；日安圖設定由預覽視窗統一管理。`);
+    lineAutoRenderScheduleStatus(c);lineAutoStartStatusTimer();
   }catch(e){lineAutoShow('❌ Worker LINE 自動化讀取失敗：'+e.message,'error')}
 }
 async function lineAutoSave(silent=false){
   const payload=lineAutoPayload();if(!payload.recipient_ids.length)throw new Error('請至少勾選一個 LINE 收件人');
-  const d=await lineAutoApi('/config',{method:'POST',body:JSON.stringify(payload)});if(!silent)lineAutoShow(`✅ 雲端設定已儲存，共 ${payload.recipient_ids.length} 個收件人。`);return d;
+  const d=await lineAutoApi('/config',{method:'POST',body:JSON.stringify(payload)});lineAutoRenderScheduleStatus(d.config||{});if(!silent)lineAutoShow(`✅ 雲端設定已儲存，共 ${payload.recipient_ids.length} 個收件人。`);return d;
 }
 async function lineAutoOpenPreview(d){
   if(!d?.photo_url)return;await openGreetingMaker(null,encodeURIComponent(d.photo_url));
@@ -5490,13 +5541,13 @@ async function lineAutoSendComposed(){
 async function lineAutoRun(send){
   try{
     await lineAutoSave(true);
-    if(send){lineAutoShow('正在依序發送已套印文字的完整 JPG…');const d=await lineAutoSendComposed();lineAutoShow(`✅ ${d.message||'完整日安圖已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);return}
+    if(send){lineAutoShow('正在依序發送已套印文字的完整 JPG…');const d=await lineAutoSendComposed();lineAutoShow(`✅ ${d.message||'完整日安圖已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);await lineAutoRefreshScheduleStatus(false);return}
     lineAutoShow('正在產生今天日安圖…');const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,image_mode:greetingGlobalConfig.image_mode||lineAutoValue('laImageMode')||'real',group_id:BOOKWIDE_GROUP_ID||'monster-group'})});
-    await lineAutoOpenPreview(d);lineAutoShow('✅ 完整日安圖已產生；文字已直接印在 JPG 上。');
+    await lineAutoOpenPreview(d);lineAutoShow('✅ 完整日安圖已產生；文字已直接印在 JPG 上。');await lineAutoRefreshScheduleStatus(false);
   }catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error');alert('執行失敗：'+e.message)}
 }
 async function lineAutoSetEnabled(enabled){
-  try{lineAutoSet('laEnabled',enabled);await lineAutoSave(true);const d=await lineAutoApi('/schedule',{method:'POST',body:JSON.stringify({enabled,group_id:BOOKWIDE_GROUP_ID||'monster-group'})});lineAutoShow('✅ '+(d.message||(enabled?'每日排程已啟用。':'每日排程已停用。')))}
+  try{lineAutoSet('laEnabled',enabled);await lineAutoSave(true);const d=await lineAutoApi('/schedule',{method:'POST',body:JSON.stringify({enabled,group_id:BOOKWIDE_GROUP_ID||'monster-group'})});lineAutoRenderScheduleStatus(d.config||{});lineAutoShow('✅ '+(d.message||(enabled?'每日排程已啟用。':'每日排程已停用。')))}
   catch(e){lineAutoShow('❌ 排程設定失敗：'+e.message,'error');alert('排程設定失敗：'+e.message)}
 }
 </script>
