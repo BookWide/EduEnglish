@@ -397,6 +397,7 @@ body.photo-admin-mode .greeting-maker-btn{display:none}
 .greeting-maker-status{min-height:22px;font-size:13px;color:var(--muted);font-weight:800}
 .greeting-ai-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .greeting-style-row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.greeting-enhance-toggle{display:flex;align-items:center;gap:8px;margin-top:9px;font-weight:800;color:#314638}.greeting-enhance-toggle input{width:18px;height:18px;accent-color:var(--green)}
 .greeting-style-row select{min-height:46px;border:1px solid var(--line);border-radius:12px;padding:9px 10px;font-weight:900;background:#fff}
 .greeting-ai-row select,.greeting-ai-row button{min-height:46px;border:1px solid var(--line);border-radius:12px;padding:9px 10px;font-weight:900;background:#fff}
 #greetingMakerAi{background:#f1eafa;border-color:#7c4d9e;color:#57306e;cursor:pointer}
@@ -899,12 +900,16 @@ body.photo-admin-mode .greeting-maker-btn{display:none}
             <option value="art">柔和行書體</option>
           </select>
           <select id="greetingMakerColor" aria-label="文字顏色">
+            <option value="auto" selected>✨ Auto 自動辨識（推薦）</option>
             <option value="white">雪白字</option>
             <option value="red">莓紅字</option>
             <option value="gold">暖金字</option>
             <option value="blue">深藍字</option>
           </select>
-        </div></div>
+        </div>
+        <label class="greeting-enhance-toggle"><input id="greetingMakerEnhance" type="checkbox" checked> 強化文字辨識（描邊＋柔影）</label>
+        <div class="small">Auto 會依文字區背景亮度，自動選擇雪白字或深藍字。</div>
+        </div>
         <div class="field"><label>相框款式</label><select id="greetingMakerFrame">
           <option value="clean">簡約白框</option>
           <option value="gold">暖金畫框</option>
@@ -4137,11 +4142,12 @@ async function downloadCurrentModalPhoto(button){
 
 
 /* ========= V113.3 BookWide Classic Oil：人物臉部清晰＋左下日期路線 ========= */
-const GREETING_GLOBAL_DEFAULTS={font:'pen',color:'white',frame:'clean',ratio:'portrait',position:'bottom',image_mode:'real',signature:''};
+const GREETING_GLOBAL_DEFAULTS={font:'pen',color:'auto',enhance_text:true,frame:'clean',ratio:'portrait',position:'bottom',image_mode:'real',signature:''};
 let greetingGlobalConfig={...GREETING_GLOBAL_DEFAULTS};
 function greetingMakerSettingsFromControls(){return {
   font:greetingMakerValue('greetingMakerFont')||'pen',
-  color:greetingMakerValue('greetingMakerColor')||'white',
+  color:greetingMakerValue('greetingMakerColor')||'auto',
+  enhance_text:document.getElementById('greetingMakerEnhance')?.checked!==false,
   frame:greetingMakerValue('greetingMakerFrame')||'clean',
   ratio:greetingMakerRadio('greetingMakerRatio','portrait'),
   position:greetingMakerRadio('greetingMakerPosition','bottom'),
@@ -4152,6 +4158,7 @@ function applyGreetingGlobalSettings(raw={}){
   const s={...GREETING_GLOBAL_DEFAULTS,...(raw||{})};greetingGlobalConfig=s;
   const set=(id,v)=>{const e=document.getElementById(id);if(e)e.value=String(v??'')};
   set('greetingMakerFont',s.font);set('greetingMakerColor',s.color);set('greetingMakerFrame',s.frame);set('greetingMakerSign',s.signature||'');
+  const enhance=document.getElementById('greetingMakerEnhance');if(enhance)enhance.checked=s.enhance_text!==false;
   const ratio=document.querySelector(`input[name="greetingMakerRatio"][value="${s.ratio}"]`);if(ratio)ratio.checked=true;
   const pos=document.querySelector(`input[name="greetingMakerPosition"][value="${s.position}"]`);if(pos)pos.checked=true;
   const mode=document.querySelector(`input[name="greetingPhotoMode"][value="${s.image_mode}"]`);if(mode)mode.checked=true;
@@ -4329,6 +4336,22 @@ function greetingMakerWrap(ctx,text,maxWidth,maxLines=3){
   if(line && out.length<maxLines) out.push(line.trim());
   return out;
 }
+function greetingMakerTextAreaBrightness(ctx,canvas,position){
+  try{
+    const W=canvas.width,H=canvas.height;
+    const x=Math.max(0,Math.round(W*.12)),w=Math.max(1,Math.round(W*.76));
+    const y=position==='bottom'?Math.max(0,Math.round(H*.58)):Math.max(0,Math.round(H*.04));
+    const h=Math.max(1,Math.min(H-y,Math.round(H*.34)));
+    const data=ctx.getImageData(x,y,w,h).data;
+    let sum=0,count=0;
+    const step=Math.max(4,Math.floor((w*h)/9000))*4;
+    for(let i=0;i<data.length;i+=step){
+      const a=data[i+3];if(a<30)continue;
+      sum+=(data[i]*0.2126+data[i+1]*0.7152+data[i+2]*0.0722);count++;
+    }
+    return count?sum/count:128;
+  }catch(_e){return 128;}
+}
 function greetingMakerDrawText(ctx,canvas,zh,en,sign,position){
   const W=canvas.width,H=canvas.height,short=Math.min(W,H);
   const pad=Math.max(34,Math.round(short*.045));
@@ -4363,12 +4386,15 @@ function greetingMakerDrawText(ctx,canvas,zh,en,sign,position){
   const enWeight=activeFont.enWeight;
   const zhStyle=activeFont.zhStyle;
   const enStyle=activeFont.enStyle;
-  const colorMode=greetingMakerValue('greetingMakerColor')||'white';
+  const selectedColor=greetingMakerValue('greetingMakerColor')||'auto';
+  const brightness=greetingMakerTextAreaBrightness(ctx,canvas,position);
+  const colorMode=selectedColor==='auto'?(brightness>=158?'blue':'white'):selectedColor;
+  const enhanceText=document.getElementById('greetingMakerEnhance')?.checked!==false;
   const palettes={
-    white:{fill:'#ffffff',stroke:'rgba(28,28,28,.88)',shadow:'rgba(0,0,0,.48)',accent:'rgba(255,255,255,.82)'},
-    red:{fill:'#b74750',stroke:'rgba(255,239,210,.85)',shadow:'rgba(55,0,8,.34)',accent:'rgba(154,55,40,.75)'},
-    gold:{fill:'#8a5a12',stroke:'rgba(255,244,204,.84)',shadow:'rgba(50,28,0,.30)',accent:'rgba(188,126,30,.88)'},
-    blue:{fill:'#123a7a',stroke:'rgba(255,255,255,.90)',shadow:'rgba(0,18,55,.46)',accent:'rgba(18,58,122,.85)'}
+    white:{fill:'#ffffff',stroke:'rgba(0,0,0,.96)',shadow:'rgba(0,0,0,.82)',accent:'rgba(255,255,255,.82)'},
+    red:{fill:'#d73f3f',stroke:'rgba(255,255,255,.98)',shadow:'rgba(50,0,0,.72)',accent:'rgba(185,35,35,.88)'},
+    gold:{fill:'#f6bd3b',stroke:'rgba(35,22,0,.96)',shadow:'rgba(0,0,0,.72)',accent:'rgba(188,126,30,.88)'},
+    blue:{fill:'#123a7a',stroke:'rgba(255,255,255,.98)',shadow:'rgba(0,0,0,.68)',accent:'rgba(18,58,122,.85)'}
   };
   const palette=palettes[colorMode]||palettes.white;
 
@@ -4390,8 +4416,9 @@ function greetingMakerDrawText(ctx,canvas,zh,en,sign,position){
 
   // 文字採細描邊＋柔影，避免 PowerPoint 式粗黑框。
   ctx.fillStyle=palette.fill;ctx.strokeStyle=palette.stroke;
-  ctx.shadowColor=palette.shadow;ctx.shadowBlur=Math.max(3,Math.round(short*.005));
-  ctx.lineWidth=Math.max(1.2,Math.round(short*.0018));
+  ctx.shadowColor=palette.shadow;ctx.shadowBlur=enhanceText?Math.max(7,Math.round(short*.009)):Math.max(3,Math.round(short*.004));
+  ctx.shadowOffsetX=enhanceText?Math.max(1,Math.round(short*.0015)):0;ctx.shadowOffsetY=enhanceText?Math.max(2,Math.round(short*.0025)):0;
+  ctx.lineWidth=enhanceText?Math.max(2.4,Math.round(short*.0032)):Math.max(1.2,Math.round(short*.0018));
   ctx.font=`${zhStyle}${zhWeight} ${zhSize}px ${zhFamily}`;
   for(const line of zhLines){ctx.strokeText(line,W/2,y,maxWidth*.90);ctx.fillText(line,W/2,y,maxWidth*.90);y+=zhLH;}
   if(zhLines.length&&enLines.length)y+=gap;
@@ -4672,7 +4699,7 @@ async function shareOrDownloadGreeting(button){
 }
 function initGreetingMaker(){
   ['greetingMakerZh','greetingMakerEn','greetingMakerSign'].forEach(id=>document.getElementById(id)?.addEventListener('input',scheduleGreetingMakerPreview));
-  document.querySelectorAll('input[name="greetingMakerRatio"],input[name="greetingMakerPosition"],#greetingMakerFont,#greetingMakerColor,#greetingMakerFrame').forEach(el=>el.addEventListener('change',scheduleGreetingMakerPreview));
+  document.querySelectorAll('input[name="greetingMakerRatio"],input[name="greetingMakerPosition"],#greetingMakerFont,#greetingMakerColor,#greetingMakerEnhance,#greetingMakerFrame').forEach(el=>el.addEventListener('change',scheduleGreetingMakerPreview));
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&document.getElementById('greetingMakerModal')?.classList.contains('active'))closeGreetingMaker();});
 }
 if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',initGreetingMaker);else initGreetingMaker();
