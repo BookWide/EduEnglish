@@ -714,14 +714,27 @@ body.photo-admin-mode .greeting-maker-btn{display:none}
   <div class="card">
     <div class="toolbar">
       <div>
-        <h2 style="margin:0">LINE 日安自動化｜V7.2</h2>
-        <p class="small" style="margin:8px 0 0">直接使用 Cloudflare Worker；全域 Cron 每 5 分鐘巡檢所有啟用排程。</p>
+        <h2 style="margin:0">LINE 日安自動化｜V7.3</h2>
+        <p class="small" style="margin:8px 0 0">直接使用 Cloudflare Worker；全域 Cron 每 5 分鐘巡檢所有啟用排程；支援多收件人與自訂收件群組。</p>
       </div>
       <button class="btn gray" type="button" onclick="showAdminHome()">返回管理</button>
     </div>
     <div id="lineAutoStatus" class="notice" style="margin-top:12px">正在讀取雲端設定…</div>
     <div class="filters" style="margin-top:14px">
-      <div class="field"><label>LINE 發送對象</label><div class="line-target-row"><select id="laRecipient"><option value="">尚未偵測到群組／好友</option></select><button class="btn gray" type="button" onclick="lineAutoLoadTargets(true)">重新偵測</button></div></div>
+      <div class="field" style="grid-column:1 / -1"><label>LINE 收件人（可複選）</label>
+        <div id="laRecipientPanel" style="border:1px solid var(--line);border-radius:14px;padding:12px;background:#fff">
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+            <button class="btn gray" type="button" onclick="lineAutoLoadTargets(true)">重新偵測</button>
+            <button class="btn gray" type="button" onclick="lineAutoSelectAll(true)">全選</button>
+            <button class="btn gray" type="button" onclick="lineAutoSelectAll(false)">清除</button>
+            <select id="laRecipientGroup" onchange="lineAutoApplyRecipientGroup(this.value)" style="min-width:180px"><option value="">選擇收件群組</option></select>
+            <button class="btn secondary" type="button" onclick="lineAutoSaveRecipientGroup()">新增／更新收件群組</button>
+            <button class="btn red" type="button" onclick="lineAutoDeleteRecipientGroup()">刪除群組</button>
+          </div>
+          <div id="laRecipientList" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px"><span class="small">尚未偵測到群組／好友</span></div>
+          <div id="laRecipientSummary" class="small" style="margin-top:10px">尚未選擇收件人。</div>
+        </div>
+      </div>
       <div class="field"><label>每日時間（台灣）</label><input id="laTime" type="time" value="07:00"></div>
       <div class="field"><label>最晚補發</label><input id="laLatest" type="time" value="12:00"></div>
       <div class="field"><label>排程模式</label><select id="laMode"><option value="smart">智慧補發</option><option value="exact">只準時</option></select></div>
@@ -5297,11 +5310,15 @@ init();
 
 <script>
 const LINE_AUTO_API='/api/line-automation';
+let lineAutoTargets=[];
+let lineAutoRecipientGroups={};
+let lineAutoInitialRecipientIds=[];
 function lineAutoValue(id){return document.getElementById(id)?.value||''}
 function lineAutoBool(id){return lineAutoValue(id)==='true'}
 function lineAutoSet(id,v){const e=document.getElementById(id);if(e&&v!==undefined&&v!==null)e.value=String(v)}
+function lineAutoSelectedIds(){return [...document.querySelectorAll('#laRecipientList input[type="checkbox"]:checked')].map(x=>x.value).filter(Boolean)}
 function lineAutoPayload(){return {
-  recipient_id:lineAutoValue('laRecipient').trim(),
+  recipient_ids:lineAutoSelectedIds(), recipient_groups:lineAutoRecipientGroups,
   schedule_time:lineAutoValue('laTime'), latest_send_time:lineAutoValue('laLatest'),
   schedule_mode:lineAutoValue('laMode'), enabled:lineAutoBool('laEnabled'),
   headline:lineAutoValue('laHeadline').trim(), signature:lineAutoValue('laSignature').trim(),
@@ -5310,104 +5327,100 @@ function lineAutoPayload(){return {
   group_id:BOOKWIDE_GROUP_ID||'monster-group', timezone:'Asia/Taipei'
 }}
 function lineAutoShow(message,type=''){const box=document.getElementById('lineAutoStatus');if(!box)return;box.textContent=message;box.style.borderColor=type==='error'?'#efb6af':'';box.style.color=type==='error'?'var(--red)':''}
-async function lineAutoApi(path,options={}){
-  return hikingApi(LINE_AUTO_API+path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
+async function lineAutoApi(path,options={}){return hikingApi(LINE_AUTO_API+path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}})}
+function lineAutoUpdateSummary(){
+  const ids=lineAutoSelectedIds();const names=ids.map(id=>lineAutoTargets.find(t=>t.id===id)?.name||id);
+  const el=document.getElementById('laRecipientSummary');if(el)el.textContent=ids.length?`已選 ${ids.length} 個對象：${names.join('、')}`:'尚未選擇收件人。';
 }
-async function lineAutoLoadTargets(showStatus=false,selected=''){
-  const select=document.getElementById('laRecipient');if(!select)return [];
+function lineAutoRenderTargets(selectedIds=[]){
+  const list=document.getElementById('laRecipientList');if(!list)return;
+  const wanted=new Set((selectedIds||[]).map(String));
+  if(!lineAutoTargets.length){list.innerHTML='<span class="small">尚未偵測到群組／好友</span>';lineAutoUpdateSummary();return;}
+  list.innerHTML='';
+  for(const t of lineAutoTargets){
+    const label=document.createElement('label');label.style.cssText='display:flex;gap:8px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:9px 10px;cursor:pointer';
+    const box=document.createElement('input');box.type='checkbox';box.value=t.id;box.checked=wanted.has(String(t.id));box.addEventListener('change',lineAutoUpdateSummary);
+    const icon=t.type==='group'?'👥':t.type==='room'?'💬':'👤';
+    const text=document.createElement('span');text.textContent=`${icon} ${t.name||t.id}（${t.type==='group'?'群組':t.type==='room'?'聊天室':'好友'}）`;
+    label.append(box,text);list.appendChild(label);
+  }
+  lineAutoUpdateSummary();
+}
+function lineAutoRenderRecipientGroups(){
+  const sel=document.getElementById('laRecipientGroup');if(!sel)return;
+  const current=sel.value;sel.innerHTML='<option value="">選擇收件群組</option>';
+  Object.keys(lineAutoRecipientGroups||{}).sort().forEach(name=>{const o=document.createElement('option');o.value=name;o.textContent=`【${name}】（${(lineAutoRecipientGroups[name]||[]).length}）`;sel.appendChild(o)});
+  if(current&&lineAutoRecipientGroups[current])sel.value=current;
+}
+function lineAutoSelectAll(checked){document.querySelectorAll('#laRecipientList input[type="checkbox"]').forEach(x=>x.checked=!!checked);lineAutoUpdateSummary()}
+function lineAutoApplyRecipientGroup(name){if(!name)return;lineAutoRenderTargets(lineAutoRecipientGroups[name]||[])}
+function lineAutoSaveRecipientGroup(){
+  const ids=lineAutoSelectedIds();if(!ids.length){alert('請先勾選至少一位收件人');return}
+  const current=document.getElementById('laRecipientGroup')?.value||'';
+  const name=prompt('收件群組名稱',current);if(!name||!name.trim())return;
+  lineAutoRecipientGroups[name.trim()]=ids;lineAutoRenderRecipientGroups();lineAutoSet('laRecipientGroup',name.trim());lineAutoShow(`✅ 已建立收件群組【${name.trim()}】，請按「儲存雲端設定」。`)
+}
+function lineAutoDeleteRecipientGroup(){
+  const sel=document.getElementById('laRecipientGroup');const name=sel?.value||'';if(!name){alert('請先選擇要刪除的收件群組');return}
+  if(!confirm(`確定刪除收件群組【${name}】？`))return;delete lineAutoRecipientGroups[name];lineAutoRenderRecipientGroups();lineAutoShow(`已刪除收件群組【${name}】，請按「儲存雲端設定」。`)
+}
+async function lineAutoLoadTargets(showStatus=false,selectedIds=null){
   try{
-    const d=await hikingApi('/api/line/targets',{method:'GET'});
-    const targets=Array.isArray(d.targets)?d.targets:[];
-    const wanted=selected||select.value;
-    select.innerHTML='<option value="">請選擇已偵測的 LINE 對象</option>';
-    for(const t of targets){
-      const o=document.createElement('option');o.value=t.id;
-      const icon=t.type==='group'?'👥':t.type==='room'?'💬':'👤';
-      o.textContent=`${icon} ${t.name||t.id}（${t.type==='group'?'群組':t.type==='room'?'聊天室':'好友'}）`;
-      select.appendChild(o);
-    }
-    if(wanted && [...select.options].some(o=>o.value===wanted)) select.value=wanted;
-    if(showStatus) lineAutoShow(targets.length?`✅ 已偵測 ${targets.length} 個 LINE 對象。`:'尚未偵測到對象：請啟用 Webhook，把官方帳號加入群組並傳一句話。',targets.length?'':'error');
-    return targets;
+    const d=await hikingApi('/api/line/targets',{method:'GET'});lineAutoTargets=Array.isArray(d.targets)?d.targets:[];
+    const wanted=Array.isArray(selectedIds)?selectedIds:lineAutoSelectedIds();lineAutoRenderTargets(wanted);
+    if(showStatus)lineAutoShow(lineAutoTargets.length?`✅ 已偵測 ${lineAutoTargets.length} 個 LINE 對象。`:'尚未偵測到對象：請啟用 Webhook，讓好友傳訊息或把官方帳號加入群組。',lineAutoTargets.length?'':'error');
+    return lineAutoTargets;
   }catch(e){if(showStatus)lineAutoShow('❌ 讀取 LINE 對象失敗：'+e.message,'error');return []}
 }
 async function openLineAutomationAdmin(){
-  if(!BOOKWIDE_IS_ADMIN){alert('只有群主或 BookWide Admin 可使用。');return;}
-  activateSectionOnly('sec-line-auto'); lineAutoShow('正在讀取 Cloudflare Worker 設定…');
+  if(!BOOKWIDE_IS_ADMIN){alert('只有群主或 BookWide Admin 可使用。');return}
+  activateSectionOnly('sec-line-auto');lineAutoShow('正在讀取 Cloudflare Worker 設定…');
   try{
     const d=await lineAutoApi('/config',{method:'GET'});const c=d.config||{};
-    await lineAutoLoadTargets(false,c.recipient_id||'');
-    lineAutoSet('laRecipient',c.recipient_id);lineAutoSet('laTime',c.schedule_time||'07:00');
-    lineAutoSet('laLatest',c.latest_send_time||'12:00');lineAutoSet('laMode',c.schedule_mode||'smart');
-    lineAutoSet('laEnabled',c.enabled!==false);lineAutoSet('laHeadline',c.headline||'日安');
-    lineAutoSet('laSignature',c.signature||'bookwide.net');lineAutoSet('laOpenAI',c.use_openai!==false);
-    lineAutoSet('laVision',c.use_photo_understanding!==false);lineAutoSet('laImageMode',c.image_mode||'real');
-    lineAutoShow('✅ 已連線 Cloudflare Worker。排程：'+(c.enabled?'啟用':'停用'));
-  }catch(e){lineAutoShow('❌ Worker LINE 自動化讀取失敗：'+e.message,'error');}
+    lineAutoRecipientGroups=(c.recipient_groups&&typeof c.recipient_groups==='object')?c.recipient_groups:{};
+    lineAutoInitialRecipientIds=Array.isArray(c.recipient_ids)?c.recipient_ids:(c.recipient_id?[c.recipient_id]:[]);
+    await lineAutoLoadTargets(false,lineAutoInitialRecipientIds);lineAutoRenderRecipientGroups();
+    lineAutoSet('laTime',c.schedule_time||'07:00');lineAutoSet('laLatest',c.latest_send_time||'12:00');lineAutoSet('laMode',c.schedule_mode||'smart');
+    lineAutoSet('laEnabled',c.enabled!==false);lineAutoSet('laHeadline',c.headline||'日安');lineAutoSet('laSignature',c.signature||'bookwide.net');
+    lineAutoSet('laOpenAI',c.use_openai!==false);lineAutoSet('laVision',c.use_photo_understanding!==false);lineAutoSet('laImageMode',c.image_mode||'real');
+    lineAutoShow(`✅ 已連線 Cloudflare Worker。排程：${c.enabled?'啟用':'停用'}；收件人 ${lineAutoInitialRecipientIds.length} 位。`);
+  }catch(e){lineAutoShow('❌ Worker LINE 自動化讀取失敗：'+e.message,'error')}
 }
 async function lineAutoSave(silent=false){
-  const payload=lineAutoPayload();
-  if(!payload.recipient_id) throw new Error('請先從下拉選單選擇 LINE 發送對象');
-  const d=await lineAutoApi('/config',{method:'POST',body:JSON.stringify(payload)});
-  if(!silent) lineAutoShow('✅ 雲端設定已儲存。');return d;
+  const payload=lineAutoPayload();if(!payload.recipient_ids.length)throw new Error('請至少勾選一個 LINE 收件人');
+  const d=await lineAutoApi('/config',{method:'POST',body:JSON.stringify(payload)});if(!silent)lineAutoShow(`✅ 雲端設定已儲存，共 ${payload.recipient_ids.length} 個收件人。`);return d;
 }
 async function lineAutoOpenPreview(d){
-  if(!d?.photo_url)return;
-  await openGreetingMaker(null,encodeURIComponent(d.photo_url));
-  if(d.text){
-    const lines=String(d.text).split('\n').map(x=>x.trim()).filter(Boolean);
-    if(lines.length) document.getElementById('greetingMakerZh').value=lines.slice(0,2).join('\n');
-  }
-  const mode=lineAutoValue('laImageMode')||'real';
-  const radio=document.querySelector(`input[name="greetingPhotoMode"][value="${mode}"]`);if(radio)radio.checked=true;
-  if(mode==='oil') await setGreetingPhotoMode('oil',radio);
-  else await setGreetingPhotoMode('real',radio);
-  // 立即把預覽畫面轉成完整 JPG：中文、英文、日期／路線、bookwide.net 全部燒在同一張圖上。
-  await renderGreetingMakerPreview();
-  const canvas=document.getElementById('greetingMakerCanvas');
+  if(!d?.photo_url)return;await openGreetingMaker(null,encodeURIComponent(d.photo_url));
+  if(d.text){const lines=String(d.text).split('\n').map(x=>x.trim()).filter(Boolean);if(lines.length)document.getElementById('greetingMakerZh').value=lines.slice(0,2).join('\n')}
+  const mode=lineAutoValue('laImageMode')||'real';const radio=document.querySelector(`input[name="greetingPhotoMode"][value="${mode}"]`);if(radio)radio.checked=true;
+  if(mode==='oil')await setGreetingPhotoMode('oil',radio);else await setGreetingPhotoMode('real',radio);
+  await renderGreetingMakerPreview();const canvas=document.getElementById('greetingMakerCanvas');
   greetingMakerState.blob=await new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('完整日安圖 JPG 產生失敗')),'image/jpeg',.98));
-  greetingMakerState.fileName=greetingMakerSafeName(greetingMakerState.url);
-  const saveButton=document.getElementById('greetingMakerSave');
-  if(saveButton){saveButton.disabled=false;saveButton.textContent='下載完成日安圖';}
+  greetingMakerState.fileName=greetingMakerSafeName(greetingMakerState.url);const saveButton=document.getElementById('greetingMakerSave');
+  if(saveButton){saveButton.disabled=false;saveButton.textContent='下載完成日安圖'}
   greetingMakerStatus('完整日安圖已生成：文字已燒進 JPG。可下載，或關閉後按「立即發送 LINE」。');
 }
 async function lineAutoSendComposed(){
-  if(!greetingMakerState.blob) throw new Error('請先按「產生今天日安圖」，確認文字已套印在圖片上');
-  const recipient=lineAutoValue('laRecipient');
-  if(!recipient) throw new Error('請先選擇 LINE 發送對象');
-  const form=new FormData();
-  form.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
-  form.append('recipient_id',recipient);
-  form.append('group_id',BOOKWIDE_GROUP_ID||'monster-group');
-  const {data:{session}}=await bookwideSupa.auth.getSession();
-  const headers=new Headers();
-  if(session?.access_token) headers.set('Authorization','Bearer '+session.access_token);
-  if(BOOKWIDE_GROUP_ID) headers.set('X-BookWide-Group',BOOKWIDE_GROUP_ID);
-  const res=await fetch(`${HIKING_API_BASE}/api/line-automation/send-composed`,{method:'POST',headers,body:form});
-  const text=await res.text();let data={};try{data=text?JSON.parse(text):{};}catch(_e){}
-  if(!res.ok) throw new Error(data.error||text||`完整日安圖發送失敗（${res.status}）`);
-  return data;
+  if(!greetingMakerState.blob)throw new Error('請先按「產生今天日安圖」，確認文字已套印在圖片上');
+  const recipients=lineAutoSelectedIds();if(!recipients.length)throw new Error('請至少勾選一個 LINE 收件人');
+  const form=new FormData();form.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
+  form.append('recipient_ids',JSON.stringify(recipients));form.append('group_id',BOOKWIDE_GROUP_ID||'monster-group');
+  const {data:{session}}=await bookwideSupa.auth.getSession();const headers=new Headers();if(session?.access_token)headers.set('Authorization','Bearer '+session.access_token);if(BOOKWIDE_GROUP_ID)headers.set('X-BookWide-Group',BOOKWIDE_GROUP_ID);
+  const res=await fetch(`${HIKING_API_BASE}/api/line-automation/send-composed`,{method:'POST',headers,body:form});const text=await res.text();let data={};try{data=text?JSON.parse(text):{}}catch(_e){}
+  if(!res.ok)throw new Error(data.error||text||`完整日安圖發送失敗（${res.status}）`);return data;
 }
 async function lineAutoRun(send){
   try{
     await lineAutoSave(true);
-    if(send){
-      lineAutoShow('正在發送已套印文字的完整 JPG…');
-      const d=await lineAutoSendComposed();
-      lineAutoShow('✅ '+(d.message||'完整日安圖 JPG 已送出 LINE。'));
-      return;
-    }
-    lineAutoShow('正在產生今天日安圖…');
-    const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,image_mode:lineAutoValue('laImageMode')||'real',group_id:BOOKWIDE_GROUP_ID||'monster-group'})});
-    await lineAutoOpenPreview(d);
-    lineAutoShow('✅ 完整日安圖已產生；文字已直接印在 JPG 上。');
+    if(send){lineAutoShow('正在依序發送已套印文字的完整 JPG…');const d=await lineAutoSendComposed();lineAutoShow(`✅ ${d.message||'完整日安圖已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);return}
+    lineAutoShow('正在產生今天日安圖…');const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,image_mode:lineAutoValue('laImageMode')||'real',group_id:BOOKWIDE_GROUP_ID||'monster-group'})});
+    await lineAutoOpenPreview(d);lineAutoShow('✅ 完整日安圖已產生；文字已直接印在 JPG 上。');
   }catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error');alert('執行失敗：'+e.message)}
 }
 async function lineAutoSetEnabled(enabled){
-  try{lineAutoSet('laEnabled',enabled);await lineAutoSave(true);
-    const d=await lineAutoApi('/schedule',{method:'POST',body:JSON.stringify({enabled,group_id:BOOKWIDE_GROUP_ID||'monster-group'})});
-    lineAutoShow('✅ '+(d.message||(enabled?'每日排程已啟用。':'每日排程已停用。')));
-  }catch(e){lineAutoShow('❌ 排程設定失敗：'+e.message,'error');alert('排程設定失敗：'+e.message)}
+  try{lineAutoSet('laEnabled',enabled);await lineAutoSave(true);const d=await lineAutoApi('/schedule',{method:'POST',body:JSON.stringify({enabled,group_id:BOOKWIDE_GROUP_ID||'monster-group'})});lineAutoShow('✅ '+(d.message||(enabled?'每日排程已啟用。':'每日排程已停用。')))}
+  catch(e){lineAutoShow('❌ 排程設定失敗：'+e.message,'error');alert('排程設定失敗：'+e.message)}
 }
 </script>
 
