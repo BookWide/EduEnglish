@@ -1063,7 +1063,7 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
           <button id="greetingMakerGenerate" type="button" onclick="generateGreetingJpg(this)">生成 JPG</button>
           <button id="greetingMakerGlobalSave" type="button" onclick="saveGreetingGlobalSettings(this)">儲存全站設定</button>
           <button id="greetingMakerSave" type="button" onclick="shareOrDownloadGreeting(this)" disabled>分享</button>
-          <button id="greetingMakerSendLine" type="button" onclick="saveAndSendGreetingToMyLine(this)" disabled>儲存並傳送我的 LINE</button>
+          <button id="greetingMakerSendLine" type="button" onclick="sendGreetingToMyLine(this)" disabled>傳送我的 LINE</button>
         </div>
         <div class="greeting-maker-note">V7.4：此視窗是日安圖唯一設定來源；儲存後，預覽、立即發送與每日排程全部使用同一份設定。</div>
       </div>
@@ -4519,19 +4519,28 @@ async function generateStickerPack(button){
 async function blobFromSticker(row){const src=row?.url||row?.data_url;if(!src)throw new Error('貼圖檔案不存在');const r=await fetch(src);if(!r.ok)throw new Error('下載貼圖失敗');return await r.blob();}
 async function downloadSingleSticker(id){const row=stickerMakerState.stickers.find(x=>x.id===id);if(!row)return;const blob=await blobFromSticker(row);greetingMakerDownload(blob,`${id}_${row.text||id}.png`);}
 
-async function sendStickerUrlToLine(row,button){
-  const imageUrl=String(row?.url||row?.data_url||'').trim();
-  if(!imageUrl)throw new Error('貼圖尚未產生或沒有可傳送網址');
-  const label=`${row?.id||''} ${row?.text||'貼圖'}`.trim();
-  if(!confirm(`確定把「${label}」傳送到你已綁定的 LINE？`))return;
+async function sendBookWideImageToMyLine(imageUrl,label,button,askConfirm=true){
+  imageUrl=String(imageUrl||'').trim();
+  if(!imageUrl)throw new Error('圖片尚未產生或沒有可傳送網址');
+  label=String(label||'圖片').trim();
+  if(askConfirm&&!confirm(`確定把「${label}」傳送到你已綁定的 LINE？`))return null;
   const old=button?.textContent||'傳送我的 LINE';if(button){button.disabled=true;button.textContent='傳送中…';}
   try{
     const data=await hikingApi('/api/sticker-send-my-line',{method:'POST',admin:false,headers:{'Content-Type':'application/json'},body:JSON.stringify({image_url:imageUrl,label})});
     alert(data?.message||'已傳送到你的 LINE。');
+    return data;
   }catch(e){
-    if(String(e.message||'').includes('尚未綁定')){document.getElementById('myStickersModal')?.classList.add('active');await refreshMyLineBinding(false);}
+    if(String(e.message||'').includes('尚未綁定')||e?.code==='LINE_BIND_REQUIRED'){
+      document.getElementById('myStickersModal')?.classList.add('active');
+      await refreshMyLineBinding(false);
+    }
     throw e;
   }finally{if(button){button.disabled=false;button.textContent=old;}}
+}
+async function sendStickerUrlToLine(row,button){
+  const imageUrl=String(row?.url||row?.data_url||'').trim();
+  const label=`${row?.id||''} ${row?.text||'貼圖'}`.trim();
+  return await sendBookWideImageToMyLine(imageUrl,label,button,true);
 }
 async function sendGeneratedStickerToLine(id,button){try{const row=stickerMakerState.stickers.find(x=>x.id===id);if(!row)throw new Error('找不到這張貼圖');await sendStickerUrlToLine(row,button);}catch(e){alert('LINE 傳送失敗：'+e.message);}}
 async function sendSavedStickerToLine(packIndex,rowIndex,button){try{const pack=window.__BOOKWIDE_MY_STICKER_PACKS?.[packIndex],row=pack?.stickers?.[rowIndex];if(!row)throw new Error('找不到這張貼圖');await sendStickerUrlToLine(row,button);}catch(e){alert('LINE 傳送失敗：'+e.message);}}
@@ -4643,14 +4652,29 @@ function closePersonalCreateChoice(event){if(event&&event.target!==document.getE
 function choosePersonalCreation(type){const c=personalCreationContext;closePersonalCreateChoice();if(type==='greeting')openGreetingMaker(c.button,c.url);else openStickerMaker(c.button,c.url);}
 function scrollToPhotoCenterForCreation(){document.getElementById('sec-album')?.scrollIntoView({behavior:'smooth',block:'start'});}
 function openGreetingFromCreationCenter(){alert('請在相簿選一張照片，按「個人創作」→「製作日安圖」。');scrollToPhotoCenterForCreation();}
-async function saveAndSendGreetingToMyLine(button){
-  if(!greetingMakerState.blob)throw new Error('請先生成 JPG');
-  const old=button.textContent;button.disabled=true;button.textContent='傳送中…';
+async function sendGreetingToMyLine(button){
+  if(!greetingMakerState.blob){alert('請先按「生成 JPG」');return;}
+  if(!confirm('確定把這張日安圖傳送到你已綁定的 LINE？'))return;
+  const original=button?.textContent||'傳送我的 LINE';
+  if(button){button.disabled=true;button.textContent='上傳中…';}
   try{
-    const form=new FormData();form.append('file',greetingMakerState.blob,greetingMakerState.fileName||'BookWide-greeting.jpg');form.append('source_photo_url',greetingMakerState.url||'');form.append('send_to_line','true');
-    const data=await hikingApi('/api/personal-creations/greetings',{method:'POST',admin:false,body:form});
-    greetingMakerStatus(data.message||'日安圖已儲存並傳送到你的 LINE。');alert(data.message||'已傳送到你的 LINE。');
-  }catch(e){if(e?.code==='LINE_BIND_REQUIRED'){openMyStickers();}alert('日安圖傳送失敗：'+e.message);}finally{button.disabled=false;button.textContent=old;}
+    // 日安圖先存入會員自己的 BookWide 雲端，取得公開圖片網址。
+    const form=new FormData();
+    form.append('file',greetingMakerState.blob,greetingMakerState.fileName||'BookWide-greeting.jpg');
+    form.append('source_photo_url',greetingMakerState.url||'');
+    form.append('send_to_line','false');
+    const saved=await hikingApi('/api/personal-creations/greetings',{method:'POST',admin:false,body:form});
+    const imageUrl=String(saved?.image_url||'').trim();
+    if(!imageUrl)throw new Error('日安圖已生成，但雲端沒有回傳圖片網址');
+    if(button){button.disabled=false;button.textContent=original;}
+    // 完全沿用個人貼圖同一個「傳送到我的 LINE」API 與綁定檢查。
+    await sendBookWideImageToMyLine(imageUrl,'我的日安圖',button,false);
+    greetingMakerStatus('日安圖已儲存，並沿用個人貼圖功能傳送到你的 LINE。');
+  }catch(e){
+    if(button){button.disabled=false;button.textContent=original;}
+    greetingMakerStatus('LINE 傳送失敗：'+e.message,true);
+    alert('日安圖傳送失敗：'+e.message);
+  }
 }
 
 function greetingMakerSafeName(url){
@@ -5131,7 +5155,7 @@ async function generateGreetingJpg(button){
     saveButton.textContent='分享';
     const lineButton=document.getElementById('greetingMakerSendLine');
     if(lineButton) lineButton.disabled=false;
-    greetingMakerStatus(`JPG 已生成：${greetingMakerState.fileName}。可按「分享」傳送生成的日安圖。`);
+    greetingMakerStatus(`JPG 已生成：${greetingMakerState.fileName}。現在可按「傳送我的 LINE」，功能與個人貼圖相同。`);
   }catch(error){greetingMakerStatus(error.message,true);alert('生成失敗：'+error.message);}
   finally{button.disabled=false;button.textContent=old;}
 }
