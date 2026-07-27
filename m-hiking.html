@@ -484,7 +484,7 @@ body.photo-admin-mode .greeting-maker-btn{display:none}
 
 
 
-/* ===== BookWide M-Hiking V8.0 Sticker Maker ===== */
+/* ===== BookWide M-Hiking V8.0.1 Sticker Maker ===== */
 .sticker-maker-btn{position:absolute;left:7px;bottom:43px;z-index:13;border:0;border-radius:999px;background:rgba(255,255,255,.97);color:#6b21a8;font-weight:950;padding:7px 10px;cursor:pointer;box-shadow:0 2px 9px rgba(0,0,0,.25);font-size:12px;line-height:1.2}
 .sticker-maker-btn:hover{background:#fff;transform:translateY(-1px)}
 body.photo-admin-mode .sticker-maker-btn{display:none}
@@ -930,11 +930,13 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
             <label><input type="radio" name="stickerStyle" value="3d">3D卡通</label>
           </div>
           <div class="sticker-actions">
-            <button id="stickerGenerateBtn" type="button" onclick="generateStickerPack(this)">AI 生成 10 張</button>
+            <select id="stickerSampleSelect" class="input" style="min-height:44px;border:1px solid var(--line);border-radius:12px;padding:8px 10px;font-weight:900;background:#fff"></select>
+            <button id="stickerGenerateSampleBtn" type="button" onclick="generateStickerSample(this)">先試生單張</button>
+            <button id="stickerGenerateBtn" type="button" onclick="generateStickerPack(this)" disabled>滿意後生成 10 張</button>
             <button id="stickerSavePackBtn" type="button" onclick="saveStickerPack(this)" disabled>儲存到我的貼圖</button>
             <button id="stickerDownloadZipBtn" type="button" onclick="downloadStickerZip(this)" disabled>下載 ZIP</button>
           </div>
-          <div id="stickerMakerStatus" class="sticker-status">請先選擇風格，再產生 10 張貼圖。</div>
+          <div id="stickerMakerStatus" class="sticker-status">請先選擇一張範例與風格，先試生單張；滿意後再生成 10 張。</div>
         </div>
       </aside>
       <section>
@@ -4329,9 +4331,19 @@ const STICKER_V8_ITEMS=[
   {id:'A09',text:'吃飯嗎？',action:'拿碗筷邀請'},
   {id:'A10',text:'辛苦了',action:'遞飲料或溫暖關懷'}
 ];
-const stickerMakerState={url:'',sourceBlob:null,stickers:[],busy:false,packId:'',style:'chibi'};
+const stickerMakerState={url:'',sourceBlob:null,stickers:[],busy:false,packId:'',style:'chibi',sampleApproved:false};
 function stickerStatus(msg,error=false){const el=document.getElementById('stickerMakerStatus');if(el){el.textContent=msg;el.style.color=error?'var(--red)':'var(--muted)';}}
 function stickerStyle(){return document.querySelector('input[name="stickerStyle"]:checked')?.value||'chibi';}
+function initStickerSampleSelect(){
+  const select=document.getElementById('stickerSampleSelect');
+  if(!select)return;
+  select.innerHTML=STICKER_V8_ITEMS.map(x=>`<option value="${x.id}">${x.id} ${x.text}｜${x.action}</option>`).join('');
+}
+function selectedStickerSample(){
+  const id=document.getElementById('stickerSampleSelect')?.value||'A01';
+  return STICKER_V8_ITEMS.find(x=>x.id===id)||STICKER_V8_ITEMS[0];
+}
+
 function renderStickerGrid(){
   const grid=document.getElementById('stickerGrid');if(!grid)return;
   grid.innerHTML=STICKER_V8_ITEMS.map(item=>{
@@ -4342,16 +4354,45 @@ function renderStickerGrid(){
 }
 async function openStickerMaker(button,url){
   stickerMakerState.url=decodeURIComponent(String(url||button?.closest?.('.photo-tile')?.querySelector('img')?.src||''));
-  stickerMakerState.stickers=[];stickerMakerState.packId='';
+  stickerMakerState.stickers=[];stickerMakerState.packId='';stickerMakerState.sampleApproved=false;
   document.getElementById('stickerSourceImg').src=stickerMakerState.url;
   document.getElementById('stickerSavePackBtn').disabled=true;
   document.getElementById('stickerDownloadZipBtn').disabled=true;
-  renderStickerGrid();stickerStatus('請先選擇風格，再產生 10 張貼圖。');
+  document.getElementById('stickerGenerateBtn').disabled=true;
+  initStickerSampleSelect();
+  renderStickerGrid();stickerStatus('請先選擇一張範例與風格，先試生單張；滿意後再生成 10 張。');
   document.getElementById('stickerMakerModal')?.classList.add('active');
 }
 function closeStickerMaker(event){if(event&&event.target!==document.getElementById('stickerMakerModal'))return;document.getElementById('stickerMakerModal')?.classList.remove('active');}
+async function generateStickerSample(button){
+  if(stickerMakerState.busy)return;
+  if(!stickerMakerState.url){alert('找不到來源照片');return;}
+  const item=selectedStickerSample();
+  stickerMakerState.busy=true;const old=button.textContent;button.disabled=true;button.textContent='試生中…';
+  stickerStatus(`正在試生 ${item.id} ${item.text}，只會產生 1 張…`);
+  try{
+    const payload={url:stickerMakerState.url,group_id:BOOKWIDE_GROUP_ID||'',style:stickerStyle(),engine_version:'V8.0_SAMPLE',items:[item],transparent_background:true,identity_consistency:true,single_sample:true};
+    const data=await hikingApi('/api/ai-sticker-pack',{method:'POST',admin:false,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const rows=Array.isArray(data?.stickers)?data.stickers:[];
+    if(rows.length<1)throw new Error('AI 沒有回傳單張貼圖');
+    const row={...rows[0],id:rows[0].id||item.id,text:rows[0].text||item.text};
+    const others=stickerMakerState.stickers.filter(x=>x.id!==item.id);
+    stickerMakerState.stickers=[...others,row];
+    stickerMakerState.sampleApproved=true;
+    renderStickerGrid();
+    document.getElementById('stickerGenerateBtn').disabled=false;
+    stickerStatus(`${item.id} ${item.text} 試生完成。確認效果滿意後，再按「滿意後生成 10 張」。`);
+  }catch(error){
+    stickerMakerState.sampleApproved=false;
+    document.getElementById('stickerGenerateBtn').disabled=true;
+    stickerStatus('單張試生失敗：'+error.message,true);
+    alert('單張試生失敗：'+error.message+'\n\n請確認 Cloudflare Worker 的 /api/ai-sticker-pack 已支援 items 只傳 1 張。');
+  }finally{stickerMakerState.busy=false;button.disabled=false;button.textContent=old;}
+}
+
 async function generateStickerPack(button){
   if(stickerMakerState.busy)return;
+  if(!stickerMakerState.sampleApproved){alert('請先試生單張，確認滿意後再生成 10 張');return;}
   if(!stickerMakerState.url){alert('找不到來源照片');return;}
   stickerMakerState.busy=true;const old=button.textContent;button.disabled=true;button.textContent='AI 生成中…';
   stickerStatus('正在固定人物臉孔並產生 10 張貼圖，可能需要一段時間…');
