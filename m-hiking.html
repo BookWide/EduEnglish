@@ -915,7 +915,7 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
 <div id="stickerMakerModal" class="sticker-modal" onclick="closeStickerMaker(event)">
   <div class="sticker-panel" onclick="event.stopPropagation()">
     <div class="sticker-head">
-      <h2>😊 BookWide 個人貼圖 V8.04</h2>
+      <h2>😊 BookWide 個人貼圖 V8.05｜GPT 效果驗證</h2>
       <button class="sticker-close" type="button" onclick="closeStickerMaker()">關閉</button>
     </div>
     <div class="sticker-body">
@@ -4330,7 +4330,7 @@ const STICKER_V8_ITEMS=[
   {id:'A09',text:'吃飯嗎？',action:'拿碗筷邀請'},
   {id:'A10',text:'辛苦了',action:'遞飲料或溫暖關懷'}
 ];
-const stickerMakerState={url:'',sourceBlob:null,stickers:[],busy:false,packId:'',style:'realistic',sampleApproved:false};
+const stickerMakerState={url:'',sourceBlob:null,stickers:[],busy:false,packId:'',style:'realistic',sampleApproved:false,anchorUrl:''};
 function stickerStatus(msg,error=false){const el=document.getElementById('stickerMakerStatus');if(el){el.textContent=msg;el.style.color=error?'var(--red)':'var(--muted)';}}
 function stickerStyle(){return document.querySelector('input[name="stickerStyle"]:checked')?.value||'photo_original';}
 function initStickerSampleSelect(){
@@ -4353,7 +4353,7 @@ function renderStickerGrid(){
 }
 async function openStickerMaker(button,url){
   stickerMakerState.url=decodeURIComponent(String(url||button?.closest?.('.photo-tile')?.querySelector('img')?.src||''));
-  stickerMakerState.stickers=[];stickerMakerState.packId='';stickerMakerState.sampleApproved=false;
+  stickerMakerState.stickers=[];stickerMakerState.packId='';stickerMakerState.sampleApproved=false;stickerMakerState.anchorUrl='';
   document.getElementById('stickerSourceImg').src=stickerMakerState.url;
   document.getElementById('stickerSavePackBtn').disabled=true;
   document.getElementById('stickerDownloadZipBtn').disabled=true;
@@ -4370,7 +4370,7 @@ async function generateStickerSample(button){
   stickerMakerState.busy=true;const old=button.textContent;button.disabled=true;button.textContent='試生中…';
   stickerStatus(`正在試生 ${item.id} ${item.text}，只會產生 1 張…`);
   try{
-    const payload={url:stickerMakerState.url,group_id:BOOKWIDE_GROUP_ID||'',style:stickerStyle(),engine_version:'V8.04_SAMPLE',items:[item],transparent_background:true,identity_consistency:true,single_sample:true};
+    const payload={url:stickerMakerState.url,group_id:BOOKWIDE_GROUP_ID||'',style:stickerStyle(),engine_version:'V8.05_SAMPLE',items:[item],transparent_background:true,identity_consistency:true,single_sample:true};
     const data=await hikingApi('/api/ai-sticker-pack',{method:'POST',admin:false,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const rows=Array.isArray(data?.stickers)?data.stickers:[];
     if(rows.length<1)throw new Error('AI 沒有回傳單張貼圖');
@@ -4378,6 +4378,7 @@ async function generateStickerSample(button){
     const others=stickerMakerState.stickers.filter(x=>x.id!==item.id);
     stickerMakerState.stickers=[...others,row];
     stickerMakerState.sampleApproved=true;
+    stickerMakerState.anchorUrl=row.url||row.data_url||'';
     renderStickerGrid();
     document.getElementById('stickerGenerateBtn').disabled=false;
     stickerStatus(`${item.id} ${item.text} 試生完成。確認效果滿意後，再按「滿意後生成 10 張」。`);
@@ -4394,18 +4395,21 @@ async function generateStickerPack(button){
   if(!stickerMakerState.sampleApproved){alert('請先試生單張，確認滿意後再生成 10 張');return;}
   if(!stickerMakerState.url){alert('找不到來源照片');return;}
   stickerMakerState.busy=true;const old=button.textContent;button.disabled=true;button.textContent='AI 生成中…';
-  stickerStatus('正在以真人臉孔一致性為最高優先產生 10 張貼圖，可能需要一段時間…');
+  stickerStatus('正在用『原始照片＋已核准範例』雙參考鎖定同一張臉，再生成其餘 9 張…');
   try{
-    const payload={url:stickerMakerState.url,group_id:BOOKWIDE_GROUP_ID||'',style:stickerStyle(),engine_version:'V8.04',items:STICKER_V8_ITEMS,transparent_background:true,identity_consistency:true};
+    const approved=stickerMakerState.stickers.find(x=>(x.url||x.data_url)===stickerMakerState.anchorUrl)||stickerMakerState.stickers[0];
+    const remaining=STICKER_V8_ITEMS.filter(x=>x.id!==approved?.id);
+    const payload={url:stickerMakerState.url,anchor_url:stickerMakerState.anchorUrl,group_id:BOOKWIDE_GROUP_ID||'',style:stickerStyle(),engine_version:'V8.05',items:remaining,transparent_background:true,identity_consistency:true,approved_sample_id:approved?.id||''};
     const data=await hikingApi('/api/ai-sticker-pack',{method:'POST',admin:false,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    const rows=Array.isArray(data?.stickers)?data.stickers:[];
+    const generated=Array.isArray(data?.stickers)?data.stickers:[];
+    const rows=[approved,...generated].filter(Boolean);
     if(rows.length!==10)throw new Error(data?.error||`AI 回傳 ${rows.length} 張，應為 10 張`);
-    stickerMakerState.stickers=rows.map((x,i)=>({...x,id:x.id||STICKER_V8_ITEMS[i].id,text:x.text||STICKER_V8_ITEMS[i].text}));
+    stickerMakerState.stickers=STICKER_V8_ITEMS.map(item=>{const x=rows.find(r=>r.id===item.id)||{};return {...x,id:item.id,text:x.text||item.text};});
     stickerMakerState.packId=data.pack_id||'';
     renderStickerGrid();
     document.getElementById('stickerSavePackBtn').disabled=false;
     document.getElementById('stickerDownloadZipBtn').disabled=false;
-    stickerStatus('10 張貼圖已完成。可下載 ZIP 或儲存到「我的貼圖」。');
+    stickerStatus('10 張貼圖已完成；其餘 9 張均使用你核准的單張作為角色錨點。可下載 ZIP。');
   }catch(error){
     stickerStatus('貼圖生成失敗：'+error.message,true);
     alert('貼圖生成失敗：'+error.message+'\n\n請確認 Cloudflare Worker 已加入 /api/ai-sticker-pack。');
@@ -4420,7 +4424,7 @@ async function downloadStickerZip(button){
     if(!window.JSZip){await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';s.onload=resolve;s.onerror=()=>reject(new Error('JSZip 載入失敗'));document.head.appendChild(s);});}
     const zip=new JSZip();
     for(const row of stickerMakerState.stickers){zip.file(`${row.id}_${row.text||row.id}.png`,await blobFromSticker(row));}
-    zip.file('manifest.json',JSON.stringify({version:'V8.04',style:stickerStyle(),created_at:new Date().toISOString(),stickers:STICKER_V8_ITEMS},null,2));
+    zip.file('manifest.json',JSON.stringify({version:'V8.05',identity_anchor_used:true,style:stickerStyle(),created_at:new Date().toISOString(),stickers:STICKER_V8_ITEMS},null,2));
     greetingMakerDownload(await zip.generateAsync({type:'blob'}),`BookWide_Sticker_Pack_${Date.now()}.zip`);
     stickerStatus('貼圖 ZIP 已下載。');
   }catch(e){stickerStatus(e.message,true);alert(e.message);}finally{button.disabled=false;button.textContent=old;}
