@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- BookWide M-Hiking V8.1 / signature de-duplication + isolated AI greeting prompt -->
+<!-- BookWide M-Hiking V9.0 個人通用版 V8.1 / signature de-duplication + isolated AI greeting prompt -->
 <html lang="zh-Hant">
 <head>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -539,7 +539,14 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
 
 </style>
 
-<script>window.BOOKWIDE_M_HIKING_BUILD='V9.0_LINE_OFFICIAL_MEMBER_AUTO_SYNC';</script>
+<script>window.BOOKWIDE_M_HIKING_BUILD='V9.0_PERSONAL_FIRST_UNIVERSAL';</script>
+
+<style>
+body.personal-space-mode #sec-find,body.personal-space-mode #sec-notice{display:none!important}
+body.personal-space-mode .v3-hero p{display:none}
+body.personal-space-mode #photoViewEventsBtn{display:none}
+body.personal-space-mode #photoCenterTitle::after{content:"（私人）";font-size:.65em;color:var(--muted);margin-left:6px}
+</style>
 </head>
 <body>
 <script>
@@ -663,11 +670,11 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
  <div class="card">
   <div class="toolbar">
   <div>
-    <h2 id="photoCenterTitle" style="margin:0">活動相簿</h2>
-    <p id="photoCenterHint" class="small" style="margin:8px 0 0">全部新舊照片預設可供日安程式使用；不適合的照片可按「🚫 排除日安圖」。群內瀏覽、下載與上傳規則不變。</p>
+    <h2 id="photoCenterTitle" style="margin:0">我的照片空間</h2>
+    <p id="photoCenterHint" class="small" style="margin:8px 0 0">每位 BookWide 會員都有獨立照片空間；照片只屬於目前登入帳號，可跨手機與電腦使用。加入群組後，才會另外看到該群組相簿。</p>
   </div>
   <div class="btns" style="margin-top:0">
-    <button id="photoViewEventsBtn" class="btn" onclick="setPhotoCenterView('events')">活動相簿</button>
+    <button id="photoViewEventsBtn" class="btn" onclick="setPhotoCenterView('events')">我的照片</button>
     <button id="photoUploadBtn" class="btn secondary" onclick="openAlbumMode('history')">📸 上傳照片</button>
   </div>
 </div>
@@ -1022,7 +1029,7 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
         </div></div>
         <div class="field"><label>中文（兩句）</label><textarea id="greetingMakerZh" maxlength="120" placeholder="AI 會根據照片寫兩句中文；署名與網站不會混入正文。"></textarea></div>
         <div class="field"><label>英文（一句）</label><div class="greeting-ai-row"><textarea id="greetingMakerEn" maxlength="140" placeholder="AI 會產生一句自然英文；署名由版面另外套印。"></textarea><button id="greetingMakerSpeak" type="button" onclick="speakGreetingEnglish()">🔊 發音</button></div></div>
-        <div class="field"><label>署名</label><input id="greetingMakerSign" maxlength="40" placeholder="例如：Raymond／怪獸健行隊"></div>
+        <div class="field"><label>署名</label><input id="greetingMakerSign" maxlength="40" placeholder="例如：Raymond／BookWide"></div>
         <div class="field"><label>文字樣式</label><div class="greeting-style-row">
           <select id="greetingMakerFont" aria-label="文字字體">
             <option value="pen" selected>鋼筆手寫體</option>
@@ -1101,8 +1108,9 @@ let BOOKWIDE_ROLE='visitor'; // visitor | member | group_admin | super_admin
 let BOOKWIDE_IS_ADMIN=false; // 群主或 BookWide Admin 皆為 true
 let BOOKWIDE_IS_SUPER_ADMIN=false;
 let BOOKWIDE_GROUP_ID='';
+let BOOKWIDE_SPACE_MODE='personal'; // personal | group
 // V8.1.2 compatibility: older cached LINE-send code may still reference GROUP_ID.
-var GROUP_ID='monster-group';
+var GROUP_ID='';
 let BOOKWIDE_GROUP_NAME='';
 let BOOKWIDE_GROUP_MEMBERSHIPS=[];
 
@@ -1111,7 +1119,8 @@ let BOOKWIDE_GROUP_MEMBERSHIPS=[];
 // 群主／群友來源：community_group_members。
 
 function bookWideLoginUrl(){
-  return '/login.html?next='+encodeURIComponent('/m-hiking.html'+(BOOKWIDE_GROUP_ID?('?group='+encodeURIComponent(BOOKWIDE_GROUP_ID)):''));
+  const requested=new URLSearchParams(location.search).get('group')||'';
+  return '/login.html?next='+encodeURIComponent('/m-hiking.html'+(requested?('?group='+encodeURIComponent(requested)):''));
 }
 
 function renderBookWideAuth(user){
@@ -1152,115 +1161,70 @@ async function loadBookWideProfile(user){
 async function resolveBookWideGroupAccess(user){
   const email=normalizeEmail(user?.email);
   const profile=await loadBookWideProfile(user);
-
-  if(profile?.is_paused){
-    return {ok:false,reason:'paused'};
-  }
+  if(profile?.is_paused) return {ok:false,reason:'paused'};
 
   BOOKWIDE_IS_SUPER_ADMIN=!!profile?.is_admin;
+  const {data:membershipRows,error:memberError}=await bookwideSupa.rpc('get_my_community_groups');
+  if(memberError) console.warn('get_my_community_groups',memberError);
 
-  // 改用 SECURITY DEFINER RPC 取得自己的群組，避免 RLS 造成明明有資料卻查不到。
-  const {data:membershipRows,error:memberError}=await bookwideSupa
-    .rpc('get_my_community_groups');
-
-  if(memberError){
-    console.warn('get_my_community_groups',memberError);
-    return {ok:false,reason:'member_table',message:memberError.message};
-  }
-
-  BOOKWIDE_GROUP_MEMBERSHIPS=(Array.isArray(membershipRows)?membershipRows:[])
-    .map(x=>({
-      group_id:String(x.group_id||'').trim(),
-      group_name:String(x.group_name||x.name||x.group_id||'').trim(),
-      group_status:String(x.group_status||x.status||'active').trim(),
-      user_email:normalizeEmail(x.user_email||email),
-      role:String(x.role||'member')
-    }));
+  BOOKWIDE_GROUP_MEMBERSHIPS=(Array.isArray(membershipRows)?membershipRows:[]).map(x=>({
+    group_id:String(x.group_id||'').trim(),
+    group_name:String(x.group_name||x.name||x.group_id||'').trim(),
+    group_status:String(x.group_status||x.status||'active').trim(),
+    user_email:normalizeEmail(x.user_email||email),
+    role:String(x.role||'member')
+  })).filter(x=>x.group_id&&x.group_status==='active');
 
   const requested=new URLSearchParams(location.search).get('group')||'';
+  if(!requested){
+    BOOKWIDE_SPACE_MODE='personal';
+    BOOKWIDE_GROUP_ID='personal-'+String(user.id).toLowerCase();
+    GROUP_ID=BOOKWIDE_GROUP_ID;
+    BOOKWIDE_GROUP_NAME='我的個人空間';
+    BOOKWIDE_ROLE=BOOKWIDE_IS_SUPER_ADMIN?'super_admin':'member';
+    BOOKWIDE_IS_ADMIN=BOOKWIDE_IS_SUPER_ADMIN;
+    return {ok:true,personal:true,group:{id:BOOKWIDE_GROUP_ID,name:BOOKWIDE_GROUP_NAME,role:BOOKWIDE_ROLE}};
+  }
+
   let selected=null;
-
   if(BOOKWIDE_IS_SUPER_ADMIN){
-    // BookWide Admin 最高權限：不需要加入群組，也能進入所有 active 群。
-    // 有 ?group= 時進指定群；沒有時自動進第一個 active 群。
-    const {data:allGroups,error:groupsError}=await bookwideSupa
-      .from('community_groups')
-      .select('id,name,status,created_at')
-      .eq('status','active')
-      .order('created_at',{ascending:true});
-
-    if(groupsError){
-      return {ok:false,reason:'group_table',message:groupsError.message};
-    }
-
-    const activeGroups=Array.isArray(allGroups)?allGroups:[];
-    if(requested){
-      const target=activeGroups.find(g=>g.id===requested);
-      if(target) selected={...target,role:'super_admin'};
-    }
-    if(!selected && activeGroups.length){
-      selected={...activeGroups[0],role:'super_admin'};
-    }
+    const {data:allGroups,error:groupsError}=await bookwideSupa.from('community_groups').select('id,name,status,created_at').eq('status','active').order('created_at',{ascending:true});
+    if(groupsError) return {ok:false,reason:'group_table',message:groupsError.message};
+    const target=(Array.isArray(allGroups)?allGroups:[]).find(g=>g.id===requested);
+    if(target) selected={...target,role:'super_admin'};
   }else{
-    // 一般帳號：只能進自己所屬群組。
-    let membership=BOOKWIDE_GROUP_MEMBERSHIPS.find(x=>x.group_id===requested);
-    if(!membership) membership=BOOKWIDE_GROUP_MEMBERSHIPS[0]||null;
-
-    if(membership && membership.group_status==='active'){
-      // RPC 已經帶回群名與狀態，不再直接查 community_groups，
-      // 避免一般群友被 community_groups 的 RLS 擋成空結果。
-      selected={
-        id:membership.group_id,
-        name:membership.group_name||membership.group_id,
-        status:membership.group_status,
-        role:membership.role||'member'
-      };
-    }
+    const membership=BOOKWIDE_GROUP_MEMBERSHIPS.find(x=>x.group_id===requested);
+    if(membership) selected={id:membership.group_id,name:membership.group_name||membership.group_id,status:'active',role:membership.role||'member'};
   }
+  if(!selected) return {ok:false,reason:'no_group'};
 
-  if(!selected){
-    return {ok:false,reason:'no_group'};
-  }
-
+  BOOKWIDE_SPACE_MODE='group';
   BOOKWIDE_GROUP_ID=selected.id;
   GROUP_ID=BOOKWIDE_GROUP_ID;
   BOOKWIDE_GROUP_NAME=selected.name||selected.id;
-  BOOKWIDE_ROLE=
-    selected.role==='super_admin'?'super_admin':
-    selected.role==='group_admin'?'group_admin':'member';
+  BOOKWIDE_ROLE=selected.role==='super_admin'?'super_admin':selected.role==='group_admin'?'group_admin':'member';
   BOOKWIDE_IS_ADMIN=BOOKWIDE_ROLE==='group_admin'||BOOKWIDE_ROLE==='super_admin';
-
   return {ok:true,group:selected};
 }
 
 async function setupAdminGroupSwitcher(){
   const sel=document.getElementById('adminGroupSwitcher');
   if(!sel) return;
-  if(!BOOKWIDE_IS_SUPER_ADMIN){
-    sel.style.display='none';
-    return;
+  let rows=[];
+  if(BOOKWIDE_IS_SUPER_ADMIN){
+    const {data,error}=await bookwideSupa.from('community_groups').select('id,name,status,created_at').eq('status','active').order('created_at',{ascending:true});
+    if(!error) rows=Array.isArray(data)?data:[];
+  }else{
+    rows=BOOKWIDE_GROUP_MEMBERSHIPS.map(x=>({id:x.group_id,name:x.group_name||x.group_id}));
   }
-
-  const {data,error}=await bookwideSupa
-    .from('community_groups')
-    .select('id,name,status,created_at')
-    .eq('status','active')
-    .order('created_at',{ascending:true});
-
-  if(error){
-    console.warn('admin group switcher',error);
-    sel.style.display='none';
-    return;
-  }
-
-  const rows=Array.isArray(data)?data:[];
-  sel.innerHTML=rows.map(g=>`<option value="${escHtml(g.id)}" ${g.id===BOOKWIDE_GROUP_ID?'selected':''}>切換：${escHtml(g.name)}</option>`).join('');
-  sel.style.display=rows.length?'block':'none';
+  const personalSelected=BOOKWIDE_SPACE_MODE==='personal'?'selected':'';
+  sel.innerHTML=`<option value="__personal__" ${personalSelected}>我的個人空間</option>`+rows.map(g=>`<option value="${escHtml(g.id)}" ${g.id===BOOKWIDE_GROUP_ID?'selected':''}>群組：${escHtml(g.name)}</option>`).join('');
+  sel.style.display='block';
 }
 
 function switchAdminGroup(groupId){
-  if(!BOOKWIDE_IS_SUPER_ADMIN || !groupId) return;
-  location.href='/m-hiking.html?group='+encodeURIComponent(groupId);
+  if(!groupId) return;
+  location.href=groupId==='__personal__'?'/m-hiking.html':'/m-hiking.html?group='+encodeURIComponent(groupId);
 }
 
 function applyCurrentGroupUi(){
@@ -1272,17 +1236,18 @@ function applyCurrentGroupUi(){
   if(roleEl){
     roleEl.textContent=
       BOOKWIDE_ROLE==='super_admin'?'BookWide Admin':
-      BOOKWIDE_ROLE==='group_admin'?'群主':'群友';
+      BOOKWIDE_SPACE_MODE==='personal'?'個人會員':(BOOKWIDE_ROLE==='group_admin'?'群主':'群友');
   }
   if(banner) banner.style.display='flex';
   setupAdminGroupSwitcher();
   const journeyLink=document.getElementById('journeysSourceLink');
-  if(journeyLink) journeyLink.href='/journey.html?group='+encodeURIComponent(BOOKWIDE_GROUP_ID);
+  if(journeyLink) journeyLink.href=BOOKWIDE_SPACE_MODE==='personal'?'/journey.html':'/journey.html?group='+encodeURIComponent(BOOKWIDE_GROUP_ID);
 
   document.querySelectorAll('.v3-hero h1').forEach(el=>{
     el.textContent=BOOKWIDE_GROUP_NAME||'BookWide Mountain';
   });
-  document.title=(BOOKWIDE_GROUP_NAME||'BookWide Mountain')+'｜BookWide 群組';
+  document.title=(BOOKWIDE_GROUP_NAME||'我的個人空間')+'｜BookWide';
+  document.body.classList.toggle('personal-space-mode',BOOKWIDE_SPACE_MODE==='personal');
 }
 
 function showGroupAccessDenied(message){
@@ -1316,7 +1281,7 @@ async function requireBookWideLogin(){
     BOOKWIDE_ROLE='visitor';
     BOOKWIDE_IS_ADMIN=false;
     BOOKWIDE_IS_SUPER_ADMIN=false;
-    BOOKWIDE_GROUP_ID=new URLSearchParams(location.search).get('group')||'monster-group';
+    BOOKWIDE_GROUP_ID=new URLSearchParams(location.search).get('group')||'';
     GROUP_ID=BOOKWIDE_GROUP_ID;
     BOOKWIDE_GROUP_NAME='';
     renderBookWideAuth(null);
@@ -1340,7 +1305,7 @@ async function requireBookWideLogin(){
       access.reason==='paused'?'此帳號已被暫停使用。':
       access.reason==='member_table'?'群組成員資料讀取失敗：'+(access.message||'請聯絡 BookWide Admin。'):
       access.reason==='group_table'?'群組資料讀取失敗：'+(access.message||'請聯絡 BookWide Admin。'):
-      '此帳號尚未被加入任何群組，請聯絡 BookWide Admin 指定群組。';
+      '你沒有此群組的存取權限；請回到個人空間或選擇已加入的群組。';
 
     showGroupAccessDenied(msg);
     return null;
@@ -1360,7 +1325,7 @@ async function bookWideLogout(){
   BOOKWIDE_USER=null;
   BOOKWIDE_ROLE='visitor';
   BOOKWIDE_IS_ADMIN=false;
-  location.href='/m-hiking.html'+(BOOKWIDE_GROUP_ID?('?group='+encodeURIComponent(BOOKWIDE_GROUP_ID)):'');
+  location.href='/m-hiking.html';
 }
 
 
@@ -1376,17 +1341,14 @@ const HIKING_UPLOADER_ID_KEY='bw_hiking_uploader_id';
 const HIKING_UPLOADER_TOKEN_KEY='bw_hiking_uploader_token';
 
 function getUploaderIdentity(){
+  if(BOOKWIDE_USER?.id){
+    return {uploaderId:'user_'+BOOKWIDE_USER.id,uploaderToken:'supabase-auth',ownerUserId:BOOKWIDE_USER.id,ownerEmail:normalizeEmail(BOOKWIDE_USER.email)};
+  }
   let uploaderId=localStorage.getItem(HIKING_UPLOADER_ID_KEY)||'';
   let uploaderToken=localStorage.getItem(HIKING_UPLOADER_TOKEN_KEY)||'';
-  if(!uploaderId){
-    uploaderId='u_'+crypto.randomUUID();
-    localStorage.setItem(HIKING_UPLOADER_ID_KEY,uploaderId);
-  }
-  if(!uploaderToken){
-    uploaderToken=crypto.randomUUID()+crypto.randomUUID();
-    localStorage.setItem(HIKING_UPLOADER_TOKEN_KEY,uploaderToken);
-  }
-  return {uploaderId,uploaderToken};
+  if(!uploaderId){uploaderId='guest_'+crypto.randomUUID();localStorage.setItem(HIKING_UPLOADER_ID_KEY,uploaderId)}
+  if(!uploaderToken){uploaderToken=crypto.randomUUID()+crypto.randomUUID();localStorage.setItem(HIKING_UPLOADER_TOKEN_KEY,uploaderToken)}
+  return {uploaderId,uploaderToken,ownerUserId:'',ownerEmail:''};
 }
 
 function getHikingAdminToken(forcePrompt=false){
@@ -1955,7 +1917,7 @@ async function init(){
   // 未登入訪客也必須繼續初始化公開查路線頁；不可在這裡導向 login.html。
   renderTabs();
   document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
-  $('sec-find').classList.add('active');
+  $(BOOKWIDE_SPACE_MODE==='personal'?'sec-album':'sec-find').classList.add('active');
   try{
     await loadWorkerData();
     if(BOOKWIDE_ROLE==='visitor'){
@@ -2005,11 +1967,9 @@ function renderTabs(){
     return;
   }
   box.style.display='flex';
-  const items=[
-    ['sec-find','找路線'],
-    ['sec-album','相簿'],
-    ['sec-notice','公告']
-  ];
+  const items=BOOKWIDE_SPACE_MODE==='personal'
+    ? [['sec-album','我的照片']]
+    : [['sec-find','找路線'],['sec-album','群組相簿'],['sec-notice','公告']];
   if(BOOKWIDE_IS_ADMIN) items.push(['sec-admin','管理']);
   box.innerHTML=items.map((t,i)=>{
     const action=t[0]==='sec-album'
@@ -3430,7 +3390,7 @@ function renderPhotoCenterView(){
   if(state.photoView==='events'){
     summary.style.display='none';
     title.textContent='活動相簿';
-    hint.textContent='全部新舊照片預設可供日安程式使用；不適合的照片可按「🚫 排除日安圖」。群內瀏覽、下載與上傳規則不變。';
+    hint.textContent='每位 BookWide 會員都有獨立照片空間；照片只屬於目前登入帳號，可跨手機與電腦使用。加入群組後，才會另外看到該群組相簿。';
     renderAlbum();
     return;
   }
@@ -3446,7 +3406,7 @@ function renderPhotoCenterView(){
     state.photoView='events';
     summary.style.display='none';
     title.textContent='活動相簿';
-    hint.textContent='全部新舊照片預設可供日安程式使用；不適合的照片可按「🚫 排除日安圖」。群內瀏覽、下載與上傳規則不變。';
+    hint.textContent='每位 BookWide 會員都有獨立照片空間；照片只屬於目前登入帳號，可跨手機與電腦使用。加入群組後，才會另外看到該群組相簿。';
     renderAlbum();
     return;
   }
@@ -4309,7 +4269,7 @@ async function saveGreetingGlobalSettings(button){
   const old=button.textContent;button.disabled=true;button.textContent='儲存中…';
   try{
     const settings=greetingMakerSettingsFromControls();
-    const d=await hikingApi('/api/greeting-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID||'monster-group',settings})});
+    const d=await hikingApi('/api/greeting-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID,settings})});
     applyGreetingGlobalSettings(d.settings||settings);
     greetingMakerStatus('全站設定已儲存：預覽、立即發送與每日排程會使用同一份設定。');
   }catch(e){greetingMakerStatus('全站設定儲存失敗：'+e.message,true);alert('全站設定儲存失敗：'+e.message);}
@@ -6016,7 +5976,7 @@ function lineAutoPayload(){return {
   use_openai:lineAutoBool('laOpenAI'), use_photo_understanding:lineAutoBool('laVision'),
   greeting_engine_version:GREETING_ENGINE_VERSION, greeting_prompt_mode:'greeting_copy_no_signature',
   image_mode:greetingGlobalConfig.image_mode||lineAutoValue('laImageMode')||'real', greeting_design:{...greetingGlobalConfig}, album_scope:'date_range',
-  group_id:BOOKWIDE_GROUP_ID||'monster-group', timezone:'Asia/Taipei'
+  group_id:BOOKWIDE_GROUP_ID, timezone:'Asia/Taipei'
 }}
 function lineAutoShow(message,type=''){const box=document.getElementById('lineAutoStatus');if(!box)return;box.textContent=message;box.style.borderColor=type==='error'?'#efb6af':'';box.style.color=type==='error'?'var(--red)':''}
 async function lineAutoApi(path,options={}){return hikingApi(LINE_AUTO_API+path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}})}
@@ -6107,7 +6067,7 @@ async function lineAutoStoreComposedForSchedule(){
   if(!greetingMakerState.blob)throw new Error('完整日安圖 JPG 尚未產生');
   const form=new FormData();
   form.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
-  form.append('group_id',BOOKWIDE_GROUP_ID||'monster-group');
+  form.append('group_id',BOOKWIDE_GROUP_ID);
   const {data:{session}}=await bookwideSupa.auth.getSession();
   const headers=new Headers();
   if(session?.access_token)headers.set('Authorization','Bearer '+session.access_token);
@@ -6117,7 +6077,7 @@ async function lineAutoStoreComposedForSchedule(){
   for(const path of paths){
     const retryForm=new FormData();
     retryForm.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
-    retryForm.append('group_id',BOOKWIDE_GROUP_ID||'monster-group');
+    retryForm.append('group_id',BOOKWIDE_GROUP_ID);
     const res=await fetch(`${HIKING_API_BASE}${path}`,{method:'POST',headers,body:retryForm});
     const text=await res.text();let data={};try{data=text?JSON.parse(text):{}}catch(_e){}
     if(res.ok)return data;
@@ -6131,14 +6091,14 @@ async function lineAutoSendComposed(){
   const recipients=lineAutoSelectedIds();if(!recipients.length)throw new Error('請至少勾選一個 LINE 收件人');
   const form=new FormData();
   if(greetingMakerState.blob)form.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
-  form.append('recipient_ids',JSON.stringify(recipients));form.append('group_id',BOOKWIDE_GROUP_ID||'monster-group');
+  form.append('recipient_ids',JSON.stringify(recipients));form.append('group_id',BOOKWIDE_GROUP_ID);
   const {data:{session}}=await bookwideSupa.auth.getSession();const headers=new Headers();if(session?.access_token)headers.set('Authorization','Bearer '+session.access_token);if(BOOKWIDE_GROUP_ID)headers.set('X-BookWide-Group',BOOKWIDE_GROUP_ID);
   const paths=['/api/line-automation/send-composed','/api/line-automation/send-composition','/send-composed'];
   let lastError='';
   for(const path of paths){
     const retryForm=new FormData();
     if(greetingMakerState.blob)retryForm.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
-    retryForm.append('recipient_ids',JSON.stringify(recipients));retryForm.append('group_id',BOOKWIDE_GROUP_ID||'monster-group');
+    retryForm.append('recipient_ids',JSON.stringify(recipients));retryForm.append('group_id',BOOKWIDE_GROUP_ID);
     const res=await fetch(`${HIKING_API_BASE}${path}`,{method:'POST',headers,body:retryForm});const text=await res.text();let data={};try{data=text?JSON.parse(text):{}}catch(_e){}
     if(res.ok)return data;
     lastError=data.error||text||`HTTP ${res.status}`;
@@ -6150,12 +6110,12 @@ async function lineAutoRun(send){
   try{
     await lineAutoSave(true);
     if(send){lineAutoShow('正在依序發送已套印文字的完整 JPG…');const d=await lineAutoSendComposed();lineAutoShow(`✅ ${d.message||'完整日安圖已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);await lineAutoRefreshScheduleStatus(false);return}
-    lineAutoShow('正在產生今天日安圖…');const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,image_mode:greetingGlobalConfig.image_mode||lineAutoValue('laImageMode')||'real',group_id:BOOKWIDE_GROUP_ID||'monster-group'})});
+    lineAutoShow('正在產生今天日安圖…');const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,image_mode:greetingGlobalConfig.image_mode||lineAutoValue('laImageMode')||'real',group_id:BOOKWIDE_GROUP_ID})});
     await lineAutoOpenPreview(d);lineAutoShow('✅ 完整日安圖已產生；文字已直接印在 JPG 上。');await lineAutoRefreshScheduleStatus(false);
   }catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error');alert('執行失敗：'+e.message)}
 }
 async function lineAutoSetEnabled(enabled){
-  try{lineAutoSet('laEnabled',enabled);await lineAutoSave(true);const d=await lineAutoApi('/schedule',{method:'POST',body:JSON.stringify({enabled,group_id:BOOKWIDE_GROUP_ID||'monster-group'})});lineAutoRenderScheduleStatus(d.config||{});lineAutoShow('✅ '+(d.message||(enabled?'每日排程已啟用。':'每日排程已停用。')))}
+  try{lineAutoSet('laEnabled',enabled);await lineAutoSave(true);const d=await lineAutoApi('/schedule',{method:'POST',body:JSON.stringify({enabled,group_id:BOOKWIDE_GROUP_ID})});lineAutoRenderScheduleStatus(d.config||{});lineAutoShow('✅ '+(d.message||(enabled?'每日排程已啟用。':'每日排程已停用。')))}
   catch(e){lineAutoShow('❌ 排程設定失敗：'+e.message,'error');alert('排程設定失敗：'+e.message)}
 }
 </script>
