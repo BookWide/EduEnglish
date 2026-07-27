@@ -539,7 +539,7 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
 
 </style>
 
-<script>window.BOOKWIDE_M_HIKING_BUILD='V9.0_LINE_OFFICIAL_MEMBER_AUTO_SYNC';</script>
+<script>window.BOOKWIDE_M_HIKING_BUILD='V9.1_SINGLE_PERSON_GROUP_UNIFIED';</script>
 </head>
 <body>
 <script>
@@ -945,8 +945,8 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
 <div id="stickerMakerModal" class="sticker-modal" onclick="closeStickerMaker(event)">
   <div class="sticker-panel" onclick="event.stopPropagation()">
     <div class="sticker-head">
-      <h2>😊 BookWide 個人貼圖 V9.0｜個人創作中心｜動漫／3D 電影／搞怪</h2>
-      <div style="margin:4px 0 10px;font-weight:800;color:#7c3aed">已載入 V9.0：日安圖＋個人貼圖＋LINE 官方帳號會員自動同步</div>
+      <h2>😊 BookWide 個人貼圖 V9.1｜個人創作中心｜動漫／3D 電影／搞怪</h2>
+      <div style="margin:4px 0 10px;font-weight:800;color:#7c3aed">已載入 V9.1：單人也是群組＋日安圖＋個人貼圖＋LINE 官方帳號會員自動同步</div>
       <button class="sticker-close" type="button" onclick="closeStickerMaker()">關閉</button>
     </div>
     <div class="sticker-body">
@@ -980,7 +980,7 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
 <div id="myStickersModal" class="my-stickers-modal" onclick="closeMyStickers(event)">
   <div class="my-stickers-panel" onclick="event.stopPropagation()">
     <div class="my-stickers-head">
-      <div><h2>😊 個人創作中心 V9.0</h2><div class="small">日安圖與個人貼圖共用同一個 BookWide 帳號與 LINE 綁定；完成後可一鍵傳送到自己的 LINE。</div></div>
+      <div><h2>😊 個人創作中心 V9.1</h2><div class="small">日安圖與個人貼圖共用同一個 BookWide 帳號與 LINE 綁定；完成後可一鍵傳送到自己的 LINE。</div></div>
       <button class="sticker-close" type="button" onclick="closeMyStickers()">關閉</button>
     </div>
     <div class="my-stickers-body">
@@ -1159,6 +1159,25 @@ async function resolveBookWideGroupAccess(user){
 
   BOOKWIDE_IS_SUPER_ADMIN=!!profile?.is_admin;
 
+  // V9.1：每個登入者都先確保擁有一個「只有自己」的個人群組。
+  // SQL 尚未部署時不阻斷舊群組功能，只在主控台提示。
+  let personalGroupId='';
+  try{
+    const {data:personalGroup,error:personalError}=await bookwideSupa
+      .rpc('ensure_my_personal_community_group');
+    if(personalError){
+      console.warn('ensure_my_personal_community_group',personalError);
+    }else if(personalGroup){
+      personalGroupId=String(
+        Array.isArray(personalGroup)
+          ? (personalGroup[0]?.group_id||personalGroup[0]?.id||'')
+          : (personalGroup.group_id||personalGroup.id||personalGroup||'')
+      ).trim();
+    }
+  }catch(personalException){
+    console.warn('ensure personal group',personalException);
+  }
+
   // 改用 SECURITY DEFINER RPC 取得自己的群組，避免 RLS 造成明明有資料卻查不到。
   const {data:membershipRows,error:memberError}=await bookwideSupa
     .rpc('get_my_community_groups');
@@ -1204,6 +1223,10 @@ async function resolveBookWideGroupAccess(user){
   }else{
     // 一般帳號：只能進自己所屬群組。
     let membership=BOOKWIDE_GROUP_MEMBERSHIPS.find(x=>x.group_id===requested);
+    // 沒指定群組時，優先進入本人單人群組；之後仍可用原下拉選單切回怪獸群或其他群。
+    if(!membership && !requested && personalGroupId){
+      membership=BOOKWIDE_GROUP_MEMBERSHIPS.find(x=>x.group_id===personalGroupId);
+    }
     if(!membership) membership=BOOKWIDE_GROUP_MEMBERSHIPS[0]||null;
 
     if(membership && membership.group_status==='active'){
@@ -1236,30 +1259,45 @@ async function resolveBookWideGroupAccess(user){
 async function setupAdminGroupSwitcher(){
   const sel=document.getElementById('adminGroupSwitcher');
   if(!sel) return;
-  if(!BOOKWIDE_IS_SUPER_ADMIN){
-    sel.style.display='none';
-    return;
+
+  let rows=[];
+  if(BOOKWIDE_IS_SUPER_ADMIN){
+    const {data,error}=await bookwideSupa
+      .from('community_groups')
+      .select('id,name,status,created_at')
+      .eq('status','active')
+      .order('created_at',{ascending:true});
+
+    if(error){
+      console.warn('admin group switcher',error);
+      sel.style.display='none';
+      return;
+    }
+    rows=Array.isArray(data)?data:[];
+  }else{
+    // 一般會員沿用同一個既有下拉選單，只列出自己加入的群組。
+    rows=(BOOKWIDE_GROUP_MEMBERSHIPS||[])
+      .filter(g=>g.group_status==='active')
+      .map(g=>({id:g.group_id,name:g.group_name||g.group_id}));
   }
 
-  const {data,error}=await bookwideSupa
-    .from('community_groups')
-    .select('id,name,status,created_at')
-    .eq('status','active')
-    .order('created_at',{ascending:true});
-
-  if(error){
-    console.warn('admin group switcher',error);
-    sel.style.display='none';
-    return;
+  const unique=[];
+  const seen=new Set();
+  for(const g of rows){
+    const id=String(g.id||'').trim();
+    if(!id||seen.has(id)) continue;
+    seen.add(id);
+    unique.push({id,name:String(g.name||id)});
   }
 
-  const rows=Array.isArray(data)?data:[];
-  sel.innerHTML=rows.map(g=>`<option value="${escHtml(g.id)}" ${g.id===BOOKWIDE_GROUP_ID?'selected':''}>切換：${escHtml(g.name)}</option>`).join('');
-  sel.style.display=rows.length?'block':'none';
+  sel.innerHTML=unique.map(g=>`<option value="${escHtml(g.id)}" ${g.id===BOOKWIDE_GROUP_ID?'selected':''}>切換：${escHtml(g.name)}</option>`).join('');
+  sel.style.display=unique.length?'block':'none';
 }
 
 function switchAdminGroup(groupId){
-  if(!BOOKWIDE_IS_SUPER_ADMIN || !groupId) return;
+  if(!groupId) return;
+  const allowed=BOOKWIDE_IS_SUPER_ADMIN || (BOOKWIDE_GROUP_MEMBERSHIPS||[]).some(g=>g.group_id===groupId&&g.group_status==='active');
+  if(!allowed) return;
   location.href='/m-hiking.html?group='+encodeURIComponent(groupId);
 }
 
@@ -1340,7 +1378,7 @@ async function requireBookWideLogin(){
       access.reason==='paused'?'此帳號已被暫停使用。':
       access.reason==='member_table'?'群組成員資料讀取失敗：'+(access.message||'請聯絡 BookWide Admin。'):
       access.reason==='group_table'?'群組資料讀取失敗：'+(access.message||'請聯絡 BookWide Admin。'):
-      '此帳號尚未被加入任何群組，請聯絡 BookWide Admin 指定群組。';
+      '尚未建立個人群組。請先執行 ZIP 內的 V9.1_Supabase.sql，再重新登入。';
 
     showGroupAccessDenied(msg);
     return null;
