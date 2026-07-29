@@ -2429,7 +2429,7 @@ async function saveBwBirthday(){
 function editBwBirthday(id){const x=bwBirthdays().find(n=>String(n.id)===String(id));if(!x)return;if(x._source==='profile'){alert('這筆生日來自會員 Profile，請由會員在 Profile 修改。');return}BW_EDIT_BDAY_ID=x.id;$('bwBirthdayName').value=x.name||'';$('bwBirthdayDate').value=x.date||'';$('bwBirthdayName').focus()}
 async function deleteBwBirthday(id){const x=bwBirthdays().find(n=>String(n.id)===String(id));if(x?._source==='profile'){alert('Profile 生日不能在行事曆刪除；請由會員關閉生日公開或修改 Profile。');return}if(!confirm('確定刪除這筆生日提醒？'))return;const {error}=await bookwideSupa.from('community_calendar_items').delete().eq('id',id).eq('group_id',BOOKWIDE_GROUP_ID);if(error){alert('刪除失敗：'+error.message);return}BW_EDIT_BDAY_ID='';await loadBwCloudCalendarData();renderBwCalendar()}
 function renderBwBirthdayList(){const box=$('bwBirthdayList');if(!box)return;box.innerHTML=bwBirthdays().map(x=>`<div class="today-item">${x.photo_url?`<img src="${escHtml(x.photo_url)}" alt="${escHtml(x.name)}" style="width:52px;height:52px;object-fit:cover;border-radius:50%;float:left;margin-right:9px">`:''}<b>${escHtml(x.name)}</b><div class="small">${escHtml(x.date)}｜${x._source==='profile'?'Profile 自動同步':'我的私人紀錄'}</div><div class="btns"><button class="mini" onclick="makeBirthdayCard('${String(x.name).replace(/'/g,"\\'")}','${encodeURIComponent(x.photo_url||'')}')">製作生日祝福卡</button>${x._source==='manual'?`<button class="mini" onclick="editBwBirthday('${x.id}')">修改</button><button class="mini" onclick="deleteBwBirthday('${x.id}')">刪除</button>`:''}</div><div style="clear:both"></div></div>`).join('')||'<div class="small">尚未建立自己的生日紀錄。</div>'}
-async function makeBirthdayCard(name,encodedPhoto=''){localStorage.setItem('bookwide_birthday_card_name',name);localStorage.setItem('bookwide_greeting_mode','birthday');await loadGreetingPoolIndex();await openGreetingMaker(null,greetingPoolRandomUrl())}
+async function makeBirthdayCard(name,encodedPhoto=''){localStorage.setItem('bookwide_birthday_card_name',name);localStorage.setItem('bookwide_greeting_mode','birthday');await loadGreetingPoolIndex();await openGreetingMaker(null,greetingPoolItems[0]?.url||'')}
 
 
 function renderTabs(){
@@ -5154,7 +5154,7 @@ function openPersonalCreateChoice(button,url){personalCreationContext={button,ur
 function closePersonalCreateChoice(event){if(event&&event.target!==document.getElementById('personalCreateChoiceModal'))return;document.getElementById('personalCreateChoiceModal')?.classList.remove('active');}
 function choosePersonalCreation(type){const c=personalCreationContext;closePersonalCreateChoice();if(type==='greeting')openGreetingMaker(c.button,c.url);else openStickerMaker(c.button,c.url);}
 function scrollToPhotoCenterForCreation(){document.getElementById('sec-album')?.scrollIntoView({behavior:'smooth',block:'start'});}
-async function openGreetingFromCreationCenter(){localStorage.setItem('bookwide_greeting_mode','greeting');await loadGreetingPoolIndex();await openGreetingMaker(null,greetingPoolRandomUrl());}
+async function openGreetingFromCreationCenter(){localStorage.setItem('bookwide_greeting_mode','greeting');await loadGreetingPoolIndex();await openGreetingMaker(null,greetingPoolItems[0]?.url||'');}
 async function sendGreetingToMyLine(button){
   if(!greetingMakerState.image){alert('照片尚未載入完成');return;}
   if(!confirm('確定把這張日安圖傳送到你已綁定的 LINE？'))return;
@@ -5259,8 +5259,13 @@ async function greetingMakerResolveImage(button,url){
   return await greetingMakerLoadFromWorker(url);
 }
 
-// V12.8：生日卡與日安圖共用 R2 card-pool/index.json。
-const BOOKWIDE_CARD_POOL_INDEX='/card-pool/index.json';
+// V12.8：生日卡與日安圖一律只使用 R2 card-pool/index.json；Admin 不讀群相簿。
+const BOOKWIDE_CARD_POOL_INDEX_CANDIDATES=[
+  'https://assets.bookwide.net/card-pool/index.json',
+  '/card-pool/index.json',
+  HIKING_API_BASE+'/card-pool/index.json'
+];
+let BOOKWIDE_CARD_POOL_INDEX=BOOKWIDE_CARD_POOL_INDEX_CANDIDATES[0];
 let greetingPoolItems=[];
 let greetingPoolLoaded=false;
 function greetingPoolFileName(url){
@@ -5277,10 +5282,18 @@ async function loadGreetingPoolIndex(force=false){
   if(greetingPoolLoaded&&!force&&greetingPoolItems.length)return greetingPoolItems;
   const select=document.getElementById('greetingMakerPool');
   if(select)select.innerHTML='<option value="">讀取 card-pool/index.json 中…</option>';
-  const indexUrl=BOOKWIDE_CARD_POOL_INDEX+(BOOKWIDE_CARD_POOL_INDEX.includes('?')?'&':'?')+'v='+Date.now();
+  let indexUrl='';
   try{
-    const res=await fetch(indexUrl,{cache:'no-store'});
-    if(!res.ok)throw new Error(`index.json 讀取失敗（${res.status}）`);
+    let res=null,lastStatus='';
+    for(const candidate of BOOKWIDE_CARD_POOL_INDEX_CANDIDATES){
+      const testUrl=candidate+(candidate.includes('?')?'&':'?')+'v='+Date.now();
+      try{
+        const r=await fetch(testUrl,{cache:'no-store'});
+        if(r.ok){res=r;indexUrl=testUrl;BOOKWIDE_CARD_POOL_INDEX=candidate;break;}
+        lastStatus=String(r.status);
+      }catch(_e){}
+    }
+    if(!res)throw new Error(`R2 card-pool/index.json 讀取失敗${lastStatus?'（'+lastStatus+'）':''}`);
     const json=await res.json();
     const list=Array.isArray(json)?json:(Array.isArray(json?.images)?json.images:Array.isArray(json?.items)?json.items:[]);
     greetingPoolItems=list.map(item=>({url:greetingPoolAbsoluteUrl(item,indexUrl),label:typeof item==='object'&&(item.title||item.name)?String(item.title||item.name):''})).filter(x=>x.url);
@@ -6850,8 +6863,8 @@ async function birthdayAdminMakeCard(name,encodedPhoto,lineUserId){
   localStorage.setItem('bookwide_birthday_card_name',name);
   localStorage.setItem('bookwide_greeting_mode','birthday');
   await loadGreetingPoolIndex();
-  const poolUrl=greetingPoolRandomUrl();
-  if(!poolUrl)throw new Error('card-pool/index.json 沒有可用素材');
+  const poolUrl=greetingPoolItems[0]?.url||'';
+  if(!poolUrl)throw new Error('R2 card-pool/index.json 沒有可用素材');
   await openGreetingMaker(null,poolUrl);
   const modeEl=document.getElementById('greetingMakerMode');if(modeEl)modeEl.value='birthday';
   changeGreetingMakerMode();
@@ -6885,7 +6898,10 @@ async function lineAutoSave(silent=false){
   const d=await lineAutoApi('/config',{method:'POST',body:JSON.stringify(payload)});lineAutoRenderScheduleStatus(d.config||{});if(!silent)lineAutoShow(`✅ 雲端設定已儲存，共 ${payload.recipient_ids.length} 個收件人。`);return d;
 }
 async function lineAutoOpenPreview(d){
-  if(!d?.photo_url)return;await openGreetingMaker(null,d.photo_url);
+  await loadGreetingPoolIndex();
+  const poolUrl=greetingPoolItems[0]?.url||'';
+  if(!poolUrl)throw new Error('R2 card-pool/index.json 沒有可用素材');
+  await openGreetingMaker(null,poolUrl);
   if(d.text){
     const lines=String(d.text).split('\n').map(x=>x.trim()).filter(Boolean);
     if(lines.length){
