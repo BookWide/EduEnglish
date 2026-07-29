@@ -1079,21 +1079,21 @@ body:not(.bookwide-super-admin) .super-admin-only{display:none!important}
       </div>
     </details>
     <details id="lineBirthdayAdmin" class="line-auto-collapsible" open>
-      <summary><span>🎂 生日英語卡自動化（Admin）</span><span id="birthdayAdminSummary" class="small">讀取中…</span></summary>
+      <summary><span>🎂 生日卡中心（Admin）</span><span id="birthdayAdminSummary" class="small">讀取中…</span></summary>
       <div class="line-auto-collapsible-body">
-        <div class="small" style="margin-bottom:10px">資料只讀取會員 Profile：BookWide 帳號、姓名、生日、LINE 綁定與生日祝福同意。私人行事曆中的親友生日不會進入此處。</div>
+        <div class="small" style="margin-bottom:10px">同一套生日流程：從會員 Profile 找出壽星 → 製作生日卡 → 發送 LINE 圖片與祝福文字。排程只提醒 Admin，不會另外自動寄一套純文字。私人行事曆中的親友生日不會進入此處。</div>
         <div class="filters">
-          <div class="field"><label>生日自動發送</label><select id="laBirthdayEnabled"><option value="true">啟用</option><option value="false">停用</option></select></div>
-          <div class="field"><label>發送時間（台灣）</label><input id="laBirthdayTime" type="time" value="08:00"></div>
+          <div class="field"><label>生日卡提醒</label><select id="laBirthdayEnabled"><option value="true">啟用</option><option value="false">停用</option></select></div>
+          <div class="field"><label>提醒時間（台灣）</label><input id="laBirthdayTime" type="time" value="08:00"></div>
           <div class="field"><label>提前天數</label><select id="laBirthdayLead"><option value="0">生日當天</option><option value="1">提前 1 天</option><option value="3">提前 3 天</option></select></div>
-          <div class="field"><label>英文祝福</label><select id="laBirthdayEnglish"><option value="wonderful">Wishing you a wonderful year ahead.</option><option value="wishes">May all your wishes come true.</option><option value="joy">May your day be filled with joy.</option></select></div>
+          <div class="field"><label>生日卡英文祝福</label><select id="laBirthdayEnglish"><option value="wonderful">Wishing you a wonderful year ahead.</option><option value="wishes">May all your wishes come true.</option><option value="joy">May your day be filled with joy.</option></select></div>
         </div>
         <div class="btns" style="margin:10px 0">
           <button class="btn gray" type="button" onclick="birthdayAdminSyncProfiles()">同步 Profile／LINE 生日會員</button>
-          <button class="btn" type="button" onclick="lineAutoSave()">儲存生日排程</button>
-          <button class="btn secondary" type="button" onclick="birthdayAdminTestToday(this)">測試今日壽星</button>
+          <button class="btn" type="button" onclick="lineAutoSave()">儲存生日卡設定</button>
+          <button class="btn secondary" type="button" onclick="birthdayAdminTestToday(this)">檢查今日壽星</button>
         </div>
-        <div id="birthdayAdminList" class="line-recipient-list"><span class="small">正在讀取 Profile 生日資料…</span></div>
+        <div class="small" style="margin:-2px 0 10px;color:#8a5b00">排程不會另寄純文字；生日卡只從下方壽星列的「製作生日卡／發送 LINE」完成一次發送。</div><div id="birthdayAdminList" class="line-recipient-list"><span class="small">正在讀取 Profile 生日資料…</span></div>
       </div>
     </details>
     <div class="filters" style="margin-top:10px">
@@ -5196,18 +5196,28 @@ async function sendGreetingToMyLine(button){
     if(!imageUrl)throw new Error('圖卡已生成，但雲端沒有回傳圖片網址');
     if(button)button.textContent='傳送中…';
     if(birthdayTarget){
-      // V13.1：生日卡沿用日安圖成功的「先上傳圖卡、再送 LINE 圖片」流程，
-      // 但收件人改成目前壽星的 LINE User ID，不再只送文字。
-      let sent=null,firstError=null;
-      try{
-        sent=await hikingApi('/api/sticker-send-my-line',{method:'POST',admin:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({image_url:imageUrl,label,target_line_user_id:birthdayTarget.lineUserId,line_user_id:birthdayTarget.lineUserId,to:birthdayTarget.lineUserId})});
-      }catch(e){firstError=e;}
-      if(!sent){
-        try{
-          sent=await hikingApi('/api/send-birthday',{method:'POST',admin:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({send:true,direct:true,line_user_id:birthdayTarget.lineUserId,to:birthdayTarget.lineUserId,name:birthdayTarget.name,image_url:imageUrl,original_content_url:imageUrl,preview_image_url:imageUrl})});
-        }catch(e){throw firstError||e;}
+      // V13.2：沿用已成功的日安圖「send-composed」Worker 路徑，
+      // 由 Worker 上傳並以 LINE Messaging API 傳給指定壽星；瀏覽器不直接連 api.line.me。
+      const {data:{session}}=await bookWideGetSession();
+      const headers=new Headers();
+      if(session?.access_token)headers.set('Authorization','Bearer '+session.access_token);
+      if(BOOKWIDE_GROUP_ID)headers.set('X-BookWide-Group',BOOKWIDE_GROUP_ID);
+      const paths=['/api/line-automation/send-composed','/api/line-automation/send-composition','/send-composed'];
+      let sent=null,lastError='';
+      for(const path of paths){
+        const sendForm=new FormData();
+        sendForm.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-birthday.jpg',{type:'image/jpeg'}));
+        sendForm.append('recipient_ids',JSON.stringify([birthdayTarget.lineUserId]));
+        sendForm.append('group_id',BOOKWIDE_GROUP_ID||'');
+        sendForm.append('label',label);
+        const res=await fetch(`${HIKING_API_BASE}${path}`,{method:'POST',headers,body:sendForm});
+        const text=await res.text();let data={};try{data=text?JSON.parse(text):{}}catch(_e){}
+        if(res.ok){sent=data;break;}
+        lastError=data.error||text||`HTTP ${res.status}`;
+        if(res.status!==404)break;
       }
-      greetingMakerStatus(`生日卡圖片已儲存並傳送給 ${birthdayTarget.name}。`);
+      if(!sent)throw new Error(lastError||'生日卡圖片發送失敗');
+      greetingMakerStatus(`生日卡圖片已傳送給 ${birthdayTarget.name}。`);
       alert(`生日卡圖片已傳送給 ${birthdayTarget.name}。`);
     }else{
       await sendBookWideImageToMyLine(imageUrl,label,button,false);
@@ -6603,7 +6613,7 @@ function lineAutoPayload(){return {
   recipient_ids:lineAutoSelectedIds(), recipient_groups:lineAutoRecipientGroups,
   schedule_time:lineAutoValue('laTime'), latest_send_time:lineAutoValue('laLatest'),
   schedule_mode:lineAutoValue('laMode'), enabled:lineAutoBool('laEnabled'),
-  birthday_enabled:lineAutoBool('laBirthdayEnabled'), birthday_send_time:lineAutoValue('laBirthdayTime')||'08:00', birthday_lead_days:Number(lineAutoValue('laBirthdayLead')||0), birthday_english_style:lineAutoValue('laBirthdayEnglish')||'wonderful',
+  birthday_enabled:false, birthday_card_reminder_enabled:lineAutoBool('laBirthdayEnabled'), birthday_card_reminder_time:lineAutoValue('laBirthdayTime')||'08:00', birthday_lead_days:Number(lineAutoValue('laBirthdayLead')||0), birthday_english_style:lineAutoValue('laBirthdayEnglish')||'wonderful',
   headline:lineAutoValue('laHeadline').trim(), signature:(greetingGlobalConfig.signature||lineAutoValue('laSignature')||'bookwide.net').trim(),
   use_openai:lineAutoBool('laOpenAI'), use_photo_understanding:lineAutoBool('laVision'),
   greeting_engine_version:GREETING_ENGINE_VERSION, greeting_prompt_mode:'greeting_copy_no_signature',
@@ -6724,7 +6734,7 @@ function birthdayAdminRow(m,isToday=false){
   const lineId=String(m.line_user_id||'');
   const bound=!!lineId;
   const aName=birthdayAdminArg(name),aPhoto=birthdayAdminArg(m.avatar_url||''),aLine=birthdayAdminArg(lineId),aId=birthdayAdminArg(m.id||''),aEmail=birthdayAdminArg(email);
-  return `<div class="birthday-member-row${isToday?' is-today':''}"><div><b>${isToday?'🎂 ':''}${escHtml(name)}</b><div class="small">${escHtml(email)}</div></div><div><b>${escHtml(mdLabel)}</b><div class="small ${bound?'line-ok':'line-missing'}">LINE：${bound?'已綁定':'尚未綁定'}</div></div><div class="birthday-actions"><button class="mini" onclick="birthdayAdminMakeCard(decodeURIComponent('${aName}'),'${aPhoto}',decodeURIComponent('${aLine}'))">製作生日卡</button><button class="mini" onclick="birthdayAdminMakeCard(decodeURIComponent('${aName}'),'${aPhoto}',decodeURIComponent('${aLine}'))">預覽／下載</button><button class="mini" onclick="birthdayAdminCheckBinding(decodeURIComponent('${aId}'),decodeURIComponent('${aEmail}'),this)">檢查綁定</button>${bound?`<button class="mini" onclick="birthdayAdminRebind(decodeURIComponent('${aId}'),decodeURIComponent('${aEmail}'),this)">重新綁定</button>`:''}<button class="mini" ${bound?'':'disabled'} onclick="birthdayAdminPrepareSend(decodeURIComponent('${aName}'),'${aPhoto}',decodeURIComponent('${aLine}'),this)">發送 LINE</button></div></div>`;
+  return `<div class="birthday-member-row${isToday?' is-today':''}"><div><b>${isToday?'🎂 ':''}${escHtml(name)}</b><div class="small">${escHtml(email)}</div></div><div><b>${escHtml(mdLabel)}</b><div class="small ${bound?'line-ok':'line-missing'}">LINE：${bound?'已綁定':'尚未綁定'}</div></div><div class="birthday-actions"><button class="mini" onclick="birthdayAdminMakeCard(decodeURIComponent('${aName}'),'${aPhoto}',decodeURIComponent('${aLine}'))">製作生日卡</button><button class="mini" ${bound?'':'disabled'} onclick="birthdayAdminPrepareSend(decodeURIComponent('${aName}'),'${aPhoto}',decodeURIComponent('${aLine}'),this)">發送 LINE</button></div></div>`;
 }
 async function birthdayAdminCheckBinding(profileId,email,button){
   const old=button?.textContent||'檢查綁定';if(button){button.disabled=true;button.textContent='檢查中…'}
@@ -6798,13 +6808,17 @@ async function birthdayAdminMakeCard(name,encodedPhoto,lineUserId){
   setTimeout(()=>document.getElementById('sec-album')?.scrollIntoView({behavior:'smooth',block:'start'}),60);
   alert('請在相簿選一張照片，按「😊 個人創作」；系統會直接套用為此壽星的生日卡。');
 }
-async function birthdayAdminTestToday(button){const old=button?.textContent||'測試今日壽星';
-  if(button){button.disabled=true;button.textContent='測試中…';}
+async function birthdayAdminTestToday(button){
+  const old=button?.textContent||'檢查今日壽星';
+  if(button){button.disabled=true;button.textContent='檢查中…';}
   try{
-    const d=await hikingApi('/api/send-birthday',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test:true,send:false,birthday_lead_days:Number(lineAutoValue('laBirthdayLead')||0),birthday_english_style:lineAutoValue('laBirthdayEnglish')||'wonderful'})});
-    const msg=`今日測試：${d.matches??0} 位壽星；${Array.isArray(d.names)&&d.names.length?d.names.join('、'):'無'}`;
+    const members=await birthdayAdminLoad(false);
+    const taipeiNow=new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Taipei'}));
+    const todayMd=String(taipeiNow.getMonth()+1).padStart(2,'0')+'-'+String(taipeiNow.getDate()).padStart(2,'0');
+    const today=(members||BIRTHDAY_ADMIN_MEMBERS||[]).filter(m=>birthdayMonthDay(m.birthday)===todayMd);
+    const msg=`今日壽星：${today.length} 位${today.length?'；'+today.map(m=>bwProfileName(m)||m.display_name||m.email||'未命名').join('、'):''}`;
     lineAutoShow('🎂 '+msg);alert(msg);
-  }catch(e){lineAutoShow('❌ 今日壽星測試失敗：'+e.message,'error');alert('今日壽星測試失敗：'+e.message);}
+  }catch(e){lineAutoShow('❌ 今日壽星檢查失敗：'+e.message,'error');alert('今日壽星檢查失敗：'+e.message);}
   finally{if(button){button.disabled=false;button.textContent=old;}}
 }
 async function openLineAutomationAdmin(){
@@ -6816,7 +6830,7 @@ async function openLineAutomationAdmin(){
     lineAutoInitialRecipientIds=Array.isArray(c.recipient_ids)?c.recipient_ids:(c.recipient_id?[c.recipient_id]:[]);
     await lineAutoLoadTargets(false,lineAutoInitialRecipientIds);lineAutoRenderRecipientGroups();await birthdayAdminLoad(false);
     lineAutoSet('laTime',c.schedule_time||'07:00');lineAutoSet('laLatest',c.latest_send_time||'12:00');lineAutoSet('laMode',c.schedule_mode||'smart');
-    lineAutoSet('laEnabled',c.enabled!==false);lineAutoSet('laBirthdayEnabled',c.birthday_enabled===true);lineAutoSet('laBirthdayTime',c.birthday_send_time||'08:00');lineAutoSet('laBirthdayLead',c.birthday_lead_days||0);lineAutoSet('laBirthdayEnglish',c.birthday_english_style||'wonderful');lineAutoSet('laHeadline',c.headline||'日安');lineAutoSet('laSignature',c.signature||'bookwide.net');
+    lineAutoSet('laEnabled',c.enabled!==false);lineAutoSet('laBirthdayEnabled',c.birthday_card_reminder_enabled!==false);lineAutoSet('laBirthdayTime',c.birthday_card_reminder_time||c.birthday_send_time||'08:00');lineAutoSet('laBirthdayLead',c.birthday_lead_days||0);lineAutoSet('laBirthdayEnglish',c.birthday_english_style||'wonderful');lineAutoSet('laHeadline',c.headline||'日安');lineAutoSet('laSignature',c.signature||'bookwide.net');
     lineAutoSet('laOpenAI',c.use_openai!==false);lineAutoSet('laVision',c.use_photo_understanding!==false);
     applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS,...(c.greeting_design||{}),image_mode:c.image_mode||(c.greeting_design||{}).image_mode||'real',signature:(c.greeting_design||{}).signature||c.signature||''});
     lineAutoShow(`✅ 已連線 Cloudflare Worker。排程：${c.enabled?'啟用':'停用'}；收件人 ${lineAutoInitialRecipientIds.length} 位；日安圖設定由預覽視窗統一管理。`);
