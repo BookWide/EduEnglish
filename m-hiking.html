@@ -1073,7 +1073,7 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
           <div class="field"><label>英文祝福</label><select id="laBirthdayEnglish"><option value="wonderful">Wishing you a wonderful year ahead.</option><option value="wishes">May all your wishes come true.</option><option value="joy">May your day be filled with joy.</option></select></div>
         </div>
         <div class="btns" style="margin:10px 0">
-          <button class="btn gray" type="button" onclick="birthdayAdminLoad(true)">同步 Profile／LINE 生日會員</button>
+          <button class="btn gray" type="button" onclick="birthdayAdminSyncProfiles()">同步 Profile／LINE 生日會員</button>
           <button class="btn" type="button" onclick="lineAutoSave()">儲存生日排程</button>
           <button class="btn secondary" type="button" onclick="birthdayAdminTestToday()">測試今日壽星</button>
         </div>
@@ -6583,23 +6583,55 @@ async function lineAutoLoadTargets(showStatus=false,selectedIds=null){
 function birthdayEnglishText(style){
   const map={wonderful:['Wishing you a wonderful year ahead.','祝你未來一年精彩順利。'],wishes:['May all your wishes come true.','願你所有的願望都能實現。'],joy:['May your day be filled with joy.','願你的生日充滿喜悅。']};return map[style]||map.wonderful;
 }
+function birthdayMonthDay(value){
+  const raw=String(value||'').trim();
+  let m=raw.match(/^(?:\d{4})[-\/]([01]?\d)[-\/]([0-3]?\d)/);
+  if(!m)m=raw.match(/^([01]?\d)[-\/]([0-3]?\d)$/);
+  if(!m)return '';
+  const mm=Number(m[1]),dd=Number(m[2]);
+  if(mm<1||mm>12||dd<1||dd>31)return '';
+  return String(mm).padStart(2,'0')+'-'+String(dd).padStart(2,'0');
+}
+async function birthdayAdminSyncProfiles(){
+  if(!BOOKWIDE_IS_ADMIN){alert('只有 BookWide Admin 可以同步會員生日。');return []}
+  lineAutoShow('正在從 Profile 讀取全部會員生日與 LINE 綁定…');
+  try{
+    const {data,error}=await bookwideSupa.from('profiles').select('*').order('updated_at',{ascending:false});
+    if(error)throw error;
+    const profiles=Array.isArray(data)?data:[];
+    const payload={group_id:BOOKWIDE_GROUP_ID||'monster-group',profiles:profiles.map(p=>({
+      id:p.id||'',email:p.email||'',display_name:bwProfileName(p),birthday:bwProfileBirthday(p),avatar_url:bwProfilePhoto(p),
+      line_user_id:p.line_user_id||'',official_line_followed:p.official_line_followed===true,
+      allow_good_morning:p.allow_good_morning!==false,allow_birthday:p.allow_birthday!==false,
+      allow_event:p.allow_event!==false,crm_member_status:p.crm_member_status||'active'
+    }))};
+    const result=await hikingApi('/api/profile-sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    await birthdayAdminLoad(false);
+    const withBirthday=profiles.filter(p=>birthdayMonthDay(bwProfileBirthday(p))).length;
+    lineAutoShow(`✅ 已同步 ${result.profiles??profiles.length} 位 Profile；其中 ${withBirthday} 位有生日。`);
+    return profiles;
+  }catch(e){
+    lineAutoShow('❌ Profile 生日同步失敗：'+e.message,'error');
+    return [];
+  }
+}
 function birthdayAdminStatus(m){
   if(!m.birthday)return '⚠ 未填生日';if(!m.line_user_id)return '⚠ 官方 LINE 尚未綁定';return '✅ 可自動發送';
 }
 function birthdayAdminRow(m,isToday=false){
   const name=String(m.display_name||'會員');
   const email=String(m.email||'無帳號 Email');
-  const md=m.birthday?String(m.birthday).slice(5).replace('-', '/'):'--/--';
+  const md=birthdayMonthDay(m.birthday);const mdLabel=md?md.replace('-', '/'):'--/--';
   const lineId=String(m.line_user_id||'');
-  return `<div class="birthday-member-row${isToday?' is-today':''}"><div><b>${isToday?'🎂 ':''}${escHtml(name)}</b><div class="small">${escHtml(email)}</div></div><div><b>${escHtml(md)}</b><div class="small">${birthdayAdminStatus(m)}</div></div><button class="mini" ${lineId?'':'disabled'} onclick="birthdayAdminMakeCard('${name.replace(/'/g,"\\'")}','${encodeURIComponent(m.avatar_url||'')}','${lineId.replace(/'/g,"\\'")}' )">製作／發送卡片</button></div>`;
+  return `<div class="birthday-member-row${isToday?' is-today':''}"><div><b>${isToday?'🎂 ':''}${escHtml(name)}</b><div class="small">${escHtml(email)}</div></div><div><b>${escHtml(mdLabel)}</b><div class="small">${birthdayAdminStatus(m)}</div></div><button class="mini" ${lineId?'':'disabled'} onclick="birthdayAdminMakeCard('${name.replace(/'/g,"\\'")}','${encodeURIComponent(m.avatar_url||'')}','${lineId.replace(/'/g,"\\'")}' )">製作／發送卡片</button></div>`;
 }
 async function birthdayAdminLoad(showStatus=false){
   const box=document.getElementById('birthdayAdminList');if(!box)return [];
   try{
     const d=await hikingApi('/api/profile-sync',{method:'GET'});BIRTHDAY_ADMIN_MEMBERS=Array.isArray(d.members)?d.members:[];
     const todayMd=new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Taipei'}).slice(5);
-    const ready=BIRTHDAY_ADMIN_MEMBERS.filter(m=>m.birthday&&m.line_user_id);
-    const today=BIRTHDAY_ADMIN_MEMBERS.filter(m=>String(m.birthday||'').slice(5)===todayMd);
+    const ready=BIRTHDAY_ADMIN_MEMBERS.filter(m=>birthdayMonthDay(m.birthday)&&m.line_user_id);
+    const today=BIRTHDAY_ADMIN_MEMBERS.filter(m=>birthdayMonthDay(m.birthday)===todayMd);
     const sum=document.getElementById('birthdayAdminSummary');if(sum)sum.textContent=`今日壽星 ${today.length}｜會員 ${BIRTHDAY_ADMIN_MEMBERS.length}｜可發送 ${ready.length}`;
     let html='';
     html+=`<div class="birthday-today-panel"><div class="birthday-today-title">🎂 今日壽星（${today.length}）</div>${today.length?today.map(m=>birthdayAdminRow(m,true)).join(''):'<div class="small">今天沒有讀取到壽星；請確認 Profile 已儲存生日並重新同步。</div>'}</div>`;
