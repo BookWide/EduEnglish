@@ -1086,14 +1086,15 @@ body:not(.bookwide-super-admin) .super-admin-only{display:none!important}
           <div class="field"><label>生日卡提醒</label><select id="laBirthdayEnabled"><option value="true">啟用</option><option value="false">停用</option></select></div>
           <div class="field"><label>提醒時間（台灣）</label><input id="laBirthdayTime" type="time" value="08:00"></div>
           <div class="field"><label>提前天數</label><select id="laBirthdayLead"><option value="0">生日當天</option><option value="1">提前 1 天</option><option value="3">提前 3 天</option></select></div>
-          <div class="field"><label>生日卡英文祝福</label><select id="laBirthdayEnglish"><option value="wonderful">Wishing you a wonderful year ahead.</option><option value="wishes">May all your wishes come true.</option><option value="joy">May your day be filled with joy.</option></select></div>
+          <div class="field"><label>英文祝福模板</label><select id="laBirthdayEnglish"><option value="wonderful">Wishing you a wonderful year ahead.</option><option value="wishes">May all your wishes come true.</option><option value="joy">May your day be filled with joy.</option></select></div>
         </div>
         <div class="btns" style="margin:10px 0">
           <button class="btn gray" type="button" onclick="birthdayAdminSyncProfiles()">同步 Profile／LINE 生日會員</button>
-          <button class="btn" type="button" onclick="lineAutoSave()">儲存生日卡設定</button>
+          <button class="btn" type="button" onclick="birthdayAdminSaveSettings(this)">儲存生日卡設定</button>
           <button class="btn secondary" type="button" onclick="birthdayAdminTestToday(this)">檢查今日壽星</button>
+          <button class="btn secondary" type="button" onclick="birthdayAdminSimulate(this)">模擬發送</button>
         </div>
-        <div class="small" style="margin:-2px 0 10px;color:#8a5b00">排程不會另寄純文字；生日卡只從下方壽星列的「製作生日卡／發送 LINE」完成一次發送。</div><div id="birthdayAdminList" class="line-recipient-list"><span class="small">正在讀取 Profile 生日資料…</span></div>
+        <div class="small" style="margin:-2px 0 10px;color:#8a5b00">排程不會另寄純文字；生日卡只從下方壽星列的「製作生日卡／發送 LINE」完成一次發送。</div><div id="birthdayAdminVerify" class="notice" style="display:none;margin-bottom:10px"></div><div id="birthdayAdminList" class="line-recipient-list"><span class="small">正在讀取 Profile 生日資料…</span></div>
       </div>
     </details>
     <div class="filters" style="margin-top:10px">
@@ -6807,6 +6808,42 @@ async function birthdayAdminMakeCard(name,encodedPhoto,lineUserId){
   try{renderAlbum()}catch(_e){}
   setTimeout(()=>document.getElementById('sec-album')?.scrollIntoView({behavior:'smooth',block:'start'}),60);
   alert('請在相簿選一張照片，按「😊 個人創作」；系統會直接套用為此壽星的生日卡。');
+}
+
+function birthdayAdminEnglishText(){
+  const style=document.getElementById('laBirthdayEnglish')?.value||'wonderful';
+  return style==='wishes'?'May all your wishes come true.':style==='joy'?'May your day be filled with joy.':'Wishing you a wonderful year ahead.';
+}
+function birthdayAdminVerifyShow(html,type='ok'){
+  const box=document.getElementById('birthdayAdminVerify');if(!box)return;
+  box.style.display='block';box.innerHTML=html;box.style.borderColor=type==='error'?'#d66':'#8dbb92';
+}
+async function birthdayAdminSaveSettings(button){
+  const old=button?.textContent||'儲存生日卡設定';if(button){button.disabled=true;button.textContent='儲存中…'}
+  try{
+    const payload=lineAutoPayload();
+    if(!payload.recipient_ids?.length)payload.recipient_ids=Array.isArray(lineAutoInitialRecipientIds)?lineAutoInitialRecipientIds:[];
+    const d=await lineAutoApi('/config',{method:'POST',body:JSON.stringify(payload)});
+    const enabled=document.getElementById('laBirthdayEnabled')?.value==='true';
+    const time=document.getElementById('laBirthdayTime')?.value||'08:00';
+    const lead=Number(document.getElementById('laBirthdayLead')?.value||0);
+    const stamp=new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date());
+    birthdayAdminVerifyShow(`✅ 生日設定已儲存<br>提醒：${enabled?'啟用':'停用'}｜${lead?`提前 ${lead} 天`:'生日當天'} ${time}<br>英文模板：${escHtml(birthdayAdminEnglishText())}<br>最後更新：${escHtml(stamp)}`);
+    lineAutoRenderScheduleStatus(d.config||{});
+  }catch(e){birthdayAdminVerifyShow('❌ 儲存失敗：'+escHtml(e.message),'error');alert('生日設定儲存失敗：'+e.message)}
+  finally{if(button){button.disabled=false;button.textContent=old}}
+}
+async function birthdayAdminSimulate(button){
+  const old=button?.textContent||'模擬發送';if(button){button.disabled=true;button.textContent='檢查中…'}
+  try{
+    const members=await birthdayAdminLoad(false);
+    const parts=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Taipei',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));
+    const md=`${parts.month}-${parts.day}`;
+    const today=(members||[]).filter(m=>birthdayMonthDay(m.birthday)===md);
+    const rows=today.map(m=>{const bound=!!m.line_user_id;const same=greetingMakerBirthdayTarget&&String(greetingMakerBirthdayTarget.lineUserId||'')===String(m.line_user_id||'');const card=!!(same&&greetingMakerState.image);return `${escHtml(m.display_name||m.email||'未命名')}：LINE ${bound?'已綁定':'未綁定'}｜生日卡 ${card?'已完成':'未製作'}｜${bound&&card?'可發送':'不可發送'}`}).join('<br>');
+    birthdayAdminVerifyShow(`🧪 模擬發送（不會真的寄出）<br>今日壽星：${today.length} 位<br>${rows||'今天沒有壽星'}<br>預計文字：${escHtml(birthdayAdminEnglishText())}`);
+  }catch(e){birthdayAdminVerifyShow('❌ 模擬失敗：'+escHtml(e.message),'error')}
+  finally{if(button){button.disabled=false;button.textContent=old}}
 }
 async function birthdayAdminTestToday(button){
   const old=button?.textContent||'檢查今日壽星';
