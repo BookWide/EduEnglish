@@ -1500,7 +1500,7 @@ async function resolveBookWideGroupAccess(user){
   BOOKWIDE_ROLE=
     selected.role==='super_admin'?'super_admin':
     selected.role==='group_admin'?'group_admin':'member';
-  // V12.7：本群管理權 = BookWide Admin 或目前群組群主。
+  // V13：本群管理權 = BookWide Admin 或目前群組群主。
   // 全站 LINE／生日／CRM 仍只開放 BookWide Admin。
   BOOKWIDE_IS_ADMIN=BOOKWIDE_IS_SUPER_ADMIN || BOOKWIDE_ROLE==='group_admin';
 
@@ -1569,7 +1569,7 @@ function applyCurrentGroupUi(){
   });
   document.title=(BOOKWIDE_GROUP_NAME||'BookWide Mountain')+'｜BookWide 群組';
 
-  // V12.7：先重建頁首，再填入群組切換器。
+  // V13：先重建頁首，再填入群組切換器。
   // 舊版順序相反，setupAdminGroupSwitcher() 先建立選項後，
   // renderBookWideAuth() 又用 innerHTML 把 select 整個覆蓋，造成看得到群名卻無法切換。
   if(BOOKWIDE_USER) renderBookWideAuth(BOOKWIDE_USER);
@@ -3818,7 +3818,7 @@ function renderPhotoTileForView(url,{showOwnerDelete=false}={}){
           aria-label="選取這張照片"
           onclick="event.stopPropagation()"
           onchange="event.stopPropagation();updatePhotoPickCount()">`}
-    <button class="sticker-maker-btn" type="button" title="用這張照片製作日安圖或個人貼圖"
+    <button class="sticker-maker-btn" type="button" title="用這張照片製作日安圖、生日卡或個人貼圖"
       onclick="event.stopPropagation();openPersonalCreateChoice(this,'${String(url).replace(/'/g,"%27")}')">😊 個人創作</button>
     <button class="photo-download-btn" type="button" title="下載原圖"
       onclick="event.stopPropagation();downloadPhotoToDevice('${String(url).replace(/'/g,"%27")}',this)">⬇ 下載</button>
@@ -5143,7 +5143,28 @@ async function shareSavedStickerPack(index){
 }
 
 let personalCreationContext={button:null,url:''};
-function openPersonalCreateChoice(button,url){personalCreationContext={button,url:decodeURIComponent(String(url||''))};document.getElementById('personalCreateChoiceModal')?.classList.add('active');}
+let birthdayAlbumPickContext=null;
+function openPersonalCreateChoice(button,url){
+  const cleanUrl=decodeURIComponent(String(url||''));
+  if(birthdayAlbumPickContext){
+    const ctx=birthdayAlbumPickContext;
+    birthdayAlbumPickContext=null;
+    localStorage.setItem('bookwide_birthday_card_name',ctx.name||'');
+    localStorage.setItem('bookwide_greeting_mode','birthday');
+    document.querySelectorAll('#laRecipientList input[type="checkbox"]').forEach(x=>x.checked=String(x.value)===String(ctx.lineUserId||''));
+    lineAutoUpdateSummary();
+    openGreetingMaker(button,cleanUrl).then(async()=>{
+      const [en,zh]=birthdayEnglishText(lineAutoValue('laBirthdayEnglish'));
+      const zhEl=document.getElementById('greetingMakerZh'),enEl=document.getElementById('greetingMakerEn');
+      if(zhEl)zhEl.value=`${ctx.name||'壽星'}，生日快樂！\n${zh}`;
+      if(enEl)enEl.value=`Happy Birthday, ${ctx.name||''}!\n${en}`;
+      await renderGreetingMakerPreview();
+      greetingMakerStatus('已使用相簿照片製作生日卡。可預覽、下載或發送 LINE。');
+    }).catch(e=>alert('生日卡製作失敗：'+e.message));
+    return;
+  }
+  personalCreationContext={button,url:cleanUrl};document.getElementById('personalCreateChoiceModal')?.classList.add('active');
+}
 function closePersonalCreateChoice(event){if(event&&event.target!==document.getElementById('personalCreateChoiceModal'))return;document.getElementById('personalCreateChoiceModal')?.classList.remove('active');}
 function choosePersonalCreation(type){const c=personalCreationContext;closePersonalCreateChoice();if(type==='greeting')openGreetingMaker(c.button,c.url);else openStickerMaker(c.button,c.url);}
 function scrollToPhotoCenterForCreation(){document.getElementById('sec-album')?.scrollIntoView({behavior:'smooth',block:'start'});}
@@ -6742,10 +6763,16 @@ async function birthdayAdminLoad(showStatus=false){
 }
 
 async function birthdayAdminMakeCard(name,encodedPhoto,lineUserId){
-  document.querySelectorAll('#laRecipientList input[type="checkbox"]').forEach(x=>x.checked=String(x.value)===String(lineUserId));lineAutoUpdateSummary();
-  const [en,zh]=birthdayEnglishText(lineAutoValue('laBirthdayEnglish'));localStorage.setItem('bookwide_birthday_card_name',name);localStorage.setItem('bookwide_greeting_mode','birthday');
-  let photo='';try{photo=decodeURIComponent(encodedPhoto||'')}catch(_){photo=String(encodedPhoto||'')}await openGreetingMaker(null,photo?encodeURIComponent(photo):'');
-  const zhEl=document.getElementById('greetingMakerZh'),enEl=document.getElementById('greetingMakerEn');if(zhEl)zhEl.value=`${name}，生日快樂！\n${zh}`;if(enEl)enEl.value=`Happy Birthday, ${name}!\n${en}`;await renderGreetingMakerPreview();greetingMakerStatus('生日英語卡已帶入。按「分享」可下載／分享；關閉後按「立即發送 LINE」會傳給此會員。');
+  // V13：Admin 生日卡一律從目前既有相簿選圖；不再使用 Profile 頭像或另外的素材池。
+  document.querySelectorAll('#laRecipientList input[type="checkbox"]').forEach(x=>x.checked=String(x.value)===String(lineUserId));
+  lineAutoUpdateSummary();
+  localStorage.setItem('bookwide_birthday_card_name',name||'');
+  localStorage.setItem('bookwide_greeting_mode','birthday');
+  birthdayAlbumPickContext={name:name||'壽星',lineUserId:lineUserId||''};
+  activateSectionOnly('sec-album');
+  try{renderAlbum()}catch(_e){}
+  setTimeout(()=>document.getElementById('sec-album')?.scrollIntoView({behavior:'smooth',block:'start'}),60);
+  alert('請在相簿選一張照片，按「😊 個人創作」；系統會直接套用為此壽星的生日卡。');
 }
 async function birthdayAdminTestToday(){
   const d=await hikingApi('/api/send-birthday',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({test:true,send:false,birthday_lead_days:Number(lineAutoValue('laBirthdayLead')||0),birthday_english_style:lineAutoValue('laBirthdayEnglish')||'wonderful'})});lineAutoShow(`🎂 今日測試：${d.matches||0} 位壽星；${d.names?.join('、')||'無'}`);
