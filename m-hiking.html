@@ -5144,11 +5144,13 @@ async function shareSavedStickerPack(index){
 
 let personalCreationContext={button:null,url:''};
 let birthdayAlbumPickContext=null;
+let greetingMakerBirthdayTarget=null;
 function openPersonalCreateChoice(button,url){
   const cleanUrl=decodeURIComponent(String(url||''));
   if(birthdayAlbumPickContext){
     const ctx=birthdayAlbumPickContext;
     birthdayAlbumPickContext=null;
+    greetingMakerBirthdayTarget={name:ctx.name||'壽星',lineUserId:ctx.lineUserId||''};
     localStorage.setItem('bookwide_birthday_card_name',ctx.name||'');
     localStorage.setItem('bookwide_greeting_mode','birthday');
     document.querySelectorAll('#laRecipientList input[type="checkbox"]').forEach(x=>x.checked=String(x.value)===String(ctx.lineUserId||''));
@@ -5171,12 +5173,13 @@ function scrollToPhotoCenterForCreation(){document.getElementById('sec-album')?.
 function openGreetingFromCreationCenter(){alert('請在相簿選一張照片，按「個人創作」→「製作日安圖」。');scrollToPhotoCenterForCreation();}
 async function sendGreetingToMyLine(button){
   if(!greetingMakerState.image){alert('照片尚未載入完成');return;}
-  if(!confirm('確定把這張日安圖傳送到你已綁定的 LINE？'))return;
-  const original=button?.textContent||'傳送我的 LINE';
+  const birthdayTarget=greetingMakerBirthdayTarget&&greetingMakerBirthdayTarget.lineUserId?greetingMakerBirthdayTarget:null;
+  const label=birthdayTarget?`生日祝福卡（${birthdayTarget.name}）`:'我的日安圖';
+  const confirmText=birthdayTarget?`確定把這張生日祝福卡傳送給 ${birthdayTarget.name}？`:'確定把這張日安圖傳送到你已綁定的 LINE？';
+  if(!confirm(confirmText))return;
+  const original=button?.textContent||(birthdayTarget?'發送 LINE':'傳送我的 LINE');
   if(button){button.disabled=true;button.textContent='生成中…';}
   try{
-    // 與個人貼圖相同：使用者只按一次「傳送我的 LINE」。
-    // 若尚未生成 JPG，先在背景完成目前預覽的 JPG，不要求再按另一顆按鈕。
     if(!greetingMakerState.blob){
       await renderGreetingMakerPreview();
       const canvas=document.getElementById('greetingMakerCanvas');
@@ -5184,22 +5187,37 @@ async function sendGreetingToMyLine(button){
       greetingMakerState.fileName=greetingMakerSafeName(greetingMakerState.url);
     }
     if(button)button.textContent='上傳中…';
-    // 日安圖先存入會員自己的 BookWide 雲端，取得公開圖片網址。
     const form=new FormData();
     form.append('file',greetingMakerState.blob,greetingMakerState.fileName||'BookWide-greeting.jpg');
     form.append('source_photo_url',greetingMakerState.url||'');
     form.append('send_to_line','false');
     const saved=await hikingApi('/api/personal-creations/greetings',{method:'POST',admin:false,body:form});
     const imageUrl=String(saved?.image_url||'').trim();
-    if(!imageUrl)throw new Error('日安圖已生成，但雲端沒有回傳圖片網址');
-    if(button){button.disabled=false;button.textContent=original;}
-    // 完全沿用個人貼圖同一個「傳送到我的 LINE」API 與綁定檢查。
-    await sendBookWideImageToMyLine(imageUrl,'我的日安圖',button,false);
-    greetingMakerStatus('日安圖已儲存，並沿用個人貼圖功能傳送到你的 LINE。');
+    if(!imageUrl)throw new Error('圖卡已生成，但雲端沒有回傳圖片網址');
+    if(button)button.textContent='傳送中…';
+    if(birthdayTarget){
+      // V13.1：生日卡沿用日安圖成功的「先上傳圖卡、再送 LINE 圖片」流程，
+      // 但收件人改成目前壽星的 LINE User ID，不再只送文字。
+      let sent=null,firstError=null;
+      try{
+        sent=await hikingApi('/api/sticker-send-my-line',{method:'POST',admin:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({image_url:imageUrl,label,target_line_user_id:birthdayTarget.lineUserId,line_user_id:birthdayTarget.lineUserId,to:birthdayTarget.lineUserId})});
+      }catch(e){firstError=e;}
+      if(!sent){
+        try{
+          sent=await hikingApi('/api/send-birthday',{method:'POST',admin:true,headers:{'Content-Type':'application/json'},body:JSON.stringify({send:true,direct:true,line_user_id:birthdayTarget.lineUserId,to:birthdayTarget.lineUserId,name:birthdayTarget.name,image_url:imageUrl,original_content_url:imageUrl,preview_image_url:imageUrl})});
+        }catch(e){throw firstError||e;}
+      }
+      greetingMakerStatus(`生日卡圖片已儲存並傳送給 ${birthdayTarget.name}。`);
+      alert(`生日卡圖片已傳送給 ${birthdayTarget.name}。`);
+    }else{
+      await sendBookWideImageToMyLine(imageUrl,label,button,false);
+      greetingMakerStatus('日安圖已儲存，並沿用個人貼圖功能傳送到你的 LINE。');
+    }
   }catch(e){
-    if(button){button.disabled=false;button.textContent=original;}
     greetingMakerStatus('LINE 傳送失敗：'+e.message,true);
-    alert('日安圖傳送失敗：'+e.message);
+    alert((birthdayTarget?'生日卡':'日安圖')+'傳送失敗：'+e.message);
+  }finally{
+    if(button){button.disabled=false;button.textContent=original;}
   }
 }
 
@@ -5712,7 +5730,7 @@ async function generateGreetingJpg(button){
     saveButton.textContent='分享';
     const lineButton=document.getElementById('greetingMakerSendLine');
     if(lineButton) lineButton.disabled=false;
-    greetingMakerStatus(`JPG 已生成：${greetingMakerState.fileName}。現在可按「傳送我的 LINE」，功能與個人貼圖相同。`);
+    greetingMakerStatus(`JPG 已生成：${greetingMakerState.fileName}。現在可直接按 LINE 傳送。`);
   }catch(error){greetingMakerStatus(error.message,true);alert('生成失敗：'+error.message);}
   finally{button.disabled=false;button.textContent=old;}
 }
