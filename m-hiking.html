@@ -708,6 +708,19 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
 /* V12.6：頁首群組切換器 */
 #headerGroupSwitcher{border:1px solid var(--line);border-radius:999px;background:#fff;color:#14532d;font-weight:800}
 @media(max-width:820px){#headerGroupSwitcher{max-width:132px!important;font-size:11px!important}.auth-email{max-width:120px;overflow:hidden;text-overflow:ellipsis}}
+
+.card-pool-album-modal{position:fixed;inset:0;z-index:190;display:none;background:rgba(0,0,0,.78);padding:18px;overflow:auto}
+.card-pool-album-modal.active{display:block}
+.card-pool-album-panel{max-width:1100px;margin:0 auto;background:#fff;border-radius:24px;overflow:hidden;box-shadow:0 24px 70px rgba(0,0,0,.35)}
+.card-pool-album-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid #e5e7eb}
+.card-pool-album-head h2{margin:0}
+.card-pool-album-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:14px;padding:16px}
+.card-pool-album-card{border:2px solid #e5e7eb;border-radius:16px;background:#fff;padding:8px;cursor:pointer;text-align:left;transition:.15s}
+.card-pool-album-card:hover{border-color:#16a34a;transform:translateY(-1px)}
+.card-pool-album-card img{width:100%;aspect-ratio:4/5;object-fit:cover;border-radius:11px;background:#f3f4f6;display:block}
+.card-pool-album-name{font-size:13px;font-weight:800;line-height:1.35;margin-top:7px;word-break:break-all}
+.card-pool-album-empty{grid-column:1/-1;padding:40px;text-align:center;color:#6b7280}
+@media(max-width:640px){.card-pool-album-modal{padding:0}.card-pool-album-panel{min-height:100vh;border-radius:0}.card-pool-album-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;padding:10px}}
 </style>
 
 <script>window.BOOKWIDE_M_HIKING_BUILD='V12.6.1_GROUP_SWITCH_RESTORED';</script>
@@ -1223,6 +1236,17 @@ body:not(.bookwide-super-admin) .super-admin-only{display:none!important}
   </div>
 </div>
 
+<div id="cardPoolAlbumModal" class="card-pool-album-modal" onclick="closeCardPoolAlbum(event)">
+  <div class="card-pool-album-panel" onclick="event.stopPropagation()">
+    <div class="card-pool-album-head">
+      <div><h2>🖼️ R2 公池相簿</h2><div class="small">點選照片後，直接套入生日卡／日安圖。</div></div>
+      <button type="button" class="greeting-maker-close" onclick="closeCardPoolAlbum()">關閉</button>
+    </div>
+    <div id="cardPoolAlbumStatus" class="small" style="padding:0 16px 10px">正在讀取 card-pool/index.json…</div>
+    <div id="cardPoolAlbumGrid" class="card-pool-album-grid"></div>
+  </div>
+</div>
+
 <div id="greetingMakerModal" class="greeting-maker-modal" onclick="closeGreetingMaker(event)">
   <div class="greeting-maker-panel" onclick="event.stopPropagation()">
     <div class="greeting-maker-head">
@@ -1239,6 +1263,7 @@ body:not(.bookwide-super-admin) .super-admin-only{display:none!important}
             <option value="">讀取 card-pool/index.json 中…</option>
           </select>
           <button type="button" onclick="applyGreetingPoolMaterial(this)">套用素材</button>
+          <button type="button" onclick="openCardPoolAlbum()">查看公池相簿</button>
           <span class="small">生日卡、日安圖共用</span>
         </div></div>
         <div class="field"><label>AI 圖卡模式</label><div class="greeting-ai-row">
@@ -5288,7 +5313,13 @@ async function loadGreetingPoolIndex(force=false){
     for(const candidate of BOOKWIDE_CARD_POOL_INDEX_CANDIDATES){
       const testUrl=candidate+(candidate.includes('?')?'&':'?')+'v='+Date.now();
       try{
-        const r=await fetch(testUrl,{cache:'no-store'});
+        const headers=new Headers();
+        if(candidate.startsWith(HIKING_API_BASE)){
+          const {data:{session}}=await bookWideGetSession();
+          if(session?.access_token)headers.set('Authorization','Bearer '+session.access_token);
+          if(BOOKWIDE_GROUP_ID)headers.set('X-BookWide-Group',BOOKWIDE_GROUP_ID);
+        }
+        const r=await fetch(testUrl,{cache:'no-store',headers});
         if(r.ok){res=r;indexUrl=testUrl;BOOKWIDE_CARD_POOL_INDEX=candidate;break;}
         lastStatus=String(r.status);
       }catch(_e){}
@@ -5326,11 +5357,81 @@ function greetingPoolIsUrl(url){
   return greetingPoolItems.some(x=>greetingNormalizeSourceUrl(x.url)===value)||/\/card-pool\//i.test(value);
 }
 
+async function greetingPoolFetchBlob(url){
+  const headers=new Headers();
+  if(String(url).startsWith(HIKING_API_BASE)){
+    const {data:{session}}=await bookWideGetSession();
+    if(session?.access_token)headers.set('Authorization','Bearer '+session.access_token);
+    if(BOOKWIDE_GROUP_ID)headers.set('X-BookWide-Group',BOOKWIDE_GROUP_ID);
+  }
+  const res=await fetch(url,{cache:'no-store',headers});
+  if(!res.ok)throw new Error(`素材讀取失敗（${res.status}）`);
+  const blob=await res.blob();
+  if(!/^image\//i.test(blob.type||''))throw new Error('素材格式不是圖片');
+  return blob;
+}
 async function greetingMakerLoadPoolImage(url){
-  const img=new Image();img.decoding='async';img.crossOrigin='anonymous';img.src=url;
+  let src=url;
+  if(String(url).startsWith(HIKING_API_BASE)){
+    const blob=await greetingPoolFetchBlob(url);
+    src=URL.createObjectURL(blob);
+  }
+  const img=new Image();img.decoding='async';
+  if(!String(src).startsWith('blob:'))img.crossOrigin='anonymous';
+  img.src=src;
   try{await img.decode();}catch(_e){await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error('素材載入失敗'));});}
   if(!greetingMakerImageLooksUsable(img))throw new Error('素材尺寸無效');
   return img;
+}
+
+let cardPoolAlbumObjectUrls=[];
+function closeCardPoolAlbum(event){
+  if(event&&event.target!==event.currentTarget)return;
+  document.getElementById('cardPoolAlbumModal')?.classList.remove('active');
+}
+async function openCardPoolAlbum(){
+  const modal=document.getElementById('cardPoolAlbumModal');
+  const grid=document.getElementById('cardPoolAlbumGrid');
+  const status=document.getElementById('cardPoolAlbumStatus');
+  if(!modal||!grid)return;
+  modal.classList.add('active');
+  grid.innerHTML='<div class="card-pool-album-empty">正在載入照片…</div>';
+  if(status)status.textContent='正在讀取 R2 card-pool/index.json…';
+  try{
+    const items=await loadGreetingPoolIndex(true);
+    cardPoolAlbumObjectUrls.forEach(x=>URL.revokeObjectURL(x));cardPoolAlbumObjectUrls=[];
+    grid.innerHTML='';
+    for(let i=0;i<items.length;i++){
+      const item=items[i];
+      const card=document.createElement('button');card.type='button';card.className='card-pool-album-card';
+      const img=document.createElement('img');img.alt=item.label||greetingPoolFileName(item.url);
+      const name=document.createElement('div');name.className='card-pool-album-name';name.textContent=item.label||greetingPoolFileName(item.url);
+      card.append(img,name);grid.appendChild(card);
+      card.onclick=()=>selectCardPoolAlbumItem(i);
+      try{
+        if(String(item.url).startsWith(HIKING_API_BASE)){
+          const blob=await greetingPoolFetchBlob(item.url);const objectUrl=URL.createObjectURL(blob);cardPoolAlbumObjectUrls.push(objectUrl);img.src=objectUrl;
+        }else{img.crossOrigin='anonymous';img.src=item.url;}
+      }catch(e){img.alt='照片讀取失敗';card.disabled=true;}
+    }
+    if(status)status.textContent=`已讀取 ${items.length} 張公池照片；點一張即可套用。`;
+  }catch(e){
+    grid.innerHTML='<div class="card-pool-album-empty">公池讀取失敗：'+escHtml(e.message)+'</div>';
+    if(status)status.textContent='請確認登入狀態與 R2 card-pool/index.json。';
+  }
+}
+async function selectCardPoolAlbumItem(index){
+  const item=greetingPoolItems[index];if(!item)return;
+  const select=document.getElementById('greetingMakerPool');if(select)select.value=item.url;
+  closeCardPoolAlbum();
+  greetingMakerState.url=item.url;greetingMakerState.blob=null;
+  try{
+    greetingMakerStatus('正在套用公池照片…');
+    const img=await greetingMakerLoadPoolImage(item.url);
+    greetingMakerState.image=img;greetingMakerState.originalImage=img;greetingMakerState.fileName=greetingMakerSafeName(item.url);
+    await renderGreetingMakerPreview();
+    greetingMakerStatus('已套用 R2 公池照片。');
+  }catch(e){greetingMakerStatus(e.message,true);alert('素材載入失敗：'+e.message);}
 }
 
 async function applyGreetingPoolMaterial(button){
