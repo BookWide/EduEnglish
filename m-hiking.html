@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- BookWide M-Hiking V8.1 / signature de-duplication + isolated AI greeting prompt -->
+<!-- BookWide M-Hiking V17.0 LTS / membership entitlement + PC export actions -->
 <html lang="zh-Hant">
 <head>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -764,6 +764,14 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
   .member-banner p{font-size:13px}
 }
 
+
+/* V17.0：PC 生成後提供下載／複製／Email／LINE；手機只保留分享。 */
+.greeting-pc-actions{display:none;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:100%}
+.greeting-pc-actions button{min-height:42px;border:1px solid var(--line);border-radius:11px;background:#fff;font-weight:900;cursor:pointer}
+.greeting-pc-actions button:disabled{opacity:.5;cursor:not-allowed}
+.greeting-free-quota{display:none;margin-top:7px;padding:8px 10px;border-radius:10px;background:#fff8e5;border:1px solid #f0d391;color:#604412;font-size:12px;line-height:1.5}
+@media(min-width:769px) and (hover:hover){#greetingMakerSave{display:none!important}.greeting-pc-actions{display:grid}.greeting-free-quota{display:block}}
+
 </style>
 
 <script>window.BOOKWIDE_M_HIKING_BUILD='V12.6.1_GROUP_SWITCH_RESTORED';</script>
@@ -1384,7 +1392,14 @@ body:not(.bookwide-super-admin) .super-admin-only{display:none!important}
           <button id="greetingMakerGlobalSave" type="button" onclick="saveGreetingGlobalSettings(this)">儲存全站設定</button>
           <button id="greetingMakerSave" type="button" onclick="shareOrDownloadGreeting(this)" disabled>分享</button>
           <button id="greetingMakerSendLine" type="button" onclick="sendGreetingToMyLine(this)">傳送我的 LINE</button>
+          <div id="greetingPcActions" class="greeting-pc-actions">
+            <button id="greetingPcDownload" type="button" onclick="downloadGreetingPc()" disabled>📥 下載 JPG</button>
+            <button id="greetingPcCopy" type="button" onclick="copyGreetingPc()" disabled>📋 複製圖片</button>
+            <button id="greetingPcEmail" type="button" onclick="emailGreetingPc()" disabled>📧 Email</button>
+            <button id="greetingPcLine" type="button" onclick="lineGreetingPc()" disabled>💬 LINE</button>
+          </div>
         </div>
+        <div id="greetingFreeQuota" class="greeting-free-quota"></div>
         <div class="greeting-maker-note">V7.4：此視窗是日安圖唯一設定來源；儲存後，預覽、立即發送與每日排程全部使用同一份設定。</div>
       </div>
     </div>
@@ -1427,6 +1442,8 @@ let BOOKWIDE_GROUP_ID='';
 var GROUP_ID='';
 let BOOKWIDE_GROUP_NAME='';
 let BOOKWIDE_GROUP_MEMBERSHIPS=[];
+let BOOKWIDE_SUBSCRIPTION={active:false,expires_at:null,source:'none'};
+const BOOKWIDE_MEMBER_POLICY={dailyGreetingLimit:1,monthlyAiEnhanceLimit:3,maxSavedGreetings:3};
 
 // 登山功能只判斷登入與群組權限，不檢查金幣或訂閱。
 // BookWide Admin 來源：profiles.is_admin。
@@ -1456,6 +1473,56 @@ async function loadBookWideLineBindingStatus(){
   }
   return BOOKWIDE_LINE_BOUND;
 }
+
+function bwYmdLocal(date=new Date()){const y=date.getFullYear(),m=String(date.getMonth()+1).padStart(2,'0'),d=String(date.getDate()).padStart(2,'0');return `${y}-${m}-${d}`}
+function bwMonthLocal(date=new Date()){return bwYmdLocal(date).slice(0,7)}
+function bwUsageKey(kind,period){return `bookwide_v17_${kind}_${BOOKWIDE_USER?.id||'guest'}_${period}`}
+function bwUsageGet(kind,period){return Number(localStorage.getItem(bwUsageKey(kind,period))||0)}
+function bwUsageSet(kind,period,value){localStorage.setItem(bwUsageKey(kind,period),String(Math.max(0,Number(value)||0)))}
+function bwIsSubscribed(){return BOOKWIDE_IS_SUPER_ADMIN||BOOKWIDE_SUBSCRIPTION.active===true}
+function bwMemberLevel(){if(BOOKWIDE_IS_SUPER_ADMIN)return 'admin';if(bwIsSubscribed())return 'subscriber';if(BOOKWIDE_USER&&bookWideLineBound(BOOKWIDE_PROFILE))return 'free';if(BOOKWIDE_USER)return 'unbound';return 'visitor'}
+async function loadBookWideSubscription(){
+  BOOKWIDE_SUBSCRIPTION={active:false,expires_at:null,source:'none'};
+  if(!BOOKWIDE_USER||BOOKWIDE_IS_SUPER_ADMIN)return BOOKWIDE_SUBSCRIPTION;
+  const now=new Date().toISOString();
+  try{
+    const q=await bookwideSupa.from('user_plans').select('expires_at,status').eq('user_id',BOOKWIDE_USER.id).order('expires_at',{ascending:false}).limit(1);
+    const row=Array.isArray(q.data)?q.data[0]:null;
+    if(row){
+      const active=String(row.status||'').toLowerCase()==='active'&&!!row.expires_at&&new Date(row.expires_at)>new Date(now);
+      BOOKWIDE_SUBSCRIPTION={active,expires_at:row.expires_at||null,source:'user_plans'};
+    }
+  }catch(error){console.warn('loadBookWideSubscription',error)}
+  return BOOKWIDE_SUBSCRIPTION;
+}
+function bwRequireLine(){
+  if(!BOOKWIDE_USER){location.href=bookWideLoginUrl();return false}
+  if(!bookWideLineBound(BOOKWIDE_PROFILE)){alert('請先完成 BookWide 官方 LINE 綁定，才能使用日安圖與貼圖功能。');return false}
+  return true;
+}
+function bwCanGenerateGreeting(show=true){
+  if(!bwRequireLine())return false;
+  if(bwIsSubscribed())return true;
+  const used=bwUsageGet('greeting',bwYmdLocal());
+  if(used>=BOOKWIDE_MEMBER_POLICY.dailyGreetingLimit){if(show)alert('今日免費日安圖額度已使用完畢。訂閱 BookWide 可繼續製作。');return false}
+  return true;
+}
+function bwCanUseAiEnhance(show=true){
+  if(!bwRequireLine())return false;
+  if(bwIsSubscribed())return true;
+  const used=bwUsageGet('ai',bwMonthLocal());
+  if(used>=BOOKWIDE_MEMBER_POLICY.monthlyAiEnhanceLimit){if(show)alert('本月 3 次免費 AI 美化已使用完畢。下月自動恢復，或訂閱後立即繼續。');return false}
+  return true;
+}
+function bwRefreshGreetingQuota(){
+  const el=document.getElementById('greetingFreeQuota');if(!el)return;
+  const level=bwMemberLevel();
+  if(level==='admin'){el.textContent='Admin 帳號：全部功能不限制。';return}
+  if(level==='subscriber'){el.textContent=`訂閱會員：完整功能${BOOKWIDE_SUBSCRIPTION.expires_at?'｜到期 '+String(BOOKWIDE_SUBSCRIPTION.expires_at).slice(0,10):''}`;return}
+  if(level==='free'){const g=bwUsageGet('greeting',bwYmdLocal()),a=bwUsageGet('ai',bwMonthLocal());el.textContent=`免費會員：今日日安圖 ${g}/1｜本月 AI 美化 ${a}/3｜訂閱到期後自動回到此權限，資料不刪除。`;return}
+  el.textContent='完成 LINE 綁定後，可使用免費會員額度。';
+}
+function bwSetPcGreetingActions(enabled){['greetingPcDownload','greetingPcCopy','greetingPcEmail','greetingPcLine'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=!enabled})}
 
 function renderBookWideMemberBanner(user,profile){
   const banner=document.getElementById('memberBanner');
@@ -1579,6 +1646,7 @@ async function resolveBookWideGroupAccess(user){
   }
 
   BOOKWIDE_IS_SUPER_ADMIN=!!profile?.is_admin;
+  await loadBookWideSubscription();
 
   // V9.2：每次登入先確保本人擁有單人群組。
   // 即使使用者已被移出其他群組，也不會先落入「無法進入群組」。
@@ -4936,6 +5004,7 @@ async function loadGreetingGlobalSettings(){
 }
 async function saveGreetingGlobalSettings(button){
   if(!BOOKWIDE_IS_ADMIN){alert('只有群主或 BookWide Admin 可儲存全站日安圖設定。');return;}
+  if(!bwIsSubscribed()){alert('自動 LINE 推播、批次生成與生日自動祝福只提供訂閱會員；Admin 不限制。');return;}
   const old=button.textContent;button.disabled=true;button.textContent='儲存中…';
   try{
     const settings=greetingMakerSettingsFromControls();
@@ -4945,7 +5014,7 @@ async function saveGreetingGlobalSettings(button){
   }catch(e){greetingMakerStatus('全站設定儲存失敗：'+e.message,true);alert('全站設定儲存失敗：'+e.message);}
   finally{button.disabled=false;button.textContent=old;}
 }
-const greetingMakerState={url:'',image:null,originalImage:null,imageObjectUrl:'',aiObjectUrl:'',blendedObjectUrl:'',blob:null,fileName:'',renderToken:0,aiBusy:false,context:{date:'',route:'',location:''}};
+const greetingMakerState={url:'',image:null,originalImage:null,imageObjectUrl:'',aiObjectUrl:'',blendedObjectUrl:'',blob:null,fileName:'',renderToken:0,aiBusy:false,quotaCounted:false,context:{date:'',route:'',location:''}};
 
 function greetingMakerContext(url){
   const raw=String(url||'').trim();
@@ -5505,12 +5574,13 @@ async function greetingMakerResolveImage(button,url){
 }
 
 async function openGreetingMaker(button,url){
+  if(!bwRequireLine())return;
   const modal=document.getElementById('greetingMakerModal');
   if(!modal) return;
   greetingMakerState.url=decodeURIComponent(String(url||button?.closest?.('.photo-tile')?.querySelector?.('img')?.currentSrc||button?.closest?.('.photo-tile')?.querySelector?.('img')?.src||''));
-  greetingMakerState.image=null;greetingMakerState.originalImage=null;greetingMakerState.blob=null;
+  greetingMakerState.image=null;greetingMakerState.originalImage=null;greetingMakerState.blob=null;greetingMakerState.quotaCounted=false;
   if(greetingMakerState.imageObjectUrl){URL.revokeObjectURL(greetingMakerState.imageObjectUrl);greetingMakerState.imageObjectUrl='';}
-  document.getElementById('greetingMakerSave').disabled=true;
+  document.getElementById('greetingMakerSave').disabled=true;bwSetPcGreetingActions(false);bwRefreshGreetingQuota();
   const ctx=greetingMakerContext(greetingMakerState.url);
   greetingMakerState.context=ctx;
   document.getElementById('greetingMakerZh').value=`日安，願今天充滿美好與喜悅。`;
@@ -5837,6 +5907,7 @@ function classicOilProcess(imageData,w,h){
 }
 async function classicOilGreeting(){
   if(greetingMakerState.aiBusy) return;
+  if(!bwCanUseAiEnhance())return;
   const original=greetingMakerState.originalImage;
   if(!original){alert('原照片尚未載入');return;}
   greetingMakerState.aiBusy=true;
@@ -5864,6 +5935,7 @@ async function classicOilGreeting(){
     greetingMakerState.image=img;greetingMakerState.blob=null;
     await renderGreetingMakerPreview();
     greetingMakerStatus('油畫完成。人物臉部與衣服細節已加強回補；左下日期＋路線及所有文字均最後套印。');
+    if(!bwIsSubscribed()){const p=bwMonthLocal();bwUsageSet('ai',p,bwUsageGet('ai',p)+1);bwRefreshGreetingQuota();}
   }catch(error){
     greetingMakerStatus('油畫處理失敗：'+error.message,true);alert('油畫處理失敗：'+error.message);
   }finally{
@@ -5935,6 +6007,7 @@ function scheduleGreetingMakerPreview(){clearTimeout(greetingMakerRenderTimer);g
 
 async function generateGreetingJpg(button){
   if(!greetingMakerState.image){alert('照片尚未載入完成');return;}
+  if(!greetingMakerState.quotaCounted&&!bwCanGenerateGreeting())return;
   const old=button.textContent;button.disabled=true;button.textContent='生成中…';
   try{
     await renderGreetingMakerPreview();
@@ -5946,7 +6019,9 @@ async function generateGreetingJpg(button){
     saveButton.textContent='分享';
     const lineButton=document.getElementById('greetingMakerSendLine');
     if(lineButton) lineButton.disabled=false;
-    greetingMakerStatus(`JPG 已生成：${greetingMakerState.fileName}。現在可直接按 LINE 傳送。`);
+    bwSetPcGreetingActions(true);
+    if(!greetingMakerState.quotaCounted&&!bwIsSubscribed()){const p=bwYmdLocal();bwUsageSet('greeting',p,bwUsageGet('greeting',p)+1);greetingMakerState.quotaCounted=true;bwRefreshGreetingQuota();}
+    greetingMakerStatus(`✓ 已生成：${greetingMakerState.fileName}`);
   }catch(error){greetingMakerStatus(error.message,true);alert('生成失敗：'+error.message);}
   finally{button.disabled=false;button.textContent=old;}
 }
@@ -5957,6 +6032,7 @@ async function shareOrDownloadGreeting(button){
     // V9.6：手機只保留「分享」，未先按生成時由分享按鈕自動產生目前預覽 JPG。
     if(!greetingMakerState.blob){
       if(!greetingMakerState.image) throw new Error('照片尚未載入完成');
+      if(!greetingMakerState.quotaCounted&&!bwCanGenerateGreeting())return;
       await renderGreetingMakerPreview();
       const canvas=document.getElementById('greetingMakerCanvas');
       greetingMakerState.blob=await new Promise((resolve,reject)=>canvas.toBlob(
@@ -5964,6 +6040,7 @@ async function shareOrDownloadGreeting(button){
         'image/jpeg',.98
       ));
       greetingMakerState.fileName=greetingMakerSafeName(greetingMakerState.url);
+      if(!greetingMakerState.quotaCounted&&!bwIsSubscribed()){const p=bwYmdLocal();bwUsageSet('greeting',p,bwUsageGet('greeting',p)+1);greetingMakerState.quotaCounted=true;bwRefreshGreetingQuota();}
     }
     const blob=greetingMakerState.blob;
     const file=new File([blob],greetingMakerState.fileName||'BookWide-my-greeting.jpg',{type:'image/jpeg'});
@@ -5988,6 +6065,19 @@ async function shareOrDownloadGreeting(button){
     if(button){button.disabled=false;button.textContent=old;}
   }
 }
+async function ensureGreetingBlob(){
+  if(greetingMakerState.blob)return greetingMakerState.blob;
+  const b=document.getElementById('greetingMakerGenerate');
+  await generateGreetingJpg(b);
+  if(!greetingMakerState.blob)throw new Error('尚未生成 JPG');
+  return greetingMakerState.blob;
+}
+async function greetingBlobToPng(blob){const bmp=await createImageBitmap(blob),c=document.createElement('canvas');c.width=bmp.width;c.height=bmp.height;c.getContext('2d').drawImage(bmp,0,0);return await new Promise((r,j)=>c.toBlob(x=>x?r(x):j(new Error('PNG 轉換失敗')),'image/png'))}
+async function downloadGreetingPc(){try{const blob=await ensureGreetingBlob();greetingMakerDownload(blob,greetingMakerState.fileName||'BookWide-my-greeting.jpg');greetingMakerStatus('JPG 已下載。')}catch(e){alert(e.message)}}
+async function copyGreetingPc(){try{const blob=await ensureGreetingBlob();if(!navigator.clipboard||!window.ClipboardItem)throw new Error('此瀏覽器不支援複製圖片');const png=await greetingBlobToPng(blob);await navigator.clipboard.write([new ClipboardItem({'image/png':png})]);greetingMakerStatus('圖片已複製，可直接貼到 LINE、Email 或社群。')}catch(e){alert('複製失敗：'+e.message)}}
+async function emailGreetingPc(){try{await copyGreetingPc();const subject=encodeURIComponent(greetingMakerMode()==='birthday'?'BookWide 生日祝福卡':'BookWide 日安圖');const body=encodeURIComponent('圖片已複製到剪貼簿，請在郵件內容中按 Ctrl+V 貼上。');window.location.href=`mailto:?subject=${subject}&body=${body}`}catch(e){alert('Email 開啟失敗：'+e.message)}}
+async function lineGreetingPc(){try{await copyGreetingPc();window.open('https://line.me/R/share?text='+encodeURIComponent('BookWide 圖卡（圖片已複製，請在 LINE 按 Ctrl+V 貼上）'),'_blank','noopener');greetingMakerStatus('LINE 已開啟；請按 Ctrl+V 貼上圖片。')}catch(e){alert('LINE 開啟失敗：'+e.message)}}
+
 function initGreetingMaker(){
   ['greetingMakerZh','greetingMakerEn','greetingMakerSign'].forEach(id=>document.getElementById(id)?.addEventListener('input',scheduleGreetingMakerPreview));
   document.querySelectorAll('input[name="greetingMakerRatio"],input[name="greetingMakerPosition"],#greetingMakerFont,#greetingMakerColor,#greetingMakerEnhance,#greetingMakerFrame').forEach(el=>el.addEventListener('change',scheduleGreetingMakerPreview));
@@ -7233,6 +7323,7 @@ async function lineAutoRun(send){
   }catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error');alert('執行失敗：'+e.message)}
 }
 async function lineAutoSetEnabled(enabled){
+  if(enabled&&!bwIsSubscribed()){alert('每日自動 LINE 推播只提供訂閱會員；Admin 不限制。');return;}
   try{lineAutoSet('laEnabled',enabled);await lineAutoSave(true);const d=await lineAutoApi('/schedule',{method:'POST',body:JSON.stringify({enabled,group_id:BOOKWIDE_GROUP_ID||''})});lineAutoRenderScheduleStatus(d.config||{});lineAutoShow('✅ '+(d.message||(enabled?'每日排程已啟用。':'每日排程已停用。')))}
   catch(e){lineAutoShow('❌ 排程設定失敗：'+e.message,'error');alert('排程設定失敗：'+e.message)}
 }
