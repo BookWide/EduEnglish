@@ -765,7 +765,7 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
 }
 
 
-/* V17.0：PC 生成後提供下載／複製／Email／LINE；手機只保留分享。 */
+/* V17.1：日安圖與貼圖共用分享；PC 提供下載／複製／Email／Facebook，手機使用原生分享。 */
 .greeting-pc-actions{display:none;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:100%}
 .greeting-pc-actions button{min-height:42px;border:1px solid var(--line);border-radius:11px;background:#fff;font-weight:900;cursor:pointer}
 .greeting-pc-actions button:disabled{opacity:.5;cursor:not-allowed}
@@ -1396,7 +1396,7 @@ body:not(.bookwide-super-admin) .super-admin-only{display:none!important}
             <button id="greetingPcDownload" type="button" onclick="downloadGreetingPc()" disabled>📥 下載 JPG</button>
             <button id="greetingPcCopy" type="button" onclick="copyGreetingPc()" disabled>📋 複製圖片</button>
             <button id="greetingPcEmail" type="button" onclick="emailGreetingPc()" disabled>📧 Email</button>
-            <button id="greetingPcLine" type="button" onclick="lineGreetingPc()" disabled>💬 LINE</button>
+            <button id="greetingPcFacebook" type="button" onclick="facebookGreetingPc()" disabled>📘 Facebook</button>
           </div>
         </div>
         <div id="greetingFreeQuota" class="greeting-free-quota"></div>
@@ -1480,7 +1480,7 @@ function bwUsageKey(kind,period){return `bookwide_v17_${kind}_${BOOKWIDE_USER?.i
 function bwUsageGet(kind,period){return Number(localStorage.getItem(bwUsageKey(kind,period))||0)}
 function bwUsageSet(kind,period,value){localStorage.setItem(bwUsageKey(kind,period),String(Math.max(0,Number(value)||0)))}
 function bwIsSubscribed(){return BOOKWIDE_IS_SUPER_ADMIN||BOOKWIDE_SUBSCRIPTION.active===true}
-function bwMemberLevel(){if(BOOKWIDE_IS_SUPER_ADMIN)return 'admin';if(bwIsSubscribed())return 'subscriber';if(BOOKWIDE_USER&&bookWideLineBound(BOOKWIDE_PROFILE))return 'free';if(BOOKWIDE_USER)return 'unbound';return 'visitor'}
+function bwMemberLevel(){if(BOOKWIDE_IS_SUPER_ADMIN)return 'admin';if(bwIsSubscribed())return 'subscriber';if(BOOKWIDE_USER)return 'free';return 'visitor'}
 async function loadBookWideSubscription(){
   BOOKWIDE_SUBSCRIPTION={active:false,expires_at:null,source:'none'};
   if(!BOOKWIDE_USER||BOOKWIDE_IS_SUPER_ADMIN)return BOOKWIDE_SUBSCRIPTION;
@@ -1496,8 +1496,8 @@ async function loadBookWideSubscription(){
   return BOOKWIDE_SUBSCRIPTION;
 }
 function bwRequireLine(){
+  // V17.1：LINE 綁定只限制 LINE 自動推播／直接傳送，不限制日安圖與貼圖製作。
   if(!BOOKWIDE_USER){location.href=bookWideLoginUrl();return false}
-  if(!bookWideLineBound(BOOKWIDE_PROFILE)){alert('請先完成 BookWide 官方 LINE 綁定，才能使用日安圖與貼圖功能。');return false}
   return true;
 }
 function bwCanGenerateGreeting(show=true){
@@ -1520,9 +1520,9 @@ function bwRefreshGreetingQuota(){
   if(level==='admin'){el.textContent='Admin 帳號：全部功能不限制。';return}
   if(level==='subscriber'){el.textContent=`訂閱會員：完整功能${BOOKWIDE_SUBSCRIPTION.expires_at?'｜到期 '+String(BOOKWIDE_SUBSCRIPTION.expires_at).slice(0,10):''}`;return}
   if(level==='free'){const g=bwUsageGet('greeting',bwYmdLocal()),a=bwUsageGet('ai',bwMonthLocal());el.textContent=`免費會員：今日日安圖 ${g}/1｜本月 AI 美化 ${a}/3｜訂閱到期後自動回到此權限，資料不刪除。`;return}
-  el.textContent='完成 LINE 綁定後，可使用免費會員額度。';
+  el.textContent='登入後可使用免費會員額度；LINE 綁定只用於自動推播與直接傳送。';
 }
-function bwSetPcGreetingActions(enabled){['greetingPcDownload','greetingPcCopy','greetingPcEmail','greetingPcLine'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=!enabled})}
+function bwSetPcGreetingActions(enabled){['greetingPcDownload','greetingPcCopy','greetingPcEmail','greetingPcFacebook'].forEach(id=>{const b=document.getElementById(id);if(b)b.disabled=!enabled})}
 
 function renderBookWideMemberBanner(user,profile){
   const banner=document.getElementById('memberBanner');
@@ -5238,6 +5238,36 @@ async function generateStickerPack(button){
   }finally{stickerMakerState.busy=false;button.disabled=false;button.textContent=old;}
 }
 async function blobFromSticker(row){const src=row?.url||row?.data_url;if(!src)throw new Error('貼圖檔案不存在');const r=await fetch(src);if(!r.ok)throw new Error('下載貼圖失敗');return await r.blob();}
+let BW_SHARE_PAYLOAD=null;
+function bwIsMobileDevice(){return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent||'')}
+async function bwBlobToPng(blob){
+  if(String(blob?.type||'').toLowerCase()==='image/png')return blob;
+  const bmp=await createImageBitmap(blob),c=document.createElement('canvas');
+  c.width=bmp.width;c.height=bmp.height;c.getContext('2d').drawImage(bmp,0,0);
+  return await new Promise((resolve,reject)=>c.toBlob(x=>x?resolve(x):reject(new Error('PNG 轉換失敗')),'image/png'));
+}
+function bwEnsurePcShareDialog(){
+  let modal=document.getElementById('bwPcShareDialog');
+  if(modal)return modal;
+  modal=document.createElement('div');modal.id='bwPcShareDialog';
+  modal.style.cssText='position:fixed;inset:0;z-index:10050;background:rgba(0,0,0,.52);display:none;align-items:center;justify-content:center;padding:18px';
+  modal.innerHTML=`<div style="width:min(430px,96vw);background:#fff;border-radius:18px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.28)"><div style="display:flex;align-items:center;justify-content:space-between;gap:12px"><div><b style="font-size:20px">✓ 已生成</b><div id="bwPcShareTitle" style="margin-top:4px;color:#666"></div></div><button type="button" onclick="bwClosePcShareDialog()" style="border:0;background:#eee;border-radius:50%;width:34px;height:34px;font-size:20px;cursor:pointer">×</button></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:18px"><button type="button" onclick="bwPcShareDownload()" class="btn">📥 下載 JPG</button><button type="button" onclick="bwPcShareCopy()" class="btn">📋 複製圖片</button><button type="button" onclick="bwPcShareEmail()" class="btn">📧 Email</button><button type="button" onclick="bwPcShareFacebook()" class="btn">📘 Facebook</button></div><div id="bwPcShareStatus" class="small" style="margin-top:12px;color:#666"></div></div>`;
+  modal.addEventListener('click',e=>{if(e.target===modal)bwClosePcShareDialog()});
+  document.body.appendChild(modal);return modal;
+}
+function bwOpenPcShareDialog(){const m=bwEnsurePcShareDialog();document.getElementById('bwPcShareTitle').textContent=BW_SHARE_PAYLOAD?.title||'BookWide 圖片';document.getElementById('bwPcShareStatus').textContent='';m.style.display='flex'}
+function bwClosePcShareDialog(){const m=document.getElementById('bwPcShareDialog');if(m)m.style.display='none'}
+function bwPcShareMessage(text){const el=document.getElementById('bwPcShareStatus');if(el)el.textContent=text||''}
+async function bwShareImage(blob,filename,title){
+  const file=new File([blob],filename||'BookWide-image.jpg',{type:blob.type||'image/jpeg'});
+  if(bwIsMobileDevice()&&navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){await navigator.share({files:[file],title:title||'BookWide 圖片'});return}
+  BW_SHARE_PAYLOAD={blob,filename:filename||'BookWide-image.jpg',title:title||'BookWide 圖片'};bwOpenPcShareDialog();
+}
+function bwPcShareDownload(){if(!BW_SHARE_PAYLOAD)return;greetingMakerDownload(BW_SHARE_PAYLOAD.blob,BW_SHARE_PAYLOAD.filename);bwPcShareMessage('圖片已下載。')}
+async function bwPcShareCopy(){if(!BW_SHARE_PAYLOAD)throw new Error('沒有可分享圖片');if(!navigator.clipboard||!window.ClipboardItem)throw new Error('此瀏覽器不支援複製圖片');const png=await bwBlobToPng(BW_SHARE_PAYLOAD.blob);await navigator.clipboard.write([new ClipboardItem({'image/png':png})]);bwPcShareMessage('圖片已複製，可貼到 Email 或 Facebook。')}
+async function bwPcShareEmail(){try{await bwPcShareCopy();const subject=encodeURIComponent(BW_SHARE_PAYLOAD?.title||'BookWide 圖片');const body=encodeURIComponent('圖片已複製到剪貼簿，請在郵件內容中按 Ctrl+V 貼上。');window.location.href=`mailto:?subject=${subject}&body=${body}`}catch(e){alert('Email 開啟失敗：'+e.message)}}
+async function bwPcShareFacebook(){try{await bwPcShareCopy();window.open('https://www.facebook.com/sharer/sharer.php?u='+encodeURIComponent(location.href),'_blank','noopener');bwPcShareMessage('Facebook 已開啟；圖片已複製，可在貼文中按 Ctrl+V 貼上。')}catch(e){alert('Facebook 開啟失敗：'+e.message)}}
+
 async function shareStickerRow(row,button){
   if(!row)throw new Error('找不到這張貼圖');
   const old=button?.textContent||'分享';
@@ -5245,13 +5275,7 @@ async function shareStickerRow(row,button){
   try{
     const blob=await blobFromSticker(row);
     const filename=`${row.id||'sticker'}_${row.text||row.id||'BookWide'}.png`;
-    const file=new File([blob],filename,{type:blob.type||'image/png'});
-    if(navigator.share && (!navigator.canShare || navigator.canShare({files:[file]}))){
-      await navigator.share({files:[file],title:`${row.id||''} ${row.text||'BookWide 貼圖'}`.trim(),text:'BookWide 個人貼圖'});
-      return;
-    }
-    greetingMakerDownload(blob,filename);
-    alert('此瀏覽器不支援系統分享，已改為下載圖片。');
+    await bwShareImage(blob,filename,`${row.id||''} ${row.text||'BookWide 貼圖'}`.trim());
   }catch(e){
     if(e?.name!=='AbortError')throw e;
   }finally{
@@ -6043,19 +6067,9 @@ async function shareOrDownloadGreeting(button){
       if(!greetingMakerState.quotaCounted&&!bwIsSubscribed()){const p=bwYmdLocal();bwUsageSet('greeting',p,bwUsageGet('greeting',p)+1);greetingMakerState.quotaCounted=true;bwRefreshGreetingQuota();}
     }
     const blob=greetingMakerState.blob;
-    const file=new File([blob],greetingMakerState.fileName||'BookWide-my-greeting.jpg',{type:'image/jpeg'});
-    if(navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){
-      await navigator.share({files:[file],title:greetingMakerMode()==='birthday'?'生日祝福卡':'BookWide 圖卡'});
-      greetingMakerStatus('已開啟系統分享選單。');
-      return;
-    }
-    if(navigator.clipboard&&window.ClipboardItem){
-      await navigator.clipboard.write([new ClipboardItem({'image/png':await createImageBitmap(blob).then(async bmp=>{const c=document.createElement('canvas');c.width=bmp.width;c.height=bmp.height;c.getContext('2d').drawImage(bmp,0,0);return await new Promise(r=>c.toBlob(r,'image/png'))})})]);
-      greetingMakerStatus('此瀏覽器沒有檔案分享選單，圖片已複製；可直接貼到 LINE、Email 或社群。');
-      alert('圖片已複製，可直接貼到 LINE 或其他軟體。');
-      return;
-    }
-    throw new Error('此瀏覽器不支援直接分享；請改按「生成 JPG」下載。');
+    await bwShareImage(blob,greetingMakerState.fileName||'BookWide-my-greeting.jpg',greetingMakerMode()==='birthday'?'生日祝福卡':'BookWide 圖卡');
+    greetingMakerStatus(bwIsMobileDevice()?'已開啟系統分享選單。':'已開啟 BookWide 分享選單。');
+    return;
   }catch(error){
     if(error?.name!=='AbortError'){
       greetingMakerStatus(error.message,true);
@@ -6074,9 +6088,9 @@ async function ensureGreetingBlob(){
 }
 async function greetingBlobToPng(blob){const bmp=await createImageBitmap(blob),c=document.createElement('canvas');c.width=bmp.width;c.height=bmp.height;c.getContext('2d').drawImage(bmp,0,0);return await new Promise((r,j)=>c.toBlob(x=>x?r(x):j(new Error('PNG 轉換失敗')),'image/png'))}
 async function downloadGreetingPc(){try{const blob=await ensureGreetingBlob();greetingMakerDownload(blob,greetingMakerState.fileName||'BookWide-my-greeting.jpg');greetingMakerStatus('JPG 已下載。')}catch(e){alert(e.message)}}
-async function copyGreetingPc(){try{const blob=await ensureGreetingBlob();if(!navigator.clipboard||!window.ClipboardItem)throw new Error('此瀏覽器不支援複製圖片');const png=await greetingBlobToPng(blob);await navigator.clipboard.write([new ClipboardItem({'image/png':png})]);greetingMakerStatus('圖片已複製，可直接貼到 LINE、Email 或社群。')}catch(e){alert('複製失敗：'+e.message)}}
+async function copyGreetingPc(){try{const blob=await ensureGreetingBlob();if(!navigator.clipboard||!window.ClipboardItem)throw new Error('此瀏覽器不支援複製圖片');const png=await greetingBlobToPng(blob);await navigator.clipboard.write([new ClipboardItem({'image/png':png})]);greetingMakerStatus('圖片已複製，可直接貼到 Email 或 Facebook。')}catch(e){alert('複製失敗：'+e.message)}}
 async function emailGreetingPc(){try{await copyGreetingPc();const subject=encodeURIComponent(greetingMakerMode()==='birthday'?'BookWide 生日祝福卡':'BookWide 日安圖');const body=encodeURIComponent('圖片已複製到剪貼簿，請在郵件內容中按 Ctrl+V 貼上。');window.location.href=`mailto:?subject=${subject}&body=${body}`}catch(e){alert('Email 開啟失敗：'+e.message)}}
-async function lineGreetingPc(){try{await copyGreetingPc();window.open('https://line.me/R/share?text='+encodeURIComponent('BookWide 圖卡（圖片已複製，請在 LINE 按 Ctrl+V 貼上）'),'_blank','noopener');greetingMakerStatus('LINE 已開啟；請按 Ctrl+V 貼上圖片。')}catch(e){alert('LINE 開啟失敗：'+e.message)}}
+async function facebookGreetingPc(){try{await copyGreetingPc();window.open('https://www.facebook.com/sharer/sharer.php?u='+encodeURIComponent(location.href),'_blank','noopener');greetingMakerStatus('Facebook 已開啟；圖片已複製，可在貼文中按 Ctrl+V 貼上。')}catch(e){alert('Facebook 開啟失敗：'+e.message)}}
 
 function initGreetingMaker(){
   ['greetingMakerZh','greetingMakerEn','greetingMakerSign'].forEach(id=>document.getElementById(id)?.addEventListener('input',scheduleGreetingMakerPreview));
@@ -7364,7 +7378,7 @@ else setTimeout(completeBookWideLineWelcome,500);
 window.addEventListener('focus',()=>setTimeout(completeBookWideLineWelcome,300));
 </script>
 
-<script>window.BOOKWIDE_MHIKING_VERSION='V16.1_UNBOUND_LINE_NOTIFY';
+<script>window.BOOKWIDE_MHIKING_VERSION='V17.1_UNIFIED_SHARE';
 setTimeout(birthdayAdminInitButtonState,0);
 </script>
 </body>
