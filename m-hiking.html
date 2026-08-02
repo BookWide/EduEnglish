@@ -7359,7 +7359,7 @@ async function cardCenterClearCard(kind){
   try{
     const d=await hikingApi('/api/line-automation/config',{method:'GET',admin:false});const c=d.config||d||{};
     const payload={group_id:BOOKWIDE_GROUP_ID||''};
-    if(kind==='greeting'){payload.scheduled_composed_url='';document.getElementById('laGreetingCardImage').value='';}
+    if(kind==='greeting'){payload.greeting_card_image_url='';payload.scheduled_composed_url='';payload.last_generated_url='';document.getElementById('laGreetingCardImage').value='';greetingMakerState.blob=null;greetingMakerState.url='';}
     if(kind==='birthday'){
       const raw=document.getElementById('laBirthdayCardMember')?.value||'';if(!raw)return;
       const m=JSON.parse(decodeURIComponent(raw));const map={...(c.birthday_card_urls||{})};
@@ -7823,17 +7823,17 @@ async function lineAutoStoreComposedForSchedule(){
   throw new Error(`Cloudflare Worker 尚未部署 V7.7.1 的完整 JPG API（${lastError||'404 Not found'}）。請覆蓋部署 ZIP 內 worker.js。`);
 }
 
-async function lineAutoSendComposed(){
+async function lineAutoSendComposed(useFixedCard=false){
   const recipients=lineAutoSelectedIds();if(!recipients.length)throw new Error('請至少勾選一個 LINE 收件人');
   const form=new FormData();
-  if(greetingMakerState.blob)form.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
+  if(!useFixedCard&&greetingMakerState.blob)form.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
   form.append('recipient_ids',JSON.stringify(recipients));form.append('group_id',BOOKWIDE_GROUP_ID||'');
   const {data:{session}}=await bookWideGetSession();const headers=new Headers();if(session?.access_token)headers.set('Authorization','Bearer '+session.access_token);if(BOOKWIDE_GROUP_ID)headers.set('X-BookWide-Group',BOOKWIDE_GROUP_ID);
   const paths=['/api/line-automation/send-composed','/api/line-automation/send-composition','/send-composed'];
   let lastError='';
   for(const path of paths){
     const retryForm=new FormData();
-    if(greetingMakerState.blob)retryForm.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
+    if(!useFixedCard&&greetingMakerState.blob)retryForm.append('image',new File([greetingMakerState.blob],greetingMakerState.fileName||'BookWide-greeting.jpg',{type:'image/jpeg'}));
     retryForm.append('recipient_ids',JSON.stringify(recipients));retryForm.append('group_id',BOOKWIDE_GROUP_ID||'');
     const res=await fetch(`${HIKING_API_BASE}${path}`,{method:'POST',headers,body:retryForm});const text=await res.text();let data={};try{data=text?JSON.parse(text):{}}catch(_e){}
     if(res.ok)return data;
@@ -7845,14 +7845,24 @@ async function lineAutoSendComposed(){
 async function lineAutoRun(send){
   try{
     await lineAutoSave(true);
-    if(send){lineAutoShow('正在依序發送已套印文字的完整 JPG…');const d=await lineAutoSendComposed();lineAutoShow(`✅ ${d.message||'完整日安圖已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);await lineAutoRefreshScheduleStatus(false);return}
     const fixed=String(document.getElementById('laGreetingCardImage')?.value||'').trim();
     if(fixed){
-      lineAutoShow('✅ 已採用指定日安卡；下方立即發送與每日排程都會使用這張。');
-      try{openPhotoModal(fixed)}catch(_e){window.open(fixed,'_blank','noopener')}
+      // V27.4：指定固定卡後，立即覆蓋「今天已準備 JPG」與 Cron 使用來源。
+      await lineAutoApi('/config',{method:'POST',body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID||'',greeting_card_image_url:fixed,scheduled_composed_url:fixed,last_generated_url:fixed})});
+      // 避免先前 Canvas Blob 仍留在記憶體，立即發送時誤送舊圖。
+      greetingMakerState.blob=null;greetingMakerState.url=fixed;greetingMakerState.fileName='BookWide-fixed-greeting.jpg';
+      if(send){
+        lineAutoShow('正在發送指定固定日安卡…');
+        const d=await lineAutoSendComposed(true);
+        lineAutoShow(`✅ ${d.message||'指定日安卡已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);
+      }else{
+        lineAutoShow('✅ 指定日安卡已立即設為今天使用；今日預覽、立即發送與每日 Cron 都會使用這張。');
+        try{openPhotoModal(fixed)}catch(_e){window.open(fixed,'_blank','noopener')}
+      }
       await lineAutoRefreshScheduleStatus(false);
       return;
     }
+    if(send){lineAutoShow('正在依序發送已套印文字的完整 JPG…');const d=await lineAutoSendComposed(false);lineAutoShow(`✅ ${d.message||'完整日安圖已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);await lineAutoRefreshScheduleStatus(false);return}
     lineAutoShow('未指定固定卡，正在從日安素材池隨機產生今天日安圖…');const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,image_mode:greetingGlobalConfig.image_mode||lineAutoValue('laImageMode')||'real',group_id:BOOKWIDE_GROUP_ID||''})});
     await lineAutoOpenPreview(d);lineAutoShow('✅ 已從素材池產生完整日安圖；文字已直接印在 JPG 上。');await lineAutoRefreshScheduleStatus(false);
   }catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error');alert('執行失敗：'+e.message)}
