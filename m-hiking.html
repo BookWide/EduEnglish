@@ -8163,7 +8163,7 @@ async function dailyEnglishSetSchedule(enabled){
 }
 </script>
 
-<script>window.BOOKWIDE_MHIKING_VERSION='V28.2_BIRTHDAY_PAYLOAD_DECODE_FIX';
+<script>window.BOOKWIDE_MHIKING_VERSION='V28.3_BIRTHDAY_PREVIEW_SEND_LOCK';
 setTimeout(birthdayAdminInitButtonState,0);
 </script>
 
@@ -8173,13 +8173,57 @@ function v261BirthdayPreview(){
   if(!url){alert('目前會員尚未製作生日卡。');return;}
   window.open(url,'_blank','noopener');
 }
+async function v283SendLockedBirthdayCard(rawMember,imageUrl,button){
+  const member=birthdayAdminParseMemberPayload(rawMember);
+  const lineUserId=String(member.line_user_id||member.lineUserId||'').trim();
+  const name=member.name||member.display_name||member.email||'會員';
+  const lockedUrl=String(imageUrl||'').trim();
+  if(!lineUserId)throw new Error('此會員尚未綁定 LINE');
+  if(!/^https:\/\//i.test(lockedUrl))throw new Error('目前生日卡圖片網址無效');
+
+  const old=button?.textContent||'4 立即發送 LINE';
+  if(button){button.disabled=true;button.textContent='讀取預覽卡…';}
+  try{
+    // V28.3：發送時直接讀取「預覽所使用的已鎖定 JPG」，禁止重新 Random 或重新 Canvas。
+    const imageRes=await fetch(lockedUrl,{cache:'no-store'});
+    if(!imageRes.ok)throw new Error(`生日卡圖片讀取失敗（HTTP ${imageRes.status}）`);
+    const blob=await imageRes.blob();
+    if(!blob.type.startsWith('image/'))throw new Error('目前鎖定網址不是圖片');
+
+    if(button)button.textContent='傳送同一張卡…';
+    const {data:{session}}=await bookWideGetSession();
+    const headers=new Headers();
+    if(session?.access_token)headers.set('Authorization','Bearer '+session.access_token);
+    if(BOOKWIDE_GROUP_ID)headers.set('X-BookWide-Group',BOOKWIDE_GROUP_ID);
+    const paths=['/api/line-automation/send-composed','/api/line-automation/send-composition','/send-composed'];
+    let sent=null,lastError='';
+    for(const path of paths){
+      const form=new FormData();
+      form.append('image',new File([blob],`BookWide-birthday-${Date.now()}.jpg`,{type:blob.type||'image/jpeg'}));
+      form.append('recipient_ids',JSON.stringify([lineUserId]));
+      form.append('group_id',BOOKWIDE_GROUP_ID||'');
+      form.append('label',`生日祝福卡（${name}）`);
+      form.append('locked_image_url',lockedUrl);
+      const res=await fetch(`${HIKING_API_BASE}${path}`,{method:'POST',headers,body:form});
+      const text=await res.text();let data={};try{data=text?JSON.parse(text):{}}catch(_e){}
+      if(res.ok){sent=data;break;}
+      lastError=data.error||text||`HTTP ${res.status}`;
+      if(res.status!==404)break;
+    }
+    if(!sent)throw new Error(lastError||'生日卡圖片發送失敗');
+    birthdayAdminVerifyShow(`✅ ${escHtml(name)}：已發送與預覽完全相同的生日卡。`);
+    alert(`已把目前預覽的同一張生日卡發送給 ${name}。`);
+  }finally{
+    if(button){button.disabled=false;button.textContent=old;}
+  }
+}
 async function v261BirthdayImmediateSend(button){
   const raw=document.getElementById('laBirthdayCardMember')?.value||'';
   if(!raw){alert('請先選擇生日會員。');return;}
   const url=String(document.getElementById('laBirthdayCardImage')?.value||'').trim();
   if(!url){alert('請先到相簿製作並儲存此會員的生日卡。');return;}
-  if(!confirm('確定立即把目前生日卡發送給這位會員？'))return;
-  await birthdayAdminAutoCreateAndSend(raw,button);
+  if(!confirm('確定立即把「目前預覽的同一張生日卡」發送給這位會員？'))return;
+  try{await v283SendLockedBirthdayCard(raw,url,button)}catch(e){birthdayAdminVerifyShow('❌ 發送失敗：'+escHtml(e.message),'error');alert('生日卡發送失敗：'+e.message)}
 }
 async function v261BirthdayStopSchedule(button){
   const enabled=document.getElementById('laBirthdayEnabled');if(enabled)enabled.value='false';
