@@ -8160,13 +8160,13 @@ let dailyEnglishV01PreviewToken='';
 function dailyEnglishV01Render(d){
   const preview=document.getElementById('dailyEnglishPreview');if(!preview)return;
   const items=Array.isArray(d?.items)?d.items:[];
-  preview.innerHTML=`<b>📚 LINE 實際發送內容預覽｜V1.5 診斷版</b>`+items.map((x,i)=>{
+  preview.innerHTML=`<b>📚 LINE 實際發送內容預覽｜V1.6 重新綁定版</b>`+items.map((x,i)=>{
     const head=`【收件人 ${i+1}】${x.email||x.line_user_id||''}`;
     const diag=x.diagnostic||{};
     const bind=diag.binding||{};
     const lookup=diag.profile_lookup||{};
     const emailCheck=diag.email_check||{};
-    const diagHtml=`<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:700">🔎 V1.5 診斷資訊</summary><div style="white-space:pre-wrap;font-family:monospace;font-size:12px;margin-top:8px">LINE user_id: ${escHtml(diag.line_user_id||x.line_user_id||'')}
+    const diagHtml=`<details style="margin-top:8px"><summary style="cursor:pointer;font-weight:700">🔎 V1.6 診斷資訊</summary><div style="white-space:pre-wrap;font-family:monospace;font-size:12px;margin-top:8px">LINE user_id: ${escHtml(diag.line_user_id||x.line_user_id||'')}
 R2 found: ${diag.r2_found?'YES':'NO'}
 R2 key: ${escHtml(bind.r2_key||x.r2_key||'')}
 R2 user_id: ${escHtml(bind.user_id||'')}
@@ -8178,11 +8178,44 @@ profiles.id found: ${lookup.found?'YES':'NO'}
 email 診斷 found: ${emailCheck.found?'YES':'NO'}
 email 對到 profile.id: ${escHtml(emailCheck.matched_profile_id||'')}
 ※ email 僅供診斷，絕不拿來替代發送身分。</div></details>`;
-    if(!x.sendable)return `<div style="margin-top:14px;padding:10px;border:1px solid #d33;border-radius:10px"><b>❌ ${escHtml(head)}</b><div>${escHtml(x.error||'資料錯誤')}</div>${diagHtml}</div>`;
+    if(!x.sendable){
+      const canRebind=diag.r2_found===true;
+      const rebindHtml=canRebind?`<div style="margin-top:10px"><button type="button" class="btn" onclick="dailyEnglishRebind('${escHtml(String(x.line_user_id||''))}')">🔗 重新綁定 BookWide 帳號</button></div>`:'';
+      return `<div style="margin-top:14px;padding:10px;border:1px solid #d33;border-radius:10px"><b>❌ ${escHtml(head)}</b><div>${escHtml(x.error||'資料錯誤')}</div>${rebindHtml}${diagHtml}</div>`;
+    }
     const tag=x.subscription==='paid'?'已訂閱｜個人控制台':'非訂閱｜公開每日一句';
     return `<div style="margin-top:14px;padding:10px;border:1px solid #d6b45d;border-radius:10px"><b>✅ ${escHtml(head)}｜${escHtml(tag)}</b><div style="white-space:pre-wrap;margin-top:8px">${escHtml(x.message?.text||'')}</div>${diagHtml}</div>`;
   }).join('')+`<div class="small" style="margin-top:10px">預覽與立即發送使用同一份內容；預覽 30 分鐘後失效。</div>`;
 }
+async function dailyEnglishRebind(lineId){
+  try{
+    const id=String(lineId||'').trim();
+    if(!id){alert('缺少 LINE user_id');return}
+    const email=String(prompt('請輸入要綁定的 BookWide Email：','')||'').trim().toLowerCase();
+    if(!email)return;
+    dailyEnglishStatus('正在查詢 BookWide 帳號並更新 R2 綁定…');
+    let result;
+    try{
+      result=await lineAutoApi('/rebind',{method:'POST',body:JSON.stringify({line_user_id:id,email,force:false})});
+    }catch(e){
+      const msg=String(e?.message||e||'');
+      if(/已綁定另一個 LINE|409/.test(msg)){
+        if(!confirm('此 BookWide 帳號可能已綁定另一個 LINE。確定覆蓋舊綁定，改綁目前這位 LINE 嗎？')){dailyEnglishStatus('已取消重新綁定。');return}
+        result=await lineAutoApi('/rebind',{method:'POST',body:JSON.stringify({line_user_id:id,email,force:true})});
+      }else throw e;
+    }
+    dailyEnglishStatus(`✅ ${result?.message||'重新綁定完成'}，正在重新預覽…`);
+    const preview=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,recipient_ids:[id],group_id:BOOKWIDE_GROUP_ID||'',daily_content_type:'daily_english'})});
+    dailyEnglishV01PreviewToken=String(preview.preview_token||'');
+    dailyEnglishV01Render(preview);
+    if(preview.error_count)dailyEnglishStatus('❌ 綁定已更新，但課程資料仍有錯誤。','error');
+    else dailyEnglishStatus('✅ 重新綁定成功，已顯示此會員真正會收到的內容。');
+  }catch(e){
+    dailyEnglishStatus('❌ 重新綁定失敗：'+e.message,'error');
+    alert('重新綁定失敗：'+e.message);
+  }
+}
+
 async function dailyEnglishRun(send){
   try{
     if(!send){
