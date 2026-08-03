@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>learning-dashboard-v17-1-one-desktop-one-mobile</title>
+  <title>BookWide Learning Dashboard V30</title>
   <style>
     :root{--bg:#f5f7fb;--card:#fff;--line:#e5e7eb;--ink:#0f172a;--muted:#64748b;--brand:#2563eb;--brand-2:#1d4ed8;--soft:#eff6ff;--done:#16a34a;--shadow:0 14px 34px rgba(15,23,42,.08)}
     *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.42 system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans TC","Microsoft JhengHei",sans-serif}
@@ -870,7 +870,7 @@ async function loadCloudProgress(userId){
   try{
     const {data, error}=await supabaseClient
       .from(CLOUD_PROGRESS_TABLE)
-      .select('start_date,completed_days,category_progress,updated_at')
+      .select('start_date,completed_days,category_progress,current_day,current_lesson_slug,current_lesson_category,last_completed_day,last_sent_date,updated_at')
       .eq('user_id', userId)
       .maybeSingle();
     if(error) throw error;
@@ -887,11 +887,14 @@ async function loadCloudProgress(userId){
       localStorage.setItem(CAT_PROGRESS_KEY, JSON.stringify(cloudCategory));
       setDashStartKey(data.start_date || localStart);
     }else{
+      const completedNums=Object.keys(localCompleted).filter(k=>localCompleted[k]===true).map(Number).filter(Number.isFinite);
       const payload={
         user_id:userId,
         start_date:localStart,
         completed_days:localCompleted,
         category_progress:localCategory,
+        current_day:completedNums.length ? Math.min(30, Math.max(...completedNums)+1) : 1,
+        last_completed_day:completedNums.length ? Math.max(...completedNums) : 0,
         updated_at:new Date().toISOString()
       };
       const {error:insertError}=await supabaseClient.from(CLOUD_PROGRESS_TABLE).insert(payload);
@@ -907,14 +910,31 @@ async function loadCloudProgress(userId){
     return false;
   }
 }
+function getCurrentCourseSnapshot(){
+  const schedule=Array.isArray(state.schedule)?state.schedule:[];
+  const progress=normalizeProgressObject(state.progress);
+  const currentDay=Math.max(1, Math.min(schedule.length||30, getUnlockedDay(progress)));
+  const dayObj=schedule.find(x=>Number(x.day)===currentDay) || schedule[0] || null;
+  const lesson=(dayObj&&Array.isArray(dayObj.lessons)) ? (dayObj.lessons[0]||null) : null;
+  const completed=Object.keys(progress).filter(k=>progress[k]===true).map(Number).filter(Number.isFinite);
+  return {
+    current_day: currentDay,
+    current_lesson_slug: lesson?.slug || null,
+    current_lesson_category: lesson?.category || dayObj?.target_category || null,
+    last_completed_day: completed.length ? Math.max(...completed) : 0
+  };
+}
+
 async function saveCloudProgressNow(){
   if(!CLOUD_PROGRESS_READY || !state.currentUserId) return false;
   try{
+    const snapshot=getCurrentCourseSnapshot();
     const payload={
       user_id:state.currentUserId,
       start_date:getDashStartKey(),
       completed_days:normalizeProgressObject(state.progress),
       category_progress:normalizeProgressObject(getCatSaved()),
+      ...snapshot,
       updated_at:new Date().toISOString()
     };
     const {error}=await supabaseClient
@@ -1763,6 +1783,8 @@ async function bootstrap(){
     state.workRoadmap = buildFiveCategoryRoadmap(state.categoryRoadmaps);
     state.relaxRoadmap = buildRelaxRoadmap(assets, state.profile);
     state.schedule = buildSchedule(state.categoryRoadmaps, state.relaxRoadmap, 30);
+    // V30：排課完成後立即把 current_day / current_lesson 寫回雲端，供 LINE Worker 直接讀取。
+    await saveCloudProgressNow();
 
     if(!state.workRoadmap.length){
       document.getElementById('timeline').innerHTML='<div class="muted" style="padding:10px 0">目前沒有已上架教材。請先補齊 story / music / movie / news / pro 內容。</div>';
