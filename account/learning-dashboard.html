@@ -825,6 +825,9 @@ const DEFAULT_PROFILE = {domain_code:"healthcare", level_code:"beginner", scene_
 const STORAGE_KEY = "BW_DASH_V3_ASSETS_PROGRESS";
 const CAT_PROGRESS_KEY = "BW_DASH_V5_CATEGORY_PROGRESS";
 const DASH_START_KEY = "BW_DASH_V5_START_DATE";
+const CLOUD_PROGRESS_TABLE = "learning_dashboard_progress";
+let CLOUD_PROGRESS_READY = false;
+let CLOUD_PROGRESS_SAVE_TIMER = null;
 const CATEGORY_KEYS = ['story','music','movie','news','pro'];
 const CATEGORY_META = {
   story:{label:'故事', color:'#2563eb'},
@@ -838,14 +841,96 @@ let calendarExpanded = true;
 
 function playerHref(item){return `../player.html?cat=${encodeURIComponent(item.category||'story')}&slug=${encodeURIComponent(item.slug)}&device=${encodeURIComponent(BW_getDeviceType())}`;}
 function getSaved(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}")}catch(e){return {}}}
-function saveSaved(v){localStorage.setItem(STORAGE_KEY, JSON.stringify(v))}
+function saveSaved(v){
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(v||{}));
+  scheduleCloudProgressSave();
+}
 function todayKey(){return new Date().toISOString().slice(0,10)}
 function getCatSaved(){try{return JSON.parse(localStorage.getItem(CAT_PROGRESS_KEY)||"{}")}catch(e){return {}}}
-function saveCatSaved(v){localStorage.setItem(CAT_PROGRESS_KEY, JSON.stringify(v))}
+function saveCatSaved(v){
+  localStorage.setItem(CAT_PROGRESS_KEY, JSON.stringify(v||{}));
+  scheduleCloudProgressSave();
+}
 function getDashStartKey(){
   let key=localStorage.getItem(DASH_START_KEY);
   if(!key){ key=todayKey(); localStorage.setItem(DASH_START_KEY, key); }
   return key;
+}
+function setDashStartKey(v){
+  const key=String(v||'').slice(0,10) || todayKey();
+  localStorage.setItem(DASH_START_KEY, key);
+  return key;
+}
+function normalizeProgressObject(v){
+  if(!v || typeof v!=='object' || Array.isArray(v)) return {};
+  return {...v};
+}
+async function loadCloudProgress(userId){
+  if(!userId) return false;
+  try{
+    const {data, error}=await supabaseClient
+      .from(CLOUD_PROGRESS_TABLE)
+      .select('start_date,completed_days,category_progress,updated_at')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if(error) throw error;
+
+    const localCompleted=getSaved();
+    const localCategory=getCatSaved();
+    const localStart=getDashStartKey();
+
+    if(data){
+      const cloudCompleted=normalizeProgressObject(data.completed_days);
+      const cloudCategory=normalizeProgressObject(data.category_progress);
+      state.progress=cloudCompleted;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudCompleted));
+      localStorage.setItem(CAT_PROGRESS_KEY, JSON.stringify(cloudCategory));
+      setDashStartKey(data.start_date || localStart);
+    }else{
+      const payload={
+        user_id:userId,
+        start_date:localStart,
+        completed_days:localCompleted,
+        category_progress:localCategory,
+        updated_at:new Date().toISOString()
+      };
+      const {error:insertError}=await supabaseClient.from(CLOUD_PROGRESS_TABLE).insert(payload);
+      if(insertError) throw insertError;
+      state.progress=localCompleted;
+    }
+    CLOUD_PROGRESS_READY=true;
+    return true;
+  }catch(err){
+    CLOUD_PROGRESS_READY=false;
+    console.warn('[BW cloud progress] load failed; using localStorage fallback', err);
+    state.progress=getSaved();
+    return false;
+  }
+}
+async function saveCloudProgressNow(){
+  if(!CLOUD_PROGRESS_READY || !state.currentUserId) return false;
+  try{
+    const payload={
+      user_id:state.currentUserId,
+      start_date:getDashStartKey(),
+      completed_days:normalizeProgressObject(state.progress),
+      category_progress:normalizeProgressObject(getCatSaved()),
+      updated_at:new Date().toISOString()
+    };
+    const {error}=await supabaseClient
+      .from(CLOUD_PROGRESS_TABLE)
+      .upsert(payload,{onConflict:'user_id'});
+    if(error) throw error;
+    return true;
+  }catch(err){
+    console.warn('[BW cloud progress] save failed; local copy retained', err);
+    return false;
+  }
+}
+function scheduleCloudProgressSave(){
+  if(!CLOUD_PROGRESS_READY || !state?.currentUserId) return;
+  if(CLOUD_PROGRESS_SAVE_TIMER) clearTimeout(CLOUD_PROGRESS_SAVE_TIMER);
+  CLOUD_PROGRESS_SAVE_TIMER=setTimeout(()=>{ saveCloudProgressNow(); }, 250);
 }
 function addDays(date, n){const d=new Date(date); d.setDate(d.getDate()+n); return d;}
 function dateKeyFromDate(d){return d.toISOString().slice(0,10)}
@@ -1469,6 +1554,7 @@ async function markCategoryDone(day, cat){
     if(!wasDone) await BW_grantProgressRewardIfNeeded(day);
     if(day < state.schedule.length && state.selectedDay===day) state.selectedDay=day+1;
   }
+  await saveCloudProgressNow();
   renderAll();
 }
 async function markDone(day){
@@ -1484,6 +1570,7 @@ async function markDone(day){
   saveSaved(state.progress);
   if(!wasDone) await BW_grantProgressRewardIfNeeded(day);
   if(day < state.schedule.length && state.selectedDay===day) state.selectedDay=day+1;
+  await saveCloudProgressNow();
   renderAll();
 }
 function updateProfileUI(profile){
@@ -1619,7 +1706,7 @@ function initUnlockToggle(){
   });
 }
 
-const state={profile:{...DEFAULT_PROFILE},workRoadmap:[],relaxRoadmap:[],categoryRoadmaps:{},allAssets:[],unlockedList:[],progress:getSaved(),selectedDay:1,schedule:[]};
+const state={profile:{...DEFAULT_PROFILE},workRoadmap:[],relaxRoadmap:[],categoryRoadmaps:{},allAssets:[],unlockedList:[],progress:getSaved(),selectedDay:1,schedule:[],currentUserId:null};
 function renderAll(){
   const unlockedDay=getUnlockedDay(state.progress); if(state.selectedDay>unlockedDay) state.selectedDay=unlockedDay;
   const selected=state.schedule.find(x=>x.day===state.selectedDay)||state.schedule[0];
@@ -1657,7 +1744,11 @@ async function bootstrap(){
   try{
     const guard = await checkDashboardAccess();
     if (guard?.blocked) return;
-    if (guard?.user?.id) BW_startDeviceWatcher(guard.user.id);
+    if (guard?.user?.id){
+      state.currentUserId=guard.user.id;
+      BW_startDeviceWatcher(guard.user.id);
+      await loadCloudProgress(guard.user.id);
+    }
     await loadLearningDomains();
     state.profile = await loadProfile();
     updateProfileUI(state.profile);
