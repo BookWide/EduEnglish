@@ -33,7 +33,8 @@ DB_CONFIG = {
     "password": os.getenv("ERP_DB_PASSWORD", "ssdbqazse"),
     "connect_timeout": 8,
 }
-ITEM_LIMIT = int(os.getenv("ERP_ITEM_LIMIT", "1000"))
+ITEM_LIMIT = int(os.getenv("ERP_ITEM_LIMIT", "50000"))
+CATEGORY_PAGE_SIZE = int(os.getenv("ERP_CATEGORY_PAGE_SIZE", "100"))
 _schema_lock = threading.Lock()
 _schema_cache: dict[str, list[tuple[str, str]]] | None = None
 _product_lock = threading.Lock()
@@ -281,6 +282,49 @@ def merge_rows(table_rows: dict[str, list[dict[str, Any]]]) -> list[dict[str, An
     return [normalize_product(obj) for obj in merged.values()]
 
 
+def derive_category(obj: dict[str, Any], code: str) -> str:
+    # Prefer an actual RunEC grouping/classification field when one exists.
+    preferred_names = {
+        "category", "categoryname", "itemclass", "classname", "class",
+        "group", "groupname", "parent", "parentname", "folder", "path",
+    }
+    for _table, col, value in field_values(obj):
+        if col.lower() in preferred_names:
+            v = repair_text(value)
+            if 1 < len(v) <= 80 and v != code and not v.lower().startswith("inv.item"):
+                return v
+
+    c = (code or "").strip().upper()
+    if c.startswith("1000"):
+        return "1000－原物料及零件"
+    if c.startswith("4000"):
+        return "4000－在製品"
+    if c.startswith("9000"):
+        return "9000－服務"
+    if not c:
+        return "其他／未分類"
+    first = c[0]
+    if first.isdigit():
+        return "0–9－數字品號"
+    if "A" <= first <= "C":
+        return "A–C－英文字母"
+    if "D" <= first <= "F":
+        return "D–F－英文字母"
+    if "G" <= first <= "I":
+        return "G–I－英文字母"
+    if "J" <= first <= "L":
+        return "J–L－英文字母"
+    if "M" <= first <= "O":
+        return "M–O－英文字母"
+    if "P" <= first <= "R":
+        return "P–R－英文字母"
+    if "S" <= first <= "U":
+        return "S–U－英文字母"
+    if "V" <= first <= "Z":
+        return "V–Z－英文字母"
+    return "其他／未分類"
+
+
 def normalize_product(obj: dict[str, Any]) -> dict[str, Any]:
     code = choose_code(obj)
     name = choose_name(obj, code)
@@ -294,7 +338,7 @@ def normalize_product(obj: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": code,
         "name": name,
-        "category": "PostgreSQL 真實產品",
+        "category": derive_category(obj, code),
         "memo": memo,
         "internalMemo": internal,
         "reference": pick_named(obj, ["references", "reference"]),
@@ -355,20 +399,52 @@ def build_product_cache(force: bool = False) -> list[dict[str, Any]]:
         return products
 
 
-def product_search(query: str = "", refresh: bool = False) -> list[dict[str, Any]]:
+def product_search(query: str = "", refresh: bool = False, limit: int = 200) -> list[dict[str, Any]]:
     products = build_product_cache(force=refresh)
     q = repair_text(query).lower().strip()
     if not q:
-        return products[:500]
+        return products[:limit]
     found = []
     for p in products:
         hay = " ".join([
             str(p.get("id", "")), str(p.get("name", "")), str(p.get("memo", "")),
-            str(p.get("internalMemo", "")), " ".join(p.get("_fields", {}).values()),
+            str(p.get("internalMemo", "")), str(p.get("category", "")),
+            " ".join(p.get("_fields", {}).values()),
         ]).lower()
         if q in hay:
             found.append(p)
-    return found[:500]
+            if len(found) >= limit:
+                break
+    return found
+
+
+def category_summary(refresh: bool = False) -> list[dict[str, Any]]:
+    products = build_product_cache(force=refresh)
+    counts: dict[str, int] = {}
+    for p in products:
+        category = str(p.get("category") or "其他／未分類")
+        counts[category] = counts.get(category, 0) + 1
+    return [
+        {"id": name, "name": name, "count": count}
+        for name, count in sorted(counts.items(), key=lambda x: x[0].lower())
+    ]
+
+
+def category_products(category: str, page: int = 1, page_size: int = CATEGORY_PAGE_SIZE) -> dict[str, Any]:
+    products = build_product_cache()
+    matched = [p for p in products if str(p.get("category") or "其他／未分類") == category]
+    page = max(1, page)
+    page_size = max(20, min(300, page_size))
+    start = (page - 1) * page_size
+    rows = matched[start:start + page_size]
+    return {
+        "category": category,
+        "page": page,
+        "pageSize": page_size,
+        "total": len(matched),
+        "hasMore": start + len(rows) < len(matched),
+        "products": rows,
+    }
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -401,11 +477,25 @@ class Handler(SimpleHTTPRequestHandler):
                     "port": DB_CONFIG["port"], "mode": "READ_ONLY_TEST",
                     "version": version, "encoding": encoding,
                 })
+            if parsed.path == "/api/categories":
+                args = parse_qs(parsed.query)
+                refresh = args.get("refresh", ["0"])[0] == "1"
+                categories = category_summary(refresh=refresh)
+                return self.send_json({"ok": True, "count": len(categories), "categories": categories})
+            if parsed.path == "/api/category-products":
+                args = parse_qs(parsed.query)
+                category = args.get("category", [""])[0].strip()
+                page = int(args.get("page", ["1"])[0])
+                page_size = int(args.get("pageSize", [str(CATEGORY_PAGE_SIZE)])[0])
+                if not category:
+                    return self.send_json({"ok": False, "error": "category is required"}, 400)
+                payload = category_products(category, page, page_size)
+                return self.send_json({"ok": True, **payload})
             if parsed.path == "/api/products":
                 args = parse_qs(parsed.query)
                 q = args.get("search", [""])[0].strip()
                 refresh = args.get("refresh", ["0"])[0] == "1"
-                products = product_search(q, refresh=refresh)
+                products = product_search(q, refresh=refresh, limit=200)
                 return self.send_json({"ok": True, "count": len(products), "products": products})
             if parsed.path == "/api/schema/discovery":
                 schema = load_schema()
@@ -418,13 +508,13 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if self.path.startswith("/api/"):
-            return self.send_json({"ok": False, "error": "V0.6 is read-only. Database writes are disabled."}, 405)
+            return self.send_json({"ok": False, "error": "V0.7 is read-only. Database writes are disabled."}, 405)
         return self.send_error(405)
 
 
 def main():
     print("=" * 70)
-    print("BookWide ERP V0.6 PostgreSQL product mapping + label printing")
+    print("BookWide ERP V0.7 product tree + lazy loading + database search")
     print(f"DB: {DB_CONFIG['host']}:{DB_CONFIG['port']} / {DB_CONFIG['dbname']}")
     print("MODE: READ ONLY")
     print("=" * 70)
