@@ -15,11 +15,11 @@ async function boot(){
     await loadProducts('');
   }catch(e){
     $('dbStatus').textContent='❌ PostgreSQL 未連線';
-    $('categoryTree').innerHTML=`<div class="db-error">${esc(e.message)}<br>請用 START_V0.4_POSTGRES_TEST.bat 開啟，不要從 GitHub Pages 測試。</div>`;
+    $('categoryTree').innerHTML=`<div class="db-error">${esc(e.message)}<br>請用 START_V0.5_POSTGRES_TEST.bat 開啟，不要從 GitHub Pages 測試。</div>`;
   }
 }
 async function loadProducts(q=''){
-  $('categoryTree').innerHTML='<div class="empty">正在讀取 PostgreSQL 真實產品...</div>';
+  $('categoryTree').innerHTML='<div class="empty">正在直接讀取 public."Item" 真實產品...</div>';
   const data=await api('/api/products'+(q?`?search=${encodeURIComponent(q)}`:''));
   products=data.products||[]; buildTree(products);
   if(products[0]) selectProduct(products[0]);
@@ -41,7 +41,7 @@ function selectProduct(p){
   renderRows('partnerRows',[],['partner','code','name','memo','level']); renderRows('safeRows',[],['warehouse','low','high']); renderRows('stockRows',[],['warehouse','qty']); renderRows('attachmentRows',[],['content','memo']);
   renderLabels(); refreshPreview();
 }
-function renderRows(id,rows,keys){$(id).innerHTML=rows.length?rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r[k])}</td>`).join('')}</tr>`).join(''):`<tr><td colspan="${keys.length}" class="empty">V0.4 尚未接此關聯表</td></tr>`;}
+function renderRows(id,rows,keys){$(id).innerHTML=rows.length?rows.map(r=>`<tr>${keys.map(k=>`<td>${esc(r[k])}</td>`).join('')}</tr>`).join(''):`<tr><td colspan="${keys.length}" class="empty">V0.5 尚未接此關聯表</td></tr>`;}
 function normalized(s){return String(s||'').toLowerCase().replace(/[^a-z0-9]/g,'');}
 function matchedLabels(){const q=normalized($('labelSearch').value),pid=normalized(current?.id);return labels.filter(l=>{const n=normalized(l.name);return(!q||n.includes(q))&&(!q?(n.includes(pid)||pid.includes(n.slice(0,Math.min(8,n.length)))):true);});}
 function renderLabels(){let list=matchedLabels();if(!list.length&&!$('labelSearch').value)list=labels;$('labelCount').textContent=`${list.length} 個模板`;$('labelPool').innerHTML=list.length?list.map(l=>`<div class="label-card ${selectedLabel===l.name?'selected':''}"><b>${esc(l.name)}</b><small>${esc(l.category)}</small><div><button data-pick="${esc(l.name)}">套用模板</button> <a href="${encodeURI(l.file)}" download>下載 EZP</a></div></div>`).join(''):'<div class="empty">找不到模板。</div>';document.querySelectorAll('[data-pick]').forEach(b=>b.onclick=()=>{selectedLabel=b.dataset.pick;renderLabels();refreshPreview();activateTab('preview');});}
@@ -55,4 +55,4 @@ function refreshPreview(){if(!current)return;$('labelSpec').value=$('labelSpec')
 function printLabels(){refreshPreview();window.print();}
 
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>activateTab(t.dataset.tab));
-$('searchBtn').onclick=search;$('searchInput').addEventListener('keydown',e=>{if(e.key==='Enter')search();});$('labelSearch').addEventListener('input',renderLabels);['batchNo','printQty','packQty','labelDate','labelSpec','labelSize'].forEach(id=>$(id).addEventListener('input',refreshPreview));$('printBtn').onclick=printLabels;$('reloadBtn').onclick=()=>loadProducts($('searchInput').value.trim());$('copyBtn').onclick=()=>alert('V0.4 是 PostgreSQL 唯讀測試版，尚未開放複製或寫入。');$('labelDate').value=new Date().toISOString().slice(0,10);boot();
+$('searchBtn').onclick=search;$('searchInput').addEventListener('keydown',e=>{if(e.key==='Enter')search();});$('labelSearch').addEventListener('input',renderLabels);['batchNo','printQty','packQty','labelDate','labelSpec','labelSize'].forEach(id=>$(id).addEventListener('input',refreshPreview));$('printBtn').onclick=printLabels;$('reloadBtn').onclick=()=>loadProducts($('searchInput').value.trim());$('copyBtn').onclick=()=>alert('V0.5 是 PostgreSQL 唯讀測試版，尚未開放複製或寫入。');$('labelDate').value=new Date().toISOString().slice(0,10);boot();

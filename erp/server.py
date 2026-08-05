@@ -219,46 +219,98 @@ def normalize_product(obj: dict[str, Any]):
     }
 
 
+def _decode_oid(value: Any):
+    if isinstance(value, memoryview):
+        return value.tobytes()
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, str):
+        try:
+            return bytes.fromhex(value)
+        except Exception:
+            return value
+    return value
+
+
+def _select_safe_columns(cols: list[tuple[str, str]]) -> list[str]:
+    """Avoid large bytea payloads such as product photos while keeping i_oid."""
+    selected = []
+    for name, dtype in cols:
+        lname = name.lower()
+        if lname == "i_oid":
+            selected.append(name)
+        elif dtype != "bytea" and lname not in {"photo", "inv_item_source_substitutes"}:
+            selected.append(name)
+    return selected
+
+
+def _fetch_rows(cur, table: str, cols: list[tuple[str, str]], *, limit=500, oids=None, query=""):
+    selected = _select_safe_columns(cols)
+    if not selected:
+        return []
+    fields = sql.SQL(", ").join(sql.Identifier(c) for c in selected)
+    where_parts = []
+    params = []
+    if oids is not None and has_oid(cols):
+        where_parts.append(sql.SQL("{} = ANY(%s)").format(sql.Identifier("i_oid")))
+        params.append(oids)
+    if query:
+        tcols = [c for c in text_columns(cols) if c in selected]
+        if tcols:
+            where_parts.append(sql.SQL("(") + sql.SQL(" OR ").join(
+                sql.SQL("CAST({} AS text) ILIKE %s").format(sql.Identifier(c)) for c in tcols
+            ) + sql.SQL(")"))
+            params.extend([f"%{query}%"] * len(tcols))
+    stmt = sql.SQL("SELECT {} FROM public.{}").format(fields, sql.Identifier(table))
+    if where_parts:
+        stmt += sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
+    stmt += sql.SQL(" LIMIT %s")
+    params.append(limit)
+    cur.execute(stmt, params)
+    return rows_as_dict(cur)
+
+
 def product_search(query: str = ""):
+    """V0.5: read Item directly, then enrich only by same i_oid from Thing/Material.
+
+    This avoids scanning every public table and returns quickly even on the old PostgreSQL 8.0 database.
+    """
     schema = load_schema()
-    preferred = ["Thing", "Item", "Material", "Service", "Stock", "Pricing"]
-    tables = preferred + [t for t in schema if t not in preferred]
+    if "Item" not in schema:
+        raise RuntimeError('找不到 public."Item" 資料表')
+
     table_rows: dict[str, list[dict[str, Any]]] = {}
     with get_conn() as conn, conn.cursor() as cur:
-        terms = [query] if query else SEEDS
-        for term in terms:
-            for table in tables:
-                cols = schema.get(table, [])
-                if not text_columns(cols):
-                    continue
-                try:
-                    rows = fetch_table_matches(cur, table, cols, term, 30)
-                    if rows:
-                        table_rows.setdefault(table, []).extend(rows)
-                except Exception:
-                    conn.rollback()
-        # If seed lookup finds nothing, still return real Item rows and all same-i_oid records.
-        if not table_rows:
-            item_rows = fetch_item_seed_rows(cur, 50)
-            if item_rows:
-                table_rows["Item"] = item_rows
-        oids = []
-        for rows in table_rows.values():
-            for row in rows:
-                if row.get("i_oid") not in (None, ""):
-                    oids.append(row["i_oid"])
-        # For bytea OIDs, rows_as_dict converted bytes to hex; refetch related using decoded bytes.
-        oid_bytes = []
-        for oid in set(map(str, oids)):
+        # First read real Item rows directly. Search only Item when a query is supplied.
+        item_rows = _fetch_rows(cur, "Item", schema["Item"], limit=500, query=query)
+
+        # Product number/name may live in Thing. If Item search did not find anything,
+        # search Thing, then use its i_oid values to fetch matching Item rows.
+        if query and not item_rows and "Thing" in schema:
+            thing_hits = _fetch_rows(cur, "Thing", schema["Thing"], limit=500, query=query)
+            hit_oids = [_decode_oid(r.get("i_oid")) for r in thing_hits if r.get("i_oid") not in (None, "")]
+            if hit_oids:
+                item_rows = _fetch_rows(cur, "Item", schema["Item"], limit=500, oids=hit_oids)
+                table_rows["Thing"] = thing_hits
+
+        if not item_rows:
+            return []
+        table_rows["Item"] = item_rows
+
+        # Enrich only from the known product master companion tables.
+        raw_oids = [_decode_oid(r.get("i_oid")) for r in item_rows if r.get("i_oid") not in (None, "")]
+        for table in ("Thing", "Material", "Service"):
+            cols = schema.get(table)
+            if not cols or not has_oid(cols) or not raw_oids:
+                continue
             try:
-                oid_bytes.append(bytes.fromhex(oid))
+                rows = _fetch_rows(cur, table, cols, limit=1000, oids=raw_oids)
+                if rows:
+                    table_rows.setdefault(table, []).extend(rows)
             except Exception:
-                pass
-        related = fetch_related_by_oids(cur, schema, oid_bytes)
-        for table, rows in related.items():
-            table_rows.setdefault(table, []).extend(rows)
+                conn.rollback()
+
     products = merge_rows(table_rows)
-    # dedupe by displayed id
     unique = {}
     for p in products:
         unique.setdefault(p["id"] or p["_oid"], p)
@@ -313,13 +365,13 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if self.path.startswith("/api/"):
-            return self.send_json({"ok": False, "error": "V0.4 為唯讀測試版，尚未開放寫入 PostgreSQL。"}, 405)
+            return self.send_json({"ok": False, "error": "V0.5 為唯讀產品測試版，尚未開放寫入 PostgreSQL。"}, 405)
         return self.send_error(405)
 
 
 def main():
     print("=" * 66)
-    print("BookWide ERP V0.4 PostgreSQL 真實連線測試")
+    print("BookWide ERP V0.5 PostgreSQL 產品直讀＋標籤套印")
     print(f"DB: {DB_CONFIG['host']}:{DB_CONFIG['port']} / {DB_CONFIG['dbname']}")
     print("模式: READ ONLY（不會寫入或刪除資料）")
     print("=" * 66)
