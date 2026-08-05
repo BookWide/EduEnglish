@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
-import mimetypes
+import math
 import os
 import re
 import sys
 import threading
-import time
 import webbrowser
-from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -18,8 +18,8 @@ try:
     import psycopg2
     from psycopg2 import sql
 except Exception as exc:
-    print("[ERROR] 缺少 psycopg2-binary：", exc)
-    print("請執行 INSTALL_DEPENDENCIES.bat")
+    print("[ERROR] psycopg2-binary is missing:", exc)
+    print("Run INSTALL_DEPENDENCIES.bat")
     raise
 
 ROOT = Path(__file__).resolve().parent
@@ -31,32 +31,46 @@ DB_CONFIG = {
     "dbname": os.getenv("ERP_DB_NAME", "we"),
     "user": os.getenv("ERP_DB_USER", "postgresql"),
     "password": os.getenv("ERP_DB_PASSWORD", "ssdbqazse"),
-    "connect_timeout": 5,
+    "connect_timeout": 8,
 }
-SEEDS = [x.strip() for x in os.getenv(
-    "ERP_PRODUCT_SEEDS",
-    "22.00mmS6DTH,20A-TJL400-S60A,R245-12T3M-PM4230U,800-13T308H-P-G I025(-22)"
-).split(",") if x.strip()]
-
+ITEM_LIMIT = int(os.getenv("ERP_ITEM_LIMIT", "1000"))
 _schema_lock = threading.Lock()
 _schema_cache: dict[str, list[tuple[str, str]]] | None = None
+_product_lock = threading.Lock()
+_product_cache: list[dict[str, Any]] | None = None
 
 
 def get_conn():
-    return psycopg2.connect(**DB_CONFIG)
+    conn = psycopg2.connect(**DB_CONFIG)
+    # PostgreSQL 8.0 database is reported as UNICODE. Let the server convert to UTF-8.
+    # SQL_ASCII installations can override this with ERP_CLIENT_ENCODING.
+    enc = os.getenv("ERP_CLIENT_ENCODING", "UTF8")
+    try:
+        conn.set_client_encoding(enc)
+    except Exception:
+        pass
+    return conn
 
 
 def json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, memoryview):
         value = value.tobytes()
     if isinstance(value, (bytes, bytearray)):
-        return value.hex()
+        return bytes(value).hex()
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     if hasattr(value, "isoformat"):
         try:
             return value.isoformat()
         except Exception:
             pass
-    return value
+    return str(value)
 
 
 def rows_as_dict(cur) -> list[dict[str, Any]]:
@@ -92,134 +106,42 @@ def has_oid(cols: list[tuple[str, str]]) -> bool:
     return any(name.lower() == "i_oid" for name, _ in cols)
 
 
-def fetch_table_matches(cur, table: str, cols: list[tuple[str, str]], query: str, limit: int = 80):
-    tcols = text_columns(cols)
-    if not tcols:
+def safe_columns(cols: list[tuple[str, str]]) -> list[str]:
+    selected = []
+    for name, dtype in cols:
+        lname = name.lower()
+        if lname == "i_oid":
+            selected.append(name)
+        elif dtype != "bytea" and lname not in {"photo", "inv_item_source_substitutes"}:
+            selected.append(name)
+    return selected
+
+
+def fetch_rows(cur, table: str, cols: list[tuple[str, str]], *, limit: int, oids=None):
+    selected = safe_columns(cols)
+    if not selected:
         return []
-    clauses = [sql.SQL("CAST({} AS text) ILIKE %s").format(sql.Identifier(c)) for c in tcols]
-    stmt = sql.SQL("SELECT * FROM public.{} WHERE {} LIMIT %s").format(
-        sql.Identifier(table), sql.SQL(" OR ").join(clauses)
-    )
-    params = [f"%{query}%"] * len(tcols) + [limit]
+    fields = sql.SQL(", ").join(sql.Identifier(c) for c in selected)
+    stmt = sql.SQL("SELECT {} FROM public.{}").format(fields, sql.Identifier(table))
+    params: list[Any] = []
+    if oids is not None:
+        stmt += sql.SQL(" WHERE {} = ANY(%s)").format(sql.Identifier("i_oid"))
+        params.append(oids)
+    stmt += sql.SQL(" LIMIT %s")
+    params.append(limit)
     cur.execute(stmt, params)
     return rows_as_dict(cur)
 
 
-def fetch_item_seed_rows(cur, limit: int = 80):
-    try:
-        cur.execute(sql.SQL('SELECT * FROM public.{} LIMIT %s').format(sql.Identifier("Item")), [limit])
-        return rows_as_dict(cur)
-    except Exception:
-        cur.connection.rollback()
-        return []
+def oid_key(value: Any) -> str:
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value).hex()
+    return str(value or "")
 
 
-def fetch_related_by_oids(cur, schema: dict[str, list[tuple[str, str]]], oids: list[Any]):
-    result: dict[str, list[dict[str, Any]]] = {}
-    if not oids:
-        return result
-    for table, cols in schema.items():
-        if not has_oid(cols):
-            continue
-        try:
-            stmt = sql.SQL('SELECT * FROM public.{} WHERE {} = ANY(%s)').format(
-                sql.Identifier(table), sql.Identifier("i_oid")
-            )
-            cur.execute(stmt, [oids])
-            rows = rows_as_dict(cur)
-            if rows:
-                result[table] = rows
-        except Exception:
-            cur.connection.rollback()
-    return result
-
-
-def merge_rows(table_rows: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    unkeyed = 0
-    for table, rows in table_rows.items():
-        for row in rows:
-            oid = row.get("i_oid")
-            if oid in (None, ""):
-                key = f"unkeyed:{table}:{unkeyed}"
-                unkeyed += 1
-            else:
-                key = str(oid)
-            obj = merged.setdefault(key, {"_oid": key, "_tables": [], "_raw": {}})
-            if table not in obj["_tables"]:
-                obj["_tables"].append(table)
-            obj["_raw"][table] = row
-            for col, value in row.items():
-                if col not in obj or obj[col] in (None, ""):
-                    obj[col] = value
-    return [normalize_product(x) for x in merged.values()]
-
-
-def first_value(obj: dict[str, Any], names: list[str], default=""):
-    lowered = {k.lower(): v for k, v in obj.items() if not k.startswith("_")}
-    for name in names:
-        v = lowered.get(name.lower())
-        if v not in (None, ""):
-            return v
-    return default
-
-
-def choose_code(obj: dict[str, Any]):
-    val = first_value(obj, [
-        "itemno", "item_no", "productno", "product_no", "thingno", "thing_no",
-        "code", "number", "no", "key", "id", "barcodeno", "barcode", "memo"
-    ])
-    if val:
-        return str(val).strip()
-    # fallback: choose a product-like text value
-    candidates = []
-    for k, v in obj.items():
-        if k.startswith("_") or not isinstance(v, str):
-            continue
-        s = v.strip()
-        if 3 <= len(s) <= 80 and re.search(r"[A-Za-z0-9]", s):
-            score = (3 if re.search(r"[-0-9]", s) else 0) + (2 if len(s) < 40 else 0)
-            candidates.append((score, s))
-    return max(candidates, default=(0, obj.get("_oid", "")))[1]
-
-
-def choose_name(obj: dict[str, Any], code: str):
-    val = first_value(obj, ["name", "title", "displayname", "display_name", "description", "desc", "memo"])
-    if val and str(val).strip() != code:
-        return str(val).strip()
-    for k, v in obj.items():
-        if k.startswith("_") or not isinstance(v, str):
-            continue
-        s = v.strip()
-        if s and s != code and any(ord(ch) > 127 for ch in s):
-            return s
-    return "（名稱欄位待確認）"
-
-
-def normalize_product(obj: dict[str, Any]):
-    code = choose_code(obj)
-    name = choose_name(obj, code)
-    return {
-        "id": code,
-        "name": name,
-        "category": first_value(obj, ["category", "class", "itemclass", "type"], "PostgreSQL 真實產品"),
-        "memo": first_value(obj, ["memo", "description", "desc"], ""),
-        "internalMemo": first_value(obj, ["internalmemo", "reference", "references", "designrule", "ruleno"], ""),
-        "reference": first_value(obj, ["references", "reference"], ""),
-        "unit": first_value(obj, ["baseunit", "unit"], ""),
-        "stockable": bool(first_value(obj, ["stockable"], False)),
-        "taxable": bool(first_value(obj, ["taxable"], False)),
-        "barcode": first_value(obj, ["barcodeno", "barcode"], code),
-        "photo": "",
-        "status": "DB READ-ONLY",
-        "updatedAt": "",
-        "_oid": obj.get("_oid"),
-        "_tables": obj.get("_tables", []),
-        "_raw": obj.get("_raw", {}),
-    }
-
-
-def _decode_oid(value: Any):
+def oid_db(value: Any):
     if isinstance(value, memoryview):
         return value.tobytes()
     if isinstance(value, (bytes, bytearray)):
@@ -232,89 +154,221 @@ def _decode_oid(value: Any):
     return value
 
 
-def _select_safe_columns(cols: list[tuple[str, str]]) -> list[str]:
-    """Avoid large bytea payloads such as product photos while keeping i_oid."""
-    selected = []
-    for name, dtype in cols:
-        lname = name.lower()
-        if lname == "i_oid":
-            selected.append(name)
-        elif dtype != "bytea" and lname not in {"photo", "inv_item_source_substitutes"}:
-            selected.append(name)
-    return selected
+def repair_text(value: Any) -> str:
+    if value is None:
+        return ""
+    s = str(value).replace("\x00", "").strip()
+    if not s:
+        return ""
+
+    candidates = [s]
+    # Old Java/SQL_ASCII systems sometimes expose Big5 bytes as Latin-1 characters.
+    for src, dst in (("latin1", "cp950"), ("latin1", "big5"), ("cp1252", "utf-8")):
+        try:
+            candidates.append(s.encode(src).decode(dst))
+        except Exception:
+            pass
+
+    def score(x: str) -> tuple[int, int, int, int]:
+        cjk = sum(1 for ch in x if "\u3400" <= ch <= "\u9fff")
+        printable = sum(1 for ch in x if ch.isprintable())
+        bad = x.count("�") + sum(1 for ch in x if ord(ch) < 32 and ch not in "\t\r\n")
+        boxes = x.count("□") + x.count("?")
+        return (cjk * 8 + printable - bad * 20 - boxes * 3, cjk, -bad, -boxes)
+
+    best = max(candidates, key=score)
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", best).strip()
 
 
-def _fetch_rows(cur, table: str, cols: list[tuple[str, str]], *, limit=500, oids=None, query=""):
-    selected = _select_safe_columns(cols)
-    if not selected:
-        return []
-    fields = sql.SQL(", ").join(sql.Identifier(c) for c in selected)
-    where_parts = []
-    params = []
-    if oids is not None and has_oid(cols):
-        where_parts.append(sql.SQL("{} = ANY(%s)").format(sql.Identifier("i_oid")))
-        params.append(oids)
-    if query:
-        tcols = [c for c in text_columns(cols) if c in selected]
-        if tcols:
-            where_parts.append(sql.SQL("(") + sql.SQL(" OR ").join(
-                sql.SQL("CAST({} AS text) ILIKE %s").format(sql.Identifier(c)) for c in tcols
-            ) + sql.SQL(")"))
-            params.extend([f"%{query}%"] * len(tcols))
-    stmt = sql.SQL("SELECT {} FROM public.{}").format(fields, sql.Identifier(table))
-    if where_parts:
-        stmt += sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_parts)
-    stmt += sql.SQL(" LIMIT %s")
-    params.append(limit)
-    cur.execute(stmt, params)
-    return rows_as_dict(cur)
+def usable_text(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    s = repair_text(value)
+    if not s or len(s) > 500:
+        return False
+    printable = sum(ch.isprintable() for ch in s)
+    return printable >= max(1, int(len(s) * 0.85))
 
 
-def product_search(query: str = ""):
-    """V0.5: read Item directly, then enrich only by same i_oid from Thing/Material.
-
-    This avoids scanning every public table and returns quickly even on the old PostgreSQL 8.0 database.
-    """
-    schema = load_schema()
-    if "Item" not in schema:
-        raise RuntimeError('找不到 public."Item" 資料表')
-
-    table_rows: dict[str, list[dict[str, Any]]] = {}
-    with get_conn() as conn, conn.cursor() as cur:
-        # First read real Item rows directly. Search only Item when a query is supplied.
-        item_rows = _fetch_rows(cur, "Item", schema["Item"], limit=500, query=query)
-
-        # Product number/name may live in Thing. If Item search did not find anything,
-        # search Thing, then use its i_oid values to fetch matching Item rows.
-        if query and not item_rows and "Thing" in schema:
-            thing_hits = _fetch_rows(cur, "Thing", schema["Thing"], limit=500, query=query)
-            hit_oids = [_decode_oid(r.get("i_oid")) for r in thing_hits if r.get("i_oid") not in (None, "")]
-            if hit_oids:
-                item_rows = _fetch_rows(cur, "Item", schema["Item"], limit=500, oids=hit_oids)
-                table_rows["Thing"] = thing_hits
-
-        if not item_rows:
-            return []
-        table_rows["Item"] = item_rows
-
-        # Enrich only from the known product master companion tables.
-        raw_oids = [_decode_oid(r.get("i_oid")) for r in item_rows if r.get("i_oid") not in (None, "")]
-        for table in ("Thing", "Material", "Service"):
-            cols = schema.get(table)
-            if not cols or not has_oid(cols) or not raw_oids:
+def field_values(obj: dict[str, Any]):
+    for table, row in obj.get("_raw", {}).items():
+        for col, raw in row.items():
+            if col.lower() == "i_oid" or not usable_text(raw):
                 continue
-            try:
-                rows = _fetch_rows(cur, table, cols, limit=1000, oids=raw_oids)
-                if rows:
-                    table_rows.setdefault(table, []).extend(rows)
-            except Exception:
-                conn.rollback()
+            yield table, col, repair_text(raw)
 
-    products = merge_rows(table_rows)
-    unique = {}
+
+def pick_named(obj: dict[str, Any], names: list[str]) -> str:
+    wanted = {n.lower() for n in names}
+    for _table, col, value in field_values(obj):
+        if col.lower() in wanted and value:
+            return value
+    return ""
+
+
+def code_score(table: str, col: str, value: str) -> int:
+    c = col.lower()
+    t = table.lower()
+    score = 0
+    exact = {
+        "id": 130, "code": 125, "itemno": 125, "item_no": 125,
+        "thingno": 120, "thing_no": 120, "number": 110, "no": 100,
+        "key": 95, "barcodeno": 60, "barcode": 55,
+    }
+    score += exact.get(c, 0)
+    if "code" in c or c.endswith("no") or "number" in c:
+        score += 55
+    if t in {"thing", "entity", "item"}:
+        score += 20
+    if re.search(r"[A-Za-z]", value) and re.search(r"\d", value):
+        score += 45
+    if any(ch in value for ch in "-_/()."):
+        score += 25
+    if 3 <= len(value) <= 50:
+        score += 20
+    if any("\u3400" <= ch <= "\u9fff" for ch in value):
+        score -= 25
+    if value.count("□") or value.count("?") > 2:
+        score -= 80
+    return score
+
+
+def name_score(table: str, col: str, value: str, code: str) -> int:
+    if value == code:
+        return -100
+    c = col.lower()
+    t = table.lower()
+    score = 0
+    exact = {"name": 140, "title": 120, "displayname": 115, "description": 80, "memo": 35}
+    score += exact.get(c, 0)
+    if "name" in c:
+        score += 60
+    if t in {"thing", "entity", "item"}:
+        score += 20
+    if any("\u3400" <= ch <= "\u9fff" for ch in value):
+        score += 55
+    if 1 <= len(value) <= 100:
+        score += 15
+    if re.fullmatch(r"[0-9A-Za-z_.\-()/ ]+", value):
+        score -= 20
+    return score
+
+
+def choose_code(obj: dict[str, Any]) -> str:
+    values = list(field_values(obj))
+    if not values:
+        return obj.get("_oid", "")
+    return max(values, key=lambda x: code_score(*x))[2]
+
+
+def choose_name(obj: dict[str, Any], code: str) -> str:
+    values = list(field_values(obj))
+    if not values:
+        return "（名稱欄位待確認）"
+    best = max(values, key=lambda x: name_score(*x, code))
+    return best[2] if name_score(*best, code) > 0 else "（名稱欄位待確認）"
+
+
+def merge_rows(table_rows: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for table, rows in table_rows.items():
+        for row in rows:
+            key = oid_key(row.get("i_oid")) or f"{table}:{len(merged)}"
+            obj = merged.setdefault(key, {"_oid": key, "_tables": [], "_raw": {}})
+            if table not in obj["_tables"]:
+                obj["_tables"].append(table)
+            obj["_raw"][table] = row
+    return [normalize_product(obj) for obj in merged.values()]
+
+
+def normalize_product(obj: dict[str, Any]) -> dict[str, Any]:
+    code = choose_code(obj)
+    name = choose_name(obj, code)
+    memo = pick_named(obj, ["memo", "description", "desc"])
+    internal = pick_named(obj, ["internalmemo", "references", "reference", "designrule", "ruleno"])
+    unit = pick_named(obj, ["baseunit", "unit"])
+    barcode = pick_named(obj, ["barcodeno", "barcode"]) or code
+    flat = {}
+    for table, col, value in field_values(obj):
+        flat[f"{table}.{col}"] = value
+    return {
+        "id": code,
+        "name": name,
+        "category": "PostgreSQL 真實產品",
+        "memo": memo,
+        "internalMemo": internal,
+        "reference": pick_named(obj, ["references", "reference"]),
+        "unit": unit,
+        "stockable": bool(next((r.get("stockable") for r in obj["_raw"].values() if "stockable" in r), False)),
+        "taxable": bool(next((r.get("taxable") for r in obj["_raw"].values() if "taxable" in r), False)),
+        "barcode": barcode,
+        "photo": "",
+        "status": "DB READ-ONLY",
+        "updatedAt": "",
+        "_oid": obj.get("_oid"),
+        "_tables": obj.get("_tables", []),
+        "_fields": flat,
+    }
+
+
+def build_product_cache(force: bool = False) -> list[dict[str, Any]]:
+    global _product_cache
+    with _product_lock:
+        if _product_cache is not None and not force:
+            return _product_cache
+        schema = load_schema()
+        if "Item" not in schema:
+            raise RuntimeError('Cannot find public."Item"')
+        table_rows: dict[str, list[dict[str, Any]]] = {}
+        with get_conn() as conn, conn.cursor() as cur:
+            item_rows = fetch_rows(cur, "Item", schema["Item"], limit=ITEM_LIMIT)
+            table_rows["Item"] = item_rows
+            raw_oids = [oid_db(r.get("i_oid")) for r in item_rows if r.get("i_oid") not in (None, "")]
+
+            # Join only tables that share i_oid and contain text fields. This finds the
+            # actual RunEC parent/master table without scanning all table rows.
+            candidates = []
+            preferred = ["Thing", "Entity", "NamedObject", "Material", "Service", "ItemGroup"]
+            for table in preferred:
+                cols = schema.get(table)
+                if cols and has_oid(cols) and text_columns(cols):
+                    candidates.append(table)
+            for table, cols in schema.items():
+                if table not in candidates and table != "Item" and has_oid(cols) and text_columns(cols):
+                    candidates.append(table)
+
+            for table in candidates:
+                try:
+                    rows = fetch_rows(cur, table, schema[table], limit=max(ITEM_LIMIT * 2, 2000), oids=raw_oids)
+                    if rows:
+                        table_rows[table] = rows
+                except Exception as exc:
+                    conn.rollback()
+                    print(f"[SKIP] {table}: {exc}")
+
+        products = merge_rows(table_rows)
+        # Remove obvious non-products and sort by human-readable code.
+        products = [p for p in products if p.get("id") and not str(p["id"]).startswith("unkeyed:")]
+        products.sort(key=lambda p: (str(p.get("id", "")).lower(), str(p.get("name", "")).lower()))
+        _product_cache = products
+        print(f"[OK] Product cache: {len(products)} products; joined tables: {', '.join(table_rows)}")
+        return products
+
+
+def product_search(query: str = "", refresh: bool = False) -> list[dict[str, Any]]:
+    products = build_product_cache(force=refresh)
+    q = repair_text(query).lower().strip()
+    if not q:
+        return products[:500]
+    found = []
     for p in products:
-        unique.setdefault(p["id"] or p["_oid"], p)
-    return list(unique.values())
+        hay = " ".join([
+            str(p.get("id", "")), str(p.get("name", "")), str(p.get("memo", "")),
+            str(p.get("internalMemo", "")), " ".join(p.get("_fields", {}).values()),
+        ]).lower()
+        if q in hay:
+            found.append(p)
+    return found[:500]
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -326,8 +380,8 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("[WEB]", fmt % args)
 
-    def send_json(self, payload: Any, status=200):
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    def send_json(self, payload: Any, status: int = 200):
+        data = json.dumps(payload, ensure_ascii=False, default=json_safe).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -340,23 +394,22 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             if parsed.path == "/api/health":
                 with get_conn() as conn, conn.cursor() as cur:
-                    cur.execute("SELECT current_database(), version()")
-                    db, version = cur.fetchone()
+                    cur.execute("SELECT current_database(), version(), pg_encoding_to_char(encoding) FROM pg_database WHERE datname=current_database()")
+                    db, version, encoding = cur.fetchone()
                 return self.send_json({
-                    "ok": True,
-                    "database": db,
-                    "host": DB_CONFIG["host"],
-                    "port": DB_CONFIG["port"],
-                    "mode": "READ_ONLY_TEST",
-                    "version": version,
+                    "ok": True, "database": db, "host": DB_CONFIG["host"],
+                    "port": DB_CONFIG["port"], "mode": "READ_ONLY_TEST",
+                    "version": version, "encoding": encoding,
                 })
             if parsed.path == "/api/products":
-                q = parse_qs(parsed.query).get("search", [""])[0].strip()
-                products = product_search(q)
+                args = parse_qs(parsed.query)
+                q = args.get("search", [""])[0].strip()
+                refresh = args.get("refresh", ["0"])[0] == "1"
+                products = product_search(q, refresh=refresh)
                 return self.send_json({"ok": True, "count": len(products), "products": products})
             if parsed.path == "/api/schema/discovery":
                 schema = load_schema()
-                compact = {t: [c for c, _ in cols] for t, cols in schema.items() if t in {"Item", "Thing", "Material", "Stock", "Pricing"}}
+                compact = {t: [c for c, _ in cols] for t, cols in schema.items() if t in {"Item", "Thing", "Entity", "Material", "Service"}}
                 return self.send_json({"ok": True, "tables": compact})
             return super().do_GET()
         except Exception as exc:
@@ -365,30 +418,31 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         if self.path.startswith("/api/"):
-            return self.send_json({"ok": False, "error": "V0.5 為唯讀產品測試版，尚未開放寫入 PostgreSQL。"}, 405)
+            return self.send_json({"ok": False, "error": "V0.6 is read-only. Database writes are disabled."}, 405)
         return self.send_error(405)
 
 
 def main():
-    print("=" * 66)
-    print("BookWide ERP V0.5 PostgreSQL 產品直讀＋標籤套印")
+    print("=" * 70)
+    print("BookWide ERP V0.6 PostgreSQL product mapping + label printing")
     print(f"DB: {DB_CONFIG['host']}:{DB_CONFIG['port']} / {DB_CONFIG['dbname']}")
-    print("模式: READ ONLY（不會寫入或刪除資料）")
-    print("=" * 66)
+    print("MODE: READ ONLY")
+    print("=" * 70)
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute("SELECT current_database(), version()")
-            print("[OK] PostgreSQL 已連線：", cur.fetchone()[0])
+            cur.execute("SELECT current_database(), pg_encoding_to_char(encoding) FROM pg_database WHERE datname=current_database()")
+            db, encoding = cur.fetchone()
+            print(f"[OK] PostgreSQL connected: {db}; encoding={encoding}")
     except Exception as exc:
-        print("[FAIL] PostgreSQL 連線失敗：", exc)
-        print("請先確認 D:\\PostgreSQL\\8.0\\data 已在 5433 啟動。")
-        input("按 Enter 結束...")
+        print("[FAIL] PostgreSQL connection failed:", exc)
+        print(r"Check D:\PostgreSQL\8.0\data on port 5433.")
+        input("Press Enter to exit...")
         sys.exit(1)
 
     server = ThreadingHTTPServer((HOST, WEB_PORT), Handler)
     url = f"http://{HOST}:{WEB_PORT}/"
-    print("[OK] ERP 網址：", url)
-    threading.Timer(1.2, lambda: webbrowser.open(url)).start()
+    print("[OK] ERP URL:", url)
+    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
