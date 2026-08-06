@@ -2161,7 +2161,7 @@ th,td{
             <div class="muted" id="cuesStatus" style="padding:8px 12px">（字幕載入中…）</div>
             <table class="cues-table">
               <thead>
-              <tr><th style="width:80px">時間</th><th id="subLangHeader">英文 / 中文 / 日文</th></tr>
+              <tr><th style="width:80px">時間</th><th id="subLangHeader">英文 / 中文 / 當地語</th></tr>
               </thead>
               <tbody id="cuesBody"></tbody>
             </table>
@@ -2221,7 +2221,7 @@ th,td{
                 <span class="muted">標準答案：</span>
                 <button id="aiDemoEn" class="btn sm">英</button>
                 <button id="aiDemoZh" class="btn sm">中</button>
-                <button id="aiDemoJa" class="btn sm">日文</button>
+                <button id="aiDemoJa" class="btn sm">當地語</button>
                 <button id="aiDemoTts" class="btn sm">朗讀目前</button>
               </div>
               <div id="aiReply">(等待你的作答…)</div>
@@ -2518,7 +2518,7 @@ function BW_updateLocalUI(forceLabel){
     label = forceLabel || BW_activeLocalLabel() || BW_currentLocalLabel() || '當地語';
   }
   const aiBtn = document.getElementById('aiDemoJa');
-  if(aiBtn) aiBtn.textContent = (cat === 'music' ? label : '日文');
+  if(aiBtn) aiBtn.textContent = label;
   const talkBtn = document.getElementById('btnTalkSpeakJa');
   if(talkBtn) talkBtn.textContent = label;
   document.querySelectorAll('.talk-ja').forEach(btn => btn.textContent = label);
@@ -4053,6 +4053,7 @@ async function loadCues(){
           ${BW_musicExtraLocalHtml(c)}
           ${BW_musicChineseJapaneseHtml(c)}
           ${(cat !== 'music' && c.ja && c.ja!==c.en && c.ja!==c.zh)?`<div class="ja-line local-line" data-lang="ja" data-label="日文">【日文】${esc(c.ja)}</div>`:''}
+          ${(cat !== 'music' && c.local_pron)?`<div class="kana-line" data-lang="ja" data-label="日文">${BW_pronLabel('日文', 'ja')}${esc(c.local_pron)}</div>`:''}
           ${(cat !== 'music' && c.en_translation)?`<div class="en-trans-line">${esc(c.en_translation)}</div>`:''}
         </td>
       </tr>`).join('');
@@ -4428,16 +4429,18 @@ async function loadVocab(){
     vBox.innerHTML = list.map(v=>{
       const zh   = v.zh || '';
       const en   = v.en || '';
+      let localLabel = BW_localLabel(v);
       const localLang = BW_detectLocalLang(v);
+      const isJapaneseLocal = BW_isJapaneseLocalCode(localLang);
       const isChineseLocal = BW_isChineseLocalCode(localLang);
       const isZhMusic = (cat === 'music' && isChineseLocal);
-      // 非 music 固定英／中／日，不再讓 local_lang=en 把第三列標成中文或英文。
-      let localLabel = (cat === 'music' && !isZhMusic) ? BW_localLabel(v) : '日文';
-      const ja = (cat === 'music' && !isZhMusic)
-        ? BW_vocabLocal(v)
-        : String(v.ja || v.ja_def || v.jp || '').trim();
+      const localTts = isZhMusic ? 'ja-JP' : BW_localTtsLang(localLang);
+      // V108：中文歌單字卡的第三列不是再顯示中文。
+      // 【中】保留中文解釋 + zh-TW；下一列改顯示【日文】並強制 ja-JP。
+      if(isZhMusic) localLabel = '日文';
+      const ja   = isZhMusic ? String(v.ja || v.ja_def || '').trim() : BW_vocabLocal(v);
       const localMainSpeakText = ja;
-      const localMainSpeakLang = (cat === 'music' && !isZhMusic) ? BW_localTtsLang(localLang) : 'ja-JP';
+      const localMainSpeakLang = isZhMusic ? 'ja-JP' : localTts;
       const img  = v.img || '';
 
       const imgHtml = img ? `
@@ -4468,9 +4471,9 @@ async function loadVocab(){
         </div>` : ''}
 
         ${ja ? `
-        <div style="margin:2px 0;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
-          <span><span style="font-size:13px;color:#9fb0c9;">【${esc(localLabel)}】</span> ${esc(ja)}</span>
-          <button class="btn sm" data-act="speak" data-lang="${esc(localMainSpeakLang)}" data-text="${esc(localMainSpeakText)}" aria-label="朗讀${esc(localLabel)}">🔊</button>
+        <div style="margin:2px 0;">
+          <span style="font-size:13px;color:#9fb0c9;">【${esc(localLabel)}】</span>
+          <span>${esc(ja)}</span>
         </div>` : ''}
 
 
@@ -4546,27 +4549,25 @@ async function loadAI(){
     let currentLang = 'en';
 
     function getSamples(t){
-      const clean = (v) => {
-        if(v === undefined || v === null || typeof v === 'object') return '';
-        const s = String(v).trim();
-        if(!s || /^\s*[\{\[]/.test(s) || /['\"]prompt['\"]\s*:/.test(s)) return '';
-        return s;
-      };
-      const enObj=(t.en && typeof t.en==='object')?t.en:null;
+      const localObj = BW_localObject(t);
       const zhObj=(t.zh && typeof t.zh==='object')?t.zh:null;
-      const jaObj=(t.ja && typeof t.ja==='object')?t.ja:null;
+      const enObj=(t.en && typeof t.en==='object')?t.en:null;
 
-      const sampleEn = clean(t.sample_en) || clean(t.sampleEn) ||
-        clean(enObj && (enObj.sample || enObj.reply)) || clean(t.sample) || clean(t.demo);
+      const sampleEn=t.sample_en || t.sampleEn ||
+        (enObj && (enObj.sample || enObj.reply)) ||
+        (typeof t.en==='string'?t.en:'') ||
+        t.sample || t.demo || '';
 
-      const sampleZh = clean(t.sample_zh) || clean(t.sampleZh) ||
-        clean(zhObj && (zhObj.sample || zhObj.reply)) || clean(t.cn);
+      const sampleZh=t.sample_zh || t.sampleZh ||
+        (zhObj && (zhObj.sample || zhObj.reply)) ||
+        (typeof t.zh==='string'?t.zh:'') ||
+        t.cn || '';
 
-      // AI 第三顆固定「日文」：只讀 ja 物件／日文字段，不讀 local 或 local_pron。
-      const sampleJa = clean(t.sample_ja) || clean(t.sampleJa) ||
-        clean(jaObj && (jaObj.sample || jaObj.reply)) || clean(t.jp_sample);
+      const sampleLocal=t.sample_local || t.sample_it || t.sample_es || t.sample_fr || t.sample_de || t.sample_ko || t.sample_ja ||
+        (localObj && (localObj.sample || localObj.reply)) ||
+        BW_localText(t) || '';
 
-      return {sampleEn,sampleZh,sampleLocal:sampleJa};
+      return {sampleEn,sampleZh,sampleLocal};
     }
 
     function setReplyByLang(t,lang){
@@ -4637,8 +4638,13 @@ async function loadAI(){
       let text='',langCode='en-US';
       if(currentLang==='zh'){text=sampleZh||sampleEn||sampleLocal;langCode='zh-TW';}
       else if(currentLang==='ja'){
-        text=sampleLocal||sampleEn||sampleZh;
-        langCode='ja-JP';
+        const lcode = BW_detectLocalLang(t);
+        if(cat === 'music' && BW_isChineseLocalCode(lcode)){
+          text = String(t.ja || t.jp || t.translation_ja || sampleLocal || sampleEn || sampleZh || '').trim();
+          langCode = 'ja-JP';
+        }else{
+          text=sampleLocal||sampleEn||sampleZh;langCode=BW_localTtsLang(lcode);
+        }
       }
       else {text=sampleEn||sampleZh||sampleLocal;langCode='en-US';}
       if(text) speakText(text,langCode,AI_SLOW_RATE);
@@ -5544,6 +5550,7 @@ function renderTalkCurrent(){
     ${'' /* V18.6：主句已顯示英文，取消第二組「英文：」避免重複 */}
     ${(() => { const zh = String(item.zh || '').trim(); return (cat==='music' && BW_isChineseLocalCode(item.local_lang || BW_detectLocalLang(item))) ? '' : (zh ? `<div style="margin-top:8px;color:#dce7ff;line-height:1.6;">${esc(zh)}</div>` : ''); })()}
     ${(() => { const alt = String(item.local || item.ja || '').trim(); const zh = String(item.zh || '').trim(); if(cat==='music' && BW_isChineseLocalCode(item.local_lang || BW_detectLocalLang(item))) return item.ja ? `<div style="margin-top:6px;color:#c8d5ef;line-height:1.6;">日文：${esc(item.ja)}</div>` : ''; return alt && !BW_talkTextSame(alt, zh) ? `<div style="margin-top:6px;color:#c8d5ef;line-height:1.6;">${esc(alt)}</div>` : ''; })()}
+    ${(() => { const isJa = BW_isJapaneseLocalCode(item.local_lang || BW_detectLocalLang(item)); const isZh = BW_isChineseLocalCode(item.local_lang || BW_detectLocalLang(item)); const p = isJa ? (item.kana || '') : (item.pinyin || item.local_pron || item.zh_pron || item.ne_pron || item.roman || ''); return p ? `<div style="margin-top:4px;color:#fde68a;line-height:1.5;font-size:13px;">${isJa ? '假名' : (isZh ? '拼音' : '羅馬拼音')}：${esc(p)}</div>` : ''; })()}
     ${helperHtml}`;
   if(talkCounter) talkCounter.textContent = `第 ${talkCurrentIdx+1}/${talkData.length} 句`;
   updateTalkSpeechBox(talkSpeechText?.textContent?.replace(/^辨識文字：/,'').trim() === '—' ? '' : (talkSpeechText?.textContent||'').replace(/^辨識文字：/,'').trim(), (talkSpeechScore?.textContent||'').replace(/^相似度：/,'').trim() || '—');
@@ -5572,6 +5579,7 @@ function renderTalkList(){
         ${'' /* V18.6：桌機 Talk 清單亦只保留一組英文 */}
         ${(() => { const zh = String(item.zh || '').trim(); return (cat==='music' && BW_isChineseLocalCode(item.local_lang || BW_detectLocalLang(item))) ? '' : (zh ? `<div style="margin-top:5px;color:#dce7ff;line-height:1.6;">${esc(zh)}</div>` : ''); })()}
         ${(() => { const alt = String(item.local || item.ja || '').trim(); const zh = String(item.zh || '').trim(); if(cat==='music' && BW_isChineseLocalCode(item.local_lang || BW_detectLocalLang(item))) return item.ja ? `<div style="margin-top:4px;color:#c8d5ef;line-height:1.6;">日文：${esc(item.ja)}</div>` : ''; return alt && !BW_talkTextSame(alt, zh) ? `<div style="margin-top:4px;color:#c8d5ef;line-height:1.6;">${esc(alt)}</div>` : ''; })()}
+        ${(() => { const isJa = BW_isJapaneseLocalCode(item.local_lang || BW_detectLocalLang(item)); const isZh = BW_isChineseLocalCode(item.local_lang || BW_detectLocalLang(item)); const p = isJa ? (item.kana || '') : (item.pinyin || item.local_pron || item.zh_pron || item.ne_pron || item.roman || ''); return p ? `<div style="margin-top:3px;color:#fde68a;line-height:1.45;font-size:13px;">${isJa ? '假名' : (isZh ? '拼音' : '羅馬拼音')}：${esc(p)}</div>` : ''; })()}
       </div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
         <button class="btn sm talk-jump" data-idx="${idx}" type="button">跳句</button>
