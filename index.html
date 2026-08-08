@@ -1762,6 +1762,13 @@ if (autoplay) {
 
         applyHeroItem(0, true);
 
+        // 手機未登入時，後台 Hero 輪播不得蓋掉 Teacher Emma。
+        try{
+          if(typeof window.BW_alignMobileGuestHero==='function'){
+            setTimeout(()=>window.BW_alignMobileGuestHero(),0);
+          }
+        }catch(_e){}
+
       } catch (err) {
         console.error("loadHeroBanner error", err);
       }
@@ -4314,50 +4321,94 @@ document.addEventListener("DOMContentLoaded", function(){
 <script id="bw-mobile-guest-hero-align-fix-script">
 (function(){
   const EMMA='https://pub-578e9e060a104f24b6865e26eb941648.r2.dev/ads/home/Teacher_Emma.mp4';
-  function isMobile(){ return window.matchMedia && window.matchMedia('(max-width:760px)').matches; }
-  function isLoggedIn(){
-    const account=document.getElementById('accountWrap');
-    const login=document.getElementById('btnLogin');
-    const name=document.getElementById('userNameBadge');
-    if(account && getComputedStyle(account).display!=='none') return true;
-    if(name && String(name.textContent||'').trim()) return true;
-    if(login && getComputedStyle(login).display==='none') return true;
+  let running=false;
+  let lastGuest=null;
+
+  function isMobile(){
+    return !!(window.matchMedia && window.matchMedia('(max-width:760px)').matches);
+  }
+
+  async function hasRealSession(){
+    try{
+      if(typeof supa!=='undefined' && supa?.auth){
+        const {data}=await supa.auth.getSession();
+        return !!data?.session?.user;
+      }
+    }catch(_e){}
     return false;
   }
-  function alignMobileGuestHero(){
-    const guest=isMobile() && !isLoggedIn();
-    document.body.classList.toggle('bw-mobile-guest', guest);
-    if(!guest) return false;
+
+  function forceEmma(){
     const video=document.getElementById('homeHeroVideo');
     const image=document.getElementById('homeHeroImage');
     if(!video) return false;
+
     let source=video.querySelector('source');
-    if(!source){ source=document.createElement('source'); source.type='video/mp4'; video.appendChild(source); }
+    if(!source){
+      source=document.createElement('source');
+      source.type='video/mp4';
+      video.appendChild(source);
+    }
+
     if(image) image.style.setProperty('display','none','important');
     video.style.setProperty('display','block','important');
     video.style.setProperty('visibility','visible','important');
     video.style.setProperty('opacity','1','important');
+    video.style.setProperty('width','100%','important');
+    video.style.setProperty('height','100%','important');
     video.muted=true;
+    video.defaultMuted=true;
     video.setAttribute('muted','');
     video.setAttribute('playsinline','');
+    video.setAttribute('webkit-playsinline','');
     video.setAttribute('autoplay','');
     video.setAttribute('preload','auto');
+    video.loop=true;
+    video.setAttribute('loop','');
+    video.onended=null;
+
     if(source.getAttribute('src')!==EMMA){
       source.setAttribute('src',EMMA);
       try{ video.load(); }catch(_e){}
     }
-    try{ video.play().catch(function(){}); }catch(_e){}
+    try{
+      const p=video.play();
+      if(p && typeof p.catch==='function') p.catch(()=>{});
+    }catch(_e){}
     return true;
   }
+
+  async function alignMobileGuestHero(){
+    if(running) return false;
+    running=true;
+    try{
+      const mobile=isMobile();
+      const loggedIn=await hasRealSession();
+      const guest=mobile && !loggedIn;
+      document.body.classList.toggle('bw-mobile-guest',guest);
+      lastGuest=guest;
+      if(!guest) return false;
+      return forceEmma();
+    }finally{
+      running=false;
+    }
+  }
+
   window.BW_alignMobileGuestHero=alignMobileGuestHero;
+
   function start(){
     alignMobileGuestHero();
-    [150,500,1200,2500,5000].forEach(ms=>setTimeout(alignMobileGuestHero,ms));
+    [100,300,700,1500,3000,5000].forEach(ms=>setTimeout(alignMobileGuestHero,ms));
     try{
-      const mo=new MutationObserver(alignMobileGuestHero);
-      mo.observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['style','class','hidden','src']});
+      const target=document.querySelector('.hero-media-frame')||document.body;
+      const mo=new MutationObserver(()=>{
+        if(lastGuest===true) forceEmma();
+        else alignMobileGuestHero();
+      });
+      mo.observe(target,{subtree:true,childList:true,attributes:true,attributeFilter:['style','hidden','src']});
     }catch(_e){}
   }
+
   if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',start); else start();
   window.addEventListener('resize',alignMobileGuestHero);
   window.addEventListener('pageshow',alignMobileGuestHero);
