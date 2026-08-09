@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>BookWide｜LINE 自動登入 V32.6</title>
+<title>BookWide｜LINE 自動登入 V32.7</title>
 <meta name="robots" content="noindex,nofollow">
 <style>
 :root{--green:#06c755;--ink:#17324d;--muted:#64748b;--line:#dbe5ee;--bg:#f4f8fb}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:linear-gradient(180deg,#eefbf3,#f7f9fc);font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;color:var(--ink)}.card{width:min(460px,100%);background:#fff;border:1px solid var(--line);border-radius:24px;padding:28px 24px;box-shadow:0 18px 50px rgba(23,50,77,.12);text-align:center}.logo{font-size:48px}.title{font-size:25px;font-weight:950;margin:8px 0}.sub{color:var(--muted);line-height:1.7;margin:0 0 20px}.status{padding:14px;border-radius:16px;background:var(--bg);font-weight:800;line-height:1.6;white-space:pre-line}.ok{background:#dcfce7;color:#166534}.err{background:#fee2e2;color:#991b1b}.btn{display:block;width:100%;margin-top:16px;border:0;border-radius:999px;padding:14px 18px;background:var(--green);color:#fff;font-size:16px;font-weight:950;text-decoration:none}.small{margin-top:16px;font-size:12px;color:var(--muted)}
@@ -15,7 +15,7 @@
   <p class="sub">從自己的 LINE 點入時，已綁定會員會直接登入自己的 BookWide 帳號。</p>
   <div id="status" class="status">正在啟動 LINE…</div>
   <a id="homeBtn" class="btn" hidden href="/m-hiking.html">立即進入 BookWide</a>
-  <div class="small">V32.6：LINE 驗證後直接建立 BookWide Session；未綁定者才走免費會員流程。</div>
+  <div class="small">V32.7：LINE Token 過期會自動重新驗證；驗證後直接建立 BookWide Session。</div>
 </main>
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" crossorigin="anonymous"></script>
@@ -32,6 +32,43 @@ function nextUrl(){
   const n=q.get('next')||'/m-hiking.html?from=line-auto-login';
   return n.startsWith('/')?n:'/m-hiking.html?from=line-auto-login';
 }
+
+// V32.7：手機 LINE 內建瀏覽器偶爾保留「已登入」狀態，
+// 但 ID Token 已過期。遇到這種情況自動重做一次 LIFF 登入。
+const TOKEN_RETRY_KEY='BW_LINE_TOKEN_RETRY_V327';
+function isExpiredTokenMessage(msg){
+  return /idtoken\s*expired|id token\s*expired|token\s*expired|expired/i.test(String(msg||''));
+}
+function decodedIdTokenExpired(){
+  try{
+    const d=(typeof liff.getDecodedIDToken==='function')?liff.getDecodedIDToken():null;
+    const exp=Number(d?.exp||0);
+    return !!exp && (Date.now() >= (exp*1000-15000));
+  }catch(_e){ return false; }
+}
+function cleanRetryUrl(){
+  const u=new URL(location.href);
+  u.searchParams.delete('_line_retry');
+  return u.href;
+}
+async function forceFreshLineLogin(reason='LINE 登入已逾時'){
+  let retried=false;
+  try{ retried=sessionStorage.getItem(TOKEN_RETRY_KEY)==='1'; }catch(_e){}
+  if(retried){
+    throw new Error(reason+'，請關閉此頁後從 LINE 再點一次。');
+  }
+  try{ sessionStorage.setItem(TOKEN_RETRY_KEY,'1'); }catch(_e){}
+  setStatus('LINE 登入已逾時。\n正在自動重新驗證，請稍候…');
+  try{ if(typeof liff.logout==='function' && liff.isLoggedIn()) liff.logout(); }catch(_e){}
+  await new Promise(r=>setTimeout(r,180));
+  const redirectUri=cleanRetryUrl();
+  liff.login({redirectUri});
+  return true;
+}
+async function workerJson(res){
+  const data=await res.json().catch(()=>({}));
+  return data||{};
+}
 async function run(){
   try{
     await liff.init({liffId:LIFF_ID});
@@ -40,18 +77,32 @@ async function run(){
       liff.login({redirectUri:location.href});
       return;
     }
+    // 先在前端檢查 exp；過期就直接重新取 Token，不送到 Worker 才報錯。
+    if(decodedIdTokenExpired()){
+      await forceFreshLineLogin('LINE IdToken expired');
+      return;
+    }
     const idToken=liff.getIDToken();
-    if(!idToken)throw new Error('無法取得 LINE 身分，請從 LINE 訊息重新點入。');
+    if(!idToken){
+      await forceFreshLineLogin('無法取得 LINE 身分');
+      return;
+    }
 
-    // V32.4：先嘗試「已綁定 LINE → 直接登入自己的 BookWide」
+    // V32.7：先嘗試「已綁定 LINE → 直接登入自己的 BookWide」
     setStatus('LINE 身分已確認。\n正在登入你的 BookWide 帳號…');
     const redirectTo=new URL(nextUrl(),location.origin).href;
     const loginRes=await fetch(API+'/api/line-login/liff',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({id_token:idToken,redirect_to:redirectTo}),cache:'no-store'
     });
-    const loginData=await loginRes.json().catch(()=>({}));
+    const loginData=await workerJson(loginRes);
+    // Worker 明確回報 Token 過期：手機端自動重新 LIFF 驗證一次。
+    if(!loginRes.ok && isExpiredTokenMessage(loginData?.error||loginData?.message||'')){
+      await forceFreshLineLogin(loginData?.error||'LINE IdToken expired');
+      return;
+    }
     if(loginRes.ok && loginData?.session?.access_token && loginData?.session?.refresh_token){
+      try{ sessionStorage.removeItem(TOKEN_RETRY_KEY); }catch(_e){}
       setStatus('✅ 已找到綁定帳號\n正在建立 BookWide 登入狀態…','ok');
       const {error:setErr}=await supa.auth.setSession({access_token:loginData.session.access_token,refresh_token:loginData.session.refresh_token});
       if(setErr)throw setErr;
@@ -69,15 +120,28 @@ async function run(){
     const res=await fetch(API+'/api/line-members/liff-register',{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id_token:idToken}),cache:'no-store'
     });
-    const data=await res.json().catch(()=>({}));
+    const data=await workerJson(res);
+    if(!res.ok && isExpiredTokenMessage(data?.error||data?.message||'')){
+      await forceFreshLineLogin(data?.error||'LINE IdToken expired');
+      return;
+    }
     if(!res.ok)throw new Error(data.error||('HTTP '+res.status));
+    try{ sessionStorage.removeItem(TOKEN_RETRY_KEY); }catch(_e){}
     const name=data?.line_member?.display_name?` ${data.line_member.display_name}`:'';
     localStorage.setItem('bookwide_line_member',JSON.stringify({line_user_id:data?.line_member?.line_user_id||'',display_name:data?.line_member?.display_name||'',picture_url:data?.line_member?.picture_url||'',member_type:data?.member_type||'LINE',saved_at:new Date().toISOString()}));
     setStatus(`✅ 歡迎${name}\nLINE 免費會員已建立。若要直接登入付費帳號，請先完成一次 BookWide 綁定。`,'ok');
     homeBtn.hidden=false;
     setTimeout(()=>location.replace('/m-hiking.html?from=line'),1200);
   }catch(e){
-    setStatus('無法完成：'+(e?.message||String(e)),'err');homeBtn.hidden=false;
+    const msg=e?.message||String(e);
+    if(isExpiredTokenMessage(msg)){
+      try{ await forceFreshLineLogin(msg); return; }catch(retryErr){
+        setStatus('無法完成：'+(retryErr?.message||String(retryErr)),'err');
+        homeBtn.hidden=false;
+        return;
+      }
+    }
+    setStatus('無法完成：'+msg,'err');homeBtn.hidden=false;
   }
 }
 run();
