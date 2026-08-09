@@ -2739,7 +2739,9 @@ if (btnTryHero) {
       document.addEventListener('keydown', (e)=>{ if(e.key === 'Escape') close(); });
       menu.addEventListener('click', (e)=>{ if(e.target.closest('a')) close(); });
     })();
-  </script> <!-- Supabase Auth（使用 supabase-js v2） --> <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script> <script>
+  </script> <!-- BookWide V33.1：首頁 LINE 已綁定會員自動登入 -->
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<!-- Supabase Auth（使用 supabase-js v2） --> <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script> <script>
     const { createClient } = supabase;
 
     // === BookWide index：先清掉壞掉/過期的 Supabase JWT，避免首頁 alert: Invalid JWT ===
@@ -2807,8 +2809,115 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     const SUPABASE_ANON_KEY =
       'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
 
+
     supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     window.supa = supa;
+
+    /* ========= BookWide V33.1：首页入口 LINE Silent Auto Login =========
+       規則：
+       1) 已有 Supabase Session -> 完全不動。
+       2) LINE App 內開啟 BookWide -> 自動用 LIFF 驗證。
+       3) 此瀏覽器曾完成 BookWide LINE 綁定 -> 也啟動 LIFF 驗證。
+       4) Worker 只接受真正 LINE token；不以 localStorage / device id 冒充帳號。
+       5) 找到既有綁定 -> Worker 回傳 BookWide Session -> 首頁直接登入本人。
+       6) 404 未綁定 -> 保持一般 BookWide 首頁，不自動建立陌生帳號。
+    ================================================================ */
+    const BW_V331_LIFF_ID = '2010846730-yWnTvvB2';
+    const BW_V331_LINE_API = 'https://bookwide-hiking-api.pmktools.workers.dev';
+    const BW_V331_RETRY_KEY = 'bw_index_line_auto_retry_v331';
+    let BW_V331_LINE_AUTO_RUNNING = false;
+
+    function BW_V331_hasKnownLineBinding(){
+      try{
+        const raw = localStorage.getItem('bookwide_line_binding');
+        if(!raw) return false;
+        const j = JSON.parse(raw);
+        return !!(j && (j.line_user_id || j.bookwide_user_id || j.bookwide_email));
+      }catch(_e){ return false; }
+    }
+
+    function BW_V331_cleanUrl(){
+      try{
+        const u = new URL(location.href);
+        ['code','state','liffClientId','liffRedirectUri'].forEach(k=>u.searchParams.delete(k));
+        return u.href;
+      }catch(_e){ return location.href; }
+    }
+
+    async function BW_V331_autoLineLogin(){
+      if(BW_V331_LINE_AUTO_RUNNING) return false;
+      BW_V331_LINE_AUTO_RUNNING = true;
+      try{
+        const current = await supa.auth.getSession();
+        if(current?.data?.session?.user) return false;
+        if(!window.liff) return false;
+
+        await liff.init({liffId:BW_V331_LIFF_ID});
+
+        const shouldTry = !!liff.isInClient() || BW_V331_hasKnownLineBinding();
+        if(!shouldTry) return false;
+
+        if(!liff.isLoggedIn()){
+          // 只對「LINE App 內」或「這支瀏覽器曾綁定」啟動登入，不影響一般訪客。
+          const retried = sessionStorage.getItem(BW_V331_RETRY_KEY) === '1';
+          if(retried) return false;
+          sessionStorage.setItem(BW_V331_RETRY_KEY,'1');
+          liff.login({redirectUri:BW_V331_cleanUrl()});
+          return true;
+        }
+
+        const idToken = (typeof liff.getIDToken === 'function') ? (liff.getIDToken() || '') : '';
+        const accessToken = (typeof liff.getAccessToken === 'function') ? (liff.getAccessToken() || '') : '';
+        if(!idToken && !accessToken) return false;
+
+        const res = await fetch(BW_V331_LINE_API + '/api/line-login/liff',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({
+            id_token:idToken,
+            access_token:accessToken,
+            redirect_to:location.origin + location.pathname
+          }),
+          cache:'no-store'
+        });
+        const data = await res.json().catch(()=>({}));
+
+        // 未綁定就維持一般首頁，不替使用者建立或猜測帳號。
+        if(res.status === 404) return false;
+        if(!res.ok) throw new Error(data?.error || data?.message || ('LINE auto login HTTP ' + res.status));
+
+        if(data?.session?.access_token && data?.session?.refresh_token){
+          const set = await supa.auth.setSession({
+            access_token:data.session.access_token,
+            refresh_token:data.session.refresh_token
+          });
+          if(set.error) throw set.error;
+
+          const check = await supa.auth.getSession();
+          if(!check?.data?.session?.user) throw new Error('BookWide Session 建立失敗');
+
+          try{
+            localStorage.setItem('bookwide_line_binding',JSON.stringify({
+              line_user_id:String(data.line_user_id||''),
+              bookwide_user_id:String(data.bookwide_user_id||''),
+              bookwide_email:String(data.bookwide_email||''),
+              bound_at:new Date().toISOString()
+            }));
+            sessionStorage.removeItem(BW_V331_RETRY_KEY);
+          }catch(_e){}
+
+          // 不 reload；直接讓既有首頁 auth/UI 流程接手。
+          if(typeof initAuthAndProfile === 'function') await initAuthAndProfile();
+          return true;
+        }
+        return false;
+      }catch(e){
+        console.warn('[BookWide V33.1] LINE auto login:', e?.message || e);
+        return false;
+      }finally{
+        BW_V331_LINE_AUTO_RUNNING = false;
+      }
+    }
 
     /* ========= BookWide 閒置 30 分鐘自動登出 ========= */
     let BW_IDLE_TIMER = null;
@@ -4734,5 +4843,14 @@ document.addEventListener("DOMContentLoaded", function(){
 })();
 </script>
 <!-- === /BookWide Mobile Emma Sound Toggle V8 === -->
+
+
+<script id="bw-v331-index-line-auto-login">
+window.addEventListener('load', function(){
+  setTimeout(function(){
+    try{ BW_V331_autoLineLogin(); }catch(e){ console.warn('[BookWide V33.1] auto login start failed', e); }
+  }, 120);
+});
+</script>
 
 </body></html>
