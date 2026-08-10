@@ -4876,58 +4876,138 @@ async function loadAI(){
   answerEl.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter') window.BW_aiSubmitCurrent(); });
 })();
 
-/* ==== V18.13 AI 語音作答：辨識完成自動判斷 + 沒聽清楚自動帶讀 ==== */
+/* ==== V18.15 AI 語音作答：給使用者開口時間，避免一按就判定沒聽清楚 ==== */
 (function(){
   const btnRec=$('#btnRec'), btnStop=$('#btnStop'), ansEl=$('#aiAnswer'), voiceStatus=$('#aiVoiceStatus');
   if(!btnRec || !btnStop || !ansEl) return;
-  let recognition=null, gotFinal=false;
+
+  let recognition=null, gotFinal=false, manualStop=false;
+  let listenStartedAt=0, earlyRetryCount=0;
+  const MIN_LISTEN_MS=3200;   // 至少給 3.2 秒開口，不可一按就教練提示
+  const MAX_EARLY_RETRY=1;    // 瀏覽器若過早 no-speech，自動靜默重聽一次
+
   function getSR(){ return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
-  function reset(){
-    btnRec.disabled=false; btnRec.classList.remove('listening'); btnRec.textContent='🎙️ 說答案';
-    btnStop.disabled=true; recognition=null;
+  function uiIdle(){
+    btnRec.disabled=false;
+    btnRec.classList.remove('listening');
+    btnRec.textContent='🎙️ 說答案';
+    btnStop.disabled=true;
   }
+  function clearRecognition(){
+    recognition=null;
+    uiIdle();
+  }
+
   window.BW_stopAiRecognition=function(){
-    if(recognition){ try{recognition.abort();}catch(_e){try{recognition.stop();}catch(_e2){}} }
-    reset();
+    manualStop=true;
+    const r=recognition;
+    recognition=null;
+    if(r){ try{r.abort();}catch(_e){try{r.stop();}catch(_e2){}} }
+    uiIdle();
+    if(voiceStatus) voiceStatus.textContent='已停止。要回答時再按「說答案」。';
   };
-  btnRec.addEventListener('click',()=>{
+
+  function startListening(isRetry=false){
     const SR=getSR();
     if(!SR){
       if(voiceStatus) voiceStatus.textContent='此瀏覽器不支援語音辨識，可直接輸入後按「檢查文字答案」。';
-      alert('此瀏覽器暫不支援語音辨識，請直接輸入答案。'); return;
+      alert('此瀏覽器暫不支援語音辨識，請直接輸入答案。');
+      return;
     }
-    if(recognition){try{recognition.abort();}catch(_e){}}
-    recognition=new SR(); gotFinal=false;
-    recognition.lang='en-US'; recognition.interimResults=true; recognition.continuous=false; recognition.maxAlternatives=3;
-    ansEl.value=''; btnRec.disabled=true; btnRec.classList.add('listening'); btnRec.textContent='🎙️ 正在聽…'; btnStop.disabled=false;
-    if(voiceStatus) voiceStatus.textContent='正在聽你說英文… 說完後會自動判斷。';
-    recognition.onresult=(e)=>{
+
+    manualStop=false;
+    gotFinal=false;
+    if(!isRetry) earlyRetryCount=0;
+    listenStartedAt=Date.now();
+
+    const r=new SR();
+    recognition=r;
+    r.lang='en-US';
+    r.interimResults=true;
+    r.continuous=false;
+    r.maxAlternatives=3;
+
+    if(!isRetry) ansEl.value='';
+    btnRec.disabled=true;
+    btnRec.classList.add('listening');
+    btnRec.textContent='🎙️ 正在聽…';
+    btnStop.disabled=false;
+    if(voiceStatus) voiceStatus.textContent='🎙️ 正在聽，慢慢說，不用急…';
+
+    r.onresult=(e)=>{
       let text='', finalReceived=false;
       for(let i=e.resultIndex;i<e.results.length;i++){
         text += e.results[i][0].transcript+' ';
         if(e.results[i].isFinal) finalReceived=true;
       }
-      ansEl.value=text.trim();
-      if(finalReceived){
+      if(text.trim()) ansEl.value=text.trim();
+
+      if(finalReceived && ansEl.value.trim()){
         gotFinal=true;
         if(voiceStatus) voiceStatus.textContent=`辨識到：${ansEl.value}　正在判斷…`;
-        try{recognition.stop();}catch(_e){}
-        setTimeout(()=>{ if(typeof window.BW_aiSubmitCurrent==='function') window.BW_aiSubmitCurrent(); },220);
+        try{r.stop();}catch(_e){}
+        setTimeout(()=>{
+          if(typeof window.BW_aiSubmitCurrent==='function') window.BW_aiSubmitCurrent();
+        },260);
       }
     };
-    recognition.onerror=(e)=>{
-      const noSpeech=e && (e.error==='no-speech'||e.error==='audio-capture');
-      reset();
-      if(noSpeech && typeof window.BW_aiCoachCurrent==='function') window.BW_aiCoachCurrent('nospeech');
-      else if(voiceStatus) voiceStatus.textContent='語音辨識沒有成功，再按一次「說答案」即可。';
+
+    r.onerror=(e)=>{
+      const err=(e&&e.error)||'';
+      const elapsed=Date.now()-listenStartedAt;
+
+      // 使用者還沒來得及開口時，絕不能立刻說「我沒聽清楚」。
+      if(err==='no-speech' && elapsed<MIN_LISTEN_MS && earlyRetryCount<MAX_EARLY_RETRY && !manualStop){
+        earlyRetryCount++;
+        recognition=null;
+        if(voiceStatus) voiceStatus.textContent='🎙️ 我還在等你，慢慢說…';
+        setTimeout(()=>startListening(true),350);
+        return;
+      }
+
+      recognition=null;
+      uiIdle();
+
+      if(manualStop) return;
+      if(err==='no-speech'){
+        if(typeof window.BW_aiCoachCurrent==='function') window.BW_aiCoachCurrent('nospeech');
+      }else if(err==='audio-capture'){
+        if(voiceStatus) voiceStatus.textContent='沒有收到麥克風聲音，請確認瀏覽器已允許麥克風。';
+      }else if(err==='not-allowed' || err==='service-not-allowed'){
+        if(voiceStatus) voiceStatus.textContent='麥克風權限被阻擋，請允許此網站使用麥克風。';
+      }else{
+        if(voiceStatus) voiceStatus.textContent='語音辨識沒有成功，再按一次「說答案」即可。';
+      }
     };
-    recognition.onend=()=>{
-      const shouldCoach=!gotFinal && !ansEl.value.trim();
-      reset();
-      if(shouldCoach && typeof window.BW_aiCoachCurrent==='function') window.BW_aiCoachCurrent('nospeech');
+
+    r.onend=()=>{
+      // onerror 後也會觸發 onend；只有目前仍是這一個 recognition 才處理，
+      // 避免同一次失敗重複講兩次「我沒聽清楚」。
+      if(recognition!==r) return;
+      recognition=null;
+      uiIdle();
+
+      if(manualStop || gotFinal || ansEl.value.trim()) return;
+
+      const elapsed=Date.now()-listenStartedAt;
+      if(elapsed<MIN_LISTEN_MS && earlyRetryCount<MAX_EARLY_RETRY){
+        earlyRetryCount++;
+        if(voiceStatus) voiceStatus.textContent='🎙️ 我還在等你，慢慢說…';
+        setTimeout(()=>startListening(true),350);
+        return;
+      }
+      if(typeof window.BW_aiCoachCurrent==='function') window.BW_aiCoachCurrent('nospeech');
     };
-    try{recognition.start();}catch(_e){reset();}
-  });
+
+    try{r.start();}
+    catch(_e){
+      recognition=null;
+      uiIdle();
+      if(voiceStatus) voiceStatus.textContent='麥克風啟動失敗，再按一次「說答案」即可。';
+    }
+  }
+
+  btnRec.addEventListener('click',()=>startListening(false));
   btnStop.addEventListener('click',()=>window.BW_stopAiRecognition());
 })();
 
