@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>BookWide｜LINE 自動登入 V33</title>
+<title>BookWide｜LINE 自動登入 V33.3</title>
 <meta name="robots" content="noindex,nofollow">
 <style>
 :root{--green:#06c755;--ink:#17324d;--muted:#64748b;--line:#dbe5ee;--bg:#f4f8fb}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:linear-gradient(180deg,#eefbf3,#f7f9fc);font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;color:var(--ink)}.card{width:min(460px,100%);background:#fff;border:1px solid var(--line);border-radius:24px;padding:28px 24px;box-shadow:0 18px 50px rgba(23,50,77,.12);text-align:center}.logo{font-size:48px}.title{font-size:25px;font-weight:950;margin:8px 0}.sub{color:var(--muted);line-height:1.7;margin:0 0 20px}.status{padding:14px;border-radius:16px;background:var(--bg);font-weight:800;line-height:1.6;white-space:pre-line}.ok{background:#dcfce7;color:#166534}.err{background:#fee2e2;color:#991b1b}.btn{display:block;width:100%;margin-top:16px;border:0;border-radius:999px;padding:14px 18px;background:var(--green);color:#fff;font-size:16px;font-weight:950;text-decoration:none}.small{margin-top:16px;font-size:12px;color:var(--muted)}
@@ -15,7 +15,7 @@
   <p class="sub">從自己的 LINE 點入時，已綁定會員會直接登入自己的 BookWide 帳號。</p>
   <div id="status" class="status">正在啟動 LINE…</div>
   <a id="homeBtn" class="btn" hidden href="/m-hiking.html">立即進入 BookWide</a>
-  <div class="small">V33：LINE 雙 Token 驗證；修正 BookWide Supabase 專案 anon key，一致後再建立登入 Session。</div>
+  <div class="small">V33.3：入口改走官方 LIFF URL；LINE in-app / 外部瀏覽器由 LIFF SDK 自動登入，再建立 BookWide Session。</div>
 </main>
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" crossorigin="anonymous"></script>
@@ -29,7 +29,19 @@ const statusEl=document.getElementById('status'),homeBtn=document.getElementById
 function setStatus(text,type=''){statusEl.textContent=text;statusEl.className='status'+(type?' '+type:'')}
 function nextUrl(){
   const q=new URLSearchParams(location.search);
-  const n=q.get('next')||'/m-hiking.html?from=line-auto-login';
+  let n=q.get('next')||'';
+  // LIFF may carry additional LIFF-URL data through liff.state.
+  if(!n){
+    try{
+      const st=q.get('liff.state')||'';
+      if(st){
+        const decoded=decodeURIComponent(st);
+        const sq=new URLSearchParams(decoded.startsWith('?')?decoded.slice(1):decoded);
+        n=sq.get('next')||'';
+      }
+    }catch(_e){}
+  }
+  n=n||'/m-hiking.html?from=line-auto-login';
   return n.startsWith('/')?n:'/m-hiking.html?from=line-auto-login';
 }
 
@@ -46,11 +58,6 @@ function decodedIdTokenExpired(){
     return !!exp && (Date.now() >= (exp*1000-15000));
   }catch(_e){ return false; }
 }
-function cleanRetryUrl(){
-  const u=new URL(location.href);
-  u.searchParams.delete('_line_retry');
-  return u.href;
-}
 async function forceFreshLineLogin(reason='LINE 登入已逾時'){
   let retried=false;
   try{ retried=sessionStorage.getItem(TOKEN_RETRY_KEY)==='1'; }catch(_e){}
@@ -61,8 +68,8 @@ async function forceFreshLineLogin(reason='LINE 登入已逾時'){
   setStatus('LINE 登入已逾時。\n正在自動重新驗證，請稍候…');
   try{ if(typeof liff.logout==='function' && liff.isLoggedIn()) liff.logout(); }catch(_e){}
   await new Promise(r=>setTimeout(r,180));
-  const redirectUri=cleanRetryUrl();
-  liff.login({redirectUri});
+  // V33.3：由 LIFF SDK 使用已登記的 Endpoint URL，不自行覆寫 redirectUri。
+  liff.login();
   return true;
 }
 async function workerJson(res){
@@ -71,10 +78,11 @@ async function workerJson(res){
 }
 async function run(){
   try{
-    await liff.init({liffId:LIFF_ID});
+    await liff.init({liffId:LIFF_ID,withLoginOnExternalBrowser:true});
     if(!liff.isLoggedIn()){
       setStatus('正在由 LINE 確認身分…');
-      liff.login({redirectUri:location.href});
+      // V33.3：不自行指定 redirectUri，避免 callback / endpoint 不匹配造成 LINE 400。
+      liff.login();
       return;
     }
     // V32.9：ID Token 即使已過期，也先讓 Worker 用 Access Token 接手驗證，避免手機 LINE 反覆登出登入。
