@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>BookWide｜LINE 自動登入 V33</title>
+<title>BookWide｜LINE 自動登入 V34.3</title>
 <meta name="robots" content="noindex,nofollow">
 <style>
 :root{--green:#06c755;--ink:#17324d;--muted:#64748b;--line:#dbe5ee;--bg:#f4f8fb}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;background:linear-gradient(180deg,#eefbf3,#f7f9fc);font-family:system-ui,-apple-system,"Noto Sans TC",sans-serif;color:var(--ink)}.card{width:min(460px,100%);background:#fff;border:1px solid var(--line);border-radius:24px;padding:28px 24px;box-shadow:0 18px 50px rgba(23,50,77,.12);text-align:center}.logo{font-size:48px}.title{font-size:25px;font-weight:950;margin:8px 0}.sub{color:var(--muted);line-height:1.7;margin:0 0 20px}.status{padding:14px;border-radius:16px;background:var(--bg);font-weight:800;line-height:1.6;white-space:pre-line}.ok{background:#dcfce7;color:#166534}.err{background:#fee2e2;color:#991b1b}.btn{display:block;width:100%;margin-top:16px;border:0;border-radius:999px;padding:14px 18px;background:var(--green);color:#fff;font-size:16px;font-weight:950;text-decoration:none}.small{margin-top:16px;font-size:12px;color:var(--muted)}
@@ -29,7 +29,19 @@ const statusEl=document.getElementById('status'),homeBtn=document.getElementById
 function setStatus(text,type=''){statusEl.textContent=text;statusEl.className='status'+(type?' '+type:'')}
 function nextUrl(){
   const q=new URLSearchParams(location.search);
-  const n=q.get('next')||'/m-hiking.html?from=line-auto-login';
+  let n=q.get('next')||'';
+  if(!n){
+    try{
+      const st=q.get('liff.state')||'';
+      if(st){
+        const decoded=decodeURIComponent(st);
+        const part=decoded.includes('?')?decoded.slice(decoded.indexOf('?')+1):decoded.replace(/^\?/,'');
+        const sq=new URLSearchParams(part);
+        n=sq.get('next')||'';
+      }
+    }catch(_e){}
+  }
+  n=n||'/m-hiking.html?from=line-auto-login';
   return n.startsWith('/')?n:'/m-hiking.html?from=line-auto-login';
 }
 
@@ -111,9 +123,49 @@ async function run(){
       return;
     }
 
-    // 尚未綁定：維持原本 LINE 免費會員流程，不冒用任何 BookWide 帳號
+    // V34.2 首次綁定：
+    // LINE 已驗證但尚未綁定時，先看「此 LINE 瀏覽器」是否已經有 BookWide Session。
+    // 有 -> 直接綁到這個精確 user，不猜 email / 手機 ID。
+    // 沒有 -> 回首頁讓會員只登入一次；登入完成後再自動回 LIFF 完成綁定。
     if(loginRes.status!==404)throw new Error(loginData?.error||('登入檢查失敗 HTTP '+loginRes.status));
-    setStatus('此 LINE 尚未綁定 BookWide 帳號。\n正在建立 LINE 免費會員…');
+
+    const current=await supa.auth.getSession();
+    const bwSession=current?.data?.session||null;
+    if(bwSession?.access_token && bwSession?.user){
+      setStatus('LINE 身分已確認。\n正在把 LINE 綁定到目前 BookWide 帳號…');
+      const bindRes=await fetch(API+'/api/line-member-binding/liff',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+bwSession.access_token},
+        body:JSON.stringify({id_token:idToken,access_token:accessToken}),
+        cache:'no-store'
+      });
+      const bindData=await workerJson(bindRes);
+      if(!bindRes.ok)throw new Error(bindData?.error||('LINE 綁定失敗 HTTP '+bindRes.status));
+      try{
+        localStorage.setItem('bookwide_line_binding',JSON.stringify({
+          line_user_id:String(bindData.line_user_id||''),
+          bookwide_user_id:String(bindData.bookwide_user_id||bwSession.user.id||''),
+          bookwide_email:String(bindData.bookwide_email||bwSession.user.email||''),
+          bound_at:String(bindData.bound_at||new Date().toISOString())
+        }));
+        sessionStorage.removeItem('BW_LINE_BIND_PENDING_V342');
+      }catch(_e){}
+      setStatus('✅ LINE 已綁定目前 BookWide 帳號\n一般會員不需要群主或 Admin 權限。以後從官方 LINE 點入會自動登入。','ok');
+      location.replace(nextUrl());
+      return;
+    }
+
+    // 沒有 BookWide Session：不能安全猜帳號。只要求登入一次，完成後自動回來綁定。
+    try{
+      sessionStorage.setItem('BW_LINE_BIND_PENDING_V342',JSON.stringify({
+        next:nextUrl(), at:Date.now(), line_verified:true
+      }));
+    }catch(_e){}
+    setStatus('LINE 身分已確認。\n請登入一次 BookWide，完成後會自動綁定。');
+    location.replace('/index.html?line_bind_pending=1');
+    return;
+
+    // 以下保留舊免費會員註冊碼作相容備援（正常 V34.2 不會走到這裡）
     const res=await fetch(API+'/api/line-members/liff-register',{
       method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id_token:idToken,access_token:accessToken}),cache:'no-store'
     });
