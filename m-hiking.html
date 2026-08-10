@@ -797,6 +797,12 @@ body.photo-admin-mode .sticker-maker-btn{display:none}
   .notice,.small,.copybox{overflow-wrap:anywhere;word-break:break-word}
 }
 
+
+.line-crm-bind-row{display:flex;gap:6px;align-items:center;margin-top:7px;min-width:260px}
+.line-crm-bind-row input{width:190px;max-width:45vw;height:34px;border:1px solid #cfd9d1;border-radius:9px;padding:0 9px;background:#fff;font-size:12px}
+.line-crm-bind-row .btn{white-space:nowrap}
+@media(max-width:760px){.line-crm-bind-row{min-width:0;flex-wrap:wrap}.line-crm-bind-row input{width:100%;max-width:none}}
+
 </style>
 
 <script>window.BOOKWIDE_M_HIKING_BUILD='V12.6.1_GROUP_SWITCH_RESTORED';</script>
@@ -1323,7 +1329,7 @@ body.card-pick-active .sticker-maker-btn{background:#f2a51a!important;color:#111
       <button class="btn" type="button" onclick="notifyAllUnboundLineUsers(this)">通知全部 LINE 免費會員</button>
     </div>
     <div id="lineCrmStatus" class="notice" style="margin-bottom:10px">尚未讀取 LINE 會員。</div>
-    <div class="line-crm-table"><table><thead><tr><th>頭像</th><th>LINE 會員</th><th>狀態</th><th>BookWide</th><th>加入時間</th><th>最後互動</th><th>通知</th></tr></thead><tbody id="lineCrmBody"><tr><td colspan="7" class="line-crm-empty">尚未讀取資料。</td></tr></tbody></table></div>
+    <datalist id="lineCrmBookWideEmails"></datalist><div class="line-crm-table"><table><thead><tr><th>頭像</th><th>LINE 會員</th><th>狀態</th><th>BookWide</th><th>加入時間</th><th>最後互動</th><th>通知</th></tr></thead><tbody id="lineCrmBody"><tr><td colspan="7" class="line-crm-empty">尚未讀取資料。</td></tr></tbody></table></div>
   </div>
 </section>
 
@@ -3086,16 +3092,88 @@ function activateSectionOnly(id){
 
 
 let LINE_CRM_USERS=[];
+let LINE_CRM_BOOKWIDE_ACCOUNTS=[];
+async function loadLineCrmBookWideAccounts(){
+  if(!BOOKWIDE_IS_SUPER_ADMIN)return;
+  try{
+    const data=await hikingApi('/api/line/bookwide-members',{method:'GET'});
+    LINE_CRM_BOOKWIDE_ACCOUNTS=Array.isArray(data?.profiles)?data.profiles:[];
+    const dl=document.getElementById('lineCrmBookWideEmails');
+    if(dl)dl.innerHTML=LINE_CRM_BOOKWIDE_ACCOUNTS.map(p=>{
+      const email=lineCrmEscape(p?.email||'');
+      const name=lineCrmEscape(p?.display_name||'');
+      const used=lineCrmText(p?.line_user_id||'').trim()?'（已綁 LINE）':'';
+      return `<option value="${email}">${name}${used}</option>`;
+    }).join('');
+  }catch(e){
+    console.warn('BookWide accounts list failed',e);
+  }
+}
+
 function lineCrmText(value){return String(value==null?'':value)}
 function lineCrmEscape(value){return lineCrmText(value).replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch]))}
 function lineCrmDate(value){const raw=lineCrmText(value).trim();if(!raw)return '—';const d=new Date(raw);if(Number.isNaN(d.getTime()))return raw;return d.toLocaleString('zh-TW',{timeZone:'Asia/Taipei',hour12:false})}
 function lineCrmIsBlocked(row){return row?.active===false||row?.blocked===true||['block','blocked','unfollow'].includes(lineCrmText(row?.status).toLowerCase())}
 function lineCrmIsBound(row){return !!lineCrmText(row?.bookwide_user_id||row?.bookwide_email||row?.email).trim()}
 function lineCrmNormalize(row){return {...row,userId:lineCrmText(row?.userId||row?.user_id||row?.line_user_id||row?.id),displayName:lineCrmText(row?.displayName||row?.display_name||row?.name||'LINE 會員'),pictureUrl:lineCrmText(row?.pictureUrl||row?.picture_url||row?.avatar_url),joinedAt:row?.first_follow_at||row?.followed_at||row?.created_at||row?.added_at||'',lastActiveAt:row?.last_active_at||row?.last_message_at||row?.updated_at||row?.last_seen_at||'',blocked:lineCrmIsBlocked(row),bound:lineCrmIsBound(row)}}
-async function openLineCrmAdmin(){if(!BOOKWIDE_IS_SUPER_ADMIN){alert('只有 BookWide Admin 可以查看 LINE 會員。');return;}openAdminSection('sec-line-crm');await loadLineCrmUsers()}
+async function openLineCrmAdmin(){if(!BOOKWIDE_IS_SUPER_ADMIN){alert('只有 BookWide Admin 可以查看 LINE 會員。');return;}openAdminSection('sec-line-crm');await Promise.all([loadLineCrmBookWideAccounts(),loadLineCrmUsers()])}
 async function loadLineCrmUsers(forceSync=false){const status=document.getElementById('lineCrmStatus');if(!BOOKWIDE_IS_SUPER_ADMIN){if(status)status.textContent='沒有 BookWide Admin 權限。';return;}if(status)status.textContent=forceSync?'正在同步 LINE 官方帳號好友…':'正在讀取 LINE 官方帳號會員…';try{const data=await hikingApi('/api/line/targets'+(forceSync?'?sync=1':''),{method:'GET'});LINE_CRM_USERS=(Array.isArray(data?.targets)?data.targets:[]).map(lineCrmNormalize);updateLineCrmStats();renderLineCrmRows();if(status){const base=`已讀取 ${LINE_CRM_USERS.length} 位 LINE 會員（BookWide ${Number(data?.bound_count||0)}／LINE 免費 ${Number(data?.free_count||0)}）。`;const warn=data?.sync_result&&data.sync_result.ok===false?` 全好友同步未啟用：${data.sync_result.warning||'LINE API 不允許'}；已保留 Webhook 收到的會員。`:'';const ok=data?.sync_result?.ok?` 已從 LINE 官方帳號同步 ${Number(data.sync_result.synced||0)} 位。`:'';status.textContent=base+ok+warn}}catch(e){console.error('LINE CRM',e);if(status)status.textContent='讀取失敗：'+(e?.message||String(e));const body=document.getElementById('lineCrmBody');if(body)body.innerHTML='<tr><td colspan="7" class="line-crm-empty">讀取失敗，請確認 Worker 已部署且目前帳號為 BookWide Admin。</td></tr>'}}
 function updateLineCrmStats(){const total=LINE_CRM_USERS.length,blocked=LINE_CRM_USERS.filter(x=>x.blocked).length,bound=LINE_CRM_USERS.filter(x=>x.bound).length;const values={lineCrmTotal:total,lineCrmActive:total-blocked,lineCrmBlocked:blocked,lineCrmBound:bound,lineCrmUnbound:total-bound};Object.entries(values).forEach(([id,v])=>{const el=document.getElementById(id);if(el)el.textContent=String(v)})}
-function renderLineCrmRows(){const body=document.getElementById('lineCrmBody');if(!body)return;const q=lineCrmText(document.getElementById('lineCrmSearch')?.value).trim().toLowerCase();const filter=lineCrmText(document.getElementById('lineCrmFilter')?.value||'all');const rows=LINE_CRM_USERS.filter(x=>{if(filter==='active'&&x.blocked)return false;if(filter==='blocked'&&!x.blocked)return false;if(filter==='bound'&&!x.bound)return false;if(filter==='unbound'&&x.bound)return false;if(!q)return true;return [x.displayName,x.userId,x.bookwide_email,x.email].some(v=>lineCrmText(v).toLowerCase().includes(q))});if(!rows.length){body.innerHTML='<tr><td colspan="7" class="line-crm-empty">沒有符合條件的 LINE 會員。</td></tr>';return;}body.innerHTML=rows.map(x=>{const avatar=x.pictureUrl?`<img class="line-crm-avatar" src="${lineCrmEscape(x.pictureUrl)}" alt="">`:'<div class="line-crm-avatar" style="display:grid;place-items:center">LINE</div>';const state=x.blocked?'<span class="line-crm-badge blocked">已封鎖</span>':'<span class="line-crm-badge">有效好友</span>';const bind=x.bound?`<span class="line-crm-badge bound">BookWide會員</span><div class="small">${lineCrmEscape(x.bookwide_email||x.email||'')}</div>`:'<span class="line-crm-badge">LINE免費會員</span>';const buttonLabel='測試通知';const notice=x.blocked?'<span class="small">無法通知</span>':`<button class="btn gray" style="padding:6px 10px;min-height:34px" type="button" onclick="notifyOneLineUser('${lineCrmEscape(x.userId)}',this)">${buttonLabel}</button>${x.bind_notice_at?`<div class="small">最近：${lineCrmEscape(lineCrmDate(x.bind_notice_at))}</div><div class="small">共 ${Number(x.bind_notice_count||0)} 次</div>`:''}`;return `<tr><td>${avatar}</td><td><div class="line-crm-name">${lineCrmEscape(x.displayName)}</div><div class="line-crm-id">${lineCrmEscape(x.userId)}</div></td><td>${state}</td><td>${bind}</td><td>${lineCrmEscape(lineCrmDate(x.joinedAt))}</td><td>${lineCrmEscape(lineCrmDate(x.lastActiveAt))}</td><td>${notice}</td></tr>`}).join('')}
+function renderLineCrmRows(){
+  const body=document.getElementById('lineCrmBody');if(!body)return;
+  const q=lineCrmText(document.getElementById('lineCrmSearch')?.value).trim().toLowerCase();
+  const filter=lineCrmText(document.getElementById('lineCrmFilter')?.value||'all');
+  const rows=LINE_CRM_USERS.filter(x=>{
+    if(filter==='active'&&x.blocked)return false;
+    if(filter==='blocked'&&!x.blocked)return false;
+    if(filter==='bound'&&!x.bound)return false;
+    if(filter==='unbound'&&x.bound)return false;
+    if(!q)return true;
+    return [x.displayName,x.userId,x.bookwide_email,x.email].some(v=>lineCrmText(v).toLowerCase().includes(q));
+  });
+  if(!rows.length){body.innerHTML='<tr><td colspan="7" class="line-crm-empty">沒有符合條件的 LINE 會員。</td></tr>';return;}
+  body.innerHTML=rows.map((x,idx)=>{
+    const avatar=x.pictureUrl?`<img class="line-crm-avatar" src="${lineCrmEscape(x.pictureUrl)}" alt="">`:'<div class="line-crm-avatar" style="display:grid;place-items:center">LINE</div>';
+    const state=x.blocked?'<span class="line-crm-badge blocked">已封鎖</span>':'<span class="line-crm-badge">有效好友</span>';
+    const inputId='lineBindEmail_'+idx;
+    const bind=x.bound
+      ? `<span class="line-crm-badge bound">BookWide會員</span><div class="small">${lineCrmEscape(x.bookwide_email||x.email||'')}</div>`
+      : `<span class="line-crm-badge">LINE免費會員</span>
+         <div class="line-crm-bind-row">
+           <input id="${inputId}" type="email" list="lineCrmBookWideEmails" placeholder="選擇 / 輸入 BookWide Email" autocomplete="off">
+           <button class="btn" type="button" style="padding:6px 10px;min-height:34px" onclick="adminBindLineCrmUser('${lineCrmEscape(x.userId)}','${inputId}',this)">綁定</button>
+         </div>`;
+    const notice=x.blocked?'<span class="small">無法通知</span>':`<button class="btn gray" style="padding:6px 10px;min-height:34px" type="button" onclick="notifyOneLineUser('${lineCrmEscape(x.userId)}',this)">測試通知</button>${x.bind_notice_at?`<div class="small">最近：${lineCrmEscape(lineCrmDate(x.bind_notice_at))}</div><div class="small">共 ${Number(x.bind_notice_count||0)} 次</div>`:''}`;
+    return `<tr><td>${avatar}</td><td><div class="line-crm-name">${lineCrmEscape(x.displayName)}</div><div class="line-crm-id">${lineCrmEscape(x.userId)}</div></td><td>${state}</td><td>${bind}</td><td>${lineCrmEscape(lineCrmDate(x.joinedAt))}</td><td>${lineCrmEscape(lineCrmDate(x.lastActiveAt))}</td><td>${notice}</td></tr>`;
+  }).join('');
+}
+
+async function adminBindLineCrmUser(userId,inputId,btn){
+  const row=LINE_CRM_USERS.find(x=>x.userId===userId);
+  if(!row){alert('找不到這位 LINE 會員。');return;}
+  if(row.bound){alert('這位 LINE 會員已經綁定 BookWide。');return;}
+  const input=document.getElementById(inputId);
+  const email=lineCrmText(input?.value).trim().toLowerCase();
+  if(!email||!email.includes('@')){alert('請先選擇或輸入 BookWide Email。');input?.focus();return;}
+  const known=LINE_CRM_BOOKWIDE_ACCOUNTS.find(p=>lineCrmText(p?.email).trim().toLowerCase()===email);
+  if(known?.line_user_id){alert(`這個 BookWide 帳號已經綁定另一個 LINE：${email}`);return;}
+  if(!confirm(`確定綁定？\n\nLINE：${row.displayName}\nUser ID：${row.userId}\n\nBookWide：${email}\n\n綁定後此會員從官方 LINE 點 BookWide 可自動登入。`))return;
+  const old=btn?.textContent;
+  if(btn){btn.disabled=true;btn.textContent='綁定中…'}
+  try{
+    const d=await hikingApi('/api/line/admin-bind',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({line_user_id:userId,email})
+    });
+    alert(d.message||`已綁定 ${email}`);
+    await Promise.all([loadLineCrmBookWideAccounts(),loadLineCrmUsers()]);
+  }catch(e){
+    alert('綁定失敗：'+(e?.message||String(e)));
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent=old||'綁定'}
+  }
+}
 
 
 async function notifyOneLineUser(userId,btn){
