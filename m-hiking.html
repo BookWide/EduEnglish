@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- BookWide M-Hiking V25.2 / 每日一句實際內容＋生日卡單圖發送 -->
+<!-- BookWide M-Hiking V28.10 HOLIDAY COMPOSE FIX：只送燒字 JPG／未選卡自動素材池套字／LINE 不裁圖 -->
 <html lang="zh-Hant">
 <head>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
@@ -7949,20 +7949,104 @@ function holidayAdminPreview(){
     </div>`;
 }
 async function holidayAdminLoad(){if(!BOOKWIDE_IS_SUPER_ADMIN)return;try{const d=await hikingApi('/api/line-automation/config',{method:'GET',admin:false});const c=d.config||d||{};document.getElementById('laHolidayEnabled').value=c.holiday_enabled===true?'true':'false';document.getElementById('laHolidayType').value=c.holiday_type||'fathers';document.getElementById('laHolidayName').value=c.holiday_name||'父親節';document.getElementById('laHolidayDate').value=c.holiday_date||holidaySuggestedDate(c.holiday_type||'fathers',holidayTaipeiToday().slice(0,4));document.getElementById('laHolidayTime').value=c.holiday_send_time||'08:00';document.getElementById('laHolidayZh').value=c.holiday_zh||HOLIDAY_TEMPLATES.fathers.zh;document.getElementById('laHolidayEn').value=c.holiday_en||HOLIDAY_TEMPLATES.fathers.en;holidayCardLibrary=(c.holiday_card_library&&typeof c.holiday_card_library==='object')?c.holiday_card_library:{};holidayContentLibrary=(c.holiday_content_library&&typeof c.holiday_content_library==='object')?c.holiday_content_library:{};document.getElementById('laHolidayImage').value=holidayCardLibrary[c.holiday_type||'fathers']||c.holiday_image_url||'';document.getElementById('laHolidaySign').value=c.holiday_signature||'BookWide';const loadedType=c.holiday_type||'fathers';const tpl=HOLIDAY_TEMPLATES[loadedType]||HOLIDAY_TEMPLATES.custom;const savedContent=(holidayContentLibrary[loadedType]&&typeof holidayContentLibrary[loadedType]==='object')?holidayContentLibrary[loadedType]:{};const playerEl=document.getElementById('laHolidayPlayerUrl');if(playerEl)playerEl.value=holidayResolvedPlayerUrl(loadedType,savedContent.player_url||c.holiday_player_url||tpl.player_url||'');const playerLabelEl=document.getElementById('laHolidayPlayerLabel');if(playerLabelEl)playerLabelEl.value=savedContent.player_label||c.holiday_player_label||tpl.player_label||'立即學習';const lineTextEl=document.getElementById('laHolidayLineText');if(lineTextEl)lineTextEl.value=savedContent.line_text||c.holiday_line_text_base||tpl.line_text||'';holidayRenderRecipients(c.holiday_recipient_ids||[]);const sm=document.getElementById('holidayAdminSummary');if(sm)sm.textContent=c.holiday_enabled?`${c.holiday_date||'未定日期'} ${c.holiday_send_time||'08:00'}｜已啟用`:'尚未啟用'}catch(e){const sm=document.getElementById('holidayAdminSummary');if(sm)sm.textContent='讀取失敗：'+e.message}}
-async function holidayAdminSave(button,silent=false){if(!BOOKWIDE_IS_SUPER_ADMIN){alert('只有 BookWide Admin 可管理節日卡。');return}const p=holidayPayload();if(!p.holiday_name||!p.holiday_date){alert('請填節日名稱與發送日期。');return}const old=button?.textContent;if(button){button.disabled=true;button.textContent='儲存中…'}try{await hikingApi('/api/line-automation/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID||'',...p})});if(!silent)alert('節日卡設定已儲存。');await holidayAdminLoad()}catch(e){alert('儲存失敗：'+e.message)}finally{if(button){button.disabled=false;button.textContent=old}}}
+
+async function holidayEnsureComposedCardFromPool({silent=false}={}){
+  const type=document.getElementById('laHolidayType')?.value||'fathers';
+  const direct=String(document.getElementById('laHolidayImage')?.value||'').trim();
+  const fixed=String(holidayCardLibrary[type]||'').trim();
+
+  if(/^https:\/\//i.test(fixed||direct)){
+    const ready=fixed||direct;
+    holidayCardLibrary[type]=ready;
+    const imageEl=document.getElementById('laHolidayImage');if(imageEl)imageEl.value=ready;
+    return ready;
+  }
+
+  const pool=holidayTaggedPoolUrls(type);
+  if(!pool.length){
+    if(!silent)alert(`「${HOLIDAY_TEMPLATES[type]?.name||'此節日'}」尚未建立照片素材池。`);
+    return '';
+  }
+
+  const source=pool[Math.floor(Math.random()*pool.length)];
+  localStorage.setItem('bookwide_greeting_mode','holiday');
+  localStorage.setItem('bookwide_holiday_type',type);
+
+  await openGreetingMaker(null,source);
+  const modeEl=document.getElementById('greetingMakerMode');if(modeEl)modeEl.value='holiday';
+  changeGreetingMakerMode();
+  const typeEl=document.getElementById('greetingHolidayType');if(typeEl)typeEl.value=type;
+
+  const zh=String(document.getElementById('laHolidayZh')?.value||HOLIDAY_TEMPLATES[type]?.zh||'').trim();
+  const en=String(document.getElementById('laHolidayEn')?.value||HOLIDAY_TEMPLATES[type]?.en||'').trim();
+  const sign=String(document.getElementById('laHolidaySign')?.value||'BookWide').trim()||'BookWide';
+  const zhEl=document.getElementById('greetingMakerZh');if(zhEl)zhEl.value=zh;
+  const enEl=document.getElementById('greetingMakerEn');if(enEl)enEl.value=en;
+  const signEl=document.getElementById('greetingMakerSign');if(signEl)signEl.value=sign;
+
+  await renderGreetingMakerPreview();
+  const synced=await syncHolidayMakerToAutomation({persistImage:true,source:'auto-pool'});
+  const imageUrl=String(synced?.image_url||'').trim();
+  try{closeGreetingMaker();}catch(_e){}
+
+  if(imageUrl){
+    holidayCardLibrary[type]=imageUrl;
+    const imageEl=document.getElementById('laHolidayImage');if(imageEl)imageEl.value=imageUrl;
+    try{refreshCardFixedStates();}catch(_e){}
+  }
+  return imageUrl;
+}
+
+async function holidayAdminSave(button,silent=false){
+  if(!BOOKWIDE_IS_SUPER_ADMIN){alert('只有 BookWide Admin 可管理節日卡。');return}
+  const old=button?.textContent;if(button){button.disabled=true;button.textContent='準備節日卡…'}
+  try{
+    let p=holidayPayload();
+    if(!p.holiday_name||!p.holiday_date){alert('請填節日名稱與發送日期。');return}
+    if(!/^https:\/\//i.test(String(p.holiday_image_url||''))){
+      if(button)button.textContent='自動從素材池套字…';
+      await holidayEnsureComposedCardFromPool({silent:true});
+      p=holidayPayload();
+    }
+    await hikingApi('/api/line-automation/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID||'',...p})});
+    if(!silent)alert('節日卡設定已儲存。');
+    await holidayAdminLoad();
+  }catch(e){alert('儲存失敗：'+e.message)}
+  finally{if(button){button.disabled=false;button.textContent=old}}
+}
 async function holidayAdminSend(send,button){
   if(!BOOKWIDE_IS_SUPER_ADMIN){alert('只有 BookWide Admin 可發送節日卡。');return}
-  const p=holidayPayload();
-  holidayAdminPreview();
-  if(!p.holiday_recipient_ids.length){alert('請選擇至少一位收件人。');return}
-  if(send&&!/^https:\/\//i.test(String(p.holiday_image_url||''))){alert('目前節日沒有可用圖片。請在相簿把至少一張照片標成這個節日，或製作固定節日卡。');return}
-  if(send&&!confirm(`確定立即發送「${p.holiday_name}」合成卡${p.holiday_player_url?'＋下方 Player 教材按鈕':''}給 ${p.holiday_recipient_ids.length} 位 LINE 會員？`))return;
-  const old=button?.textContent;if(button){button.disabled=true;button.textContent=send?'發送圖片中…':'檢查中…'}
+  const old=button?.textContent;
   try{
-    const d=await hikingApi('/api/line-automation/holiday-run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID||'',send,...p})});
-    if(send&&!d.image_included)throw new Error('Worker 沒有取得節日卡圖片，已停止發送。');
-    alert(send?`節日合成卡＋Player 教材已整合成一封發送 ${d.sent_count||0} 位${d.failed_count?`，失敗 ${d.failed_count} 位`:''}。`:`模擬完成：圖片卡將發送 ${d.matches||0} 位。`)
-  }catch(e){alert((send?'發送':'模擬')+'失敗：'+e.message)}finally{if(button){button.disabled=false;button.textContent=old}}
+    if(button){button.disabled=true;button.textContent='準備節日卡…'}
+    let p=holidayPayload();
+
+    if(!/^https:\/\//i.test(String(p.holiday_image_url||''))){
+      if(button)button.textContent='自動選圖＋套文字…';
+      const composed=await holidayEnsureComposedCardFromPool({silent:false});
+      if(!composed)return;
+      p=holidayPayload();
+    }
+
+    holidayAdminPreview();
+    if(!p.holiday_recipient_ids.length){alert('請選擇至少一位收件人。');return}
+    if(send&&!confirm(`確定立即發送「${p.holiday_name}」完整燒字卡＋Player 給 ${p.holiday_recipient_ids.length} 位 LINE 會員？`))return;
+
+    if(button)button.textContent=send?'發送完整卡片中…':'檢查中…';
+    const d=await hikingApi('/api/line-automation/holiday-run',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID||'',send,...p})
+    });
+    if(send&&!d.image_included)throw new Error('Worker 沒有取得完整燒字節日卡，已停止發送。');
+    alert(send
+      ?`完整節日卡＋Player 已發送 ${d.sent_count||0} 位${d.failed_count?`，失敗 ${d.failed_count} 位`:''}。`
+      :`模擬完成：完整燒字卡將發送 ${d.matches||0} 位。`);
+  }catch(e){
+    alert((send?'發送':'模擬')+'失敗：'+e.message)
+  }finally{
+    if(button){button.disabled=false;button.textContent=old}
+  }
 }
 function birthdayAdminInitButtonState(){
   const btn=$('birthdayInitBtn');if(!btn)return;
