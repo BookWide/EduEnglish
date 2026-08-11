@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V35.3_DEVICE_GUARD_FINAL_FIX" /><script>window.BOOKWIDE_BUILD="V35.3_DEVICE_GUARD_FINAL_FIX";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
+<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V35.6_DEVICE_SLOT_FINAL" /><script>window.BOOKWIDE_BUILD="V35.6_DEVICE_SLOT_FINAL";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
 <meta name="keywords" content="BookWide,多語言學習,看影片學英文,聽故事學英文,聽音樂學英文,看電影學英文,看新聞學英文,英文聽力,英文會話,日文學習,旅遊英文,機場英文,飯店英文,餐廳英文" />
 <link rel="canonical" href="https://bookwide.net/" />
 <meta property="og:type" content="website" />
@@ -1338,20 +1338,30 @@ body{background:radial-gradient(circle at 12% 0%,rgba(59,130,246,.14),transparen
 
 <!-- v_direct_url_fix_20260708: monk cards respect direct_url/url before fallback -->
 
-<style id="bw-v353-build-debug">
-html[data-bw-build-debug="1"] body::after{
-  content:"BookWide V35.3";
+<style id="bw-v356-build-debug">
+body::after{
+  content:"BookWide V35.6 · " attr(data-bw-device-type);
   position:fixed;left:8px;bottom:8px;z-index:2147483646;
   padding:5px 8px;border-radius:8px;background:#111827;color:#fff;
   font:700 11px/1.2 system-ui;opacity:.88;pointer-events:none
 }
 </style>
-<script>
+
+
+
+<script id="bw-v356-device-badge">
 (function(){
-  try{
-    const q=new URLSearchParams(location.search);
-    if(q.get('debug_version')==='1') document.documentElement.setAttribute('data-bw-build-debug','1');
-  }catch(_){}
+  function type(){
+    try{
+      var ua=navigator.userAgent||'';
+      var uaMobile=/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
+      var coarse=!!(window.matchMedia&&window.matchMedia('(pointer: coarse)').matches);
+      var touch=(navigator.maxTouchPoints||0)>1 && coarse &&
+        Math.min(window.screen.width||9999,window.innerWidth||9999)<=1180;
+      return (uaMobile||touch)?'MOBILE':'DESKTOP';
+    }catch(_){ return 'UNKNOWN'; }
+  }
+  document.documentElement.setAttribute('data-bw-device-type',type());
 })();
 </script>
 
@@ -2936,7 +2946,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         await supa.auth.signOut({ scope:'local' });
       }catch(_){
         try{ BW_stopIdleLogout();
-          await supa.auth.signOut(); }catch(__){}
+          await supa.auth.signOut({ scope:'local' }); }catch(__){}
       }
       location.href = '/index.html?idle=1';
     }
@@ -3002,7 +3012,10 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
        - 手機寫 current_mobile_device_id / mobile_last_seen_at
        - 同類型新登入 -> 舊同類型踢出
     ====================================================== */
-    function BW_getDeviceId(){
+    // V35.6：裝置身份分成「瀏覽器 ID」與「實體裝置槽 ID」。
+    // 手機在 LINE / Safari / Chrome 的 localStorage 彼此隔離，
+    // 若直接用 localStorage bw_device_id，會把同一支手機誤判成多台手機互踢。
+    function BW_getBrowserDeviceId(){
       try{
         let id = localStorage.getItem('bw_device_id');
         if(!id){
@@ -3025,18 +3038,72 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       }catch(_e){}
 
       const ua = navigator.userAgent || '';
-      const uaMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+      const uaMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(ua);
+      const coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
       const touchMobile =
         (navigator.maxTouchPoints || 0) > 1 &&
-        window.matchMedia &&
-        window.matchMedia('(pointer: coarse)').matches &&
-        Math.min(window.screen.width || 9999, window.innerWidth || 9999) <= 1024;
+        coarse &&
+        Math.min(window.screen.width || 9999, window.innerWidth || 9999) <= 1180;
 
       return (uaMobile || touchMobile) ? 'mobile' : 'desktop';
     }
 
+    function BW_hash32(str){
+      let h = 2166136261 >>> 0;
+      str = String(str || '');
+      for(let i=0;i<str.length;i++){
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return ('00000000' + (h >>> 0).toString(16)).slice(-8);
+    }
+
+    function BW_getPhysicalMobileSlotId(){
+      // 目標：同一支 iPhone 在 LINE WebView / Safari 取得相同 slot。
+      // 故意不使用完整 UA / browser version，避免 LINE 與 Safari 被分成兩台。
+      try{
+        const ua = navigator.userAgent || '';
+        let os = 'mobile';
+        let m = ua.match(/(?:CPU iPhone OS|CPU OS) ([0-9_]+)/i);
+        if(m) os = 'ios-' + String(m[1]).split('_').slice(0,2).join('.');
+        else {
+          m = ua.match(/Android\s+([0-9.]+)/i);
+          if(m) os = 'android-' + String(m[1]).split('.').slice(0,2).join('.');
+        }
+
+        const sw = Number(screen.width || 0);
+        const sh = Number(screen.height || 0);
+        const a = Math.min(sw, sh);
+        const b = Math.max(sw, sh);
+        const dpr = Number(window.devicePixelRatio || 1).toFixed(2);
+        const touch = Number(navigator.maxTouchPoints || 0);
+        const platform =
+          /iPhone/i.test(ua) ? 'iphone' :
+          /iPad/i.test(ua) ? 'ipad' :
+          /Android/i.test(ua) ? 'android' : 'mobile';
+
+        const raw = [platform, os, a, b, dpr, touch].join('|');
+        return 'mob-' + BW_hash32(raw);
+      }catch(_e){
+        return 'mob-' + BW_hash32('fallback|' + String(screen.width||0) + '|' + String(screen.height||0));
+      }
+    }
+
+    function BW_getDeviceId(){
+      // 桌機仍採 browser local id；
+      // 手機採跨 LINE / Safari 較穩定的 physical slot id。
+      return BW_getDeviceType() === 'mobile'
+        ? BW_getPhysicalMobileSlotId()
+        : BW_getBrowserDeviceId();
+    }
+
+    const BW_PAGE_DEVICE_TYPE = BW_getDeviceType();
+    const BW_PAGE_DEVICE_ID = BW_PAGE_DEVICE_TYPE === 'mobile'
+      ? BW_getPhysicalMobileSlotId()
+      : BW_getBrowserDeviceId();
+
     function BW_deviceCols(){
-      const type = BW_getDeviceType();
+      const type = BW_PAGE_DEVICE_TYPE;
       if(type === 'mobile'){
         return { type, idCol:'current_mobile_device_id', seenCol:'mobile_last_seen_at' };
       }
@@ -3091,7 +3158,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         if(await BW_isAdminDeviceUser(user)) return;
 
         const cols = BW_deviceCols();
-        const deviceId = BW_getDeviceId();
+        const deviceId = BW_PAGE_DEVICE_ID;
         const now = new Date().toISOString();
         const payload = { last_seen_at: now };
         payload[cols.idCol] = deviceId;
@@ -3117,7 +3184,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         if(await BW_isAdminDeviceUser(user)) return true;
 
         const cols = BW_deviceCols();
-        const my = BW_getDeviceId();
+        const my = BW_PAGE_DEVICE_ID;
 
         const { data, error } = await supa.from('profiles')
           .select(cols.idCol)
@@ -3173,7 +3240,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
           }
 
           const cols = BW_deviceCols();
-          const my = BW_getDeviceId();
+          const my = BW_PAGE_DEVICE_ID;
 
           const { data, error } = await supa.from('profiles')
             .select(cols.idCol)
@@ -3397,16 +3464,16 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
     async function doLogout(){
       try{
-        // ✅ 1) Supabase 端登出（global：讓 refresh token 失效）
-        await supa.auth.signOut({ scope: 'global' });
+        // ✅ V35.6：只登出目前瀏覽器；不可把 PC / 手機另一端一起登出
+        await supa.auth.signOut({ scope: 'local' });
       }catch(e){
         // fallback（舊版不支援 scope）
         try{ BW_stopIdleLogout();
-          await supa.auth.signOut({ scope:'global' }); }
+          await supa.auth.signOut({ scope:'local' }); }
        catch(_){ try{ try{ BW_stopIdleLogout();
-          await supa.auth.signOut({ scope:'global' }); }
+          await supa.auth.signOut({ scope:'local' }); }
      catch(_){ try{ BW_stopIdleLogout();
-          await supa.auth.signOut(); }catch(__){} } }catch(__){} }
+          await supa.auth.signOut({ scope:'local' }); }catch(__){} } }catch(__){} }
       }
 
       // ✅ 2) 清掉本機可能殘留的 session（避免「登出後又自動登入」）
