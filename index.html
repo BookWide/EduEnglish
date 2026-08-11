@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-Hant"><!-- BookWide V35.1: remove hero self-observer; login-safe dashboard CTA --><head><meta charset="utf-8" /><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
+<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
 <meta name="keywords" content="BookWide,多語言學習,看影片學英文,聽故事學英文,聽音樂學英文,看電影學英文,看新聞學英文,英文聽力,英文會話,日文學習,旅遊英文,機場英文,飯店英文,餐廳英文" />
 <link rel="canonical" href="https://bookwide.net/" />
 <meta property="og:type" content="website" />
@@ -2915,7 +2915,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       }catch(_){}
       try{
         BW_stopIdleLogout();
-          await supa.auth.signOut({ scope:'global' });
+          await supa.auth.signOut({ scope:'local' });
       }catch(_){
         try{ BW_stopIdleLogout();
           await supa.auth.signOut(); }catch(__){}
@@ -2949,6 +2949,24 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       BW_IDLE_LOGGING_OUT = false;
     }
     const BW_ALLOW_MULTI_DEVICE = false; // single-device mode
+    let BW_DEVICE_GUARD_TIMER = null;
+    const BW_DEVICE_TAKEOVER_PENDING = 'bw_device_takeover_pending_v352';
+
+    function BW_markDeviceTakeoverPending(){
+      try{ sessionStorage.setItem(BW_DEVICE_TAKEOVER_PENDING, '1'); }catch(_){}
+    }
+
+    function BW_consumeDeviceTakeoverPending(){
+      try{
+        if(sessionStorage.getItem(BW_DEVICE_TAKEOVER_PENDING) === '1'){
+          sessionStorage.removeItem(BW_DEVICE_TAKEOVER_PENDING);
+          return true;
+        }
+        const q = new URLSearchParams(location.search);
+        if(q.get('line_auto') === 'done') return true;
+      }catch(_){}
+      return false;
+    }
     // kick off initial loads (after supa is ready)
     try{
       if (window.__BW_NEED_INIT) {
@@ -3073,6 +3091,54 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       }
     }
 
+    async function BW_validateOrClaimCurrentDevice(user){
+      try{
+        if(!user?.id) return false;
+        if(await BW_isAdminDeviceUser(user)) return true;
+
+        const cols = BW_deviceCols();
+        const my = BW_getDeviceId();
+
+        const { data, error } = await supa.from('profiles')
+          .select(cols.idCol)
+          .eq('id', user.id)
+          .maybeSingle();
+
+        if(error){
+          console.warn('[BW] initial device select blocked:', error.message || error);
+          // DB 暫時讀不到時不要誤踢，交給 guard 後續再檢查
+          return true;
+        }
+
+        const currentId = String((data && data[cols.idCol]) || '');
+        if(currentId && currentId !== my){
+          await BW_forceSignOut();
+          return false;
+        }
+
+        // 尚未登記過此類裝置：只在欄位為空時認領，不覆蓋別台
+        if(!currentId){
+          const now = new Date().toISOString();
+          const payload = { last_seen_at: now };
+          payload[cols.idCol] = my;
+          payload[cols.seenCol] = now;
+
+          const up = await supa.from('profiles')
+            .update(payload)
+            .eq('id', user.id)
+            .is(cols.idCol, null);
+
+          if(up.error){
+            console.warn('[BW] initial device claim blocked:', up.error.message || up.error);
+          }
+        }
+        return true;
+      }catch(e){
+        console.warn('[BW] initial device validation error:', e);
+        return true;
+      }
+    }
+
     function BW_startDeviceGuard(user){
       let running = false;
       const uid = user && user.id;
@@ -3121,8 +3187,13 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         }
       };
 
+      if(BW_DEVICE_GUARD_TIMER){
+        clearInterval(BW_DEVICE_GUARD_TIMER);
+        BW_DEVICE_GUARD_TIMER = null;
+      }
       tick();
-      return setInterval(tick, 30*1000);
+      BW_DEVICE_GUARD_TIMER = setInterval(tick, 30*1000);
+      return BW_DEVICE_GUARD_TIMER;
     }
 
     // 被踢提示（跨頁保險）
@@ -3144,6 +3215,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         const code = qs.get('code');
         if (code){
           await supa.auth.exchangeCodeForSession(code);
+          BW_markDeviceTakeoverPending();
           try{ await initAuthAndProfile(); }catch(_e){}
 	          // ⚠️ 不要在這裡直接跳 next（常見 next=/pricing.html 會把新戶流程打斷）
 	          // 交給 initAuthAndProfile() 內的「最終入口版」規則決定要去哪一頁。
@@ -3407,6 +3479,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         if (authMode === 'login') {
           const { data, error } = await supa.auth.signInWithPassword({ email, password });
           if (error) throw error;
+          BW_markDeviceTakeoverPending();
           await initAuthAndProfile();
           closeModal();
         } else {
@@ -3449,12 +3522,26 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
           // 未登入：套用首頁 Hero（影片 + 右文案）
           if (!user) { try { applyHomeHeroVariant(false, false, false); renderHomeWorkNotice(); } catch(_) {} }
 
-        // [BW] 單一裝置接管 + 監控 + 閒置 30 分鐘自動登出
+        // [BW V35.2] 裝置守門：
+        // - 明確登入 / LINE 登入完成：新裝置可接管同類型席位
+        // - 一般重新整理 / 舊分頁恢復：只能驗證，不能反向搶回席位
         if (user) {
-          await BW_takeoverCurrentDevice(user);
+          const shouldTakeover = BW_consumeDeviceTakeoverPending();
+          let deviceOK = true;
+          if (shouldTakeover) {
+            await BW_takeoverCurrentDevice(user);
+          } else {
+            deviceOK = await BW_validateOrClaimCurrentDevice(user);
+          }
+          if (!deviceOK) return;
+
           BW_startDeviceGuard(user);
           BW_startIdleLogout();
         } else {
+          if(BW_DEVICE_GUARD_TIMER){
+            clearInterval(BW_DEVICE_GUARD_TIMER);
+            BW_DEVICE_GUARD_TIMER = null;
+          }
           BW_stopIdleLogout();
         }
 
