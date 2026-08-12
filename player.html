@@ -4517,6 +4517,26 @@ function setupQuizButtons(){
     }
   }
 
+  function BW_isLineInAppBrowser(){
+    try{
+      return /(?:^|[\s;])Line\//i.test(String(navigator.userAgent || ''));
+    }catch(_e){ return false; }
+  }
+
+  function BW_externalPrintUrl(catToPrint){
+    const url = new URL(location.href);
+    url.searchParams.set('openExternalBrowser', '1');
+    url.searchParams.set('bwExternalPrintCat', String(catToPrint || 'vocab'));
+    return url.toString();
+  }
+
+  function BW_openPrintInExternalBrowser(catToPrint){
+    const url = BW_externalPrintUrl(catToPrint);
+    // LINE 官方支援 openExternalBrowser=1：由 LINE 交給 Safari/Chrome 開啟。
+    // 使用 location.href 而不是 popup，避免 LINE 阻擋 window.open。
+    location.href = url;
+  }
+
   let BW_MOBILE_PRINT_RETURN_PENDING = false;
   let BW_MOBILE_PRINT_SAW_HIDDEN = false;
 
@@ -4599,7 +4619,11 @@ function setupQuizButtons(){
 
     toolbar.querySelector('[data-bw-print-back]').addEventListener('click', BW_closeMobilePrintMode);
     toolbar.querySelector('[data-bw-print-now]').addEventListener('click', () => {
-      // 使用者再次點擊時仍保持直接手勢；並先武裝 LINE / iOS 返回復原機制。
+      // LINE iOS WebView 不可靠支援 window.print()；直接交給外部瀏覽器。
+      if(BW_isLineInAppBrowser()){
+        BW_openPrintInExternalBrowser(catToPrint);
+        return;
+      }
       BW_armMobilePrintRecovery();
       try{ window.print(); }catch(_e){ BW_MOBILE_PRINT_RETURN_PENDING = false; }
     });
@@ -4608,8 +4632,12 @@ function setupQuizButtons(){
   }
 
   function BW_mobilePrintQuiz(catToPrint, prev){
-    // 手機不再使用 window.open / popup。直接在目前頁建立乾淨的列印 DOM，
-    // 避免 iPhone Safari / LINE WebView 阻擋新視窗後導致列印失效。
+    // LINE 內建瀏覽器不直接呼叫 window.print；交給外部 Safari/Chrome。
+    if(BW_isLineInAppBrowser()){
+      BW_openPrintInExternalBrowser(catToPrint);
+      return;
+    }
+    // Safari / Chrome：同頁建立乾淨列印 DOM。
     BW_closeMobilePrintMode();
     const root = BW_buildMobilePrintRoot(catToPrint);
     BW_restoreQuizAfterPrint(prev);
@@ -4641,6 +4669,25 @@ function setupQuizButtons(){
   $('#btnPrint').onclick = () => BW_printQuiz(currentQuizCat === 'all' ? 'vocab' : currentQuizCat);
 
   $('#btnPrintAll').onclick = () => BW_printQuiz('all');
+
+  // 從 LINE 轉交到外部瀏覽器後，直接停在同一份列印頁；
+  // 不自動 window.print（iOS 需要使用者手勢），讓使用者只需再按一次「🖨️ 列印」。
+  try{
+    const extCat = new URLSearchParams(location.search).get('bwExternalPrintCat');
+    if(extCat && !BW_isLineInAppBrowser()){
+      const allowed = ['vocab','grammar','reading','mix','all'];
+      const printCat = allowed.includes(extCat) ? extCat : 'vocab';
+      setTimeout(() => {
+        const prev = currentQuizCat;
+        BW_closeMobilePrintMode();
+        const root = BW_buildMobilePrintRoot(printCat);
+        BW_restoreQuizAfterPrint(prev);
+        if(root){
+          try{ root.scrollIntoView({block:'start'}); }catch(_e){}
+        }
+      }, 0);
+    }
+  }catch(_e){}
 }
 
 /* ==== 單字 ==== */
