@@ -48,6 +48,7 @@
     .running{background:var(--orange);color:#111827}
     .success{background:var(--green)}
     .failed{background:var(--red)}
+    .ready_manual_git{background:#7c3aed}
     .log{background:#081121;border:1px solid #20324f;border-radius:12px;padding:12px;white-space:pre-wrap;font-family:Consolas,monospace;font-size:12px;max-height:220px;overflow:auto;margin-top:10px}
     .empty{padding:20px;text-align:center;color:var(--muted)}
     .pipeline-box{margin-top:12px;border:1px solid var(--line);border-radius:14px;padding:12px;background:#12203a}
@@ -169,11 +170,11 @@
       </div>
 
       <div class="field">
-        <label class="label">批次 YouTube URL（1 行 1 支，可一次貼 8 支）</label>
+        <label class="label">批次 YouTube URL（1 行 1 支，可一次貼多支）</label>
         <textarea id="batchUrls" placeholder="https://www.youtube.com/watch?v=...
 https://www.youtube.com/watch?v=...
 https://www.youtube.com/watch?v=..."></textarea>
-        <div class="hint">批次會自動排隊：一支完成後才跑下一支，避免主機同時跑多支卡住。</div>
+        <div class="hint">批次會自動排隊：一支完成後才跑下一支；只跑到 06 素材完成，GitHub 最後由你手動整批執行一次。</div>
       </div>
 
       <div class="card" style="background:#12203a;box-shadow:none;border:1px solid var(--line);padding:14px;margin-bottom:16px;">
@@ -212,7 +213,8 @@ https://www.youtube.com/watch?v=..."></textarea>
       </div>
 
       <div class="row" style="margin-top:6px;">
-        <label class="switch-row"><input type="checkbox" id="autoPush" checked><span>自動 push GitHub（顯示用）</span></label>
+        <label class="switch-row" style="display:none"><input type="checkbox" id="autoPush"><span>自動 push GitHub</span></label>
+        <span class="status-chip">GitHub：固定手動整批上傳</span>
         <label class="switch-row"><input type="checkbox" id="autoPublish"><span>自動上架（顯示用）</span></label>
         <label class="switch-row"><input type="checkbox" id="priorityRun"><span>優先執行（顯示用）</span></label>
       </div>
@@ -364,7 +366,7 @@ https://www.youtube.com/watch?v=..."></textarea>
       document.getElementById("publishTier").value = "pro";
       document.getElementById("runMode").value = "full";
       document.getElementById("remark").value = "";
-      document.getElementById("autoPush").checked = true;
+      document.getElementById("autoPush").checked = false;
       document.getElementById("autoPublish").checked = false;
       document.getElementById("priorityRun").checked = false;
       refreshDomainOptions();
@@ -372,20 +374,21 @@ https://www.youtube.com/watch?v=..."></textarea>
     }
 
     function buildRealPipeline(currentStep, status) {
-      const order = ["01", "compress", "04", "05", "06", "03"];
+      const order = ["01", "compress", "04", "05", "06", "manual_git"];
       const labels = {
         "01": "01",
         "compress": "壓縮",
         "04": "04",
         "05": "05",
         "06": "06",
-        "03": "03"
+        "manual_git": "GitHub 手動"
       };
 
       const currentIndex = order.indexOf(currentStep);
 
       return order.map((step, idx) => {
-        if (status === "success") return { label: labels[step], state: "done" };
+        if (step === "manual_git") return { label: labels[step], state: "waiting" };
+        if (status === "success" || status === "ready_manual_git") return { label: labels[step], state: "done" };
         if (status === "failed" && idx === currentIndex) return { label: labels[step], state: "fail" };
         if (status === "running" && idx === currentIndex) return { label: labels[step], state: "running" };
         if (currentIndex >= 0 && idx < currentIndex) return { label: labels[step], state: "done" };
@@ -419,6 +422,13 @@ https://www.youtube.com/watch?v=..."></textarea>
       return false;
     }
 
+    function isManualGitBoundary(data) {
+      const step = String(data?.current_step || "").trim().toLowerCase();
+      const error = String(data?.last_error || "").toLowerCase();
+      return step === "03" || step.includes("github") || step.includes("push") ||
+        (/github|git push|03github/.test(error) && !data?.running);
+    }
+
     function isFailedBackend(data) {
       const running = !!data?.running;
       const finished = !!data?.last_finished_at;
@@ -444,6 +454,8 @@ https://www.youtube.com/watch?v=..."></textarea>
         job.status = "running";
       } else if (success) {
         job.status = "success";
+      } else if (failed && isManualGitBoundary(data)) {
+        job.status = "ready_manual_git";
       } else if (failed) {
         job.status = "failed";
       } else {
@@ -479,7 +491,7 @@ actual_folder: ${data.actual_folder || "-"}
 current_step: ${data.current_step || "-"}
 last_url: ${data.last_url || "-"}
 log_file: ${data.last_log_file || "-"}
-error: ${data.last_error || "-"}`;
+error: ${job.status === "ready_manual_git" ? "素材已完成；GitHub 等待手動整批上傳" : (data.last_error || "-")}`;
     }
 
     function pipelineHtml(job) {
@@ -489,7 +501,7 @@ error: ${data.last_error || "-"}`;
           <div class="pipeline-title">真實主機狀態</div>
           <div class="pipeline-steps">${pipeline.map(s => `<div class="step ${s.state}">${s.label}</div>`).join("")}</div>
           <div class="kv">
-            <div class="k">狀態</div><div>${job.status}</div>
+            <div class="k">狀態</div><div>${job.status === "ready_manual_git" ? "素材完成／等待手動 GitHub" : job.status}</div>
             <div class="k">送出 Domain</div><div>${job.domain || "-"}</div>
             <div class="k">實際 Category</div><div>${job.realCategory || "-"}</div>
             <div class="k">實際 Domain</div><div>${job.realDomain || "-"}</div>
@@ -633,7 +645,7 @@ error: ${data.last_error || "-"}`;
         return;
       }
 
-      if (!confirm(`確定建立批次任務？\n共 ${urls.length} 支\n\n會一支完成後自動跑下一支。`)) return;
+      if (!confirm(`確定建立批次任務？\n共 ${urls.length} 支\n\n會逐支跑到 06 素材完成；GitHub 不自動 Push，全部完成後由你手動上傳一次。`)) return;
 
       const created = urls.map((url, i) => makeJob(url, `[批次 ${i + 1}/${urls.length}]`));
       jobs = created.concat(jobs);
@@ -673,14 +685,18 @@ error: ${data.last_error || "-"}`;
           source_url: job.source?.source_url || "",
           source_batch: job.source?.source_batch || "",
           local_lang: job.local?.local_lang || "it",
-          local_label: job.local?.local_label || "義大利文"
+          local_label: job.local?.local_label || "義大利文",
+          auto_push: false,
+          skip_github: true,
+          stop_after: "06",
+          batch_mode: true
         })
       })
       .then(async res => {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || ("HTTP " + res.status));
 
-        job.log = "主機已接收，背景執行中；完成後自動跑下一支。";
+        job.log = "主機已接收；跑到 06 素材完成後自動換下一支，GitHub 等待手動整批上傳。";
         job.pipeline = buildRealPipeline("01", "running");
         renderJobs();
         pollQueuedJob(job);
@@ -762,7 +778,10 @@ error: ${data.last_error || "-"}`;
           source_url: job.source?.source_url || "",
           source_batch: job.source?.source_batch || "",
           local_lang: job.local?.local_lang || "it",
-          local_label: job.local?.local_label || "義大利文"
+          local_label: job.local?.local_label || "義大利文",
+          auto_push: false,
+          skip_github: true,
+          stop_after: "06"
         })
       })
       .then(async res => {
@@ -812,7 +831,7 @@ error: ${data.last_error || "-"}`;
     }
 
     function clearFinished() {
-      jobs = jobs.filter(j => !["success", "failed"].includes(j.status));
+      jobs = jobs.filter(j => !["success", "failed", "ready_manual_git"].includes(j.status));
       renderJobs();
     }
 
@@ -889,7 +908,7 @@ error: ${data.last_error || "-"}`;
             ${job.source?.source_key ? `<div class="small">source：<span class="mono">${escapeHtml(job.source.source_key)}</span> / ${escapeHtml(job.source.source_name || "")}</div>` : ""}
             <div class="small">local：<span class="mono">${escapeHtml(job.local?.local_lang || "it")}</span> / ${escapeHtml(job.local?.local_label || "義大利文")}</div>
           </td>
-          <td><span class="status ${job.status}">${job.status}</span></td>
+          <td><span class="status ${job.status}">${job.status === "ready_manual_git" ? "素材完成／等手動 GitHub" : job.status}</span></td>
           <td class="mono">${escapeHtml(job.slug || "-")}</td>
           <td>
             <div class="row">
