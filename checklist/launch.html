@@ -283,6 +283,15 @@
       </div>
       <div id="historyStatus" class="small" style="padding:0 18px 10px;">尚未載入。</div>
       <div id="historyList" style="padding:0 18px 18px;"></div>
+      <details style="margin:0 18px 18px;border-top:1px solid var(--line);padding-top:12px;">
+        <summary style="font-weight:900;cursor:pointer;">批次加入 Player 池（不用一筆一筆指定）</summary>
+        <div class="small" style="margin:10px 0 6px;">每行格式：月日｜年份｜歷史事件｜YouTube 網址。系統會用 YouTube ID 自動找到已入庫影片。</div>
+        <textarea id="historyBulkInput" class="textarea" style="min-height:190px" placeholder="08-12｜1981｜IBM 推出首部個人電腦｜https://www.youtube.com/watch?v=..."></textarea>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:10px;flex-wrap:wrap">
+          <button class="btn" id="historyBulkBtn" type="button" style="background:#21864a">一次比對並加入全部</button>
+          <span class="small" id="historyBulkResult">尚未執行。</span>
+        </div>
+      </details>
     </div>
 
     <div class="modebar">
@@ -660,6 +669,9 @@ async function upsertMonkPublish(val, row){
     historySaveBtn: document.getElementById('historySaveBtn'),
     historyStatus: document.getElementById('historyStatus'),
     historyList: document.getElementById('historyList'),
+    historyBulkInput: document.getElementById('historyBulkInput'),
+    historyBulkBtn: document.getElementById('historyBulkBtn'),
+    historyBulkResult: document.getElementById('historyBulkResult'),
   };
 
   // ===== Import index-*.json -> assets upsert =====
@@ -1585,7 +1597,13 @@ function renderHistoryPool(){
     return da.localeCompare(db)||String(a.slug).localeCompare(String(b.slug));
   });
   els.historyStatus.textContent=`池內共 ${rows.length} 支；同月同日的影片會依年份輪播，全部用過才循環。`;
-  els.historyList.innerHTML=rows.length?`<div style="overflow:auto"><table><thead><tr><th>日期</th><th>年份</th><th>歷史事件</th><th>Player</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td>${escapeHtml(historyTagValue(r.scene_tags,'history-date='))}</td><td>${escapeHtml(historyTagValue(r.scene_tags,'history-year=')||'—')}</td><td>${escapeHtml(historyTagValue(r.scene_tags,'history-title=')||r.title||'')}</td><td><a href="${escapeHtml(historyPlayerUrl(r))}" target="_blank" rel="noopener">觀看</a></td><td><button class="mini historyRemoveBtn" data-slug="${escapeHtml(r.slug)}" type="button">移出池</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="small">尚未加入歷史 Player。</div>';
+  els.historyList.innerHTML=rows.length?`<div style="overflow:auto"><table><thead><tr><th>日期</th><th>年份</th><th>歷史事件</th><th>入庫影片</th><th>Player</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td>${escapeHtml(historyTagValue(r.scene_tags,'history-date='))}</td><td>${escapeHtml(historyTagValue(r.scene_tags,'history-year=')||'—')}</td><td>${escapeHtml(historyTagValue(r.scene_tags,'history-title=')||r.title||'')}</td><td>${escapeHtml(r.title||r.slug)}<div class="small mono">${escapeHtml(r.slug||'')}</div></td><td><a href="${escapeHtml(historyPlayerUrl(r))}" target="_blank" rel="noopener">觀看</a></td><td><button class="mini historyLocateBtn" data-slug="${escapeHtml(r.slug)}" type="button">定位影片</button> <button class="mini historyRemoveBtn" data-slug="${escapeHtml(r.slug)}" type="button">移出池</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="small">尚未加入歷史 Player。</div>';
+}
+function locateHistoryAsset(slug){setMode('all');els.q.value=String(slug||'');els.catSel.value='';if(els.sourceSel)els.sourceSel.value='';applyFilters();document.getElementById('modeTitle')?.scrollIntoView({behavior:'smooth',block:'start'})
+}
+function parseHistoryBulkLine(line){const p=String(line||'').split(/[｜|\t]/).map(x=>x.trim());if(p.length<4)return null;const url=p.slice(3).join('|').trim(),youtubeId=extractYouTubeId(url)||String(url).trim();return {date:historyDateKey(p[0]),year:p[1],title:p[2],url,youtubeId}
+}
+async function saveHistoryBulk(){const items=String(els.historyBulkInput?.value||'').split(/\r?\n/).map(parseHistoryBulkLine).filter(Boolean);if(!items.length)throw new Error('沒有可處理的資料；每行需要：月日｜年份｜事件｜YouTube 網址');setBusy(true,`比對 ${items.length} 筆歷史影片…`);const ok=[],missing=[],invalid=[];try{for(const item of items){if(!item.date||!item.title||!item.youtubeId){invalid.push(item.title||item.url||'格式錯誤');continue}const row=state.rows.find(r=>String(r.youtube_id||extractYouTubeId(r.youtube_url||'')).trim()===item.youtubeId);if(!row){missing.push(`${item.date}｜${item.title}｜${item.youtubeId}`);continue}for(const old of state.rows.filter(r=>r!==row&&historyTagValue(r.scene_tags,'history-date=')===item.date&&historyTagValue(r.scene_tags,'history-title=')===item.title)){const oldTags=(Array.isArray(old.scene_tags)?old.scene_tags:[]).filter(t=>!HISTORY_TAG_PREFIXES.some(p=>String(t||'').startsWith(p)));const {error:clearError}=await supa.from('assets').update({scene_tags:oldTags}).eq('slug',old.slug);if(clearError)throw clearError;old.scene_tags=oldTags}const tags=(Array.isArray(row.scene_tags)?row.scene_tags:[]).filter(t=>!HISTORY_TAG_PREFIXES.some(p=>String(t||'').startsWith(p)));tags.push(`history-date=${item.date}`,`history-title=${item.title}`);if(item.year)tags.push(`history-year=${item.year}`);const {data,error}=await supa.from('assets').update({scene_tags:tags}).eq('slug',row.slug).select('slug,scene_tags').single();if(error)throw error;row.scene_tags=data.scene_tags||tags;ok.push(`${item.date}｜${item.title}`)}renderHistoryPool();const parts=[`成功 ${ok.length} 筆`];if(missing.length)parts.push(`尚未入庫 ${missing.length} 筆`);if(invalid.length)parts.push(`格式錯誤 ${invalid.length} 筆`);els.historyBulkResult.textContent=parts.join('；');if(missing.length)alert(`已成功加入 ${ok.length} 筆。\n\n以下影片尚未在 assets 找到，請先完成產線入庫，再按一次批次加入：\n${missing.join('\n')}`);else toast('批次 Player 池完成',`已加入／更新 ${ok.length} 筆`)}finally{setBusy(false)}
 }
 async function saveHistoryPoolItem(){
   const slug=String(els.historyAsset?.value||'').trim(),date=historyDateKey(els.historyDate?.value),year=String(els.historyYear?.value||'').trim(),title=String(els.historyTitle?.value||'').trim();
@@ -1597,7 +1615,7 @@ async function saveHistoryPoolItem(){
   const {data,error}=await supa.from('assets').update({scene_tags:tags}).eq('slug',slug).select('slug,scene_tags').single();
   if(error)throw error;
   row.scene_tags=data.scene_tags||tags;
-  renderHistoryPool();toast('已保存',`${date}｜${title}`);
+  renderHistoryPool();els.q.value='';toast('已保存',`${date}｜${title}`);
 }
 async function removeHistoryPoolItem(slug){
   const row=state.rows.find(r=>String(r.slug)===String(slug));if(!row)return;
@@ -2042,7 +2060,8 @@ async function hardDeleteOne(slug){
       if (els.clearReviewBtn) els.clearReviewBtn.onclick = ()=>clearAllReviewRows().catch(err=>{console.error(err); alert('清除待審失敗：'+(err?.message||err));});
       if (els.historyDate && !els.historyDate.value) els.historyDate.value = new Date().toLocaleDateString('en-CA',{timeZone:'Asia/Taipei'});
       if (els.historySaveBtn) els.historySaveBtn.onclick = ()=>saveHistoryPoolItem().catch(err=>{console.error(err); alert('Player 池保存失敗：'+(err?.message||err));});
-      if (els.historyList) els.historyList.addEventListener('click',ev=>{const b=ev.target.closest?.('.historyRemoveBtn');if(b)removeHistoryPoolItem(b.dataset.slug).catch(err=>alert('移出失敗：'+(err?.message||err)));});
+      if (els.historyBulkBtn) els.historyBulkBtn.onclick = ()=>saveHistoryBulk().catch(err=>{console.error(err);alert('批次加入失敗：'+(err?.message||err));});
+      if (els.historyList) els.historyList.addEventListener('click',ev=>{const locate=ev.target.closest?.('.historyLocateBtn');if(locate){locateHistoryAsset(locate.dataset.slug);return}const b=ev.target.closest?.('.historyRemoveBtn');if(b)removeHistoryPoolItem(b.dataset.slug).catch(err=>alert('移出失敗：'+(err?.message||err)));});
 
       if (migEls.previewBtn) migEls.previewBtn.onclick = ()=>previewMigration().catch(err=>{console.error(err); alert(err?.message||err);});
       if (migEls.runBtn) migEls.runBtn.onclick = ()=>runLogicalMigration().catch(err=>{console.error(err); alert(err?.message||err);});
