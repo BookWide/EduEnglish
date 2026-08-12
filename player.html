@@ -5571,7 +5571,160 @@ function BW_talkErrorText(err){
   return map[code] || ('辨識失敗：' + code);
 }
 
+/* ==== V19.1 Talk「我來說」：LINE 內建瀏覽器走 MediaRecorder + Worker STT；其他瀏覽器沿用 SpeechRecognition ==== */
+const BW_TALK_TRANSCRIBE_API='https://bookwide-hiking-api.pmktools.workers.dev/api/transcribe';
+const BW_TALK_LINE_RECORD_MS=6500;
+let BW_talkLineRecorder=null, BW_talkLineStream=null, BW_talkLineChunks=[], BW_talkLineStopTimer=null, BW_talkLineBusy=false;
+
+function BW_talkIsLineWebView(){
+  const ua=String(navigator.userAgent||'');
+  return /\bLine\//i.test(ua) || /\bLIFF\b/i.test(ua) || /Line\s*\d/i.test(ua);
+}
+function BW_talkPreferredMimeType(){
+  const MR=window.MediaRecorder;
+  if(!MR) return '';
+  const choices=['audio/mp4','audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus'];
+  for(const type of choices){
+    try{ if(!MR.isTypeSupported || MR.isTypeSupported(type)) return type; }catch(_e){}
+  }
+  return '';
+}
+function BW_talkExtForMime(type=''){
+  type=String(type).toLowerCase();
+  if(type.includes('mp4')||type.includes('m4a')) return 'm4a';
+  if(type.includes('ogg')) return 'ogg';
+  if(type.includes('wav')) return 'wav';
+  return 'webm';
+}
+function BW_talkLanguageCode(){
+  const lang=String(BW_talkRecognitionLang()||'en-US').trim().toLowerCase();
+  if(lang.startsWith('zh')) return 'zh';
+  if(lang.startsWith('ja')) return 'ja';
+  if(lang.startsWith('ko')) return 'ko';
+  if(lang.startsWith('th')) return 'th';
+  if(lang.startsWith('vi')) return 'vi';
+  if(lang.startsWith('it')) return 'it';
+  if(lang.startsWith('da')) return 'da';
+  if(lang.startsWith('ne')) return 'ne';
+  return 'en';
+}
+async function BW_talkGetAccessToken(){
+  try{
+    const {data}=await playerSupa.auth.getSession();
+    return String(data?.session?.access_token||'');
+  }catch(_e){ return ''; }
+}
+function BW_talkLineSetMicLabel(text){
+  if(btnTalkSpeakMic) btnTalkSpeakMic.textContent=text || '🎙 我來說';
+}
+function BW_talkStopLineTracks(){
+  if(BW_talkLineStopTimer){ clearTimeout(BW_talkLineStopTimer); BW_talkLineStopTimer=null; }
+  if(BW_talkLineStream){
+    try{ BW_talkLineStream.getTracks().forEach(t=>t.stop()); }catch(_e){}
+    BW_talkLineStream=null;
+  }
+}
+function BW_talkCleanupLineRecorder(){
+  BW_talkStopLineTracks();
+  BW_talkLineRecorder=null;
+  BW_talkLineChunks=[];
+  BW_talkLineBusy=false;
+  BW_talkLineSetMicLabel('🎙 我來說');
+}
+async function BW_talkSendLineRecording(blob){
+  if(!blob || blob.size<500){
+    BW_talkCleanupLineRecorder();
+    updateTalkSpeechBox('沒有收到有效錄音，請再按一次「我來說」', '—');
+    return;
+  }
+  BW_talkLineBusy=true;
+  BW_talkLineSetMicLabel('⏳ 辨識中…');
+  updateTalkSpeechBox('正在把你的語音轉成文字…', '—');
+  try{
+    const token=await BW_talkGetAccessToken();
+    if(!token) throw new Error('登入狀態已失效，請重新登入 BookWide');
+    const form=new FormData();
+    const mime=blob.type||'audio/webm';
+    form.append('audio',blob,'talk.'+BW_talkExtForMime(mime));
+    form.append('language',BW_talkLanguageCode());
+    const res=await fetch(BW_TALK_TRANSCRIBE_API,{
+      method:'POST',
+      headers:{Authorization:`Bearer ${token}`},
+      body:form,
+      cache:'no-store'
+    });
+    const raw=await res.text();
+    let data={};
+    try{ data=raw?JSON.parse(raw):{}; }catch(_e){}
+    if(!res.ok) throw new Error(data.error||raw||`語音辨識失敗 ${res.status}`);
+    const transcript=String(data.text||'').trim();
+    if(!transcript){
+      BW_talkCleanupLineRecorder();
+      updateTalkSpeechBox('沒有辨識到語音，請再按一次「我來說」', '—');
+      return;
+    }
+    const target=BW_talkTargetText(talkData[talkCurrentIdx] || {}) || '';
+    const score=similarityScore(transcript,target);
+    talkLastScore=score;
+    BW_talkCleanupLineRecorder();
+    updateTalkSpeechBox(transcript,score+'%');
+  }catch(err){
+    BW_talkCleanupLineRecorder();
+    updateTalkSpeechBox('語音辨識失敗：'+String(err?.message||err), '—');
+  }
+}
+async function BW_talkStartLineRecording(){
+  if(BW_talkLineBusy || BW_talkLineRecorder) return;
+  if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){
+    updateTalkSpeechBox('目前 LINE 瀏覽器無法啟用錄音，請更新 LINE 後再試。', '—');
+    return;
+  }
+  BW_talkLineChunks=[];
+  try{
+    updateTalkSpeechBox('正在開啟麥克風…', '—');
+    BW_talkLineStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    const mime=BW_talkPreferredMimeType();
+    BW_talkLineRecorder=mime ? new MediaRecorder(BW_talkLineStream,{mimeType:mime}) : new MediaRecorder(BW_talkLineStream);
+    BW_talkLineRecorder.ondataavailable=(e)=>{ if(e.data && e.data.size>0) BW_talkLineChunks.push(e.data); };
+    BW_talkLineRecorder.onerror=(e)=>{
+      const msg=String(e?.error?.message||e?.error||'錄音器錯誤');
+      BW_talkCleanupLineRecorder();
+      updateTalkSpeechBox('錄音失敗：'+msg, '—');
+    };
+    BW_talkLineRecorder.onstop=()=>{
+      const type=BW_talkLineRecorder?.mimeType || BW_talkLineChunks[0]?.type || mime || 'audio/webm';
+      const blob=new Blob(BW_talkLineChunks,{type});
+      BW_talkStopLineTracks();
+      BW_talkLineRecorder=null;
+      BW_talkLineChunks=[];
+      BW_talkSendLineRecording(blob);
+    };
+    BW_talkLineRecorder.start(250);
+    BW_talkLineSetMicLabel('🎙 LINE 錄音中…');
+    updateTalkSpeechBox('正在聽...（'+BW_talkRecognitionLang()+'）', '—');
+    BW_talkLineStopTimer=setTimeout(()=>{
+      if(BW_talkLineRecorder && BW_talkLineRecorder.state==='recording'){
+        try{ BW_talkLineRecorder.stop(); }catch(_e){}
+      }
+    },BW_TALK_LINE_RECORD_MS);
+  }catch(err){
+    BW_talkCleanupLineRecorder();
+    const name=String(err?.name||'');
+    updateTalkSpeechBox(
+      (name==='NotAllowedError'||name==='PermissionDeniedError')
+        ? 'LINE 沒有取得麥克風權限。請在 iPhone「設定 → LINE → 麥克風」開啟後再試。'
+        : '無法啟用麥克風：'+String(err?.message||err),
+      '—'
+    );
+  }
+}
+
 function startTalkRecognition(){
+  if(BW_talkIsLineWebView()){
+    BW_talkStartLineRecording();
+    return;
+  }
+
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition || null;
   if(!SR){
     updateTalkSpeechBox('此瀏覽器不支援語音辨識，請用 Chrome / Edge', '—');
@@ -5627,12 +5780,21 @@ function startTalkRecognition(){
 }
 
 function stopTalkRecognition(){
+  if(BW_talkLineRecorder){
+    try{
+      if(BW_talkLineRecorder.state==='recording') BW_talkLineRecorder.stop();
+      else BW_talkCleanupLineRecorder();
+    }catch(_e){ BW_talkCleanupLineRecorder(); }
+  }else if(BW_talkLineStream){
+    BW_talkCleanupLineRecorder();
+  }
   if(talkRecognition){
     try{ talkRecognition.stop(); }catch(_e){}
     try{ talkRecognition.abort && talkRecognition.abort(); }catch(_e){}
   }
   talkRecognition = null;
 }
+
 function BW_findNextTalkIndexForSelectedRole(fromIdx){
   if(!talkSelectedRole) return fromIdx + 1;
   for(let i = fromIdx + 1; i < talkData.length; i++){
