@@ -4876,7 +4876,7 @@ async function loadAI(){
   answerEl.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter') window.BW_aiSubmitCurrent(); });
 })();
 
-/* ==== V18.16 AI 語音作答：LINE 內建瀏覽器先主動要求麥克風權限 ==== */
+/* ==== V18.17 AI 語音作答：LINE 內建瀏覽器持續保留麥克風串流，避免一閃即停 ==== */
 (function(){
   const btnRec=$('#btnRec'), btnStop=$('#btnStop'), ansEl=$('#aiAnswer'), voiceStatus=$('#aiVoiceStatus');
   if(!btnRec || !btnStop || !ansEl) return;
@@ -4903,6 +4903,7 @@ async function loadAI(){
     const r=recognition;
     recognition=null;
     if(r){ try{r.abort();}catch(_e){try{r.stop();}catch(_e2){}} }
+    BW_closeMicStream();
     uiIdle();
     if(voiceStatus) voiceStatus.textContent='已停止。要回答時再按「說答案」。';
   };
@@ -4911,24 +4912,27 @@ async function loadAI(){
     return /\bLine\//i.test(navigator.userAgent || '') || /LIFF/i.test(navigator.userAgent || '');
   }
 
-  let micPermissionChecked=false;
-  async function BW_requestMicPermission(){
-    if(micPermissionChecked) return true;
+  let micStream=null;
+  async function BW_openMicStream(){
+    if(micStream && micStream.getAudioTracks && micStream.getAudioTracks().some(t=>t.readyState==='live')) return true;
     if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return true;
     try{
-      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
-      stream.getTracks().forEach(t=>{ try{t.stop();}catch(_e){} });
-      micPermissionChecked=true;
+      micStream=await navigator.mediaDevices.getUserMedia({audio:true});
       return true;
     }catch(err){
       const inLine=BW_isLineInApp();
       if(voiceStatus){
         voiceStatus.textContent=inLine
-          ? 'LINE 尚未取得麥克風權限。請先允許 LINE 使用麥克風；若 LINE 內仍無法使用，請由右上選單改用 Safari 開啟。'
+          ? 'LINE 尚未取得麥克風權限。請允許 LINE 使用麥克風後再試。'
           : '麥克風權限被阻擋，請允許此網站使用麥克風。';
       }
       return false;
     }
+  }
+  function BW_closeMicStream(){
+    if(!micStream) return;
+    try{ micStream.getTracks().forEach(t=>t.stop()); }catch(_e){}
+    micStream=null;
   }
 
   async function startListening(isRetry=false){
@@ -4940,7 +4944,7 @@ async function loadAI(){
     }
 
     if(!isRetry){
-      const micOK=await BW_requestMicPermission();
+      const micOK=await BW_openMicStream();
       if(!micOK) return;
     }
 
@@ -4995,6 +4999,7 @@ async function loadAI(){
       }
 
       recognition=null;
+      BW_closeMicStream();
       uiIdle();
 
       if(manualStop) return;
@@ -5003,7 +5008,7 @@ async function loadAI(){
       }else if(err==='audio-capture'){
         if(voiceStatus) voiceStatus.textContent='沒有收到麥克風聲音，請確認瀏覽器已允許麥克風。';
       }else if(err==='not-allowed' || err==='service-not-allowed'){
-        if(voiceStatus) voiceStatus.textContent=BW_isLineInApp() ? 'LINE 阻擋麥克風。請允許 LINE 使用麥克風；仍無法使用時，請由右上選單改用 Safari 開啟。' : '麥克風權限被阻擋，請允許此網站使用麥克風。';
+        if(voiceStatus) voiceStatus.textContent=BW_isLineInApp() ? 'LINE 內建瀏覽器未能啟動語音辨識。已保留麥克風權限；請再按一次「說答案」。' : '麥克風權限被阻擋，請允許此網站使用麥克風。';
       }else{
         if(voiceStatus) voiceStatus.textContent='語音辨識沒有成功，再按一次「說答案」即可。';
       }
@@ -5014,6 +5019,7 @@ async function loadAI(){
       // 避免同一次失敗重複講兩次「我沒聽清楚」。
       if(recognition!==r) return;
       recognition=null;
+      BW_closeMicStream();
       uiIdle();
 
       if(manualStop || gotFinal || ansEl.value.trim()) return;
@@ -5031,6 +5037,7 @@ async function loadAI(){
     try{r.start();}
     catch(_e){
       recognition=null;
+      BW_closeMicStream();
       uiIdle();
       if(voiceStatus) voiceStatus.textContent='麥克風啟動失敗，再按一次「說答案」即可。';
     }
