@@ -6256,6 +6256,50 @@ function holidayTypeToTag(type){const map={
     qixi:'qixi'};
   return map[type]||type;
 }
+let holidayLaunchMapping={};
+function holidayLaunchTagValue(tags,prefix){const hit=(Array.isArray(tags)?tags:[]).find(x=>String(x||'').startsWith(prefix));return hit?String(hit).slice(prefix.length).trim():'';}
+function holidayLaunchInternalType(tag){const map={father:'fathers',mother:'mothers','mid-autumn':'midautumn','dragon-boat':'dragonboat','new-year':'newyear',christmas:'christmas',teacher:'teachers',qixi:'qixi'};return map[String(tag||'').trim()]||'';}
+async function holidayLoadLaunchMapping(){
+  const {data,error}=await bookwideSupa.from('assets').select('slug,category,title,domain_code,scene_tags,cover_url,is_published').order('slug',{ascending:true});
+  if(error)throw error;
+  const next={};
+  for(const row of (data||[])){
+    if(row?.is_published===false)continue;
+    const tag=holidayLaunchTagValue(row.scene_tags,'holiday-type=');
+    const type=holidayLaunchInternalType(tag);
+    if(!type)continue;
+    const slug=String(row.slug||'').trim(),category=String(row.category||'story').trim()||'story';
+    if(!slug)continue;
+    const params=new URLSearchParams({cat:category,slug});
+    if(category==='pro'&&row.domain_code)params.set('domain',String(row.domain_code));
+    const cover=String(row.cover_url||'').trim()||`${GREETING_HISTORY_R2_BASE}/assets/${encodeURIComponent(category)}/${encodeURIComponent(slug)}.jpg`;
+    next[type]={
+      type,tag,slug,category,title:String(row.title||slug),
+      player_url:`${location.origin}/player.html?${params.toString()}`,
+      cover_url:cover};
+  }
+  holidayLaunchMapping=next;
+  return next;
+}
+function holidayApplyLaunchMappingToLibraries(){
+  for(const [type,savedRaw] of Object.entries(holidayContentLibrary||{})){
+    const saved=(savedRaw&&typeof savedRaw==='object')?savedRaw:{};
+    if(saved.mapping_source!=='launch')continue;
+    const current=holidayLaunchMapping[type];
+    if(current)continue;
+    if(String(holidayCardLibrary[type]||'')===String(saved.cover_url||''))delete holidayCardLibrary[type];
+    holidayContentLibrary[type]={...saved,player_url:'',cover_url:'',asset_slug:'',asset_category:'',asset_title:'',mapping_source:''};
+  }
+  for(const [type,item] of Object.entries(holidayLaunchMapping||{})){
+    const saved=(holidayContentLibrary[type]&&typeof holidayContentLibrary[type]==='object')?holidayContentLibrary[type]:{};
+    holidayContentLibrary[type]={...saved,player_url:item.player_url,player_label:saved.player_label||'立即學習',cover_url:item.cover_url,asset_slug:item.slug,asset_category:item.category,asset_title:item.title,mapping_source:'launch'};
+    holidayCardLibrary[type]=item.cover_url;
+  }
+}
+async function holidaySyncLaunchMappingToCloud(){
+  try{await hikingApi('/api/line-automation/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID||'',holiday_card_library:holidayCardLibrary,holiday_content_library:holidayContentLibrary})});}
+  catch(e){console.warn('節日 Launch mapping 雲端同步失敗',e);}
+}
 function holidayTaggedPoolUrls(type){const tag=holidayTypeToTag(type);
   try{const urls=commonPhotoUrls();
     return urls.filter(u=>{
@@ -6270,12 +6314,15 @@ function holidayValidPlayerUrl(url){try{const u=new URL(String(url||'').trim(),l
     return true;}catch(_e){
     return false;}
 }
-function holidayResolvedPlayerUrl(type,raw){const t=HOLIDAY_TEMPLATES[type]||HOLIDAY_TEMPLATES.custom||{};
+function holidayResolvedPlayerUrl(type,raw){const mapped=holidayLaunchMapping[type]?.player_url||'',t=HOLIDAY_TEMPLATES[type]||HOLIDAY_TEMPLATES.custom||{};
+  if(holidayValidPlayerUrl(mapped))return String(mapped).trim();
   if(holidayValidPlayerUrl(raw))return String(raw).trim();
   if(holidayValidPlayerUrl(t.player_url))return String(t.player_url).trim();
   return '';
 }
-function holidayResolveImage(type,direct=''){const fixed=String(holidayCardLibrary[type]||'').trim();
+function holidayResolveImage(type,direct=''){const mapped=String(holidayLaunchMapping[type]?.cover_url||'').trim();
+  if(/^https:\/\//i.test(mapped))return mapped;
+  const fixed=String(holidayCardLibrary[type]||'').trim();
   if(/^https:\/\//i.test(fixed))return fixed;
   direct=String(direct||'').trim();
   if(/^https:\/\//i.test(direct))return direct;
@@ -6296,7 +6343,9 @@ function holidayPayload(){const type=document.getElementById('laHolidayType').va
   const playerLabel=String(document.getElementById('laHolidayPlayerLabel')?.value||'立即學習').trim()||'立即學習';
   const lineTextBase=String(document.getElementById('laHolidayLineText')?.value||'').trim();
   const lineText=[lineTextBase,playerUrl].filter(Boolean).join('\n\n');
+  const existingContent=(holidayContentLibrary[type]&&typeof holidayContentLibrary[type]==='object')?holidayContentLibrary[type]:{};
   holidayContentLibrary[type]={
+    ...existingContent,
     player_url:playerUrl,
     player_label:playerLabel,
     line_text:lineTextBase};
@@ -6333,7 +6382,7 @@ function holidayAdminPreview(){const p=holidayPayload(),box=document.getElementB
       <div class="small" style="margin-top:8px">正式 LINE：1 個 Flex 訊息＝上方合成 JPG＋下方 Player 教材按鈕；不再拆成圖片訊息＋文字訊息。</div>
     </div>`;
 }
-async function holidayAdminLoad(){if(!BOOKWIDE_IS_SUPER_ADMIN)return;try{const d=await hikingApi('/api/line-automation/config',{method:'GET',admin:false});const c=d.config||d||{};document.getElementById('laHolidayEnabled').value=c.holiday_enabled===true?'true':'false';document.getElementById('laHolidayType').value=c.holiday_type||'fathers';document.getElementById('laHolidayName').value=c.holiday_name||'父親節';document.getElementById('laHolidayDate').value=c.holiday_date||holidaySuggestedDate(c.holiday_type||'fathers',holidayTaipeiToday().slice(0,4));document.getElementById('laHolidayTime').value=c.holiday_send_time||'08:00';document.getElementById('laHolidayZh').value=c.holiday_zh||HOLIDAY_TEMPLATES.fathers.zh;document.getElementById('laHolidayEn').value=c.holiday_en||HOLIDAY_TEMPLATES.fathers.en;holidayCardLibrary=(c.holiday_card_library&&typeof c.holiday_card_library==='object')?c.holiday_card_library:{};holidayContentLibrary=(c.holiday_content_library&&typeof c.holiday_content_library==='object')?c.holiday_content_library:{};document.getElementById('laHolidayImage').value=holidayCardLibrary[c.holiday_type||'fathers']||c.holiday_image_url||'';document.getElementById('laHolidaySign').value=c.holiday_signature||'BookWide';const loadedType=c.holiday_type||'fathers';const tpl=HOLIDAY_TEMPLATES[loadedType]||HOLIDAY_TEMPLATES.custom;const savedContent=(holidayContentLibrary[loadedType]&&typeof holidayContentLibrary[loadedType]==='object')?holidayContentLibrary[loadedType]:{};const playerEl=document.getElementById('laHolidayPlayerUrl');if(playerEl)playerEl.value=holidayResolvedPlayerUrl(loadedType,savedContent.player_url||c.holiday_player_url||tpl.player_url||'');const playerLabelEl=document.getElementById('laHolidayPlayerLabel');if(playerLabelEl)playerLabelEl.value=savedContent.player_label||c.holiday_player_label||tpl.player_label||'立即學習';const lineTextEl=document.getElementById('laHolidayLineText');if(lineTextEl)lineTextEl.value=savedContent.line_text||c.holiday_line_text_base||tpl.line_text||'';holidayRenderRecipients(c.holiday_recipient_ids||[]);const sm=document.getElementById('holidayAdminSummary');if(sm)sm.textContent=c.holiday_enabled?`${c.holiday_date||'未定日期'} ${c.holiday_send_time||'08:00'}｜已啟用`:'尚未啟用'}catch(e){const sm=document.getElementById('holidayAdminSummary');if(sm)sm.textContent='讀取失敗：'+e.message}}
+async function holidayAdminLoad(){if(!BOOKWIDE_IS_SUPER_ADMIN)return;try{const d=await hikingApi('/api/line-automation/config',{method:'GET',admin:false});const c=d.config||d||{};document.getElementById('laHolidayEnabled').value=c.holiday_enabled===true?'true':'false';document.getElementById('laHolidayType').value=c.holiday_type||'fathers';document.getElementById('laHolidayName').value=c.holiday_name||'父親節';document.getElementById('laHolidayDate').value=c.holiday_date||holidaySuggestedDate(c.holiday_type||'fathers',holidayTaipeiToday().slice(0,4));document.getElementById('laHolidayTime').value=c.holiday_send_time||'08:00';document.getElementById('laHolidayZh').value=c.holiday_zh||HOLIDAY_TEMPLATES.fathers.zh;document.getElementById('laHolidayEn').value=c.holiday_en||HOLIDAY_TEMPLATES.fathers.en;holidayCardLibrary=(c.holiday_card_library&&typeof c.holiday_card_library==='object')?c.holiday_card_library:{};holidayContentLibrary=(c.holiday_content_library&&typeof c.holiday_content_library==='object')?c.holiday_content_library:{};try{await holidayLoadLaunchMapping();holidayApplyLaunchMappingToLibraries();await holidaySyncLaunchMappingToCloud()}catch(mapError){console.warn('Launch 節日 mapping 讀取失敗，暫用既有節日設定',mapError)}const loadedType=c.holiday_type||'fathers';document.getElementById('laHolidayImage').value=holidayResolveImage(loadedType,holidayCardLibrary[loadedType]||c.holiday_image_url||'');document.getElementById('laHolidaySign').value=c.holiday_signature||'BookWide';const tpl=HOLIDAY_TEMPLATES[loadedType]||HOLIDAY_TEMPLATES.custom;const savedContent=(holidayContentLibrary[loadedType]&&typeof holidayContentLibrary[loadedType]==='object')?holidayContentLibrary[loadedType]:{};const playerEl=document.getElementById('laHolidayPlayerUrl');if(playerEl)playerEl.value=holidayResolvedPlayerUrl(loadedType,savedContent.player_url||c.holiday_player_url||tpl.player_url||'');const playerLabelEl=document.getElementById('laHolidayPlayerLabel');if(playerLabelEl)playerLabelEl.value=savedContent.player_label||c.holiday_player_label||tpl.player_label||'立即學習';const lineTextEl=document.getElementById('laHolidayLineText');if(lineTextEl)lineTextEl.value=savedContent.line_text||c.holiday_line_text_base||tpl.line_text||'';holidayRenderRecipients(c.holiday_recipient_ids||[]);const sm=document.getElementById('holidayAdminSummary');if(sm){const mapped=holidayLaunchMapping[loadedType];sm.textContent=c.holiday_enabled?`${c.holiday_date||'未定日期'} ${c.holiday_send_time||'08:00'}｜已啟用${mapped?'｜Launch Player 已同步':''}`:(mapped?'Launch Player 已同步':'尚未啟用')}}catch(e){const sm=document.getElementById('holidayAdminSummary');if(sm)sm.textContent='讀取失敗：'+e.message}}
 async function holidayEnsureComposedCardFromPool({silent=false}={}){const type=document.getElementById('laHolidayType')?.value||'fathers';
   const direct=String(document.getElementById('laHolidayImage')?.value||'').trim();
   const fixed=String(holidayCardLibrary[type]||'').trim();
