@@ -1765,6 +1765,19 @@ body.bw-mobile-print-mode #bwMobilePrintRoot{
 #bwMobilePrintList > li *{background:transparent!important;background-image:none!important;box-shadow:none!important;}
 #bwMobilePrintList > li > div{background:#fff!important;}
 #bwMobilePrintList input[type="radio"]{appearance:auto!important;-webkit-appearance:radio!important;}
+.bw-line-print-help{
+  display:none;
+  margin:4px 0 14px;
+  padding:12px 14px;
+  border:1px solid #94a3b8;
+  border-radius:10px;
+  background:#f8fafc;
+  color:#111827;
+  font-size:14px;
+  line-height:1.55;
+}
+.bw-line-print-help.show{display:block;}
+.bw-line-print-help strong{display:block;margin-bottom:4px;color:#111827;}
 
 @media print{
   body.bw-mobile-print-mode > *:not(#bwMobilePrintRoot){display:none!important;}
@@ -4517,26 +4530,6 @@ function setupQuizButtons(){
     }
   }
 
-  function BW_isLineInAppBrowser(){
-    try{
-      return /(?:^|[\s;])Line\//i.test(String(navigator.userAgent || ''));
-    }catch(_e){ return false; }
-  }
-
-  function BW_externalPrintUrl(catToPrint){
-    const url = new URL(location.href);
-    url.searchParams.set('openExternalBrowser', '1');
-    url.searchParams.set('bwExternalPrintCat', String(catToPrint || 'vocab'));
-    return url.toString();
-  }
-
-  function BW_openPrintInExternalBrowser(catToPrint){
-    const url = BW_externalPrintUrl(catToPrint);
-    // LINE 官方支援 openExternalBrowser=1：由 LINE 交給 Safari/Chrome 開啟。
-    // 使用 location.href 而不是 popup，避免 LINE 阻擋 window.open。
-    location.href = url;
-  }
-
   let BW_MOBILE_PRINT_RETURN_PENDING = false;
   let BW_MOBILE_PRINT_SAW_HIDDEN = false;
 
@@ -4576,6 +4569,30 @@ function setupQuizButtons(){
     if(BW_MOBILE_PRINT_RETURN_PENDING) setTimeout(BW_closeMobilePrintMode, 80);
   });
 
+  function BW_isLineWebView(){
+    try{ return /\bLine\//i.test(navigator.userAgent || '') || /LIFF/i.test(navigator.userAgent || ''); }catch(_e){ return false; }
+  }
+
+  function BW_showLinePrintHelp(root){
+    if(!root) return;
+    const box = root.querySelector('[data-bw-line-print-help]');
+    if(box){
+      box.classList.add('show');
+      try{ box.scrollIntoView({block:'nearest', behavior:'smooth'}); }catch(_e){}
+    }
+  }
+
+  function BW_triggerMobilePrint(root){
+    const isLine = BW_isLineWebView();
+    BW_armMobilePrintRecovery();
+
+    // LINE iOS WebView 實測會忽略 window.print()。先立即顯示替代操作，
+    // 同時仍嘗試原生 print；若未來 LINE 開放能力，也能直接進系統列印。
+    if(isLine) BW_showLinePrintHelp(root);
+    try{ window.print(); }catch(_e){ BW_MOBILE_PRINT_RETURN_PENDING = false; }
+    if(isLine) BW_MOBILE_PRINT_RETURN_PENDING = false;
+  }
+
   function BW_buildMobilePrintRoot(catToPrint){
     renderQuiz(catToPrint);
 
@@ -4590,6 +4607,11 @@ function setupQuizButtons(){
     const toolbar = document.createElement('div');
     toolbar.className = 'bw-mobile-print-toolbar';
     toolbar.innerHTML = '<button type="button" class="btn blue" data-bw-print-now>🖨️ 列印</button><button type="button" class="btn" data-bw-print-back>← 返回播放器</button>';
+
+    const lineHelp = document.createElement('div');
+    lineHelp.className = 'bw-line-print-help';
+    lineHelp.setAttribute('data-bw-line-print-help','');
+    lineHelp.innerHTML = '<strong>LINE 內建瀏覽器沒有提供網頁直接列印。</strong>題目已整理成列印版。請點 LINE 上方／下方的「分享」按鈕，再選「用預設瀏覽器開啟」後列印；或按「← 返回播放器」繼續使用。';
 
     const title = document.createElement('h1');
     title.className = 'bw-mobile-print-title';
@@ -4613,31 +4635,21 @@ function setupQuizButtons(){
       }catch(_e){}
     });
 
-    root.append(toolbar, title, meta, list);
+    root.append(toolbar, lineHelp, title, meta, list);
     document.body.appendChild(root);
     document.body.classList.add('bw-mobile-print-mode');
 
     toolbar.querySelector('[data-bw-print-back]').addEventListener('click', BW_closeMobilePrintMode);
     toolbar.querySelector('[data-bw-print-now]').addEventListener('click', () => {
-      // LINE iOS WebView 不可靠支援 window.print()；直接交給外部瀏覽器。
-      if(BW_isLineInAppBrowser()){
-        BW_openPrintInExternalBrowser(catToPrint);
-        return;
-      }
-      BW_armMobilePrintRecovery();
-      try{ window.print(); }catch(_e){ BW_MOBILE_PRINT_RETURN_PENDING = false; }
+      BW_triggerMobilePrint(root);
     });
 
     return root;
   }
 
   function BW_mobilePrintQuiz(catToPrint, prev){
-    // LINE 內建瀏覽器不直接呼叫 window.print；交給外部 Safari/Chrome。
-    if(BW_isLineInAppBrowser()){
-      BW_openPrintInExternalBrowser(catToPrint);
-      return;
-    }
-    // Safari / Chrome：同頁建立乾淨列印 DOM。
+    // 手機不再使用 window.open / popup。直接在目前頁建立乾淨的列印 DOM，
+    // 避免 iPhone Safari / LINE WebView 阻擋新視窗後導致列印失效。
     BW_closeMobilePrintMode();
     const root = BW_buildMobilePrintRoot(catToPrint);
     BW_restoreQuizAfterPrint(prev);
@@ -4646,8 +4658,13 @@ function setupQuizButtons(){
     // 強制完成版面計算後，在原始點擊事件流程內直接叫系統列印。
     // 若 App 不提供 print UI，畫面會停留在列印專頁，使用者仍可按「列印」再次觸發或返回。
     void root.offsetHeight;
-    BW_armMobilePrintRecovery();
-    try{ window.print(); }catch(_e){ BW_MOBILE_PRINT_RETURN_PENDING = false; }
+    if(BW_isLineWebView()){
+      // LINE 先停在乾淨列印頁，避免載入後自動呼叫無效 print()。
+      // 使用者點上方「列印」時再嘗試；若 WebView 不支援，會立即顯示操作提示。
+      BW_MOBILE_PRINT_RETURN_PENDING = false;
+    }else{
+      BW_triggerMobilePrint(root);
+    }
   }
 
   function BW_printQuiz(catToPrint){
@@ -4669,25 +4686,6 @@ function setupQuizButtons(){
   $('#btnPrint').onclick = () => BW_printQuiz(currentQuizCat === 'all' ? 'vocab' : currentQuizCat);
 
   $('#btnPrintAll').onclick = () => BW_printQuiz('all');
-
-  // 從 LINE 轉交到外部瀏覽器後，直接停在同一份列印頁；
-  // 不自動 window.print（iOS 需要使用者手勢），讓使用者只需再按一次「🖨️ 列印」。
-  try{
-    const extCat = new URLSearchParams(location.search).get('bwExternalPrintCat');
-    if(extCat && !BW_isLineInAppBrowser()){
-      const allowed = ['vocab','grammar','reading','mix','all'];
-      const printCat = allowed.includes(extCat) ? extCat : 'vocab';
-      setTimeout(() => {
-        const prev = currentQuizCat;
-        BW_closeMobilePrintMode();
-        const root = BW_buildMobilePrintRoot(printCat);
-        BW_restoreQuizAfterPrint(prev);
-        if(root){
-          try{ root.scrollIntoView({block:'start'}); }catch(_e){}
-        }
-      }, 0);
-    }
-  }catch(_e){}
 }
 
 /* ==== 單字 ==== */
