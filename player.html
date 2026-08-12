@@ -4876,30 +4876,177 @@ async function loadAI(){
   answerEl.addEventListener('keydown',e=>{ if((e.ctrlKey||e.metaKey)&&e.key==='Enter') window.BW_aiSubmitCurrent(); });
 })();
 
-/* ==== V18.15 AI 語音作答：給使用者開口時間，避免一按就判定沒聽清楚 ==== */
+/* ==== V18.20 AI 語音作答：LINE 內建瀏覽器改走 MediaRecorder + Worker STT；一般瀏覽器沿用 SpeechRecognition ==== */
 (function(){
   const btnRec=$('#btnRec'), btnStop=$('#btnStop'), ansEl=$('#aiAnswer'), voiceStatus=$('#aiVoiceStatus');
   if(!btnRec || !btnStop || !ansEl) return;
 
+  const BW_TRANSCRIBE_API='https://bookwide-hiking-api.pmktools.workers.dev/api/transcribe';
+  const BW_LINE_RECORD_MS=6500;
   let recognition=null, gotFinal=false, manualStop=false;
   let listenStartedAt=0, earlyRetryCount=0;
-  const MIN_LISTEN_MS=3200;   // 至少給 3.2 秒開口，不可一按就教練提示
-  const MAX_EARLY_RETRY=1;    // 瀏覽器若過早 no-speech，自動靜默重聽一次
+  let lineRecorder=null, lineStream=null, lineChunks=[], lineStopTimer=null, lineBusy=false;
+  const MIN_LISTEN_MS=3200;
+  const MAX_EARLY_RETRY=1;
 
   function getSR(){ return window.SpeechRecognition || window.webkitSpeechRecognition || null; }
+  function isLineWebView(){
+    const ua=String(navigator.userAgent||'');
+    return /\bLine\//i.test(ua) || /\bLIFF\b/i.test(ua) || /Line\s*\d/i.test(ua);
+  }
   function uiIdle(){
     btnRec.disabled=false;
     btnRec.classList.remove('listening');
     btnRec.textContent='🎙️ 說答案';
     btnStop.disabled=true;
   }
-  function clearRecognition(){
-    recognition=null;
+  function uiListening(text='🎙️ 正在聽…'){
+    btnRec.disabled=true;
+    btnRec.classList.add('listening');
+    btnRec.textContent=text;
+    btnStop.disabled=false;
+  }
+  function stopLineTracks(){
+    if(lineStopTimer){ clearTimeout(lineStopTimer); lineStopTimer=null; }
+    if(lineStream){
+      try{ lineStream.getTracks().forEach(t=>t.stop()); }catch(_e){}
+      lineStream=null;
+    }
+  }
+  function cleanupLineRecorder(){
+    stopLineTracks();
+    lineRecorder=null;
+    lineChunks=[];
+    lineBusy=false;
     uiIdle();
+  }
+  function preferredMimeType(){
+    const MR=window.MediaRecorder;
+    if(!MR) return '';
+    const choices=['audio/mp4','audio/webm;codecs=opus','audio/webm','audio/ogg;codecs=opus'];
+    for(const type of choices){
+      try{ if(!MR.isTypeSupported || MR.isTypeSupported(type)) return type; }catch(_e){}
+    }
+    return '';
+  }
+  function extForMime(type=''){
+    type=String(type).toLowerCase();
+    if(type.includes('mp4')||type.includes('m4a')) return 'm4a';
+    if(type.includes('ogg')) return 'ogg';
+    if(type.includes('wav')) return 'wav';
+    return 'webm';
+  }
+  async function getAccessToken(){
+    try{
+      const {data}=await playerSupa.auth.getSession();
+      return String(data?.session?.access_token||'');
+    }catch(_e){ return ''; }
+  }
+  async function sendLineRecording(blob){
+    if(!blob || blob.size<500){
+      if(voiceStatus) voiceStatus.textContent='沒有收到有效錄音，請再按一次「說答案」。';
+      cleanupLineRecorder();
+      return;
+    }
+    lineBusy=true;
+    btnStop.disabled=true;
+    btnRec.textContent='⏳ 辨識中…';
+    if(voiceStatus) voiceStatus.textContent='正在把你的語音轉成文字…';
+    try{
+      const token=await getAccessToken();
+      if(!token) throw new Error('登入狀態已失效，請重新登入 BookWide');
+      const form=new FormData();
+      const mime=blob.type||'audio/webm';
+      form.append('audio',blob,'answer.'+extForMime(mime));
+      form.append('language','en');
+      const res=await fetch(BW_TRANSCRIBE_API,{
+        method:'POST',
+        headers:{Authorization:`Bearer ${token}`},
+        body:form,
+        cache:'no-store'
+      });
+      const raw=await res.text();
+      let data={};
+      try{ data=raw?JSON.parse(raw):{}; }catch(_e){}
+      if(!res.ok) throw new Error(data.error||raw||`語音辨識失敗 ${res.status}`);
+      const text=String(data.text||'').trim();
+      if(!text){
+        if(voiceStatus) voiceStatus.textContent='沒有辨識到語音，請再按一次「說答案」。';
+        cleanupLineRecorder();
+        return;
+      }
+      ansEl.value=text;
+      if(voiceStatus) voiceStatus.textContent=`辨識到：${text}　正在判斷…`;
+      cleanupLineRecorder();
+      setTimeout(()=>{
+        if(typeof window.BW_aiSubmitCurrent==='function') window.BW_aiSubmitCurrent();
+      },260);
+    }catch(err){
+      cleanupLineRecorder();
+      if(voiceStatus) voiceStatus.textContent='語音辨識失敗：'+String(err?.message||err)+'。請再試一次。';
+    }
+  }
+  async function startLineRecording(){
+    if(lineBusy || lineRecorder) return;
+    if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){
+      if(voiceStatus) voiceStatus.textContent='目前 LINE 瀏覽器無法啟用錄音，請更新 LINE 後再試。';
+      return;
+    }
+    ansEl.value='';
+    manualStop=false;
+    lineChunks=[];
+    try{
+      if(voiceStatus) voiceStatus.textContent='正在開啟麥克風…';
+      lineStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+      const mime=preferredMimeType();
+      lineRecorder=mime ? new MediaRecorder(lineStream,{mimeType:mime}) : new MediaRecorder(lineStream);
+      lineRecorder.ondataavailable=(e)=>{ if(e.data && e.data.size>0) lineChunks.push(e.data); };
+      lineRecorder.onerror=(e)=>{
+        const msg=String(e?.error?.message||e?.error||'錄音器錯誤');
+        cleanupLineRecorder();
+        if(voiceStatus) voiceStatus.textContent='錄音失敗：'+msg;
+      };
+      lineRecorder.onstop=()=>{
+        const type=lineRecorder?.mimeType || lineChunks[0]?.type || mime || 'audio/webm';
+        const blob=new Blob(lineChunks,{type});
+        stopLineTracks();
+        lineRecorder=null;
+        lineChunks=[];
+        sendLineRecording(blob);
+      };
+      lineRecorder.start(250);
+      uiListening('🎙️ LINE 錄音中…');
+      if(voiceStatus) voiceStatus.textContent='🎙️ 正在錄音，直接用英文回答；約 6 秒後自動辨識。';
+      lineStopTimer=setTimeout(()=>{
+        if(lineRecorder && lineRecorder.state==='recording'){
+          try{ lineRecorder.stop(); }catch(_e){}
+        }
+      },BW_LINE_RECORD_MS);
+    }catch(err){
+      cleanupLineRecorder();
+      const name=String(err?.name||'');
+      if(voiceStatus){
+        voiceStatus.textContent=(name==='NotAllowedError'||name==='PermissionDeniedError')
+          ? 'LINE 沒有取得麥克風權限。請在 iPhone「設定 → LINE → 麥克風」開啟後再試。'
+          : '無法啟用麥克風：'+String(err?.message||err);
+      }
+    }
   }
 
   window.BW_stopAiRecognition=function(){
     manualStop=true;
+    if(lineRecorder){
+      if(lineStopTimer){ clearTimeout(lineStopTimer); lineStopTimer=null; }
+      try{
+        if(lineRecorder.state==='recording'){
+          if(voiceStatus) voiceStatus.textContent='錄音完成，正在辨識…';
+          lineRecorder.stop();
+          return;
+        }
+      }catch(_e){}
+      cleanupLineRecorder();
+      return;
+    }
     const r=recognition;
     recognition=null;
     if(r){ try{r.abort();}catch(_e){try{r.stop();}catch(_e2){}} }
@@ -4908,10 +5055,13 @@ async function loadAI(){
   };
 
   function startListening(isRetry=false){
+    if(isLineWebView()){
+      startLineRecording();
+      return;
+    }
     const SR=getSR();
     if(!SR){
       if(voiceStatus) voiceStatus.textContent='此瀏覽器不支援語音辨識，可直接輸入後按「檢查文字答案」。';
-      alert('此瀏覽器暫不支援語音辨識，請直接輸入答案。');
       return;
     }
 
@@ -4928,10 +5078,7 @@ async function loadAI(){
     r.maxAlternatives=3;
 
     if(!isRetry) ansEl.value='';
-    btnRec.disabled=true;
-    btnRec.classList.add('listening');
-    btnRec.textContent='🎙️ 正在聽…';
-    btnStop.disabled=false;
+    uiListening();
     if(voiceStatus) voiceStatus.textContent='🎙️ 正在聽，慢慢說，不用急…';
 
     r.onresult=(e)=>{
@@ -4941,7 +5088,6 @@ async function loadAI(){
         if(e.results[i].isFinal) finalReceived=true;
       }
       if(text.trim()) ansEl.value=text.trim();
-
       if(finalReceived && ansEl.value.trim()){
         gotFinal=true;
         if(voiceStatus) voiceStatus.textContent=`辨識到：${ansEl.value}　正在判斷…`;
@@ -4955,8 +5101,6 @@ async function loadAI(){
     r.onerror=(e)=>{
       const err=(e&&e.error)||'';
       const elapsed=Date.now()-listenStartedAt;
-
-      // 使用者還沒來得及開口時，絕不能立刻說「我沒聽清楚」。
       if(err==='no-speech' && elapsed<MIN_LISTEN_MS && earlyRetryCount<MAX_EARLY_RETRY && !manualStop){
         earlyRetryCount++;
         recognition=null;
@@ -4964,10 +5108,8 @@ async function loadAI(){
         setTimeout(()=>startListening(true),350);
         return;
       }
-
       recognition=null;
       uiIdle();
-
       if(manualStop) return;
       if(err==='no-speech'){
         if(typeof window.BW_aiCoachCurrent==='function') window.BW_aiCoachCurrent('nospeech');
@@ -4981,14 +5123,10 @@ async function loadAI(){
     };
 
     r.onend=()=>{
-      // onerror 後也會觸發 onend；只有目前仍是這一個 recognition 才處理，
-      // 避免同一次失敗重複講兩次「我沒聽清楚」。
       if(recognition!==r) return;
       recognition=null;
       uiIdle();
-
       if(manualStop || gotFinal || ansEl.value.trim()) return;
-
       const elapsed=Date.now()-listenStartedAt;
       if(elapsed<MIN_LISTEN_MS && earlyRetryCount<MAX_EARLY_RETRY){
         earlyRetryCount++;
