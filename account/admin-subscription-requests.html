@@ -81,13 +81,55 @@ function scholarshipCoins(r){
   const n = Number(r.coins || r.coins_added || 50);
   return Number.isFinite(n) && n > 0 ? n : 50;
 }
+async function getFreshAccessToken(){
+  // 不直接相信舊 getSession() 快取；先確認目前 user，再刷新 session。
+  const { data:userData, error:userError } = await sb.auth.getUser();
+  if(userError || !userData?.user) throw new Error('請先重新登入 admin 帳號');
+
+  let { data:sessData, error:sessError } = await sb.auth.refreshSession();
+  let token = sessData?.session?.access_token;
+
+  // refreshSession 在某些瀏覽器沒有必要刷新時可能沒有回 session，退回目前 session。
+  if(!token){
+    const { data:current, error:currentError } = await sb.auth.getSession();
+    if(currentError) throw currentError;
+    token = current?.session?.access_token;
+  }
+  if(sessError && !token) throw sessError;
+  if(!token) throw new Error('登入 Session 已失效，請重新登入 admin');
+  return token;
+}
+
 async function call(action, payload={}){
-  const { data:sess } = await sb.auth.getSession();
-  const token = sess?.session?.access_token;
-  if(!token) throw new Error('請先登入 admin 帳號');
-  const res = await fetch(FUNCTION_URL, {method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${token}`,'apikey':SUPABASE_ANON_KEY}, body:JSON.stringify({action,...payload})});
-  const j = await res.json().catch(()=>({}));
-  if(!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
+  const token = await getFreshAccessToken();
+
+  const doFetch = (accessToken) => fetch(FUNCTION_URL, {
+    method:'POST',
+    headers:{
+      'Content-Type':'application/json',
+      'Authorization':`Bearer ${accessToken}`,
+      'apikey':SUPABASE_ANON_KEY
+    },
+    body:JSON.stringify({action,...payload})
+  });
+
+  let res = await doFetch(token);
+
+  // 若 token 剛好在呼叫時過期，只重刷一次再重送；不改後端權限規則。
+  if(res.status === 401){
+    const { data:refreshed } = await sb.auth.refreshSession();
+    const retryToken = refreshed?.session?.access_token;
+    if(retryToken && retryToken !== token) res = await doFetch(retryToken);
+  }
+
+  const raw = await res.text();
+  let j = {};
+  try{ j = raw ? JSON.parse(raw) : {}; }catch(_){}
+
+  if(!res.ok || !j.ok){
+    const detail = j.error || j.message || raw || `HTTP ${res.status}`;
+    throw new Error(`HTTP ${res.status}：${detail}`);
+  }
   return j;
 }
 function render(rows){
