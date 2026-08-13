@@ -165,7 +165,7 @@ textarea{min-height:108px;resize:vertical}
 
         <div class="fieldRow">
           <div class="fieldLabel">學習目標與需求</div>
-          <textarea id="scholarReason" placeholder="請分享你的學習目標、目前的學習計畫，以及希望 BookWide 提供哪些學習支持。"></textarea>
+          <textarea id="scholarReason" placeholder="請分享你的學習目標、目前遇到的困難，以及希望 BookWide 提供哪些支持。"></textarea>
         </div>
 
         <div class="actions">
@@ -204,8 +204,16 @@ function setScholarStatus(html, type=''){
 }
 
 async function initAuthEmail(showMessage=true){
-  const { data: sess } = await sb.auth.getSession();
-  const session = sess?.session || null;
+  // 送出前先刷新一次 session，避免 LINE / Safari 從背景回來時拿到舊 access token。
+  let session = null;
+  try{
+    const { data: refreshed, error: refreshErr } = await sb.auth.refreshSession();
+    if(!refreshErr && refreshed?.session) session = refreshed.session;
+  }catch(_e){}
+  if(!session){
+    const { data: sess } = await sb.auth.getSession();
+    session = sess?.session || null;
+  }
   authUser = session?.user || null;
   const token = session?.access_token || '';
 
@@ -253,10 +261,13 @@ $('submitScholarship')?.addEventListener('click', async ()=>{
 
     const res = await fetch(REQUEST_FUNCTION_URL, {
       method:'POST',
+      mode:'cors',
+      cache:'no-store',
       headers:{
         'Content-Type':'application/json',
         'Authorization':`Bearer ${auth.token}`,
-        'apikey':SUPABASE_ANON_KEY
+        'apikey':SUPABASE_ANON_KEY,
+        'x-client-info':'bookwide-scholarship-v2'
       },
       body: JSON.stringify({
         action:'submit',
@@ -275,8 +286,15 @@ $('submitScholarship')?.addEventListener('click', async ()=>{
       })
     });
 
-    const j = await res.json().catch(()=>({}));
-    if(!res.ok || !j.ok) throw new Error(j.error || `HTTP ${res.status}`);
+    const rawText = await res.text();
+    let j = {};
+    try{ j = rawText ? JSON.parse(rawText) : {}; }catch(_e){}
+    if(!res.ok || !j.ok){
+      if(res.status===401){
+        throw new Error(j.error || '登入驗證失敗（HTTP 401）。請重新整理後再試；若仍失敗，請確認 subscription-request 已使用 verify_jwt=false 部署。');
+      }
+      throw new Error(j.error || rawText || `HTTP ${res.status}`);
+    }
 
     setScholarStatus(`已成功送出學習支持申請。<br>申請編號：<span class="mono">${j.request_id || scholarshipNo}</span><br>審核通過後，BookWide 會協助開通學習會員。`, 'ok');
     $('submitScholarship').disabled = true;
