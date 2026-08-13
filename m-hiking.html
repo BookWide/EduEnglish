@@ -739,6 +739,7 @@ max-width:100%;overflow-wrap:anywhere;word-break:break-word;
 .birthday-today-panel{border:2px solid #f59e0b;border-radius:14px;padding:12px;margin:10px 0 14px;background:#fffbeb}.birthday-today-title{font-weight:950;font-size:18px;margin-bottom:8px}.birthday-all-members{border-top:1px solid var(--line);padding-top:10px}.birthday-all-members summary{cursor:pointer;font-weight:900;margin-bottom:8px}.birthday-member-row{display:grid;grid-template-columns:minmax(0,1fr) 170px minmax(260px,auto)!important;gap:10px;align-items:center;padding:10px 0;border-bottom:1px dashed var(--line)}.birthday-member-row.is-today{background:#fff7ed;border-radius:10px;padding:10px}.birthday-member-row .mini{white-space:nowrap;writing-mode:horizontal-tb!important}
 .birthday-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .birthday-actions .mini{min-width:auto!important;white-space:nowrap}
+.birthday-date-editor{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.birthday-date-editor input[type="date"]{width:145px;min-width:145px;padding:7px 8px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}.birthday-date-editor .mini{padding:7px 10px}
 .line-ok{color:#166534;font-weight:900}.line-missing{color:#b45309;font-weight:900}
 @media(max-width:720px){.birthday-member-row{grid-template-columns:minmax(0,1fr)!important}.birthday-member-row .mini{grid-column:1/-1;width:100%}.birthday-actions{justify-content:flex-start}}
 /* v26 unified card layout */.v26-card-layout{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(360px,.95fr);gap:12px;margin-top:12px;align-items:start}
@@ -6614,10 +6615,23 @@ function birthdayAdminArg(value){return encodeURIComponent(String(value||''));}
 function birthdayAdminRow(m,isToday=false){const name=String(m.display_name||'會員');
   const email=String(m.email||'無帳號 Email');
   const md=birthdayMonthDay(m.birthday);const mdLabel=md?md.replace('-', '/'):'--/--';
+  const fullBirthday=String(m.birthday||'').match(/^\d{4}-\d{2}-\d{2}$/)?.[0]||'';
   const lineId=String(m.line_user_id||'');
   const bound=!!lineId;
   const payload=birthdayAdminArg(JSON.stringify({name,email,line_user_id:lineId,id:m.id||'',birthday:m.birthday||'',avatar_url:m.avatar_url||m.profile_photo_url||m.photo_url||m.image_url||''}));
-  return `<div class="birthday-member-row${isToday?' is-today':''}"><div><b>${isToday?'🎂 ':''}${escHtml(name)}</b><div class="small">${escHtml(email)}</div></div><div><b>${escHtml(mdLabel)}</b><div class="small ${bound?'line-ok':'line-missing'}">LINE：${bound?'已綁定':'尚未綁定'}</div><div class="small">模式：${bound?'AUTO 自動卡':'等待綁定'}</div></div><div class="birthday-actions"><button class="mini" ${bound?'':'disabled'} onclick="birthdayAdminAutoCreateAndSend(decodeURIComponent('${payload}'),this)">${isToday?'自動製作／發送':'測試自動卡'}</button></div></div>`;
+  return `<div class="birthday-member-row${isToday?' is-today':''}"><div><b>${isToday?'🎂 ':''}${escHtml(name)}</b><div class="small">${escHtml(email)}</div></div><div><div class="birthday-date-editor"><input type="date" value="${escHtml(fullBirthday)}" aria-label="${escHtml(name)}的生日"><button class="mini" onclick="birthdayAdminSaveBirthday(decodeURIComponent('${payload}'),this)">儲存生日</button></div><div class="small ${bound?'line-ok':'line-missing'}">目前：${escHtml(mdLabel)}｜LINE：${bound?'已綁定':'尚未綁定'}</div></div><div class="birthday-actions"><button class="mini" ${bound?'':'disabled'} onclick="birthdayAdminAutoCreateAndSend(decodeURIComponent('${payload}'),this)">${isToday?'自動製作／發送':'測試自動卡'}</button></div></div>`;
+}
+async function birthdayAdminSaveBirthday(encodedMember,button){const member=birthdayAdminParseMemberPayload(encodedMember);const row=button?.closest('.birthday-member-row');const input=row?.querySelector('input[type="date"]');const birthday=String(input?.value||'').trim();
+  if(!birthday){alert('請先選擇生日日期。');input?.focus();return;}
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(birthday)){alert('生日日期格式不正確。');return;}
+  const old=button?.textContent||'儲存生日';if(button){button.disabled=true;button.textContent='儲存中…'}
+  try{let query=bookwideSupa.from('profiles').update({birthday,allow_birthday:true,updated_at:new Date().toISOString()});
+    if(member.id)query=query.eq('id',member.id);else if(member.email)query=query.eq('email',member.email);else throw new Error('此會員缺少可辨識的帳號資料');
+    const {data,error}=await query.select('id,email,birthday');if(error)throw error;if(!Array.isArray(data)||!data.length)throw new Error('找不到可更新的會員，或目前帳號沒有修改權限');
+    const {data:profiles,error:loadError}=await bookwideSupa.from('profiles').select('*').order('updated_at',{ascending:false});if(loadError)throw loadError;
+    await syncBwCrmToLineAutomation(Array.isArray(profiles)?profiles:[]);await birthdayAdminLoad(true);
+    birthdayAdminVerifyShow(`✅ ${escHtml(member.name||member.email||'會員')} 的生日已設定為 ${escHtml(birthday)}；今日壽星已重新比對。`);
+  }catch(e){birthdayAdminVerifyShow('❌ 生日儲存失敗：'+escHtml(e.message),'error');alert('生日儲存失敗：'+e.message)}finally{if(button){button.disabled=false;button.textContent=old}}
 }
 function birthdayAdminAutoBackground(name='會員'){const c=document.createElement('canvas');c.width=1080;c.height=1350;const x=c.getContext('2d');
   const g=x.createLinearGradient(0,0,1080,1350);g.addColorStop(0,'#173d2b');g.addColorStop(.48,'#2f7a50');g.addColorStop(1,'#f2c66d');x.fillStyle=g;x.fillRect(0,0,c.width,c.height);
@@ -6705,7 +6719,7 @@ async function birthdayAdminLoad(showStatus=false){const box=document.getElement
       const key=String(p.id||p.email||'').toLowerCase();
       const old=byId.get(key)||{};
       byId.set(key,{...old,id:p.id||old.id||'',email:p.email||old.email||'',display_name:bwProfileName(p),birthday:bwProfileBirthday(p)||old.birthday||'',avatar_url:bwProfilePhoto(p)||old.avatar_url||'',line_user_id:old.line_user_id||p.line_user_id||'',official_line_followed:old.official_line_followed===true||p.official_line_followed===true,allow_birthday:p.allow_birthday!==false,crm_member_status:p.crm_member_status||old.crm_member_status||'active'});}
-    const merged=[...byId.values()].filter(m=>birthdayMonthDay(m.birthday));
+    const merged=[...byId.values()].filter(m=>m.crm_member_status!=='inactive').sort((a,b)=>String(a.display_name||a.email||'').localeCompare(String(b.display_name||b.email||''),'zh-Hant'));
     return birthdayAdminRenderMembers(merged,showStatus);}catch(e){box.innerHTML=`<div class="notice">生日會員讀取失敗：${escHtml(e.message)}</div>`;if(showStatus)lineAutoShow('❌ '+e.message,'error');return []}
 }
 async function birthdayAdminMakeCard(name,encodedPhoto,lineUserId){document.querySelectorAll('#laRecipientList input[type="checkbox"]').forEach(x=>x.checked=String(x.value)===String(lineUserId));
@@ -7010,7 +7024,7 @@ async function dailyEnglishSetSchedule(enabled){dailyEnglishSet('deScheduleEnabl
     await lineAutoApi('/schedule',{method:'POST',body:JSON.stringify({enabled:!!enabled,group_id:BOOKWIDE_GROUP_ID||'',daily_content_type:'daily_english'})});
     dailyEnglishStatus(enabled?'✅ 本群每日英文排程已啟用。':'✅ 本群每日英文排程已停用。');}catch(e){dailyEnglishStatus('❌ 排程設定失敗：'+e.message,'error')}
 }
-window.BOOKWIDE_MHIKING_VERSION='V32.9_BIRTHDAY_MEDIA_LINK';
+window.BOOKWIDE_MHIKING_VERSION='V33.0_BIRTHDAY_DATE_ADMIN';
 setTimeout(birthdayAdminInitButtonState,0);
 /* v26.1 birthday actions */
 function v261BirthdayPreview(){const url=String(document.getElementById('laBirthdayCardImage')?.value||'').trim();
