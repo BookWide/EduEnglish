@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V36.6_DEVICE_LOGIN_TAKEOVER_FIX" /><script>window.BOOKWIDE_BUILD="V36.6_DEVICE_LOGIN_TAKEOVER_FIX";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
+<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V36.7_DEVICE_LOGIN_RACE_FIX" /><script>window.BOOKWIDE_BUILD="V36.7_DEVICE_LOGIN_RACE_FIX";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
 <meta name="keywords" content="BookWide,多語言學習,看影片學英文,聽故事學英文,聽音樂學英文,看電影學英文,看新聞學英文,英文聽力,英文會話,日文學習,旅遊英文,機場英文,飯店英文,餐廳英文" />
 <link rel="canonical" href="https://bookwide.net/" />
 <meta property="og:type" content="website" />
@@ -3048,14 +3048,16 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     }
     const BW_ALLOW_MULTI_DEVICE = false; // single-device mode
     let BW_DEVICE_GUARD_TIMER = null;
-    const BW_DEVICE_TAKEOVER_PENDING = 'bw_device_takeover_pending_v366';
-    const BW_DEVICE_LOGIN_GRACE_UNTIL = 'bw_device_login_grace_until_v366';
+    const BW_DEVICE_TAKEOVER_PENDING = 'bw_device_takeover_pending_v367';
+    const BW_DEVICE_LOGIN_GRACE_UNTIL = 'bw_device_login_grace_until_v367';
+    let BW_EXPLICIT_LOGIN_IN_PROGRESS = false;
 
     function BW_markDeviceTakeoverPending(){
+      BW_EXPLICIT_LOGIN_IN_PROGRESS = true;
       try{
         sessionStorage.setItem(BW_DEVICE_TAKEOVER_PENDING, '1');
-        // 明確登入後給新裝置短暫接管時間，避免舊 guard timer 在接管寫入完成前誤踢。
-        sessionStorage.setItem(BW_DEVICE_LOGIN_GRACE_UNTIL, String(Date.now() + 15000));
+        // V36.7：明確登入期間保留 30 秒接管保護，避免頁面初始化/舊 guard 與登入流程競速誤踢。
+        sessionStorage.setItem(BW_DEVICE_LOGIN_GRACE_UNTIL, String(Date.now() + 30000));
       }catch(_){}
     }
 
@@ -3208,15 +3210,19 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     }
 
     async function BW_forceSignOut(){
-      try{ localStorage.setItem('bw_forced_logout','1'); }catch(_){}
+      // V36.7：明確登入/接管仍在進行時，任何舊的驗證流程都不得把新 Session 登出。
+      if(BW_EXPLICIT_LOGIN_IN_PROGRESS || BW_hasDeviceLoginGrace()){
+        console.warn('[BW] kick suppressed during explicit login takeover');
+        return false;
+      }
       try{
         BW_stopIdleLogout();
-        // V36：被另一台同類型裝置取代時，只登出目前這台。
-        // 絕對不能 global，否則會把新登入的手機/PC session 一起撤銷。
         await supa.auth.signOut({ scope:'local' });
       }catch(_){
         try{ await supa.auth.signOut({ scope:'local' }); }catch(__){}
       }
+      // 不再寫 bw_forced_logout；原版會在 denied=kicked 重導後再跳第二次相同警告。
+      try{ localStorage.removeItem('bw_forced_logout'); }catch(_){}
       BW_showKickedModal();
       try{
         const url = new URL(location.href);
@@ -3225,6 +3231,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       }catch(_){
         location.href = location.pathname + '?denied=kicked';
       }
+      return true;
     }
 
     async function BW_isAdminDeviceUser(user){
@@ -3284,6 +3291,10 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       try{
         if(!user?.id) return false;
         if(await BW_isAdminDeviceUser(user)) return true;
+        // V36.7：只要是剛剛明確登入，就直接完成接管，不走「發現舊 ID 就踢」的驗證路徑。
+        if(BW_EXPLICIT_LOGIN_IN_PROGRESS || BW_hasDeviceLoginGrace()){
+          return await BW_takeoverCurrentDevice(user);
+        }
 
         const cols = BW_deviceCols();
         const my = BW_PAGE_DEVICE_ID;
@@ -3397,12 +3408,8 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
     // 被踢提示（跨頁保險）
     (function BW_popForcedLogoutHint(){
-      try{
-        if(localStorage.getItem('bw_forced_logout')==='1'){
-          localStorage.removeItem('bw_forced_logout');
-          BW_showKickedModal();
-        }
-      }catch(_){}
+      // V36.7：清除舊版殘留旗標，不再於重導後重複跳相同警告。
+      try{ localStorage.removeItem('bw_forced_logout'); }catch(_){}
     })();
     /* ========= End V17-1 per-type device takeover ========= */
 
@@ -3416,6 +3423,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
           await supa.auth.exchangeCodeForSession(code);
           BW_markDeviceTakeoverPending();
           try{ await initAuthAndProfile(); }catch(_e){}
+          setTimeout(()=>{ BW_EXPLICIT_LOGIN_IN_PROGRESS = false; }, 8000);
 	          // ⚠️ 不要在這裡直接跳 next（常見 next=/pricing.html 會把新戶流程打斷）
 	          // 交給 initAuthAndProfile() 內的「最終入口版」規則決定要去哪一頁。
 	          // 清掉 query（不保留 next）避免刷新又跑一次
@@ -3693,7 +3701,8 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
             }
           }
           await initAuthAndProfile();
-          BW_clearDeviceLoginGrace();
+          // 不立即清掉 grace：讓同頁較早啟動的 init/guard 有時間結束，避免 race condition。
+          setTimeout(()=>{ BW_EXPLICIT_LOGIN_IN_PROGRESS = false; }, 8000);
           closeModal();
         } else {
           const { data, error } = await supa.auth.signUp({ email, password });
@@ -3759,7 +3768,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         // - 明確登入 / LINE 登入完成：新裝置可接管同類型席位
         // - 一般重新整理 / 舊分頁恢復：只能驗證，不能反向搶回席位
         if (user) {
-          const shouldTakeover = BW_consumeDeviceTakeoverPending();
+          const shouldTakeover = BW_consumeDeviceTakeoverPending() || BW_EXPLICIT_LOGIN_IN_PROGRESS || BW_hasDeviceLoginGrace();
           let deviceOK = true;
           if (shouldTakeover) {
             deviceOK = await BW_takeoverCurrentDevice(user);
