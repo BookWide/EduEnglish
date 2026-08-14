@@ -240,15 +240,41 @@ async function checkSchema(){
 }
 async function loadMembers(){
   hideStatus();
-  const {data:gm,error:gmErr}=await supa.from('community_group_members').select('*').eq('group_id',GROUP_ID);
-  if(gmErr)throw gmErr;
-  const emails=[...new Set((gm||[]).map(x=>email(x.user_email)).filter(Boolean))];
   let profiles=[];
-  if(emails.length){const {data,error}=await supa.from('profiles').select('*').in('email',emails);if(error)throw error;profiles=data||[]}
+
+  if(IS_SUPER){
+    /* BookWide Admin：CRM 與 M-Hiking 生日收件人使用同一會員來源。
+       直接讀 profiles，僅保留 LINE 已綁定＋有效 CRM 會員，不再受 community_group_members 限制。 */
+    const {data,error}=await supa.from('profiles').select('*').order('updated_at',{ascending:false});
+    if(error)throw error;
+    profiles=(data||[])
+      .filter(p=>p.crm_member_status!=='inactive')
+      .filter(p=>email(p.email))
+      .filter(p=>norm(p.line_user_id));
+  }else{
+    /* 群主：只看自己群內的會員。 */
+    const {data:gm,error:gmErr}=await supa.from('community_group_members').select('*').eq('group_id',GROUP_ID);
+    if(gmErr)throw gmErr;
+    const emails=[...new Set((gm||[]).map(x=>email(x.user_email)).filter(Boolean))];
+    if(emails.length){
+      const {data,error}=await supa.from('profiles').select('*').in('email',emails).order('updated_at',{ascending:false});
+      if(error)throw error;
+      profiles=(data||[]).filter(p=>p.crm_member_status!=='inactive');
+    }
+  }
+
   const {data:crm,error:crmErr}=await supa.from('travel_crm_members').select('*').eq('group_id',GROUP_ID);
   if(crmErr)throw crmErr;CRM_ROWS=crm||[];
-  MEMBERS=profiles.map(p=>{const c=CRM_ROWS.find(x=>email(x.email)===email(p.email))||CRM_ROWS.find(x=>p.id&&String(x.profile_id||'')===String(p.id))||null;return {profile:p,crm:c}});
+
+  MEMBERS=profiles.map(p=>{
+    const c=CRM_ROWS.find(x=>email(x.email)===email(p.email))
+      ||CRM_ROWS.find(x=>p.id&&String(x.profile_id||'')===String(p.id))
+      ||null;
+    return {profile:p,crm:c};
+  });
+
   updateStats();renderMembers();
+
   const qs=new URLSearchParams(location.search);
   const requestedEmail=email(qs.get('member_email')||'');
   const legacyMember=norm(qs.get('member')||'');
@@ -282,7 +308,10 @@ async function selectMemberByEmail(memberEmail){
   const key=email(memberEmail);
   if(!key)return;
   const m=MEMBERS.find(x=>email(x.profile?.email)===key);
-  if(!m){show('找不到此會員 CRM：'+esc(memberEmail),'err');return;}
+  if(!m){
+    show('找不到此會員 CRM：'+esc(memberEmail)+'。目前 CRM 可見會員 '+MEMBERS.length+' 位；請確認此會員仍為 LINE＋已綁定帳號，或目前群主有該群權限。','err');
+    return;
+  }
   SELECTED=m.profile;SELECTED_CRM=m.crm||{};$('emptyDetail').style.display='none';$('detail').style.display='block';
   const av=avatarUrl(SELECTED);$('detailAvatar').innerHTML=av?`<img src="${esc(av)}" style="width:100%;height:100%;object-fit:cover;border-radius:999px">`:esc(displayName(SELECTED).slice(0,2));
   $('detailName').textContent=displayName(SELECTED);$('detailEmail').textContent=SELECTED.email||'';
