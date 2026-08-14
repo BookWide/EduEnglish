@@ -726,11 +726,11 @@ max-width:100%;overflow-wrap:anywhere;word-break:break-word;
 .daily-fold>summary::after{content:'展開 ▼';font-size:12px;color:var(--muted);font-weight:800}
 .daily-fold[open]>summary::after{content:'收起 ▲'}
 .daily-fold-body{padding:10px 12px}
-#laHistoryPreview{max-width:360px!important;margin:8px 0 0!important}
-#laHistoryPreview img{max-height:210px!important;object-fit:cover!important}
-#laHistoryPreview .daily-final-preview-card{max-width:360px!important}
+#laHistoryPreview{width:100%!important;max-width:none!important;margin:8px 0 0!important}
+#laHistoryPreview img{display:block!important;width:100%!important;height:auto!important;max-height:none!important;object-fit:contain!important}
+#laHistoryPreview .daily-final-preview-card{width:100%!important;max-width:none!important}
 #laDailySpecialPreview{display:none!important}
-@media(max-width:620px){#laHistoryPreview{max-width:100%!important}#laHistoryPreview img{max-height:180px!important}}
+@media(max-width:620px){#laHistoryPreview{width:100%!important;max-width:100%!important}#laHistoryPreview img{width:100%!important;height:auto!important;max-height:none!important;object-fit:contain!important}}
 
 /* V28.5 daily calendar cleanup: legacy special-card editors stay as hidden data backends */
 #lineCardPanelHoliday,#lineCardPanelSolar,#historyEditorFold{display:none!important}
@@ -4906,8 +4906,9 @@ async function openGreetingMaker(button,url){if(!bwRequireLine())return;
   greetingMakerState.context=ctx;
   document.getElementById('greetingMakerZh').value=`日安，願今天充滿美好與喜悅。`;
   document.getElementById('greetingMakerEn').value='May today bring you joy and peace.';
-  await loadGreetingGlobalSettings();
   const savedMode=localStorage.getItem('bookwide_greeting_mode')||'greeting';
+  if(savedMode==='greeting')applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});
+  else await loadGreetingGlobalSettings();
   const modeEl=document.getElementById('greetingMakerMode');if(modeEl)modeEl.value=savedMode;
   changeGreetingMakerMode();
   modal.classList.add('active');document.body.style.overflow='hidden';
@@ -5927,6 +5928,13 @@ let lineAutoStatusTimer=null;
 let lineAutoCurrentComposedUrl='';
 let greetingHistoryLibrary={};
 let greetingHistoryRotation={};
+/* V33.5 GREETING_SOURCE_AND_PREVIEW_FIX
+   日安成品不再回填成來源圖，避免 AI/日安文字二次套印重疊。
+   排程中心開啟時固定日安卡預設未指定；只有使用者手動指定才使用固定照片。
+   自動日安素材池排除已生成的 greeting/composed 成品。
+   所有群的一般日安共用同一套 GREETING_GLOBAL_DEFAULTS；群內只保留照片來源、收件人、排程時間。
+   最終預覽取消裁切，完整顯示整張圖片。
+   生日流程未修改。 */
 /* V33.4 GROUP_PHOTO_SHARED_DESIGN
    日安照片：群內照片優先；群內沒有可用照片才 fallback 共用池。
    日安設計：所有群共用同一 GREETING_GLOBAL_DEFAULTS / Canvas 套字規格。
@@ -5949,6 +5957,11 @@ function lineAutoTodayTaipei(){return new Intl.DateTimeFormat('en-CA',{timeZone:
 function greetingItemGroupId(item){
   return String(item?.group_id||item?.groupId||item?.owner_group_id||item?.bookwide_group_id||item?.group?.id||'').trim();
 }
+function isGeneratedGreetingComposite(url){
+  const s=String(url||'').toLowerCase();
+  if(!s)return false;
+  return /(?:personal[-_/]?creations?\/greetings?|line[-_/]?automation\/composed|scheduled[-_/]?composed|bookwide[-_]?greeting|my[-_]?greeting)/i.test(s);
+}
 function lineAutoGroupGreetingPool(){
   const gid=String(BOOKWIDE_GROUP_ID||'').trim();
   if(!gid)return [];
@@ -5959,13 +5972,14 @@ function lineAutoGroupGreetingPool(){
   for(const photo of (state.photos||[])){
     if(greetingItemGroupId(photo)===gid)urls.push(normalizePhotoUrl(photo));
   }
-  return [...new Set(urls.map(normalizePhotoUrl).filter(isImageUrl))].filter(isEffectiveGreetingPhoto);
+  return [...new Set(urls.map(normalizePhotoUrl).filter(isImageUrl))]
+    .filter(url=>isEffectiveGreetingPhoto(url)&&!isGeneratedGreetingComposite(url));
 }
 function lineAutoSharedGreetingPool(){
   const albumUrls=(state.albums||[]).flatMap(albumAllPhotoUrls);
   const photoUrls=(state.photos||[]).map(normalizePhotoUrl);
   return [...new Set([...albumUrls,...photoUrls].map(normalizePhotoUrl).filter(isImageUrl))]
-    .filter(isEffectiveGreetingPhoto);
+    .filter(url=>isEffectiveGreetingPhoto(url)&&!isGeneratedGreetingComposite(url));
 }
 function lineAutoGreetingPool(){
   const groupPool=lineAutoGroupGreetingPool();
@@ -6197,18 +6211,25 @@ async function saveCardCenterFromMaker(button){const mode=greetingMakerMode();if
       form.append('line_user_id',m.line_user_id||'');form.append('profile_id',m.id||'');form.append('email',m.email||'');
       const d=await hikingApi('/api/line-automation/store-birthday-card',{method:'POST',admin:false,body:form});url=d.image_url||'';
       [m.line_user_id,m.id,m.email].filter(Boolean).forEach(k=>birthdayCardLibrary[String(k)]=url);const el=document.getElementById('laBirthdayCardImage');if(el)el.value=url;}else{
-      form.append('label','日安卡');const d=await hikingApi('/api/line-automation/store-composed',{method:'POST',admin:false,body:form});url=d.image_url||'';const el=document.getElementById('laGreetingCardImage');if(el)el.value=url;}
-    greetingMakerStatus('卡片已儲存，排程將使用這張完整套印 JPG。');
+      form.append('label','日安卡');
+      const d=await hikingApi('/api/line-automation/store-composed',{method:'POST',admin:false,body:form});
+      url=String(d.scheduled_composed_url||d.image_url||d.url||'').trim();
+      if(url){
+        lineAutoCurrentComposedUrl=url;
+        lineAutoLastConfig={...(lineAutoLastConfig||{}),scheduled_composed_url:url,last_generated_url:url};
+      }}
+    greetingMakerStatus('卡片已儲存；完整燒字 JPG 已進排程成品，不會再回填成下一次來源照片。');
     return true;}catch(e){alert('卡片儲存失敗：'+e.message);return false}finally{if(button){button.disabled=false;button.textContent=old}}
 }
 async function saveCardAndReturn(button){const mode=greetingMakerMode();
   if(mode==='story'){await generateGreetingJpg(button);return;}
   const old=button?.textContent||'💾 儲存並返回';
   if(button){button.disabled=true;button.textContent='儲存中…';}
-  try{if(BOOKWIDE_IS_ADMIN){
+  try{if(BOOKWIDE_IS_ADMIN&&mode!=='greeting'){
       try{const settings=greetingMakerSettingsFromControls();
         await hikingApi('/api/greeting-settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID||'',settings})});
         applyGreetingGlobalSettings(settings);}catch(_e){}}
+    if(mode==='greeting')applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});
     const ok=mode==='holiday'?await saveHolidayCardFromMaker(null):mode==='solar'?await saveSolarCardFromMaker(null):await saveCardCenterFromMaker(null);
     if(!ok)return;
     closeGreetingMaker();
@@ -6802,12 +6823,25 @@ async function openLineAutomationAdmin(){if(!BOOKWIDE_IS_SUPER_ADMIN){alert('只
     lineAutoInitialRecipientIds=Array.isArray(c.recipient_ids)?c.recipient_ids:(c.recipient_id?[c.recipient_id]:[]);
     await lineAutoLoadTargets(false,lineAutoInitialRecipientIds);lineAutoRenderRecipientGroups();await birthdayAdminLoad(false);await holidayAdminLoad();await solarAdminLoad();dailyCalendarCursor=dailyCalendarMonthStart(lineAutoTodayTaipei());dailyCalendarSelect(lineAutoTodayTaipei());
     lineAutoSet('laTime',c.schedule_time||'07:00');lineAutoSet('laLatest',c.latest_send_time||'12:00');lineAutoSet('laMode',c.schedule_mode||'smart');
-    lineAutoCurrentComposedUrl=String(c.scheduled_composed_url||c.last_generated_url||'').trim();const greetingCardEl=document.getElementById('laGreetingCardImage');if(greetingCardEl)greetingCardEl.value=c.greeting_card_image_url||'';birthdayCardLibrary=(c.birthday_card_urls&&typeof c.birthday_card_urls==='object')?c.birthday_card_urls:{};birthdayCardCenterSelectMember(document.getElementById('laBirthdayCardMember')?.value||'');lineAutoSet('laEnabled',c.enabled!==false);lineAutoSet('laBirthdayEnabled',c.birthday_card_reminder_enabled!==false);lineAutoSet('laBirthdayTime',c.birthday_card_reminder_time||c.birthday_send_time||'08:00');lineAutoSet('laBirthdayLead',c.birthday_lead_days||0);lineAutoSet('laBirthdayEnglish',c.birthday_english_style||'wonderful');lineAutoSet('laBirthdayMediaType',c.birthday_media_type||'audio');lineAutoSet('laBirthdayMediaUrl',c.birthday_media_url||c.birthday_player_url||'https://www.youtube.com/watch?v=5u4xTa3LR2U&list=RD5u4xTa3LR2U&start_radio=1');birthdayMediaRefresh();lineAutoSet('laHeadline',c.headline||'日安');lineAutoSet('laSignature',c.signature||'bookwide.net');
+    lineAutoCurrentComposedUrl=String(c.scheduled_composed_url||c.last_generated_url||'').trim();
+    const greetingCardEl=document.getElementById('laGreetingCardImage');
+    if(greetingCardEl)greetingCardEl.value='';
+    birthdayCardLibrary=(c.birthday_card_urls&&typeof c.birthday_card_urls==='object')?c.birthday_card_urls:{};birthdayCardCenterSelectMember(document.getElementById('laBirthdayCardMember')?.value||'');lineAutoSet('laEnabled',c.enabled!==false);lineAutoSet('laBirthdayEnabled',c.birthday_card_reminder_enabled!==false);lineAutoSet('laBirthdayTime',c.birthday_card_reminder_time||c.birthday_send_time||'08:00');lineAutoSet('laBirthdayLead',c.birthday_lead_days||0);lineAutoSet('laBirthdayEnglish',c.birthday_english_style||'wonderful');lineAutoSet('laBirthdayMediaType',c.birthday_media_type||'audio');lineAutoSet('laBirthdayMediaUrl',c.birthday_media_url||c.birthday_player_url||'https://www.youtube.com/watch?v=5u4xTa3LR2U&list=RD5u4xTa3LR2U&start_radio=1');birthdayMediaRefresh();lineAutoSet('laHeadline',c.headline||'日安');lineAutoSet('laSignature',c.signature||'bookwide.net');
     lineAutoSet('laOpenAI',c.use_openai!==false);lineAutoSet('laVision',c.use_photo_understanding!==false);
     /* V33.4：日安套字/版面為全站共用規格，不讀取各群舊 greeting_design 覆蓋。
        群組只決定照片來源、收件人與排程；所有照片最後都進同一套 Canvas。 */
     applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});
-    lineAutoShow(`✅ 已連線 Cloudflare Worker。排程：${c.enabled?'啟用':'停用'}；收件人 ${lineAutoInitialRecipientIds.length} 位；日安圖設定由預覽視窗統一管理。`);
+    if(String(c.greeting_card_image_url||'').trim()){
+      try{
+        await hikingApi('/api/line-automation/config',{
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({group_id:BOOKWIDE_GROUP_ID||'',greeting_card_image_url:''})
+        });
+      }catch(_e){}
+    }
+    refreshCardFixedStates();
+    lineAutoShow(`✅ 已連線 Cloudflare Worker。排程：${c.enabled?'啟用':'停用'}；收件人 ${lineAutoInitialRecipientIds.length} 位；日安固定照片預設為未指定。`);
     lineAutoRenderScheduleStatus(c);lineAutoStartStatusTimer();}catch(e){lineAutoShow('❌ Worker LINE 自動化讀取失敗：'+e.message,'error')}
 }
 async function lineAutoSave(silent=false){const payload=lineAutoPayload();if(!payload.recipient_ids.length)throw new Error('請至少勾選一個 LINE 收件人');
