@@ -5927,6 +5927,12 @@ let lineAutoStatusTimer=null;
 let lineAutoCurrentComposedUrl='';
 let greetingHistoryLibrary={};
 let greetingHistoryRotation={};
+/* V33.4 GROUP_PHOTO_SHARED_DESIGN
+   日安照片：群內照片優先；群內沒有可用照片才 fallback 共用池。
+   日安設計：所有群共用同一 GREETING_GLOBAL_DEFAULTS / Canvas 套字規格。
+   各群舊 greeting_design / image_mode 不再覆蓋共用規格。
+   群組仍保留自己的收件人、啟用狀態、發送時間與照片輪播進度。
+   生日流程完全未修改。 */
 /* V33.3 FULL_GREETING_POOL
    一般日安使用相簿目前全部可用照片，只排除明確「排除日安圖」。
    節日 / 節氣 / 歷史由行事曆優先規則與各自 R2 Cover 處理，不再縮小一般日安照片池。
@@ -5940,11 +5946,30 @@ function lineAutoTaipeiText(iso){if(!iso)return '—';
 }
 function lineAutoTodayTaipei(){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 }
-function lineAutoGreetingPool(){
+function greetingItemGroupId(item){
+  return String(item?.group_id||item?.groupId||item?.owner_group_id||item?.bookwide_group_id||item?.group?.id||'').trim();
+}
+function lineAutoGroupGreetingPool(){
+  const gid=String(BOOKWIDE_GROUP_ID||'').trim();
+  if(!gid)return [];
+  const urls=[];
+  for(const album of (state.albums||[])){
+    if(greetingItemGroupId(album)===gid)urls.push(...albumAllPhotoUrls(album));
+  }
+  for(const photo of (state.photos||[])){
+    if(greetingItemGroupId(photo)===gid)urls.push(normalizePhotoUrl(photo));
+  }
+  return [...new Set(urls.map(normalizePhotoUrl).filter(isImageUrl))].filter(isEffectiveGreetingPhoto);
+}
+function lineAutoSharedGreetingPool(){
   const albumUrls=(state.albums||[]).flatMap(albumAllPhotoUrls);
   const photoUrls=(state.photos||[]).map(normalizePhotoUrl);
   return [...new Set([...albumUrls,...photoUrls].map(normalizePhotoUrl).filter(isImageUrl))]
     .filter(isEffectiveGreetingPhoto);
+}
+function lineAutoGreetingPool(){
+  const groupPool=lineAutoGroupGreetingPool();
+  return groupPool.length?groupPool:lineAutoSharedGreetingPool();
 }
 function lineAutoShuffle(items){const rows=items.slice();for(let i=rows.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[rows[i],rows[j]]=[rows[j],rows[i]]}return rows
 }
@@ -6044,7 +6069,8 @@ function lineAutoPayload(){return {
   headline:lineAutoValue('laHeadline').trim(), signature:(greetingGlobalConfig.signature||lineAutoValue('laSignature')||'bookwide.net').trim(),
   use_openai:lineAutoBool('laOpenAI'), use_photo_understanding:lineAutoBool('laVision'),
   greeting_engine_version:GREETING_ENGINE_VERSION, greeting_prompt_mode:'greeting_copy_no_signature',
-  image_mode:greetingGlobalConfig.image_mode||lineAutoValue('laImageMode')||'real', greeting_design:{...greetingGlobalConfig}, album_scope:'date_range', greeting_pool_urls:lineAutoGreetingPool(), greeting_rotation_mode:'shuffle_bag_no_repeat', greeting_rotation_reset:'after_pool_exhausted',
+  /* V33.4：不把日安設計存成群組規格；只送照片池。Worker 必須使用共用日安成品。 */
+  album_scope:'group_then_shared', greeting_pool_urls:lineAutoGreetingPool(), greeting_rotation_mode:'shuffle_bag_no_repeat', greeting_rotation_reset:'after_pool_exhausted',
   greeting_history_enabled:true, greeting_history_library:greetingHistoryLibrary, greeting_history_rotation:greetingHistoryRotation, ...greetingHistoryTodayPayload(lineAutoTodayTaipei(),{commit:true}), ...dailySpecialPayload(lineAutoTodayTaipei()),
   holiday_auto_match:true, holiday_card_library:holidayCardLibrary, holiday_content_library:holidayContentLibrary,
   group_id:BOOKWIDE_GROUP_ID||'', timezone:'Asia/Taipei'
@@ -6778,7 +6804,9 @@ async function openLineAutomationAdmin(){if(!BOOKWIDE_IS_SUPER_ADMIN){alert('只
     lineAutoSet('laTime',c.schedule_time||'07:00');lineAutoSet('laLatest',c.latest_send_time||'12:00');lineAutoSet('laMode',c.schedule_mode||'smart');
     lineAutoCurrentComposedUrl=String(c.scheduled_composed_url||c.last_generated_url||'').trim();const greetingCardEl=document.getElementById('laGreetingCardImage');if(greetingCardEl)greetingCardEl.value=c.greeting_card_image_url||'';birthdayCardLibrary=(c.birthday_card_urls&&typeof c.birthday_card_urls==='object')?c.birthday_card_urls:{};birthdayCardCenterSelectMember(document.getElementById('laBirthdayCardMember')?.value||'');lineAutoSet('laEnabled',c.enabled!==false);lineAutoSet('laBirthdayEnabled',c.birthday_card_reminder_enabled!==false);lineAutoSet('laBirthdayTime',c.birthday_card_reminder_time||c.birthday_send_time||'08:00');lineAutoSet('laBirthdayLead',c.birthday_lead_days||0);lineAutoSet('laBirthdayEnglish',c.birthday_english_style||'wonderful');lineAutoSet('laBirthdayMediaType',c.birthday_media_type||'audio');lineAutoSet('laBirthdayMediaUrl',c.birthday_media_url||c.birthday_player_url||'https://www.youtube.com/watch?v=5u4xTa3LR2U&list=RD5u4xTa3LR2U&start_radio=1');birthdayMediaRefresh();lineAutoSet('laHeadline',c.headline||'日安');lineAutoSet('laSignature',c.signature||'bookwide.net');
     lineAutoSet('laOpenAI',c.use_openai!==false);lineAutoSet('laVision',c.use_photo_understanding!==false);
-    applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS,...(c.greeting_design||{}),image_mode:c.image_mode||(c.greeting_design||{}).image_mode||'real',signature:(c.greeting_design||{}).signature||c.signature||''});
+    /* V33.4：日安套字/版面為全站共用規格，不讀取各群舊 greeting_design 覆蓋。
+       群組只決定照片來源、收件人與排程；所有照片最後都進同一套 Canvas。 */
+    applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});
     lineAutoShow(`✅ 已連線 Cloudflare Worker。排程：${c.enabled?'啟用':'停用'}；收件人 ${lineAutoInitialRecipientIds.length} 位；日安圖設定由預覽視窗統一管理。`);
     lineAutoRenderScheduleStatus(c);lineAutoStartStatusTimer();}catch(e){lineAutoShow('❌ Worker LINE 自動化讀取失敗：'+e.message,'error')}
 }
@@ -6791,7 +6819,7 @@ async function lineAutoOpenPreview(d){if(!d?.photo_url)return;await openGreeting
     if(lines.length){
       const currentEn=greetingMakerValue('greetingMakerEn');
       greetingApplyNormalizedCopy(lines.slice(0,2).join('\n'),currentEn);}}
-  const mode=greetingGlobalConfig.image_mode||lineAutoValue('laImageMode')||'real';const radio=document.querySelector(`input[name="greetingPhotoMode"][value="${mode}"]`);if(radio)radio.checked=true;
+  applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const mode=GREETING_GLOBAL_DEFAULTS.image_mode||'real';const radio=document.querySelector(`input[name="greetingPhotoMode"][value="${mode}"]`);if(radio)radio.checked=true;
   if(mode==='oil')await setGreetingPhotoMode('oil',radio);else await setGreetingPhotoMode('real',radio);
   await renderGreetingMakerPreview();const canvas=document.getElementById('greetingMakerCanvas');
   greetingMakerState.blob=await new Promise((resolve,reject)=>canvas.toBlob(b=>b?resolve(b):reject(new Error('完整日安圖 JPG 產生失敗')),'image/jpeg',.98));
@@ -6863,11 +6891,12 @@ async function lineAutoRun(send){try{await lineAutoSave(true);const testDate=doc
     lineAutoShow(`✅ ${d.message||'今日日安圖已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);
   }else{
     lineAutoShow('正在以指定日安照片產生今天唯一成品（文字會燒進 JPG）…');
-    const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,image_mode:greetingGlobalConfig.image_mode||lineAutoValue('laImageMode')||'real',group_id:BOOKWIDE_GROUP_ID||'',photo_url:fixed,source_photo_url:fixed,selected_photo_url:fixed,greeting_pool_urls:lineAutoGreetingPool(),avoid_recent_photos:false})});
+    applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});
+    const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,group_id:BOOKWIDE_GROUP_ID||'',photo_url:fixed,source_photo_url:fixed,selected_photo_url:fixed,greeting_pool_urls:lineAutoGreetingPool(),avoid_recent_photos:false})});
     await lineAutoOpenPreview({...d,photo_url:fixed,worker_photo_url:d?.photo_url||''});
     lineAutoShow('✅ 今日日安成品已產生並儲存；預覽、立即發送與每日 Cron 共用同一張燒字 JPG。');
   }
-  await lineAutoRefreshScheduleStatus(false);return}if(send){lineAutoShow('正在發送一般日安圖…');const d=await lineAutoSendComposed(false);lineAutoShow(`✅ ${d.message||'完整日安圖已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);await lineAutoRefreshScheduleStatus(false);return}const pick=lineAutoNextGreetingPhoto();if(!pick.url)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在從 ${pick.total} 張日安素材依序輪播；本輪尚餘 ${pick.remaining} 張…`);const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,image_mode:greetingGlobalConfig.image_mode||lineAutoValue('laImageMode')||'real',group_id:BOOKWIDE_GROUP_ID||'',photo_url:pick.url,source_photo_url:pick.url,selected_photo_url:pick.url,greeting_pool_urls:lineAutoGreetingPool(),avoid_recent_photos:true,rotation_remaining:pick.remaining})});await lineAutoOpenPreview({...d,photo_url:pick.url,worker_photo_url:d?.photo_url||''});lineAutoShow(`✅ 已使用輪播素材產生完整日安圖；本輪尚餘 ${pick.remaining} 張，用完前不重複。`);await lineAutoRefreshScheduleStatus(false);}catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error')}
+  await lineAutoRefreshScheduleStatus(false);return}if(send){lineAutoShow('正在發送一般日安圖…');const d=await lineAutoSendComposed(false);lineAutoShow(`✅ ${d.message||'完整日安圖已送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);await lineAutoRefreshScheduleStatus(false);return}const pick=lineAutoNextGreetingPhoto();if(!pick.url)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在從 ${pick.total} 張日安素材依序輪播；本輪尚餘 ${pick.remaining} 張…`);applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,group_id:BOOKWIDE_GROUP_ID||'',photo_url:pick.url,source_photo_url:pick.url,selected_photo_url:pick.url,greeting_pool_urls:lineAutoGreetingPool(),avoid_recent_photos:true,rotation_remaining:pick.remaining})});await lineAutoOpenPreview({...d,photo_url:pick.url,worker_photo_url:d?.photo_url||''});lineAutoShow(`✅ 已使用輪播素材產生完整日安圖；本輪尚餘 ${pick.remaining} 張，用完前不重複。`);await lineAutoRefreshScheduleStatus(false);}catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error')}
 }
 
 async function lineAutoSetEnabled(enabled){if(enabled&&!bwIsSubscribed()){alert('每日自動 LINE 推播只提供訂閱會員；Admin 不限制。');return;}
