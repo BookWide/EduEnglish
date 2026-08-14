@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V36.5_DEVICE_SLOT_STABLE" /><script>window.BOOKWIDE_BUILD="V36.5_DEVICE_SLOT_STABLE";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
+<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V36.6_DEVICE_LOGIN_TAKEOVER_FIX" /><script>window.BOOKWIDE_BUILD="V36.6_DEVICE_LOGIN_TAKEOVER_FIX";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
 <meta name="keywords" content="BookWide,多語言學習,看影片學英文,聽故事學英文,聽音樂學英文,看電影學英文,看新聞學英文,英文聽力,英文會話,日文學習,旅遊英文,機場英文,飯店英文,餐廳英文" />
 <link rel="canonical" href="https://bookwide.net/" />
 <meta property="og:type" content="website" />
@@ -3048,10 +3048,28 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     }
     const BW_ALLOW_MULTI_DEVICE = false; // single-device mode
     let BW_DEVICE_GUARD_TIMER = null;
-    const BW_DEVICE_TAKEOVER_PENDING = 'bw_device_takeover_pending_v352';
+    const BW_DEVICE_TAKEOVER_PENDING = 'bw_device_takeover_pending_v366';
+    const BW_DEVICE_LOGIN_GRACE_UNTIL = 'bw_device_login_grace_until_v366';
 
     function BW_markDeviceTakeoverPending(){
-      try{ sessionStorage.setItem(BW_DEVICE_TAKEOVER_PENDING, '1'); }catch(_){}
+      try{
+        sessionStorage.setItem(BW_DEVICE_TAKEOVER_PENDING, '1');
+        // 明確登入後給新裝置短暫接管時間，避免舊 guard timer 在接管寫入完成前誤踢。
+        sessionStorage.setItem(BW_DEVICE_LOGIN_GRACE_UNTIL, String(Date.now() + 15000));
+      }catch(_){}
+    }
+
+    function BW_hasDeviceLoginGrace(){
+      try{
+        const until = Number(sessionStorage.getItem(BW_DEVICE_LOGIN_GRACE_UNTIL) || 0);
+        if(until > Date.now()) return true;
+        sessionStorage.removeItem(BW_DEVICE_LOGIN_GRACE_UNTIL);
+      }catch(_){}
+      return false;
+    }
+
+    function BW_clearDeviceLoginGrace(){
+      try{ sessionStorage.removeItem(BW_DEVICE_LOGIN_GRACE_UNTIL); }catch(_){}
     }
 
     function BW_consumeDeviceTakeoverPending(){
@@ -3227,8 +3245,8 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
     async function BW_takeoverCurrentDevice(user){
       try{
-        if(!user?.id) return;
-        if(await BW_isAdminDeviceUser(user)) return;
+        if(!user?.id) return false;
+        if(await BW_isAdminDeviceUser(user)) return true;
 
         const cols = BW_deviceCols();
         const deviceId = BW_PAGE_DEVICE_ID;
@@ -3237,17 +3255,28 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         payload[cols.idCol] = deviceId;
         payload[cols.seenCol] = now;
 
-        const up = await supa.from('profiles')
+        // 明確登入＝目前這台正式接管同類型席位。
+        // 用 select 回讀確認，不再把「update 沒報錯但實際沒寫入」當成成功。
+        const { data, error } = await supa.from('profiles')
           .update(payload)
-          .eq('id', user.id);
+          .eq('id', user.id)
+          .select(cols.idCol)
+          .maybeSingle();
 
-        if(up.error){
-          console.warn('[BW] per-type device update blocked:', up.error.message || up.error);
-          return;
+        if(error){
+          console.warn('[BW] per-type device takeover blocked:', error.message || error);
+          return false;
         }
-        console.log('[BW] device registered:', cols.type, deviceId);
+        const saved = String((data && data[cols.idCol]) || '');
+        if(saved !== deviceId){
+          console.warn('[BW] per-type device takeover not persisted:', cols.type, saved, deviceId);
+          return false;
+        }
+        console.log('[BW] device takeover registered:', cols.type, deviceId);
+        return true;
       }catch(e){
         console.warn('[BW] takeover error:', e);
+        return false;
       }
     }
 
@@ -3315,6 +3344,8 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
           if(await BW_isAdminDeviceUser(user)){
             return;
           }
+          // 明確登入接管中的短暫窗口：舊 guard 不得在 DB 寫入完成前把新 Session 踢掉。
+          if(BW_hasDeviceLoginGrace()) return;
 
           const cols = BW_deviceCols();
           const my = BW_PAGE_DEVICE_ID;
@@ -3645,10 +3676,24 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
 
       try {
         if (authMode === 'login') {
+          // 明確登入要先停止舊 Session 的 guard，並先標記本次登入可接管同類型席位。
+          if(BW_DEVICE_GUARD_TIMER){
+            clearInterval(BW_DEVICE_GUARD_TIMER);
+            BW_DEVICE_GUARD_TIMER = null;
+          }
+          BW_markDeviceTakeoverPending();
           const { data, error } = await supa.auth.signInWithPassword({ email, password });
           if (error) throw error;
-          BW_markDeviceTakeoverPending();
+
+          const signedUser = data?.user || data?.session?.user || null;
+          if(signedUser){
+            const takeoverOK = await BW_takeoverCurrentDevice(signedUser);
+            if(!takeoverOK && !(await BW_isAdminDeviceUser(signedUser))){
+              throw new Error('裝置席位更新失敗，請重新登入一次');
+            }
+          }
           await initAuthAndProfile();
+          BW_clearDeviceLoginGrace();
           closeModal();
         } else {
           const { data, error } = await supa.auth.signUp({ email, password });
@@ -3717,7 +3762,11 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
           const shouldTakeover = BW_consumeDeviceTakeoverPending();
           let deviceOK = true;
           if (shouldTakeover) {
-            await BW_takeoverCurrentDevice(user);
+            deviceOK = await BW_takeoverCurrentDevice(user);
+            if(!deviceOK){
+              console.warn('[BW] explicit device takeover failed; guard not started');
+              return;
+            }
           } else {
             deviceOK = await BW_validateOrClaimCurrentDevice(user);
           }
