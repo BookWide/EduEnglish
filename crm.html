@@ -247,15 +247,18 @@ async function loadMembers(){
   if(emails.length){const {data,error}=await supa.from('profiles').select('*').in('email',emails);if(error)throw error;profiles=data||[]}
   const {data:crm,error:crmErr}=await supa.from('travel_crm_members').select('*').eq('group_id',GROUP_ID);
   if(crmErr)throw crmErr;CRM_ROWS=crm||[];
-  MEMBERS=profiles.map(p=>{const c=CRM_ROWS.find(x=>String(x.profile_id||'')===String(p.id||'')||email(x.email)===email(p.email))||null;return {profile:p,crm:c}});
+  MEMBERS=profiles.map(p=>{const c=CRM_ROWS.find(x=>email(x.email)===email(p.email))||CRM_ROWS.find(x=>p.id&&String(x.profile_id||'')===String(p.id))||null;return {profile:p,crm:c}});
   updateStats();renderMembers();
-  const requested=new URLSearchParams(location.search).get('member')||'';
-  if(requested){
-    const requestedEmail=requested.includes('@')?email(requested):'';
-    const m=requestedEmail
-      ? MEMBERS.find(x=>email(x.profile.email)===requestedEmail)
-      : MEMBERS.find(x=>String(x.profile.id)===String(requested));
-    if(m)selectMember(m.profile.id);
+  const qs=new URLSearchParams(location.search);
+  const requestedEmail=email(qs.get('member_email')||'');
+  const legacyMember=norm(qs.get('member')||'');
+  if(requestedEmail){
+    await selectMemberByEmail(requestedEmail);
+  }else if(legacyMember.includes('@')){
+    await selectMemberByEmail(legacyMember);
+  }else if(legacyMember){
+    const m=MEMBERS.find(x=>String(x.profile?.id||'')===String(legacyMember));
+    if(m?.profile?.email)await selectMemberByEmail(m.profile.email);
   }
 }
 function passportComplete(m){const c=m?.crm||{};return !!(norm(c.passport_english_name)&&norm(c.passport_number)&&norm(c.nationality)&&norm(c.passport_issuing_country)&&norm(c.passport_expiry))}
@@ -267,22 +270,34 @@ function renderMembers(){
   const q=norm($('memberSearch').value).toLowerCase(),box=$('memberList');
   let rows=MEMBERS.filter(m=>{const p=m.profile,c=m.crm||{};return !q||[displayName(p),p.email,p.line_user_id,c.passport_english_name].join(' ').toLowerCase().includes(q)});
   if(!rows.length){box.innerHTML='<div class="empty">沒有符合的會員。</div>';return}
-  box.innerHTML=rows.map(m=>{const p=m.profile,c=m.crm||{},active=SELECTED&&String(SELECTED.id)===String(p.id),av=avatarUrl(p),ready=flightReady(m);
-    return `<button class="member ${active?'active':''}" onclick="selectMember('${esc(p.id)}')">
+  box.innerHTML=rows.map(m=>{const p=m.profile,c=m.crm||{},active=SELECTED&&email(SELECTED.email)===email(p.email),av=avatarUrl(p),ready=flightReady(m);
+    return `<button class="member ${active?'active':''}" onclick="selectMemberByEmail('${esc(p.email||'')}')">
       ${av?`<img class="avatar" src="${esc(av)}">`:`<span class="avatar">${esc(displayName(p).slice(0,1))}</span>`}
       <span><span class="member-name">${esc(displayName(p))}</span><span class="member-email">${esc(p.email||'')}</span>
       <span class="badges"><span class="badge ${p.line_user_id?'blue':'gray'}">${p.line_user_id?'LINE 已綁':'LINE 未綁'}</span><span class="badge ${c?'':'gray'}">${c?'CRM':'未建 CRM'}</span></span></span>
       <span class="member-score"><strong>${ready?'✓':'—'}</strong>${ready?'可訂票':'資料未齊'}</span>
     </button>`}).join('');
 }
-async function selectMember(id){
-  const m=MEMBERS.find(x=>String(x.profile.id)===String(id));if(!m)return;
+async function selectMemberByEmail(memberEmail){
+  const key=email(memberEmail);
+  if(!key)return;
+  const m=MEMBERS.find(x=>email(x.profile?.email)===key);
+  if(!m){show('找不到此會員 CRM：'+esc(memberEmail),'err');return;}
   SELECTED=m.profile;SELECTED_CRM=m.crm||{};$('emptyDetail').style.display='none';$('detail').style.display='block';
   const av=avatarUrl(SELECTED);$('detailAvatar').innerHTML=av?`<img src="${esc(av)}" style="width:100%;height:100%;object-fit:cover;border-radius:999px">`:esc(displayName(SELECTED).slice(0,2));
   $('detailName').textContent=displayName(SELECTED);$('detailEmail').textContent=SELECTED.email||'';
   $('detailBadges').innerHTML=`<span class="badge ${SELECTED.line_user_id?'blue':'gray'}">${SELECTED.line_user_id?'LINE＋帳號已綁定':'LINE 未綁定'}</span><span class="badge">${esc(GROUP_ROLE)}</span>`;
   fillForm();await loadBookings();updateReadiness();renderMembers();
-  const u=new URL(location.href);u.searchParams.set('member',SELECTED.id);history.replaceState({},'',u);
+  const u=new URL(location.href);
+  u.searchParams.delete('member');
+  u.searchParams.set('member_email',SELECTED.email||key);
+  history.replaceState({},'',u);
+}
+async function selectMember(id){
+  /* 舊入口相容：若有 id，先找該筆後再用 email 進正式選人流程。 */
+  const m=MEMBERS.find(x=>String(x.profile?.id||'')===String(id));
+  if(m?.profile?.email)return selectMemberByEmail(m.profile.email);
+  return;
 }
 function fillForm(){
   const p=SELECTED,c=SELECTED_CRM||{},pref=c.travel_preferences||{},ec=c.emergency_contact||{};
@@ -317,7 +332,7 @@ async function saveMember(){
       notes:getVal('fNotes'),updated_at:new Date().toISOString(),updated_by:USER.id
     };
     const {data,error}=await supa.from('travel_crm_members').upsert(payload,{onConflict:'group_id,profile_id'}).select().single();if(error)throw error;
-    SELECTED_CRM=data;SELECTED.birthday=birthday;show('✅ CRM 已儲存；生日已同步到 profiles，M-Hiking 會繼續使用同一筆生日。','ok');await loadMembers();selectMember(SELECTED.id);
+    SELECTED_CRM=data;SELECTED.birthday=birthday;show('✅ CRM 已儲存；生日已同步到 profiles，M-Hiking 會繼續使用同一筆生日。','ok');const keepEmail=SELECTED.email;await loadMembers();await selectMemberByEmail(keepEmail);
   }catch(e){show('儲存失敗：'+esc(e.message),'err')}finally{btn.disabled=!canEdit();btn.textContent=old}
 }
 function documentMap(){return SELECTED_CRM?.document_paths||{}}
