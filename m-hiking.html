@@ -3682,12 +3682,14 @@ function cardTagKey(url){return String(url||'').split('?')[0];}
 function photoCardTag(url){return state.cardTags?.[cardTagKey(url)]||{};}
 function photoTagSummary(url){const t=photoCardTag(url);return {greeting:t.greeting===true,holidays:Array.isArray(t.holidays)?t.holidays:[],solar_terms:Array.isArray(t.solar_terms)?t.solar_terms:[],birthdays:Array.isArray(t.birthdays)?t.birthdays:[]};}
 function isUnassignedCardPhoto(tag){const t=tag||{};return t.greeting!==true&&!(t.holidays||[]).length&&!(t.solar_terms||[]).length&&!(t.birthdays||[]).length;}
-function isEffectiveGreetingPhoto(url){const t=photoTagSummary(url);return t.greeting===true||isUnassignedCardPhoto(t);}
+function isEffectiveGreetingPhoto(url){
+  return !!String(url||'').trim()&&!isGreetingExcluded(url);
+}
 state.cardPoolFilter=state.cardPoolFilter||'all';
 const SOLAR_TERM_LABELS={xiaohan:'小寒',dahan:'大寒',lichun:'立春',yushui:'雨水',jingzhe:'驚蟄',chunfen:'春分',qingming:'清明',guyu:'穀雨',lixia:'立夏',xiaoman:'小滿',mangzhong:'芒種',xiazhi:'夏至',xiaoshu:'小暑',dashu:'大暑',liqiu:'立秋',chushu:'處暑',bailu:'白露',qiufen:'秋分',hanlu:'寒露',shuangjiang:'霜降',lidong:'立冬',xiaoxue:'小雪',daxue:'大雪',dongzhi:'冬至'};
 const HOLIDAY_LABELS={father:'父親節',mother:'母親節','mid-autumn':'中秋節','dragon-boat':'端午節','new-year':'新年',christmas:'聖誕節',teacher:'教師節',valentine:'西洋情人節',qixi:'七夕情人節'};
-function cardPoolCounts(urls){const result={all:urls.length,greeting:0,holiday:0,solar:0,birthday:0,unused:0};for(const u of urls){const t=photoTagSummary(u),unused=isUnassignedCardPhoto(t);if(t.greeting||unused)result.greeting++;if(t.holidays.length)result.holiday++;if(t.solar_terms.length)result.solar++;if(t.birthdays.length)result.birthday++;if(unused)result.unused++;}return result;}
-function cardPoolMatch(url,filter=state.cardPoolFilter){const t=photoTagSummary(url);if(filter==='greeting')return t.greeting||isUnassignedCardPhoto(t);if(filter==='holiday')return t.holidays.length>0;if(filter==='solar')return t.solar_terms.length>0;if(filter==='birthday')return t.birthdays.length>0;if(filter==='unused')return isUnassignedCardPhoto(t);return true;}
+function cardPoolCounts(urls){const result={all:urls.length,greeting:0,holiday:0,solar:0,birthday:0,unused:0};for(const u of urls){const t=photoTagSummary(u),unused=isUnassignedCardPhoto(t);if(isEffectiveGreetingPhoto(u))result.greeting++;if(t.holidays.length)result.holiday++;if(t.solar_terms.length)result.solar++;if(t.birthdays.length)result.birthday++;if(unused)result.unused++;}return result;}
+function cardPoolMatch(url,filter=state.cardPoolFilter){const t=photoTagSummary(url);if(filter==='greeting')return isEffectiveGreetingPhoto(url);if(filter==='holiday')return t.holidays.length>0;if(filter==='solar')return t.solar_terms.length>0;if(filter==='birthday')return t.birthdays.length>0;if(filter==='unused')return isUnassignedCardPhoto(t);return true;}
 function setCardPoolFilter(filter){state.cardPoolFilter=filter||'all';if(state.activeAlbumKey)renderAlbum(null,state.activeAlbumKey);else renderAlbum();}
 function cardPoolFilterHtml(urls){if(!BOOKWIDE_IS_ADMIN)return '';const c=cardPoolCounts(urls);const btn=(k,label)=>`<button type="button" class="card-pool-filter ${state.cardPoolFilter===k?'active':''}" onclick="setCardPoolFilter('${k}')">${label} (${c[k]})</button>`;return `<div class="card-pool-filters"><b>素材池（V24.4 自動配對）：</b>${btn('all','全部')}${btn('greeting','🌄 日安')}${btn('holiday','🎉 節日')}${btn('solar','🍂 節氣')}${btn('birthday','🎂 生日')}${btn('unused','未指定')}</div>`;}
 async function savePhotoCardTag(url,next){const d=await hikingApi('/api/photo-card-tags',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({url,...next})});
@@ -5925,7 +5927,12 @@ let lineAutoStatusTimer=null;
 let lineAutoCurrentComposedUrl='';
 let greetingHistoryLibrary={};
 let greetingHistoryRotation={};
-const GREETING_ROTATION_KEY='bookwide_greeting_rotation_v1';
+/* V33.3 FULL_GREETING_POOL
+   一般日安使用相簿目前全部可用照片，只排除明確「排除日安圖」。
+   節日 / 節氣 / 歷史由行事曆優先規則與各自 R2 Cover 處理，不再縮小一般日安照片池。
+   輪播改用 v2 + pool signature；舊 5 張 queue 自動作廢，素材池變更時自動重建。
+   生日流程未修改。 */
+const GREETING_ROTATION_KEY='bookwide_greeting_rotation_v2';
 const GREETING_HISTORY_R2_BASE='https://pub-578e9e060a104f24b6865e26eb941648.r2.dev';
 function lineAutoTaipeiText(iso){if(!iso)return '—';
   const d=new Date(iso);if(Number.isNaN(d.getTime()))return String(iso);
@@ -5933,11 +5940,40 @@ function lineAutoTaipeiText(iso){if(!iso)return '—';
 }
 function lineAutoTodayTaipei(){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
 }
-function lineAutoGreetingPool(){const albumUrls=(state.albums||[]).flatMap(albumAllPhotoUrls),photoUrls=(state.photos||[]).map(normalizePhotoUrl);return [...new Set([...albumUrls,...photoUrls].map(normalizePhotoUrl).filter(isImageUrl))].filter(url=>!isGreetingExcluded(url)&&isEffectiveGreetingPhoto(url))
+function lineAutoGreetingPool(){
+  const albumUrls=(state.albums||[]).flatMap(albumAllPhotoUrls);
+  const photoUrls=(state.photos||[]).map(normalizePhotoUrl);
+  return [...new Set([...albumUrls,...photoUrls].map(normalizePhotoUrl).filter(isImageUrl))]
+    .filter(isEffectiveGreetingPhoto);
 }
 function lineAutoShuffle(items){const rows=items.slice();for(let i=rows.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[rows[i],rows[j]]=[rows[j],rows[i]]}return rows
 }
-function lineAutoNextGreetingPhoto(){const pool=lineAutoGreetingPool(),scope=BOOKWIDE_GROUP_ID||'default';if(!pool.length)return {url:'',total:0,remaining:0};let saved={};try{saved=JSON.parse(localStorage.getItem(GREETING_ROTATION_KEY)||'{}')}catch(_e){}const valid=new Set(pool),oldQueue=Array.isArray(saved?.[scope]?.queue)?saved[scope].queue.filter(x=>valid.has(x)):[],oldUsed=Array.isArray(saved?.[scope]?.used)?saved[scope].used.filter(x=>valid.has(x)):[];let queue=oldQueue,used=oldUsed;if(!queue.length){queue=lineAutoShuffle(pool.filter(x=>!used.includes(x)));if(!queue.length){used=[];queue=lineAutoShuffle(pool)}}const url=queue.shift();used.push(url);saved[scope]={queue,used,updated_at:new Date().toISOString(),pool_size:pool.length};localStorage.setItem(GREETING_ROTATION_KEY,JSON.stringify(saved));return {url,total:pool.length,remaining:queue.length}
+function lineAutoGreetingPoolSignature(pool){
+  let h=2166136261;
+  for(const s of pool.slice().sort()){
+    for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}
+  }
+  return `${pool.length}:${(h>>>0).toString(16)}`;
+}
+function lineAutoNextGreetingPhoto(){
+  const pool=lineAutoGreetingPool(),scope=BOOKWIDE_GROUP_ID||'default';
+  if(!pool.length)return {url:'',total:0,remaining:0};
+  const signature=lineAutoGreetingPoolSignature(pool);
+  let saved={};try{saved=JSON.parse(localStorage.getItem(GREETING_ROTATION_KEY)||'{}')}catch(_e){}
+  const previous=saved?.[scope]||{};
+  const samePool=previous.pool_signature===signature;
+  const valid=new Set(pool);
+  let queue=samePool&&Array.isArray(previous.queue)?previous.queue.filter(x=>valid.has(x)):[];
+  let used=samePool&&Array.isArray(previous.used)?previous.used.filter(x=>valid.has(x)):[];
+  if(!queue.length){
+    queue=lineAutoShuffle(pool.filter(x=>!used.includes(x)));
+    if(!queue.length){used=[];queue=lineAutoShuffle(pool);}
+  }
+  const url=queue.shift();
+  used.push(url);
+  saved[scope]={queue,used,updated_at:new Date().toISOString(),pool_size:pool.length,pool_signature:signature};
+  localStorage.setItem(GREETING_ROTATION_KEY,JSON.stringify(saved));
+  return {url,total:pool.length,remaining:queue.length};
 }
 function greetingHistoryKey(value){const raw=String(value||lineAutoTodayTaipei()).trim(),m=raw.match(/(?:\d{4}-)?(\d{2})-(\d{2})$/);return m?`${m[1]}-${m[2]}`:''
 }
