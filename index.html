@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V36.5_DEVICE_SLOT_STABLE" /><script>window.BOOKWIDE_BUILD="V36.5_DEVICE_SLOT_STABLE";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
+<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V37_DEVICE_GUARD_REBUILD" /><script>window.BOOKWIDE_BUILD="V37_DEVICE_GUARD_REBUILD";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
 <meta name="keywords" content="BookWide,多語言學習,看影片學英文,聽故事學英文,聽音樂學英文,看電影學英文,看新聞學英文,英文聽力,英文會話,日文學習,旅遊英文,機場英文,飯店英文,餐廳英文" />
 <link rel="canonical" href="https://bookwide.net/" />
 <meta property="og:type" content="website" />
@@ -3065,7 +3065,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
        - Admin：不受裝置限制。
        - 一般會員：1 台 desktop + 1 台 mobile。
        - 明確登入成功：目前裝置先寫入自己的 slot，永遠讓「新登入」成功。
-       - 舊同類型裝置：下一次 guard 發現 slot 已被取代後，只登出舊裝置本身。
+       - 舊同類型裝置：guard 連續確認 slot 已被取代後，只登出舊裝置本身。
        - 不使用 takeover pending / grace / legacy migration / forced-logout localStorage 補丁。
     ====================================================== */
     function BW_getBrowserDeviceId(){
@@ -3132,6 +3132,22 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         : { type:'desktop', idCol:'current_desktop_device_id', seenCol:'desktop_last_seen_at' };
     }
 
+    const BW_V37_CLAIM_MARK = 'BW_V37_DEVICE_CLAIM';
+    function BW_markFreshClaim(user){
+      try{
+        sessionStorage.setItem(BW_V37_CLAIM_MARK, JSON.stringify({
+          uid:String(user?.id||''), type:BW_PAGE_DEVICE_TYPE, id:String(BW_PAGE_DEVICE_ID), at:Date.now()
+        }));
+      }catch(_e){}
+    }
+    function BW_hasFreshClaim(user, maxAgeMs=90000){
+      try{
+        const v=JSON.parse(sessionStorage.getItem(BW_V37_CLAIM_MARK)||'{}');
+        return String(v.uid||'')===String(user?.id||'') && v.type===BW_PAGE_DEVICE_TYPE &&
+          String(v.id||'')===String(BW_PAGE_DEVICE_ID) && (Date.now()-Number(v.at||0)) < maxAgeMs;
+      }catch(_e){ return false; }
+    }
+
     async function BW_isAdminDeviceUser(user){
       try{
         if(!user) return false;
@@ -3169,6 +3185,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         console.error('[BW V37] device claim verification failed');
         return false;
       }
+      BW_markFreshClaim(user);
       return true;
     }
 
@@ -3176,6 +3193,8 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     async function BW_validateCurrentDevice(user){
       if(!user?.id) return false;
       if(await BW_isAdminDeviceUser(user)) return true;
+      // 剛完成明確登入並已回讀確認 slot 的新裝置，不得被同一輪 init 反踢。
+      if(BW_hasFreshClaim(user)) return true;
       const cols = BW_deviceCols();
       const { data, error } = await supa.from('profiles').select(cols.idCol).eq('id', user.id).maybeSingle();
       if(error){
@@ -3207,8 +3226,16 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
           const { data, error } = await supa.from('profiles').select(cols.idCol).eq('id', user.id).maybeSingle();
           if(error){ console.warn('[BW V37] guard read failed:', error.message || error); return; }
           if(String(data?.[cols.idCol] || '') !== String(BW_PAGE_DEVICE_ID)){
-            await BW_signOutReplacedDevice();
-            return;
+            // 新登入後 90 秒保護：避免登入寫入與初始化/快取讀取競爭而把新裝置踢掉。
+            if(BW_hasFreshClaim(user)) return;
+            // 再讀一次確認，只有連續兩次都確定被別台取代才登出本裝置。
+            await new Promise(r=>setTimeout(r,1200));
+            const confirmRead = await supa.from('profiles').select(cols.idCol).eq('id', user.id).maybeSingle();
+            if(confirmRead.error){ console.warn('[BW V37] guard confirm read failed:', confirmRead.error.message || confirmRead.error); return; }
+            if(String(confirmRead.data?.[cols.idCol] || '') !== String(BW_PAGE_DEVICE_ID)){
+              await BW_signOutReplacedDevice();
+              return;
+            }
           }
           const now = new Date().toISOString();
           const payload = { last_seen_at: now };
@@ -3218,7 +3245,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         }finally{ running = false; }
       };
       // 不立即 tick；init 已驗證。避免登入流程與 guard 競爭。
-      BW_DEVICE_GUARD_TIMER = setInterval(tick, 30 * 1000);
+      BW_DEVICE_GUARD_TIMER = setInterval(tick, 45 * 1000);
       return BW_DEVICE_GUARD_TIMER;
     }
     /* ========= End BookWide V37 DEVICE GUARD REBUILD ========= */
