@@ -13,7 +13,7 @@
 <div class="wrap">
 <div id="gate" class="gate"><h2>檢查管理員權限中…</h2><div class="muted">只有 profiles.is_admin = true 的管理員可進入。</div></div>
 <div id="app" style="display:none">
-  <div class="head"><div><h1>LINE 禮物商品後台</h1><p>直接維護前台商品，不需再改 JSON。新增／替換／上下架後，前台重新整理即生效。</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
+  <div class="head"><div><h1>LINE 禮物商品後台</h1><p>直接維護前台商品，不需再改 JSON。新增／替換／上下架後，前台重新整理即生效。｜V37.2.10 SDK INVOKE</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
   <div id="status" class="status">準備中…</div>
   <section class="panel">
     <div class="formgrid">
@@ -75,16 +75,31 @@ async function del(id){const p=products.find(x=>String(x.id)===String(id));if(!p
 function derive(){const u=$('line_url').value.trim();const m=u.match(/\/products\/(\d+)/);if(m)$('external_id').value=m[1];else alert('網址中找不到 /products/商品ID')}
 
 async function callImporter(payload){
-  const {data:{session}}=await SB.auth.getSession();
+  // V37.2.10：統一改用 Supabase SDK invoke，不再自行組 fetch / apikey / Authorization。
+  const {data:{session},error:sessionError}=await SB.auth.getSession();
+  if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
   if(!session?.access_token)throw new Error('登入狀態失效，請重新登入');
-  const ctl=new AbortController(); const timer=setTimeout(()=>ctl.abort(),45000);
-  let r;
-  try{r=await fetch(SUPABASE_URL+'/functions/v1/import-line-gift-product',{method:'POST',mode:'cors',headers:{'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+session.access_token},body:JSON.stringify(payload),signal:ctl.signal})}
-  catch(e){throw new Error(e?.name==='AbortError'?'Edge Function 逾時 45 秒':('POST 無法送出／CORS：'+String(e?.message||e)))}
-  finally{clearTimeout(timer)}
-  const text=await r.text(); let j={}; try{j=text?JSON.parse(text):{}}catch(_e){j={error:text}}
-  if(!r.ok||j.ok===false)throw new Error(j.error||('HTTP '+r.status));
-  return j;
+
+  const {data,error}=await SB.functions.invoke('import-line-gift-product',{
+    body:payload
+  });
+
+  if(error){
+    let detail='';
+    try{
+      const resp=error.context;
+      if(resp && typeof resp.clone==='function'){
+        const text=await resp.clone().text();
+        if(text){
+          try{const j=JSON.parse(text);detail=j?.error||j?.message||text}catch(_e){detail=text}
+        }
+      }
+    }catch(_e){}
+    throw new Error(detail||error.message||'Edge Function 呼叫失敗');
+  }
+  if(!data)throw new Error('Edge Function 沒有回傳資料');
+  if(data.ok===false)throw new Error(data.error||'LINE 商品匯入失敗');
+  return data;
 }
 async function importLineProduct(){
   const line=$('line_url').value.trim(); if(!line)return alert('先貼 LINE 禮物商品網址');
