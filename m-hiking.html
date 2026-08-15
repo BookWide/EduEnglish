@@ -1263,6 +1263,7 @@ body.card-pick-active .sticker-maker-btn{background:#f2a51a!important;color:#111
     <details id="lineScheduleStatus" class="line-auto-collapsible" open>
       <summary><span id="lineScheduleStatusTitle">今日排程：讀取中…</span></summary>
       <div class="line-auto-collapsible-body">
+        <div id="lineQuotaStatus" class="notice" style="margin:0 0 8px;padding:8px 10px;background:#f7faf7;border-color:#dfe5dc">LINE 本月額度：讀取中…</div>
         <div id="lineScheduleStatusDetail" class="small" style="line-height:1.55">正在取得最近執行狀態。</div>
         <button class="btn gray" style="margin-top:7px;padding:6px 10px;min-height:34px" type="button" onclick="lineAutoRefreshScheduleStatus(true)">重新整理狀態</button>
       </div>
@@ -5937,6 +5938,9 @@ let lineAutoStatusTimer=null;
 let lineAutoCurrentComposedUrl='';
 let greetingHistoryLibrary={};
 let greetingHistoryRotation={};
+/* V33.12 LINE_QUOTA_AND_ZERO_RECIPIENT
+   日安直送允許 0 人；清空後不再被生日設定或 legacy recipient_id 補回。
+   LINE 額度由 Worker /api/line/quota 安全查詢；剩餘 <=10 時一般日安 Cron 暫停，保留生日/重要訊息額度。 */
 /* V33.11 CRM_FINAL_PERMISSION_MODEL
    CRM 最終權限：Owner=pmktools@gmail.com；其他全域 Admin 沿用 BookWide profiles.is_admin 動態升降；
    群主只管理自己群；一般會員不可進 CRM。m-hiking 僅保留 CRM 導覽與會員快捷入口。 */
@@ -6096,8 +6100,29 @@ function lineAutoRenderScheduleStatus(c){lineAutoLastConfig=c||lineAutoLastConfi
   const composedToday=!!(c.scheduled_composed_url&&c.scheduled_composed_created_at&&new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(c.scheduled_composed_created_at))===today);if(composedToday)parts.push(`今日完整套印 JPG：已準備（${lineAutoTaipeiText(c.scheduled_composed_created_at)}）`);else if(c.greeting_card_image_url)parts.push('目前使用：管理員指定固定日安卡。');else if(c.enabled!==false&&!sentToday)parts.push('今日完整套印 JPG：尚未準備；V24.3 不會再寄昨天舊卡或裸照片。');
   title.textContent=heading;detail.innerHTML=parts.map(x=>`<div>${escHtml(x)}</div>`).join('');
 }
-async function lineAutoRefreshScheduleStatus(showMessage=false){try{const d=await lineAutoApi('/config',{method:'GET'});lineAutoRenderScheduleStatus(d.config||{});if(showMessage)lineAutoShow('✅ 排程狀態已更新。');return d.config||{};}
-  catch(e){if(showMessage)lineAutoShow('❌ 讀取排程狀態失敗：'+e.message,'error');return null;}
+function lineQuotaRender(q){
+  const box=document.getElementById('lineQuotaStatus');if(!box)return;
+  if(!q||q.ok===false){box.textContent='LINE 本月額度：暫時無法取得';box.style.background='#fff8e5';box.style.borderColor='#f0d391';return;}
+  const used=Number(q.used||0),limited=q.type==='limited'&&Number.isFinite(Number(q.limit)),limit=limited?Number(q.limit):null;
+  if(!limited){
+    box.textContent=`LINE 本月額度：已用 ${used}｜方案 ${q.type||'未限制'}`;
+    box.style.background='#eef7f0';box.style.borderColor='#cfe0d2';return;
+  }
+  const remaining=Math.max(0,Number(q.remaining??(limit-used)));
+  box.textContent=`LINE 本月額度：已用 ${used} / ${limit}｜剩餘 ${remaining}${remaining<=Number(q.reserve||10)?'｜⚠ 一般日安自動保留額度，暫停 Push':''}`;
+  box.style.background=remaining<=Number(q.reserve||10)?'#fff1ed':remaining<=30?'#fff8e5':'#eef7f0';
+  box.style.borderColor=remaining<=Number(q.reserve||10)?'#efb6af':remaining<=30?'#f0d391':'#cfe0d2';
+}
+async function lineAutoRefreshQuota(){
+  try{const q=await hikingApi('/api/line/quota',{method:'GET'});lineQuotaRender(q);return q;}
+  catch(e){lineQuotaRender({ok:false});return null;}
+}
+async function lineAutoRefreshScheduleStatus(showMessage=false){try{
+    const [d]=await Promise.all([lineAutoApi('/config',{method:'GET'}),lineAutoRefreshQuota()]);
+    lineAutoRenderScheduleStatus(d.config||{});
+    if(showMessage)lineAutoShow('✅ 排程與 LINE 額度狀態已更新。');
+    return d.config||{};
+  }catch(e){if(showMessage)lineAutoShow('❌ 讀取排程狀態失敗：'+e.message,'error');return null;}
 }
 function lineAutoStartStatusTimer(){if(lineAutoStatusTimer)clearInterval(lineAutoStatusTimer);
   lineAutoStatusTimer=setInterval(()=>{if(document.getElementById('sec-line-auto')?.classList.contains('active'))lineAutoRefreshScheduleStatus(false)},60000);
@@ -6105,8 +6130,8 @@ function lineAutoStartStatusTimer(){if(lineAutoStatusTimer)clearInterval(lineAut
 function lineAutoValue(id){return document.getElementById(id)?.value||''}
 function lineAutoBool(id){return lineAutoValue(id)==='true'}
 function lineAutoSelectedIds(){return [...document.querySelectorAll('#laRecipientList input[type="checkbox"]:checked')].map(x=>String(x.value||'').trim()).filter(Boolean)}
-function lineAutoPayload(){return {
-  recipient_ids:lineAutoSelectedIds(), recipient_groups:lineAutoRecipientGroups,
+function lineAutoPayload(){const selectedRecipients=lineAutoSelectedIds();return {
+  recipient_ids:selectedRecipients, recipient_id:selectedRecipients[0]||'', recipient_groups:lineAutoRecipientGroups,
   schedule_time:lineAutoValue('laTime'), latest_send_time:lineAutoValue('laLatest'),
   schedule_mode:lineAutoValue('laMode'), enabled:lineAutoBool('laEnabled'),
   birthday_enabled:lineAutoBool('laBirthdayEnabled'), birthday_auto_enabled:lineAutoBool('laBirthdayEnabled'), birthday_card_reminder_enabled:lineAutoBool('laBirthdayEnabled'), birthday_card_reminder_time:lineAutoValue('laBirthdayTime')||'08:00', birthday_send_time:lineAutoValue('laBirthdayTime')||'08:00', birthday_time:lineAutoValue('laBirthdayTime')||'08:00', birthday_lead_days:Number(lineAutoValue('laBirthdayLead')||0), birthday_english_style:lineAutoValue('laBirthdayEnglish')||'wonderful', birthday_media_type:lineAutoValue('laBirthdayMediaType')||'audio', birthday_media_url:birthdayMediaUrl(), birthday_player_url:birthdayMediaUrl(), birthday_player_label:birthdayMediaLabel(), birthday_message_mode:birthdayMediaUrl()?'flex_image_player':'image_only',
@@ -6123,7 +6148,10 @@ function lineAutoSet(id,v){const e=document.getElementById(id);if(e&&v!==undefin
 function lineAutoShow(message,type=''){const box=document.getElementById('lineAutoStatus');if(!box)return;box.textContent=message;box.style.borderColor=type==='error'?'#efb6af':'';box.style.color=type==='error'?'var(--red)':''}
 async function lineAutoApi(path,options={}){return hikingApi(LINE_AUTO_API+path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}})}
 function lineAutoUpdateSummary(){const ids=lineAutoSelectedIds();const names=ids.map(id=>lineAutoTargets.find(t=>t.id===id)?.name||id);
-  const el=document.getElementById('laRecipientSummary');if(el)el.textContent=ids.length?`已選 ${ids.length} 個對象：${names.join('、')}`:'尚未選擇收件人。';const head=document.getElementById('lineRecipientCollapseSummary');if(head)head.textContent=ids.length?`已選 ${ids.length} 個`:'尚未選擇';
+  const el=document.getElementById('laRecipientSummary');
+  if(el)el.textContent=ids.length?`已選 ${ids.length} 個對象：${names.join('、')}`:'0 位｜不額外直送日安';
+  const head=document.getElementById('lineRecipientCollapseSummary');
+  if(head)head.textContent=ids.length?`已選 ${ids.length} 個`:'0 位｜不直送';
 }
 function lineAutoRenderTargets(selectedIds=[]){const list=document.getElementById('laRecipientList');if(!list)return;
   const wanted=new Set((selectedIds||[]).map(String));
@@ -6817,7 +6845,7 @@ function birthdayAdminVerifyShow(html,type='ok'){const box=document.getElementBy
 }
 async function birthdayAdminSaveSettings(button){const old=button?.textContent||'儲存生日卡設定';if(button){button.disabled=true;button.textContent='儲存中…'}
   try{const payload=lineAutoPayload();
-    if(!payload.recipient_ids?.length)payload.recipient_ids=Array.isArray(lineAutoInitialRecipientIds)?lineAutoInitialRecipientIds:[];
+    /* 生日卡設定不可把已清空的日安收件人偷偷補回舊名單。 */
     const d=await lineAutoApi('/config',{method:'POST',body:JSON.stringify(payload)});
     const enabled=document.getElementById('laBirthdayEnabled')?.value==='true';
     const time=document.getElementById('laBirthdayTime')?.value||'08:00';
@@ -6892,8 +6920,15 @@ async function openLineAutomationAdmin(){if(!BOOKWIDE_IS_SUPER_ADMIN){alert('只
     lineAutoShow(`✅ 已連線 Cloudflare Worker。排程：${c.enabled?'啟用':'停用'}；收件人 ${lineAutoInitialRecipientIds.length} 位；日安固定照片預設為未指定。`);
     lineAutoRenderScheduleStatus(c);lineAutoStartStatusTimer();}catch(e){lineAutoShow('❌ Worker LINE 自動化讀取失敗：'+e.message,'error')}
 }
-async function lineAutoSave(silent=false){const payload=lineAutoPayload();if(!payload.recipient_ids.length)throw new Error('請至少勾選一個 LINE 收件人');
-  const d=await lineAutoApi('/config',{method:'POST',body:JSON.stringify(payload)});lineAutoRenderScheduleStatus(d.config||{});if(!silent)lineAutoShow(`✅ 雲端設定已儲存，共 ${payload.recipient_ids.length} 個收件人。`);return d;
+async function lineAutoSave(silent=false){const payload=lineAutoPayload();
+  /* V33.12：日安直送允許 0 人。0 人代表此群不做額外個人 Push，不再強迫保留一個測試/管理帳號。 */
+  const d=await lineAutoApi('/config',{method:'POST',body:JSON.stringify(payload)});
+  lineAutoInitialRecipientIds=[...(payload.recipient_ids||[])];
+  lineAutoRenderScheduleStatus(d.config||{});
+  if(!silent)lineAutoShow(payload.recipient_ids.length
+    ? `✅ 雲端設定已儲存，共 ${payload.recipient_ids.length} 個日安直送收件人。`
+    : '✅ 雲端設定已儲存：日安直送收件人 0 位，不會額外 Push 日安給任何個人。');
+  return d;
 }
 async function lineAutoOpenPreview(d){if(!d?.photo_url)return;await openGreetingMaker(null,encodeURIComponent(d.photo_url));
   if(d.text){
