@@ -39,10 +39,11 @@
       <div class="field w4"><label>LINE 禮物商品網址</label><input id="line_url" placeholder="https://giftshop-tw.line.me/products/..."></div>
       <div class="field w4"><label>商品圖片網址（建議使用 BookWide R2：assets/gifts/...）</label><input id="image_url" placeholder="https://你的R2網域/assets/gifts/商品ID.jpg"></div>
     </div>
-    <div class="actions"><button class="btn" id="saveBtn">儲存商品</button><button class="btn gray" id="clearBtn">清空表單</button><button class="btn gray" id="deriveBtn">從 LINE 網址帶入商品 ID</button></div>
+    <div class="actions"><button class="btn" id="saveBtn">儲存商品</button><button class="btn green" id="importBtn">從 LINE 匯入＋圖片存 R2</button><button class="btn gray" id="clearBtn">清空表單</button><button class="btn gray" id="deriveBtn">只帶入商品 ID</button></div>
+    <div class="status" style="margin:12px 0 0;background:#f8fafc">貼上 LINE 禮物商品網址後按「從 LINE 匯入＋圖片存 R2」：自動抓商品 ID／名稱／價格／圖片，圖片存到 <b>R2 assets/gifts/</b>，再回填本表單。</div>
   </section>
   <section class="panel">
-    <div class="tools"><input id="q" placeholder="搜尋品牌、商品、分類"><div class="muted"><span id="count">0</span> 筆</div></div>
+    <div class="tools"><input id="q" placeholder="搜尋品牌、商品、分類"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn gray" id="fillMissingBtn">批次補齊缺圖到 R2</button><div class="muted"><span id="count">0</span> 筆</div></div></div>
     <div class="tablewrap"><table><thead><tr><th>圖</th><th>商品</th><th>價格</th><th>分類／節日</th><th>排序</th><th>狀態</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div>
   </section>
   <section class="panel">
@@ -72,9 +73,41 @@ async function save(){const p=formData();if(!p.name||!p.line_url){alert('商品�
 async function toggle(id){const p=products.find(x=>String(x.id)===String(id));if(!p)return;const {error}=await SB.from('line_gift_products').update({is_active:!p.is_active}).eq('id',p.id);if(error)return setStatus('❌ 更新失敗：'+error.message);await load()}
 async function del(id){const p=products.find(x=>String(x.id)===String(id));if(!p||!confirm(`確定刪除「${p.name}」？\n\n若只是暫時不用，建議按下架即可。`))return;const {error}=await SB.from('line_gift_products').delete().eq('id',p.id);if(error)return setStatus('❌ 刪除失敗：'+error.message);await load()}
 function derive(){const u=$('line_url').value.trim();const m=u.match(/\/products\/(\d+)/);if(m)$('external_id').value=m[1];else alert('網址中找不到 /products/商品ID')}
+
+async function callImporter(payload){
+  const {data:{session}}=await SB.auth.getSession();
+  if(!session?.access_token)throw new Error('登入狀態失效，請重新登入');
+  const r=await fetch(SUPABASE_URL+'/functions/v1/import-line-gift-product',{method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+session.access_token},body:JSON.stringify(payload)});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok||j.ok===false)throw new Error(j.error||('HTTP '+r.status));
+  return j;
+}
+async function importLineProduct(){
+  const line=$('line_url').value.trim(); if(!line)return alert('先貼 LINE 禮物商品網址');
+  $('importBtn').disabled=true; setStatus('⏳ 正在讀 LINE 商品並把圖片存到 R2…');
+  try{
+    const j=await callImporter({line_url:line});
+    $('external_id').value=j.external_id||''; if(j.brand)$('brand').value=j.brand; $('name').value=j.name||''; if(j.price>0)$('price').value=j.price; $('image_url').value=j.image_url||''; $('line_url').value=j.line_url||line;
+    setStatus('✅ 已匯入：'+(j.name||j.external_id)+'；圖片已存 R2：'+j.r2_key);
+  }catch(e){setStatus('❌ LINE 匯入失敗：'+String(e.message||e));}
+  finally{$('importBtn').disabled=false}
+}
+async function fillMissingImages(){
+  const arr=products.filter(p=>p.line_url && !String(p.image_url||'').trim());
+  if(!arr.length)return alert('目前沒有缺圖商品');
+  if(!confirm(`要把 ${arr.length} 件缺圖商品從 LINE 抓圖並存到 R2？`))return;
+  $('fillMissingBtn').disabled=true; let ok=0,fail=0;
+  for(let i=0;i<arr.length;i++){
+    const p=arr[i]; setStatus(`⏳ 補圖 ${i+1}/${arr.length}：${p.name}`);
+    try{await callImporter({line_url:p.line_url,product_id:p.id,refresh_fields:false});ok++}
+    catch(e){fail++;console.warn('補圖失敗',p.name,e)}
+  }
+  await load(); setStatus(`✅ 批次補圖完成：成功 ${ok}、失敗 ${fail}`); $('fillMissingBtn').disabled=false;
+}
+
 async function loadOrders(){const box=$('orderRows');if(!box)return;box.innerHTML='<tr><td colspan="8" class="muted">讀取訂單中…</td></tr>';const {data,error}=await SB.from('line_gift_orders').select('id,user_id,product_name,product_price,points_used,cash_amount,status,created_at,paid_at,sent_at,note').order('created_at',{ascending:false}).limit(100);if(error){box.innerHTML=`<tr><td colspan="8" class="muted">讀取失敗：${esc(error.message)}</td></tr>`;return}const names={pending_payment:'待刷卡',pending_fulfillment:'待送禮',sent:'已送出',cancelled:'已取消'};box.innerHTML=(data||[]).length?(data||[]).map(o=>`<tr><td>${new Date(o.created_at).toLocaleString('zh-TW',{hour12:false})}</td><td class="muted">${esc(String(o.user_id).slice(0,8))}…</td><td><b>${esc(o.product_name)}</b></td><td>NT$ ${Number(o.product_price||0).toLocaleString('zh-TW')}</td><td>${Number(o.points_used||0).toLocaleString('zh-TW')} 點</td><td>NT$ ${Number(o.cash_amount||0).toLocaleString('zh-TW')}</td><td><span class="badge ${o.status==='sent'?'on':o.status==='cancelled'?'off':''}">${names[o.status]||esc(o.status)}</span></td><td>${o.status==='pending_fulfillment'?`<button class="rowbtn" data-sent="${o.id}">已送出</button> <button class="rowbtn danger" data-cancel="${o.id}">取消</button>`:o.status==='pending_payment'?`<button class="rowbtn danger" data-cancel="${o.id}">取消</button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="8" class="muted">目前沒有禮物訂單。</td></tr>';document.querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>setOrderStatus(b.dataset.sent,'sent'));document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=()=>setOrderStatus(b.dataset.cancel,'cancelled'))}
 async function setOrderStatus(id,status){if(status==='cancelled'&&!confirm('確定取消這筆禮物訂單？取消後推薦點會釋放回可用點數。'))return;const {error}=await SB.rpc('admin_set_line_gift_order_status',{p_order_id:id,p_status:status,p_note:null});if(error){alert(error.message);return}await loadOrders()}
 async function boot(){const {data:{session}}=await SB.auth.getSession();if(!session){$('gate').innerHTML='<h2>請先登入</h2><p class="muted">登入 BookWide 後再進入商品後台。</p><p><a class="btn" href="/index.html#login">前往登入</a></p>';return}const {data,error}=await SB.from('profiles').select('is_admin').eq('id',session.user.id).maybeSingle();if(error||data?.is_admin!==true){$('gate').innerHTML='<h2>沒有管理權限</h2><p class="muted">此頁只開放 BookWide Admin。</p>';return}$('gate').style.display='none';$('app').style.display='block';await load();await loadOrders()}
-$('saveBtn').onclick=save;$('clearBtn').onclick=clearForm;$('newBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('q').oninput=render;$('reloadOrders').onclick=loadOrders;boot();
+$('saveBtn').onclick=save;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('newBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('q').oninput=render;$('reloadOrders').onclick=loadOrders;boot();
 </script>
 </body></html>
