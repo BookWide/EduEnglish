@@ -77,8 +77,12 @@ function derive(){const u=$('line_url').value.trim();const m=u.match(/\/products
 async function callImporter(payload){
   const {data:{session}}=await SB.auth.getSession();
   if(!session?.access_token)throw new Error('登入狀態失效，請重新登入');
-  const r=await fetch(SUPABASE_URL+'/functions/v1/import-line-gift-product',{method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+session.access_token},body:JSON.stringify(payload)});
-  const j=await r.json().catch(()=>({}));
+  const ctl=new AbortController(); const timer=setTimeout(()=>ctl.abort(),45000);
+  let r;
+  try{r=await fetch(SUPABASE_URL+'/functions/v1/import-line-gift-product',{method:'POST',mode:'cors',headers:{'Content-Type':'application/json','apikey':SUPABASE_ANON_KEY,'Authorization':'Bearer '+session.access_token},body:JSON.stringify(payload),signal:ctl.signal})}
+  catch(e){throw new Error(e?.name==='AbortError'?'Edge Function 逾時 45 秒':('POST 無法送出／CORS：'+String(e?.message||e)))}
+  finally{clearTimeout(timer)}
+  const text=await r.text(); let j={}; try{j=text?JSON.parse(text):{}}catch(_e){j={error:text}}
   if(!r.ok||j.ok===false)throw new Error(j.error||('HTTP '+r.status));
   return j;
 }
@@ -99,8 +103,8 @@ async function fillMissingImages(){
   $('fillMissingBtn').disabled=true; let ok=0,fail=0;
   for(let i=0;i<arr.length;i++){
     const p=arr[i]; setStatus(`⏳ 補圖 ${i+1}/${arr.length}：${p.name}`);
-    try{await callImporter({line_url:p.line_url,product_id:p.id,refresh_fields:false});ok++}
-    catch(e){fail++;console.warn('補圖失敗',p.name,e)}
+    try{await callImporter({line_url:p.line_url,product_id:p.id,refresh_fields:false});ok++;setStatus(`✅ ${i+1}/${arr.length} 已完成：${p.name}｜成功 ${ok}、失敗 ${fail}`)}
+    catch(e){fail++;setStatus(`❌ ${i+1}/${arr.length} 失敗：${p.name}｜${String(e.message||e)}｜成功 ${ok}、失敗 ${fail}`);console.warn('補圖失敗',p.name,e)}
   }
   await load(); setStatus(`✅ 批次補圖完成：成功 ${ok}、失敗 ${fail}`); $('fillMissingBtn').disabled=false;
 }
