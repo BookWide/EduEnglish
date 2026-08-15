@@ -13,7 +13,7 @@
 <div class="wrap">
 <div id="gate" class="gate"><h2>檢查管理員權限中…</h2><div class="muted">只有 profiles.is_admin = true 的管理員可進入。</div></div>
 <div id="app" style="display:none">
-  <div class="head"><div><h1>LINE 禮物商品後台 <small style="font-size:14px;color:#64748b">V41.2</small></h1><p>直接維護前台商品，不需再改 JSON。新增／替換／上下架後，前台重新整理即生效。</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
+  <div class="head"><div><h1>LINE 禮物商品後台 <small style="font-size:14px;color:#64748b">V42</small></h1><p>直接維護前台商品，不需再改 JSON。新增／替換／上下架後，前台重新整理即生效。</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
   <div id="status" class="status">準備中…</div>
   <section class="panel">
     <div class="formgrid">
@@ -40,7 +40,7 @@
       <div class="field w4"><label>商品圖片網址（BookWide R2）</label><input id="image_url" placeholder="上傳完成後自動回填 R2 圖片網址"></div><div class="field w4"><label>手動補商品照片（從電腦選照片）</label><input id="local_image" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></div>
     </div>
     <div class="actions"><button class="btn" id="saveBtn">儲存商品</button><button class="btn green" id="uploadImageBtn">上傳照片到 R2</button><button class="btn gray" id="importBtn">LINE 自動匯入（備用）</button><button class="btn gray" id="clearBtn">清空表單</button><button class="btn gray" id="deriveBtn">只帶入商品 ID</button></div>
-    <div class="status" style="margin:12px 0 0;background:#f8fafc"><b>手動補圖：</b>選商品 → 從電腦選照片 → 按「上傳照片到 R2」。照片直接存 <b>assets/gifts/商品ID.副檔名</b>，不再抓 LINE 網頁。</div>
+    <div class="status" style="margin:12px 0 0;background:#f8fafc"><b>V42 手動補圖：</b>選商品 → 從電腦選照片 → 按「上傳照片到 R2」。照片由 <b>Cloudflare Worker 直接寫入 R2</b>，不再經 Supabase Edge Function，也不抓 LINE 網頁。</div>
   </section>
   <section class="panel">
     <div class="tools"><input id="q" placeholder="搜尋品牌、商品、分類"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn gray" id="fillMissingBtn">批次補齊缺圖到 R2</button><div class="muted"><span id="count">0</span> 筆</div></div></div>
@@ -75,35 +75,69 @@ async function del(id){const p=products.find(x=>String(x.id)===String(id));if(!p
 function derive(){const u=$('line_url').value.trim();const m=u.match(/\/products\/(\d+)/);if(m)$('external_id').value=m[1];else alert('網址中找不到 /products/商品ID')}
 
 async function uploadLocalImageToR2(){
- const file=$('local_image')?.files?.[0]; if(!file)return alert('請先從電腦選擇商品照片');
- let externalId=$('external_id').value.trim(); if(!externalId){derive();externalId=$('external_id').value.trim()}
- if(!externalId)return alert('缺少 LINE 商品 ID');
- if(file.size>10*1024*1024)return alert('照片不可超過 10MB');
- $('uploadImageBtn').disabled=true;setStatus('⏳ 正在把照片上傳到 R2…');
- try{
-  const {data:{session}}=await SB.auth.getSession();if(!session?.access_token)throw new Error('登入狀態失效');
-  const fd=new FormData();fd.append('access_token',session.access_token);fd.append('upload_image','true');fd.append('external_id',externalId);fd.append('image_file',file,file.name);
-  const ctl=new AbortController();
-  const timer=setTimeout(()=>ctl.abort(),30000);
-  let r;
+  const file=$('local_image')?.files?.[0];
+  if(!file)return alert('請先從電腦選擇商品照片');
+
+  let externalId=$('external_id').value.trim();
+  if(!externalId){derive();externalId=$('external_id').value.trim()}
+  if(!externalId)return alert('缺少 LINE 商品 ID');
+  if(file.size>10*1024*1024)return alert('照片不可超過 10MB');
+
+  $('uploadImageBtn').disabled=true;
+  setStatus('⏳ 直接上傳照片到 Cloudflare R2…');
+
   try{
-    r=await fetch(SUPABASE_URL+'/functions/v1/import-line-gift-product',{method:'POST',body:fd,signal:ctl.signal,cache:'no-store'});
+    const {data:{session},error:sessionError}=await SB.auth.getSession();
+    if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
+    if(!session?.access_token)throw new Error('登入狀態失效，請重新登入');
+
+    const fd=new FormData();
+    fd.append('external_id',externalId);
+    fd.append('image_file',file,file.name);
+
+    const ctl=new AbortController();
+    const timer=setTimeout(()=>ctl.abort(),30000);
+    let r;
+    try{
+      r=await fetch('/api/gift-image-upload',{
+        method:'POST',
+        headers:{'Authorization':'Bearer '+session.access_token},
+        body:fd,
+        signal:ctl.signal,
+        cache:'no-store',
+        credentials:'same-origin'
+      });
+    }catch(e){
+      if(e?.name==='AbortError')throw new Error('UPLOAD_TIMEOUT｜30 秒未收到 Cloudflare R2 回應');
+      throw e;
+    }finally{
+      clearTimeout(timer);
+    }
+
+    const text=await r.text();
+    let j={};
+    try{j=text?JSON.parse(text):{}}catch(_){throw new Error(text||('HTTP '+r.status))}
+    if(!r.ok||j.ok===false){
+      throw new Error([j.error,j.message,j.stage?('stage='+j.stage):'',('HTTP '+r.status)].filter(Boolean).join('｜'));
+    }
+
+    $('image_url').value=j.image_url||'';
+
+    if(editingId){
+      const u=await SB.from('line_gift_products').update({image_url:j.image_url}).eq('id',editingId);
+      if(u.error)throw new Error('照片已進 R2，但商品資料更新失敗：'+u.error.message);
+      await load();
+      setStatus('✅ 完成：照片已直接存 Cloudflare R2，商品圖片已更新');
+    }else{
+      setStatus('✅ 照片已直接存 Cloudflare R2；請按「儲存商品」');
+    }
   }catch(e){
-    if(e?.name==='AbortError')throw new Error('UPLOAD_TIMEOUT｜30 秒未收到 R2 上傳服務回應');
-    throw e;
+    setStatus('❌ 手動照片上傳失敗：'+String(e?.message||e));
   }finally{
-    clearTimeout(timer);
+    $('uploadImageBtn').disabled=false;
   }
-  const text=await r.text();let j={};try{j=JSON.parse(text)}catch(_){throw new Error(text||('HTTP '+r.status))}
-  if(!r.ok||j.ok===false){
-    throw new Error([j.error,j.message,j.stage?('stage='+j.stage):'',('HTTP '+r.status)].filter(Boolean).join('｜'));
-  }
-  $('image_url').value=j.image_url||'';
-  if(editingId){const u=await SB.from('line_gift_products').update({image_url:j.image_url}).eq('id',editingId);if(u.error)throw u.error;await load();setStatus('✅ 照片已上傳 R2 並更新商品：'+j.r2_key)}
-  else setStatus('✅ 照片已上傳 R2：'+j.r2_key+'；請按儲存商品');
- }catch(e){setStatus('❌ 手動照片上傳失敗：'+String(e?.message||e))}
- finally{$('uploadImageBtn').disabled=false}
 }
+
 async function callImporter(payload){
   const {data:{session},error:sessionError}=await SB.auth.getSession();
   if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
