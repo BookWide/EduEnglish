@@ -14,7 +14,7 @@
 <div class="wrap">
 <div id="gate" class="gate"><h2>檢查管理員權限中…</h2><div class="muted">只有 profiles.is_admin = true 的管理員可進入。</div></div>
 <div id="app" style="display:none">
-  <div class="head"><div><h1>LINE 禮物商品後台</h1><p>貼 LINE 禮物網址即可自動抓商品資料與圖片，圖片存 BookWide R2；不用手動找圖。｜V38.6 AUTO LINE → R2</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
+  <div class="head"><div><h1>LINE 禮物商品後台</h1><p>貼 LINE 禮物網址即可自動抓商品資料與圖片，圖片存 BookWide R2；不用手動找圖。｜V38.7 FRONTEND REQUEST REBUILD</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
   <div id="status" class="status">準備中…</div>
 
   <section class="panel imagePanel">
@@ -91,10 +91,23 @@ async function del(id){const p=products.find(x=>String(x.id)===String(id));if(!p
 
 async function sessionToken(){const {data:{session},error}=await SB.auth.getSession();if(error)throw new Error('登入狀態讀取失敗：'+error.message);if(!session?.access_token)throw new Error('登入狀態失效，請重新登入');return session.access_token}
 async function callAutoImporter({lineUrl,product=null,refreshFields=true}){
-  const token=await sessionToken();const fd=new FormData();fd.set('access_token',token);fd.set('line_url',String(lineUrl||'').trim());fd.set('refresh_fields',refreshFields?'true':'false');if(product?.id)fd.set('product_id',String(product.id));
-  const ctl=new AbortController();const timer=setTimeout(()=>ctl.abort(),18000);let r;
-  try{r=await fetch(SUPABASE_URL+'/functions/v1/import-line-gift-product',{method:'POST',body:fd,signal:ctl.signal,cache:'no-store',credentials:'omit'})}catch(e){if(e?.name==='AbortError')throw new Error('AUTO_IMPORT_TIMEOUT｜18 秒逾時');throw e}finally{clearTimeout(timer)}
-  const text=await r.text().catch(()=> '');let j={};try{j=text?JSON.parse(text):{}}catch(_e){j={error:text||('HTTP '+r.status)}}if(!r.ok||j.ok===false){throw new Error([j.error,j.message,j.stage?('stage='+j.stage):'',j.source?('source='+j.source):''].filter(Boolean).join('｜')||('HTTP '+r.status))}return j
+  setStatus('🔐 取得 BookWide 登入憑證…');
+  const token=await sessionToken();
+  const body=new URLSearchParams();
+  body.set('access_token',token);
+  body.set('line_url',String(lineUrl||'').trim());
+  body.set('refresh_fields',refreshFields?'true':'false');
+  if(product?.id)body.set('product_id',String(product.id));
+  const url=SUPABASE_URL+'/functions/v1/import-line-gift-product';
+  setStatus('📤 POST 已送出 → import-line-gift-product\n'+String(lineUrl||''));
+  const ctl=new AbortController();const timer=setTimeout(()=>ctl.abort(),20000);let r;
+  try{r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},body:body.toString(),signal:ctl.signal,cache:'no-store',credentials:'omit',redirect:'follow'})}
+  catch(e){if(e?.name==='AbortError')throw new Error('POST_TIMEOUT｜20 秒未收到 Edge Function 回應');throw new Error('POST_NETWORK_ERROR｜'+String(e?.message||e))}
+  finally{clearTimeout(timer)}
+  setStatus('📥 Edge Function 回應：HTTP '+r.status+'\n正在讀取結果…');
+  const text=await r.text().catch(()=> '');let j={};try{j=text?JSON.parse(text):{}}catch(_e){j={error:text||('HTTP '+r.status)}}
+  if(!r.ok||j.ok===false)throw new Error([j.error,j.message,j.stage?('stage='+j.stage):'',j.source?('source='+j.source):'',('HTTP '+r.status)].filter(Boolean).join('｜'));
+  return j
 }
 async function importLineProduct(){
   const line=$('import_line_url').value.trim();if(!line)return alert('先貼 LINE 禮物商品網址');$('importBtn').disabled=true;setStatus('⏳ 自動讀取 LINE 商品並將圖片存 R2…');
@@ -102,9 +115,37 @@ async function importLineProduct(){
 }
 async function autoOne(id){const p=products.find(x=>String(x.id)===String(id));if(!p?.line_url)return setStatus('❌ 此商品沒有 LINE 商品網址，無法自動補圖');setStatus(`⏳ 自動補圖：${p.name}`);try{const j=await callAutoImporter({lineUrl:p.line_url,product:p,refreshFields:false});await load();setStatus(`✅ 自動補圖完成：${p.name}\n${j.r2_key||''}`)}catch(e){setStatus(`❌ ${p.name}：${String(e.message||e)}`)}}
 async function autoFillMissing(){
-  const arr=products.filter(p=>p.line_url&&!String(p.image_url||'').trim());if(!arr.length)return setStatus('✅ 目前沒有缺圖商品');if(!confirm(`要自動處理 ${arr.length} 件缺圖商品？\n\n只要按這一次，系統會自己跑完整批。`))return;$('autoMissingBtn').disabled=true;let ok=0,fail=0;const errors=[];
-  for(let i=0;i<arr.length;i++){const p=arr[i];setStatus(`⏳ 自動補圖 ${i+1}/${arr.length}：${p.name}\n成功 ${ok}｜失敗 ${fail}`);try{await callAutoImporter({lineUrl:p.line_url,product:p,refreshFields:false});ok++}catch(e){fail++;errors.push(`${p.external_id||''} ${p.name}：${String(e.message||e)}`)} }
-  await load();setStatus(`✅ 自動補圖完成：成功 ${ok}、失敗 ${fail}${errors.length?'\n\n失敗明細：\n'+errors.slice(0,12).join('\n'):''}`);$('autoMissingBtn').disabled=false
+  const arr=products.filter(p=>p.line_url&&!String(p.image_url||'').trim());
+  if(!arr.length)return setStatus('✅ 目前沒有缺圖商品');
+  if(!confirm(`要自動處理 ${arr.length} 件缺圖商品？
+
+只按這一次；失敗會記錄後繼續下一筆。`))return;
+  $('autoMissingBtn').disabled=true;let ok=0,fail=0;const errors=[];
+  try{
+    for(let i=0;i<arr.length;i++){
+      const p=arr[i];
+      setStatus(`⏳ ${i+1}/${arr.length} 準備處理：${p.name}
+成功 ${ok}｜失敗 ${fail}`);
+      try{
+        await callAutoImporter({lineUrl:p.line_url,product:p,refreshFields:false});
+        ok++;
+        setStatus(`✅ ${i+1}/${arr.length} 成功：${p.name}
+成功 ${ok}｜失敗 ${fail}`);
+      }catch(e){
+        fail++;
+        const msg=`${p.external_id||''} ${p.name}：${String(e.message||e)}`;
+        errors.push(msg);
+        setStatus(`❌ ${i+1}/${arr.length} 失敗：${msg}
+下一筆將自動繼續…`);
+      }
+      await new Promise(r=>setTimeout(r,250));
+    }
+    await load();
+    const detail=errors.length ? ('\n\n失敗明細：\n'+errors.slice(0,20).join('\n')) : '';
+    setStatus(`🏁 全批完成：成功 ${ok}、失敗 ${fail}${detail}`);
+  }finally{
+    $('autoMissingBtn').disabled=false;
+  }
 }
 function checkMissing(){const arr=products.filter(p=>!String(p.image_url||'').trim());if(!arr.length)return setStatus('✅ 目前沒有缺圖商品');setStatus(`⚠️ 缺圖 ${arr.length} 筆：\n`+arr.map(p=>`${p.external_id||'無ID'}｜${p.name}`).join('\n'))}
 
