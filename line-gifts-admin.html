@@ -13,7 +13,7 @@
 <div class="wrap">
 <div id="gate" class="gate"><h2>檢查管理員權限中…</h2><div class="muted">只有 profiles.is_admin = true 的管理員可進入。</div></div>
 <div id="app" style="display:none">
-  <div class="head"><div><h1>LINE 禮物商品後台</h1><p>直接維護前台商品，不需再改 JSON。新增／替換／上下架後，前台重新整理即生效。</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
+  <div class="head"><div><h1>LINE 禮物商品後台 <small style="font-size:14px;color:#64748b">V41.2</small></h1><p>直接維護前台商品，不需再改 JSON。新增／替換／上下架後，前台重新整理即生效。</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
   <div id="status" class="status">準備中…</div>
   <section class="panel">
     <div class="formgrid">
@@ -37,10 +37,10 @@
       <div class="field"><label>排序</label><input id="sort_order" type="number" value="100" step="1"></div>
       <div class="field"><label>狀態</label><select id="is_active"><option value="true">上架</option><option value="false">下架</option></select></div>
       <div class="field w4"><label>LINE 禮物商品網址</label><input id="line_url" placeholder="https://giftshop-tw.line.me/products/..."></div>
-      <div class="field w4"><label>商品圖片網址（建議使用 BookWide R2：assets/gifts/...）</label><input id="image_url" placeholder="https://你的R2網域/assets/gifts/商品ID.jpg"></div>
+      <div class="field w4"><label>商品圖片網址（BookWide R2）</label><input id="image_url" placeholder="上傳完成後自動回填 R2 圖片網址"></div><div class="field w4"><label>手動補商品照片（從電腦選照片）</label><input id="local_image" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></div>
     </div>
-    <div class="actions"><button class="btn" id="saveBtn">儲存商品</button><button class="btn green" id="importBtn">從 LINE 匯入＋圖片存 R2</button><button class="btn gray" id="clearBtn">清空表單</button><button class="btn gray" id="deriveBtn">只帶入商品 ID</button></div>
-    <div class="status" style="margin:12px 0 0;background:#f8fafc">貼上 LINE 禮物商品網址後按「從 LINE 匯入＋圖片存 R2」：自動抓商品 ID／名稱／價格／圖片，圖片存到 <b>R2 assets/gifts/</b>，再回填本表單。</div>
+    <div class="actions"><button class="btn" id="saveBtn">儲存商品</button><button class="btn green" id="uploadImageBtn">上傳照片到 R2</button><button class="btn gray" id="importBtn">LINE 自動匯入（備用）</button><button class="btn gray" id="clearBtn">清空表單</button><button class="btn gray" id="deriveBtn">只帶入商品 ID</button></div>
+    <div class="status" style="margin:12px 0 0;background:#f8fafc"><b>手動補圖：</b>選商品 → 從電腦選照片 → 按「上傳照片到 R2」。照片直接存 <b>assets/gifts/商品ID.副檔名</b>，不再抓 LINE 網頁。</div>
   </section>
   <section class="panel">
     <div class="tools"><input id="q" placeholder="搜尋品牌、商品、分類"><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn gray" id="fillMissingBtn">批次補齊缺圖到 R2</button><div class="muted"><span id="count">0</span> 筆</div></div></div>
@@ -74,6 +74,36 @@ async function toggle(id){const p=products.find(x=>String(x.id)===String(id));if
 async function del(id){const p=products.find(x=>String(x.id)===String(id));if(!p||!confirm(`確定刪除「${p.name}」？\n\n若只是暫時不用，建議按下架即可。`))return;const {error}=await SB.from('line_gift_products').delete().eq('id',p.id);if(error)return setStatus('❌ 刪除失敗：'+error.message);await load()}
 function derive(){const u=$('line_url').value.trim();const m=u.match(/\/products\/(\d+)/);if(m)$('external_id').value=m[1];else alert('網址中找不到 /products/商品ID')}
 
+async function uploadLocalImageToR2(){
+ const file=$('local_image')?.files?.[0]; if(!file)return alert('請先從電腦選擇商品照片');
+ let externalId=$('external_id').value.trim(); if(!externalId){derive();externalId=$('external_id').value.trim()}
+ if(!externalId)return alert('缺少 LINE 商品 ID');
+ if(file.size>10*1024*1024)return alert('照片不可超過 10MB');
+ $('uploadImageBtn').disabled=true;setStatus('⏳ 正在把照片上傳到 R2…');
+ try{
+  const {data:{session}}=await SB.auth.getSession();if(!session?.access_token)throw new Error('登入狀態失效');
+  const fd=new FormData();fd.append('access_token',session.access_token);fd.append('upload_image','true');fd.append('external_id',externalId);fd.append('image_file',file,file.name);
+  const ctl=new AbortController();
+  const timer=setTimeout(()=>ctl.abort(),30000);
+  let r;
+  try{
+    r=await fetch(SUPABASE_URL+'/functions/v1/import-line-gift-product',{method:'POST',body:fd,signal:ctl.signal,cache:'no-store'});
+  }catch(e){
+    if(e?.name==='AbortError')throw new Error('UPLOAD_TIMEOUT｜30 秒未收到 R2 上傳服務回應');
+    throw e;
+  }finally{
+    clearTimeout(timer);
+  }
+  const text=await r.text();let j={};try{j=JSON.parse(text)}catch(_){throw new Error(text||('HTTP '+r.status))}
+  if(!r.ok||j.ok===false){
+    throw new Error([j.error,j.message,j.stage?('stage='+j.stage):'',('HTTP '+r.status)].filter(Boolean).join('｜'));
+  }
+  $('image_url').value=j.image_url||'';
+  if(editingId){const u=await SB.from('line_gift_products').update({image_url:j.image_url}).eq('id',editingId);if(u.error)throw u.error;await load();setStatus('✅ 照片已上傳 R2 並更新商品：'+j.r2_key)}
+  else setStatus('✅ 照片已上傳 R2：'+j.r2_key+'；請按儲存商品');
+ }catch(e){setStatus('❌ 手動照片上傳失敗：'+String(e?.message||e))}
+ finally{$('uploadImageBtn').disabled=false}
+}
 async function callImporter(payload){
   const {data:{session},error:sessionError}=await SB.auth.getSession();
   if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
@@ -155,6 +185,6 @@ async function fillMissingImages(){
 async function loadOrders(){const box=$('orderRows');if(!box)return;box.innerHTML='<tr><td colspan="8" class="muted">讀取訂單中…</td></tr>';const {data,error}=await SB.from('line_gift_orders').select('id,user_id,product_name,product_price,points_used,cash_amount,status,created_at,paid_at,sent_at,note').order('created_at',{ascending:false}).limit(100);if(error){box.innerHTML=`<tr><td colspan="8" class="muted">讀取失敗：${esc(error.message)}</td></tr>`;return}const names={pending_payment:'待刷卡',pending_fulfillment:'待送禮',sent:'已送出',cancelled:'已取消'};box.innerHTML=(data||[]).length?(data||[]).map(o=>`<tr><td>${new Date(o.created_at).toLocaleString('zh-TW',{hour12:false})}</td><td class="muted">${esc(String(o.user_id).slice(0,8))}…</td><td><b>${esc(o.product_name)}</b></td><td>NT$ ${Number(o.product_price||0).toLocaleString('zh-TW')}</td><td>${Number(o.points_used||0).toLocaleString('zh-TW')} 點</td><td>NT$ ${Number(o.cash_amount||0).toLocaleString('zh-TW')}</td><td><span class="badge ${o.status==='sent'?'on':o.status==='cancelled'?'off':''}">${names[o.status]||esc(o.status)}</span></td><td>${o.status==='pending_fulfillment'?`<button class="rowbtn" data-sent="${o.id}">已送出</button> <button class="rowbtn danger" data-cancel="${o.id}">取消</button>`:o.status==='pending_payment'?`<button class="rowbtn danger" data-cancel="${o.id}">取消</button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="8" class="muted">目前沒有禮物訂單。</td></tr>';document.querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>setOrderStatus(b.dataset.sent,'sent'));document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=()=>setOrderStatus(b.dataset.cancel,'cancelled'))}
 async function setOrderStatus(id,status){if(status==='cancelled'&&!confirm('確定取消這筆禮物訂單？取消後推薦點會釋放回可用點數。'))return;const {error}=await SB.rpc('admin_set_line_gift_order_status',{p_order_id:id,p_status:status,p_note:null});if(error){alert(error.message);return}await loadOrders()}
 async function boot(){const {data:{session}}=await SB.auth.getSession();if(!session){$('gate').innerHTML='<h2>請先登入</h2><p class="muted">登入 BookWide 後再進入商品後台。</p><p><a class="btn" href="/index.html#login">前往登入</a></p>';return}const {data,error}=await SB.from('profiles').select('is_admin').eq('id',session.user.id).maybeSingle();if(error||data?.is_admin!==true){$('gate').innerHTML='<h2>沒有管理權限</h2><p class="muted">此頁只開放 BookWide Admin。</p>';return}$('gate').style.display='none';$('app').style.display='block';await load();await loadOrders()}
-$('saveBtn').onclick=save;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('newBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('q').oninput=render;$('reloadOrders').onclick=loadOrders;boot();
+$('saveBtn').onclick=save;$('uploadImageBtn').onclick=uploadLocalImageToR2;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('newBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('q').oninput=render;$('reloadOrders').onclick=loadOrders;boot();
 </script>
 </body></html>
