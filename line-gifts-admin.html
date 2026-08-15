@@ -75,31 +75,37 @@ async function del(id){const p=products.find(x=>String(x.id)===String(id));if(!p
 function derive(){const u=$('line_url').value.trim();const m=u.match(/\/products\/(\d+)/);if(m)$('external_id').value=m[1];else alert('網址中找不到 /products/商品ID')}
 
 async function callImporter(payload){
-  // V37.2.10：統一改用 Supabase SDK invoke，不再自行組 fetch / apikey / Authorization。
+  // V38：NO PREFLIGHT。只送 safelisted form POST，不送 Authorization/apikey/custom headers。
+  // Edge Function 需關閉 gateway Verify JWT，改由 Function 內用 access_token 驗證 Admin。
   const {data:{session},error:sessionError}=await SB.auth.getSession();
   if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
   if(!session?.access_token)throw new Error('登入狀態失效，請重新登入');
 
-  const {data,error}=await SB.functions.invoke('import-line-gift-product',{
-    body:payload
-  });
+  const ctl=new AbortController();
+  const timer=setTimeout(()=>ctl.abort(),45000);
+  let r;
+  try{
+    const body=new URLSearchParams();
+    body.set('access_token',session.access_token);
+    body.set('payload',JSON.stringify(payload||{}));
+    r=await fetch(SUPABASE_URL+'/functions/v1/import-line-gift-product',{
+      method:'POST',
+      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
+      body:body.toString(),
+      signal:ctl.signal,
+      cache:'no-store',
+      credentials:'omit'
+    });
+  }catch(e){
+    if(e?.name==='AbortError')throw new Error('Edge Function 45 秒逾時');
+    throw new Error('POST 無法送出：'+String(e?.message||e));
+  }finally{clearTimeout(timer)}
 
-  if(error){
-    let detail='';
-    try{
-      const resp=error.context;
-      if(resp && typeof resp.clone==='function'){
-        const text=await resp.clone().text();
-        if(text){
-          try{const j=JSON.parse(text);detail=j?.error||j?.message||text}catch(_e){detail=text}
-        }
-      }
-    }catch(_e){}
-    throw new Error(detail||error.message||'Edge Function 呼叫失敗');
-  }
-  if(!data)throw new Error('Edge Function 沒有回傳資料');
-  if(data.ok===false)throw new Error(data.error||'LINE 商品匯入失敗');
-  return data;
+  const text=await r.text().catch(()=> '');
+  let j={};
+  try{j=text?JSON.parse(text):{}}catch(_e){j={error:text||('HTTP '+r.status)}}
+  if(!r.ok||j.ok===false)throw new Error(j.error||j.message||('HTTP '+r.status));
+  return j;
 }
 async function importLineProduct(){
   const line=$('line_url').value.trim(); if(!line)return alert('先貼 LINE 禮物商品網址');
