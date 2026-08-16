@@ -13,7 +13,7 @@
 <div class="wrap">
 <div id="gate" class="gate"><h2>檢查管理員權限中…</h2><div class="muted">只有 profiles.is_admin = true 的管理員可進入。</div></div>
 <div id="app" style="display:none">
-  <div class="head"><div><h1>LINE 禮物商品後台 <small style="font-size:14px;color:#64748b">V45</small></h1><p>直接維護前台商品，不需再改 JSON。新增／替換／上下架後，前台重新整理即生效。</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
+  <div class="head"><div><h1>LINE 禮物商品後台 <small style="font-size:14px;color:#64748b">V46</small></h1><p>直接維護前台商品，不需再改 JSON。新增／替換／上下架後，前台重新整理即生效。</p></div><button class="btn green" id="newBtn">＋ 新增商品</button></div>
   <div id="status" class="status">準備中…</div>
   <section class="panel">
     <div class="formgrid">
@@ -40,7 +40,7 @@
       <div class="field w4"><label>商品圖片網址（BookWide R2）</label><input id="image_url" placeholder="上傳完成後自動回填 R2 圖片網址"></div>
       <div class="field w4"><label>手動補商品照片（從電腦選照片）</label><input id="local_image" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></div>
     </div>
-    <div class="actions"><button class="btn" id="saveBtn">儲存商品</button><button class="btn green" id="uploadImageBtn">上傳照片到 R2</button><button class="btn gray" id="importBtn">LINE 自動匯入（備用）</button><button class="btn gray" id="clearBtn">清空表單</button><button class="btn gray" id="deriveBtn">只帶入商品 ID</button></div>
+    <div class="actions"><button class="btn" id="saveBtn">儲存商品</button><button class="btn green" id="uploadImageBtn">上傳照片到 R2</button><button class="btn gray" id="importBtn">LINE 自動匯入</button><button class="btn gray" id="clearBtn">清空表單</button><button class="btn gray" id="deriveBtn">只帶入商品 ID</button></div>
     <div class="status" style="margin:12px 0 0;background:#f8fafc"><b>V45：</b>手動照片直接呼叫 m-hiking 正式 Worker：<b>https://bookwide-hiking-api.pmktools.workers.dev/api/upload</b>。送 <b>upload_type=gift</b> 後存到 <b>assets/gifts/商品ID.副檔名</b>。</div>
   </section>
   <section class="panel">
@@ -138,77 +138,69 @@ async function callImporter(payload){
   if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
   if(!session?.access_token)throw new Error('登入狀態失效，請重新登入');
 
-  // Edge Function V38.7 使用 req.formData()，所以這裡必須送 form-urlencoded，
-  // 並把 access_token 放進表單；不可再送 JSON。
-  const body=new URLSearchParams();
-  body.set('access_token',session.access_token);
-  body.set('line_url',String(payload?.line_url||'').trim());
-  body.set('refresh_fields',payload?.refresh_fields===false?'false':'true');
-  if(payload?.product_id!==undefined&&payload?.product_id!==null&&String(payload.product_id).trim()){
-    body.set('product_id',String(payload.product_id));
-  }
-
   const ctl=new AbortController();
-  const timer=setTimeout(()=>ctl.abort(),20000);
+  const timer=setTimeout(()=>ctl.abort(),30000);
   let r;
   try{
-    r=await fetch(SUPABASE_URL+'/functions/v1/import-line-gift-product',{
+    r=await fetch(HIKING_API_BASE+'/api/line-gift-import',{
       method:'POST',
-      headers:{'Content-Type':'application/x-www-form-urlencoded;charset=UTF-8'},
-      body:body.toString(),
-      signal:ctl.signal,
-      cache:'no-store',
-      credentials:'omit',
-      redirect:'follow'
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
+      body:JSON.stringify({line_url:String(payload?.line_url||'').trim(),refresh_fields:payload?.refresh_fields!==false}),
+      signal:ctl.signal,cache:'no-store'
     });
   }catch(e){
-    if(e?.name==='AbortError')throw new Error('POST_TIMEOUT｜20 秒未收到補圖服務回應');
-    throw new Error('POST_NETWORK_ERROR｜'+String(e?.message||e));
-  }finally{
-    clearTimeout(timer);
-  }
+    if(e?.name==='AbortError')throw new Error('IMPORT_TIMEOUT｜30 秒未收到 BookWide Worker 回應');
+    throw new Error('IMPORT_NETWORK_ERROR｜'+String(e?.message||e));
+  }finally{clearTimeout(timer)}
 
   const text=await r.text().catch(()=> '');
   let j={};
   try{j=text?JSON.parse(text):{}}catch(_){j={error:text||('HTTP '+r.status)}}
-  if(!r.ok||j.ok===false){
-    throw new Error([j.error,j.message,j.stage?('stage='+j.stage):'',('HTTP '+r.status)].filter(Boolean).join('｜'));
-  }
+  if(!r.ok||j.ok===false)throw new Error([j.error,j.message,j.stage?('stage='+j.stage):'',('HTTP '+r.status)].filter(Boolean).join('｜'));
   return j;
 }
+
 async function importLineProduct(){
-  const line=$('line_url').value.trim(); if(!line)return alert('先貼 LINE 禮物商品網址');
-  $('importBtn').disabled=true; setStatus('⏳ 正在讀 LINE 商品並把圖片存到 R2…');
+  const line=$('line_url').value.trim();
+  if(!line)return alert('先貼 LINE 禮物商品網址');
+  $('importBtn').disabled=true;
+  setStatus('⏳ Worker 正在先開 LINE 上一層，再讀商品並把圖片直接存 R2…');
   try{
-    const j=await callImporter({line_url:line});
-    $('external_id').value=j.external_id||''; if(j.brand)$('brand').value=j.brand; $('name').value=j.name||''; if(j.price>0)$('price').value=j.price; $('image_url').value=j.image_url||''; $('line_url').value=j.line_url||line;
-    setStatus('✅ 已匯入：'+(j.name||j.external_id)+'；圖片已存 R2：'+j.r2_key);
-  }catch(e){setStatus('❌ LINE 匯入失敗：'+String(e.message||e));}
+    const j=await callImporter({line_url:line,refresh_fields:true});
+    $('external_id').value=j.external_id||'';
+    if(j.brand)$('brand').value=j.brand;
+    if(j.name)$('name').value=j.name;
+    if(Number(j.price)>0)$('price').value=Number(j.price);
+    $('image_url').value=j.image_url||'';
+    $('line_url').value=j.line_url||line;
+    setStatus('✅ LINE 商品已讀取；圖片已直接存 R2：'+j.r2_key+'｜來源：'+(j.source||'direct'));
+  }catch(e){setStatus('❌ LINE 匯入失敗：'+String(e?.message||e))}
   finally{$('importBtn').disabled=false}
 }
+
 async function fillMissingImages(){
   const arr=products.filter(p=>p.line_url && !String(p.image_url||'').trim());
   if(!arr.length)return alert('目前沒有缺圖商品');
-  if(!confirm(`要把 ${arr.length} 件缺圖商品從 LINE 抓圖並存到 R2？`))return;
-  $('fillMissingBtn').disabled=true; let ok=0,fail=0; const errors=[];
+  if(!confirm(`要把 ${arr.length} 件缺圖商品直接經 BookWide Worker 抓圖並存到 R2？`))return;
+  $('fillMissingBtn').disabled=true;let ok=0,fail=0;const errors=[];
   try{
     for(let i=0;i<arr.length;i++){
-      const p=arr[i]; setStatus(`⏳ 補圖 ${i+1}/${arr.length}：${p.name}\n成功 ${ok}｜失敗 ${fail}`);
+      const p=arr[i];
+      setStatus(`⏳ Worker 批次補圖 ${i+1}/${arr.length}：${p.name}\n成功 ${ok}｜失敗 ${fail}`);
       try{
-        await callImporter({line_url:p.line_url,product_id:p.id,refresh_fields:false});
+        const j=await callImporter({line_url:p.line_url,refresh_fields:false});
+        if(!j.image_url)throw new Error('Worker 沒有回傳 image_url');
+        const {error:updateError}=await SB.from('line_gift_products').update({image_url:j.image_url}).eq('id',p.id);
+        if(updateError)throw new Error('R2 已成功，但商品 image_url 更新失敗：'+updateError.message);
         ok++;
       }catch(e){
-        fail++;
-        const msg=String(e?.message||e);
-        errors.push(`${p.external_id||p.id}｜${p.name}｜${msg}`);
-        console.warn('補圖失敗',p.name,e);
+        fail++;const msg=String(e?.message||e);
+        errors.push(`${p.external_id||p.id}｜${p.name}｜${msg}`);console.warn('補圖失敗',p.name,e);
       }
     }
     await load();
-    setStatus(`✅ 批次補圖完成：成功 ${ok}、失敗 ${fail}`+(errors.length?`\n\n失敗原因：\n${errors.join('\n')}`:''));
-  }finally{
-    $('fillMissingBtn').disabled=false;
-  }
+    setStatus(`✅ Worker → R2 批次補圖完成：成功 ${ok}、失敗 ${fail}`+(errors.length?`\n\n失敗原因：\n${errors.join('\n')}`:''));
+  }finally{$('fillMissingBtn').disabled=false}
 }
 
 async function loadOrders(){const box=$('orderRows');if(!box)return;box.innerHTML='<tr><td colspan="8" class="muted">讀取訂單中…</td></tr>';const {data,error}=await SB.from('line_gift_orders').select('id,user_id,product_name,product_price,points_used,cash_amount,status,created_at,paid_at,sent_at,note').order('created_at',{ascending:false}).limit(100);if(error){box.innerHTML=`<tr><td colspan="8" class="muted">讀取失敗：${esc(error.message)}</td></tr>`;return}const names={pending_payment:'待刷卡',pending_fulfillment:'待送禮',sent:'已送出',cancelled:'已取消'};box.innerHTML=(data||[]).length?(data||[]).map(o=>`<tr><td>${new Date(o.created_at).toLocaleString('zh-TW',{hour12:false})}</td><td class="muted">${esc(String(o.user_id).slice(0,8))}…</td><td><b>${esc(o.product_name)}</b></td><td>NT$ ${Number(o.product_price||0).toLocaleString('zh-TW')}</td><td>${Number(o.points_used||0).toLocaleString('zh-TW')} 點</td><td>NT$ ${Number(o.cash_amount||0).toLocaleString('zh-TW')}</td><td><span class="badge ${o.status==='sent'?'on':o.status==='cancelled'?'off':''}">${names[o.status]||esc(o.status)}</span></td><td>${o.status==='pending_fulfillment'?`<button class="rowbtn" data-sent="${o.id}">已送出</button> <button class="rowbtn danger" data-cancel="${o.id}">取消</button>`:o.status==='pending_payment'?`<button class="rowbtn danger" data-cancel="${o.id}">取消</button>`:'—'}</td></tr>`).join(''):'<tr><td colspan="8" class="muted">目前沒有禮物訂單。</td></tr>';document.querySelectorAll('[data-sent]').forEach(b=>b.onclick=()=>setOrderStatus(b.dataset.sent,'sent'));document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=()=>setOrderStatus(b.dataset.cancel,'cancelled'))}
