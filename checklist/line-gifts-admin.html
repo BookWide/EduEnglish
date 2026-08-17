@@ -81,7 +81,7 @@
       <div class="sep"></div>
       <button data-module="settings">⚙ 系統設定</button>
     </nav>
-    <div class="v49-side-note">V50：商品主檔、分類、圖片走 R2；Supabase 只保留登入、訂單、客戶、推薦點、付款、庫存流水與單據。</div>
+    <div class="v49-side-note">V50.1：商品主檔、分類、圖片只走 R2；進入後台會自動把既有 LINE 商品搬入 R2 並逐筆驗證。Supabase 商品表只作一次性搬家來源，不再作日常商品 CRUD。</div>
   </aside>
   <main class="v49-main">
   
@@ -222,7 +222,7 @@
     <div class="status" style="margin:12px 0 0;background:#f8fafc"><b>V45：</b>手動照片直接呼叫 m-hiking 正式 Worker：<b>https://bookwide-hiking-api.pmktools.workers.dev/api/upload</b>。送 <b>upload_type=gift</b> 後存到 <b>assets/gifts/商品ID.副檔名</b>。</div>
   </div></section>
   <section class="panel collapsible collapsed" id="categoryPanel"><div class="sectionHead" data-collapse="categoryPanel"><div><h2>BW 商品分類管理</h2><div class="muted">R2 分類主檔：新增／改名／排序／顯示隱藏／刪除。</div></div><button type="button" class="collapseBtn"></button></div><div class="collapseBody">
-<div class="tools"><div class="muted">分類主檔固定由 R2 管理。重建後只保留：學習加油站／達標好禮／職場充電／旅行學習／送禮花卉／精選福利。</div><div class="actions" style="margin:0"><button class="btn green" id="applyEducationCategories">重建 6 大分類</button><button class="btn gray" id="migrateProductsOnce">一次搬家：舊商品 → R2</button><button class="btn" id="seedFlower12">匯入花卉合作商品 12 組</button><button class="btn gray" id="reloadCategories">重新整理分類</button></div></div>
+<div class="tools"><div class="muted">分類主檔固定由 R2 管理。重建後只保留：學習加油站／達標好禮／職場充電／旅行學習／送禮花卉／精選福利。</div><div class="actions" style="margin:0"><button class="btn green" id="applyEducationCategories">重建 6 大分類</button><button class="btn gray" id="migrateProductsOnce">檢查 R2 商品主檔</button><button class="btn" id="seedFlower12">匯入花卉合作商品 12 組</button><button class="btn gray" id="reloadCategories">重新整理分類</button></div></div>
     <div class="formgrid">
       <div class="field w2"><label>分類名稱</label><input id="cat_name" placeholder="例如：旅遊體驗"></div>
       <div class="field"><label>排序</label><input id="cat_sort" type="number" value="100" step="1"></div>
@@ -629,10 +629,34 @@ async function productAdminPost(path,body){
   const r=await fetch(HIKING_API_BASE+path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},body:JSON.stringify(body||{}),cache:'no-store'});
   const j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));return j;
 }
+async function ensureV501ProductMaster(showAlert=false){
+  const b=$('migrateProductsOnce');
+  const old=b?.textContent||'檢查 R2 商品主檔';
+  if(b){b.disabled=true;b.textContent='檢查中…'}
+  setStatus('V50.1：檢查 R2 商品主檔與原 LINE 商品…');
+
+  try{
+    const j=await productAdminPost('/api/bw-products-migrate-once',{});
+    if(j.verified!==true)throw new Error('R2 商品驗證未通過');
+
+    const action=j.action==='migrated'?'已自動搬家':'已核對';
+    setStatus(`✅ V50.1 ${action}：R2 ${j.migrated||0} 筆商品，逐筆驗證 PASS。`);
+    if(showAlert)alert(`✅ ${action}完成\nR2 商品：${j.migrated||0} 筆\n逐筆驗證：PASS`);
+    return j;
+  }catch(e){
+    const msg=String(e?.message||e);
+    setStatus('❌ V50.1 商品主檔檢查失敗：'+msg);
+    if(showAlert)alert('商品主檔檢查失敗：'+msg);
+    throw e;
+  }finally{
+    if(b){b.disabled=false;b.textContent=old}
+  }
+}
 async function migrateProductsOnce(){
-  if(!confirm('只執行一次：把現有舊商品表搬到 R2 products.json。\n\nR2 已有商品時會拒絕覆寫。搬家後商品 CRUD 全走 R2。'))return;
-  const b=$('migrateProductsOnce');if(b){b.disabled=true;b.textContent='搬家中…'}
-  try{const j=await productAdminPost('/api/bw-products-migrate-once',{});alert(`完成：${j.migrated||0} 筆商品已搬到 R2。`);await load()}catch(e){alert('搬家失敗：'+(e?.message||String(e)))}finally{if(b){b.disabled=false;b.textContent='一次搬家：舊商品 → R2'}}
+  try{
+    await ensureV501ProductMaster(true);
+    await load();
+  }catch(_e){}
 }
 
 async function load(){
@@ -832,7 +856,7 @@ async function loadOrders(){
   document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=()=>setOrderStatus(b.dataset.cancel,'cancelled'));
 }
 async function setOrderStatus(id,status){if(status==='cancelled'&&!confirm('確定取消這筆禮物訂單？取消後推薦點會釋放回可用點數。'))return;const {error}=await SB.rpc('admin_set_line_gift_order_status',{p_order_id:id,p_status:status,p_note:null});if(error){alert(error.message);return}await loadOrders()}
-async function boot(){const {data:{session}}=await SB.auth.getSession();if(!session){$('gate').innerHTML='<h2>請先登入</h2><p class="muted">登入 BookWide 後再進入商品後台。</p><p><a class="btn" href="/index.html#login">前往登入</a></p>';return}const {data,error}=await SB.from('profiles').select('is_admin').eq('id',session.user.id).maybeSingle();if(error||data?.is_admin!==true){$('gate').innerHTML='<h2>沒有管理權限</h2><p class="muted">此頁只開放 BookWide Admin。</p>';return}$('gate').style.display='none';$('app').style.display='block';await load();await loadCategories();await loadOrders();await loadInventory();await loadV49Dashboard();renderSuppliers()}
+async function boot(){const {data:{session}}=await SB.auth.getSession();if(!session){$('gate').innerHTML='<h2>請先登入</h2><p class="muted">登入 BookWide 後再進入商品後台。</p><p><a class="btn" href="/index.html#login">前往登入</a></p>';return}const {data,error}=await SB.from('profiles').select('is_admin').eq('id',session.user.id).maybeSingle();if(error||data?.is_admin!==true){$('gate').innerHTML='<h2>沒有管理權限</h2><p class="muted">此頁只開放 BookWide Admin。</p>';return}$('gate').style.display='none';$('app').style.display='block';try{await ensureV501ProductMaster(false)}catch(_e){return}await load();await loadCategories();await loadOrders();await loadInventory();await loadV49Dashboard();renderSuppliers()}
 $('saveBtn').onclick=save;$('uploadImageBtn').onclick=uploadLocalGiftImage;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
 $('seedFlower12').onclick=seedFlowerPartner12;
 $('reloadCategories').onclick=loadCategories;$('catSaveBtn').onclick=saveCategory;$('catCancelBtn').onclick=resetCategoryEditor;initCollapsibles();initV49Layout();boot();
