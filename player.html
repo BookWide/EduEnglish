@@ -1084,6 +1084,18 @@ body.bw-hide-zh-sub #pane-sub .zh-line{
 .ai-easy-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}
 .ai-topic-select{min-width:210px;max-width:330px}
 .ai-progress{font-weight:800;color:#bfdbfe;white-space:nowrap}
+.bw-grammar-course{display:none;margin:0 0 10px;padding:12px;border:1px solid #3b82f6;border-radius:14px;background:#0f2747;color:#fff}
+.bw-grammar-course.show{display:block}
+.bw-grammar-head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}
+.bw-grammar-title{font-weight:900;font-size:16px;line-height:1.4}
+.bw-grammar-count{font-size:13px;color:#bfdbfe;white-space:nowrap}
+.bw-grammar-progress{height:7px;background:#243b5d;border-radius:99px;overflow:hidden;margin:9px 0}
+.bw-grammar-progress>span{display:block;height:100%;background:#22c55e;width:0}
+.bw-grammar-actions{display:flex;gap:8px;flex-wrap:wrap}
+.bw-grammar-actions .btn{padding:8px 12px;font-size:13px}
+.bw-grammar-recommend{display:none;margin-top:10px;padding-top:9px;border-top:1px solid #36577f;font-size:13px}
+.bw-grammar-recommend.show{display:block}
+.bw-grammar-recommend a{color:#93c5fd;font-weight:800;text-decoration:none}
 .ai-speak-main{background:#16a34a!important;border:2px solid #4ade80!important;color:#fff!important;font-weight:900!important;padding:9px 18px!important;box-shadow:0 0 0 2px rgba(74,222,128,.10)}
 .ai-speak-main.listening{background:#b91c1c!important;border-color:#f87171!important;animation:bwAiPulse 1s infinite}
 @keyframes bwAiPulse{50%{transform:scale(1.03);box-shadow:0 0 0 5px rgba(248,113,113,.12)}}
@@ -2266,6 +2278,22 @@ const SUPABASE_URL = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     <section class="page" id="pageRight">
       <section class="right">
         <div class="rightScroll" id="rightScroll">
+          <section id="bwGrammarCourse" class="bw-grammar-course" aria-label="英文文法課程進度">
+            <div class="bw-grammar-head">
+              <div>
+                <div id="bwGrammarTitle" class="bw-grammar-title">基礎英文文法</div>
+                <div id="bwGrammarLessonTitle" class="muted"></div>
+              </div>
+              <div id="bwGrammarCount" class="bw-grammar-count"></div>
+            </div>
+            <div class="bw-grammar-progress"><span id="bwGrammarProgressBar"></span></div>
+            <div class="bw-grammar-actions">
+              <button class="btn" id="bwGrammarPrev" type="button">← 上一課</button>
+              <button class="btn blue" id="bwGrammarComplete" type="button">✓ 完成本課</button>
+              <button class="btn" id="bwGrammarNext" type="button">下一課 →</button>
+            </div>
+            <div id="bwGrammarRecommend" class="bw-grammar-recommend"></div>
+          </section>
           <div class="tabs">
             <div class="tab active" data-tab="sub">字幕</div>
             <div class="tab" data-tab="quiz">測驗</div>
@@ -8275,6 +8303,7 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
 
     // 字幕完成後立即顯示；其他分頁資料改為背景載入。
     await cuesPromise;
+    await BW_loadGrammarCourse();
     showTab('sub');
 
     Promise.allSettled([
@@ -8713,6 +8742,129 @@ let exp = (p && p.expires_at) ? new Date(p.expires_at) : null;
     document.addEventListener('DOMContentLoaded', function(){ setTimeout(bwActivityInit, 1200); });
   }
 })();
+
+// 英文文法課：沿用 index-pro.json，把同一 course/source 的影片排成有順序的課程。
+// 沒有課程欄位或沒有推薦 mapping 時完全隱藏，不影響一般 story/music/movie/news/pro。
+function BW_grammarVal(item, snake, camel){
+  const meta = item?.meta || item?.metadata || {};
+  return item?.[snake] ?? item?.[camel] ?? meta?.[snake] ?? meta?.[camel] ?? '';
+}
+function BW_grammarLessonNo(item, fallback){
+  const direct = Number(BW_grammarVal(item, 'lesson_no', 'lessonNo') || item?.no || 0);
+  if(direct > 0) return direct;
+  const title = String(item?.title || '');
+  const m = title.match(/(?:^|[^0-9])(?:第\s*)?([1-9][0-9]?)\s*(?:課|集|[-–—])/);
+  return m ? Number(m[1]) : fallback;
+}
+function BW_flattenProCourseIndex(raw){
+  const out = [];
+  const add = (item, group={}) => {
+    if(!item || !item.slug) return;
+    out.push(Object.assign({}, item, {
+      __groupId: group.groupId || group.level || '',
+      __groupTitle: group.groupTitle || group.title || ''
+    }));
+  };
+  if(Array.isArray(raw)){
+    raw.forEach((entry) => {
+      if(Array.isArray(entry?.items)) entry.items.forEach(item => add(item, entry));
+      else add(entry, {});
+    });
+  }else if(Array.isArray(raw?.groups)){
+    raw.groups.forEach(group => (group.items || []).forEach(item => add(item, group)));
+  }else{
+    (raw?.items || raw?.lessons || []).forEach(item => add(item, {}));
+  }
+  return out;
+}
+function BW_isJulieGrammarItem(item){
+  const courseId = String(BW_grammarVal(item, 'course_id', 'courseId')).toLowerCase();
+  const track = String(BW_grammarVal(item, 'track', 'track')).toLowerCase();
+  const source = String(BW_grammarVal(item, 'source_key', 'sourceKey') || BW_grammarVal(item, 'source_name', 'sourceName')).toLowerCase();
+  return courseId === 'julie-basic-grammar' || source.includes('julieenglish123') || (track === 'grammar' && courseId.includes('grammar'));
+}
+function BW_grammarGo(target){
+  if(!target?.slug) return;
+  const baseParam = paramBase ? `&base=${encodeURIComponent(paramBase)}` : '';
+  const domain = target.domain_code || target.domain || getLessonDomain() || '';
+  const domainPart = domain ? `&domain=${encodeURIComponent(domain)}` : '';
+  location.href = `player.html?cat=pro&slug=${encodeURIComponent(target.slug)}${domainPart}${baseParam}`;
+}
+function BW_grammarCompletedKey(courseId){ return `BW_GRAMMAR_DONE:${courseId || 'julie-basic-grammar'}`; }
+function BW_getGrammarCompleted(courseId){
+  try{ return JSON.parse(localStorage.getItem(BW_grammarCompletedKey(courseId)) || '[]'); }catch(_e){ return []; }
+}
+function BW_setGrammarCompleted(courseId, lessonSlug){
+  const done = new Set(BW_getGrammarCompleted(courseId));
+  done.add(lessonSlug);
+  try{ localStorage.setItem(BW_grammarCompletedKey(courseId), JSON.stringify([...done])); }catch(_e){}
+  return [...done];
+}
+async function BW_loadGrammarRecommendation(currentSlug){
+  const box = document.getElementById('bwGrammarRecommend');
+  if(!box) return;
+  box.classList.remove('show'); box.innerHTML = '';
+  try{
+    const r = await fetch(`${BASE}/data/pro/grammar-recommendations.json?v=${vnow}`, {cache:'no-store'});
+    if(!r.ok) return;
+    const raw = await r.json();
+    const rows = raw?.[currentSlug] || raw?.items?.[currentSlug] || [];
+    const list = Array.isArray(rows) ? rows : (rows?.recommended || []);
+    if(!list.length) return;
+    const links = list.slice(0,3).filter(x => x?.slug).map(x => {
+      const catVal = x.category || x.cat || 'story';
+      const label = x.title || x.label || x.slug;
+      return `<a href="player.html?cat=${encodeURIComponent(catVal)}&slug=${encodeURIComponent(x.slug)}">${esc(label)}</a>`;
+    });
+    if(!links.length) return;
+    box.innerHTML = `<strong>用現有 Story 練習本課：</strong> ${links.join('・')}`;
+    box.classList.add('show');
+  }catch(_e){}
+}
+async function BW_loadGrammarCourse(){
+  const panel = document.getElementById('bwGrammarCourse');
+  if(!panel || cat !== 'pro') return;
+  try{
+    const r = await fetch(`${BASE}/data/pro/index-pro.json?v=${vnow}`, {cache:'no-store'});
+    if(!r.ok) return;
+    const all = BW_flattenProCourseIndex(await r.json());
+    const current = all.find(x => x.slug === slug);
+    if(!current || !BW_isJulieGrammarItem(current)) return;
+    const currentCourseId = String(BW_grammarVal(current, 'course_id', 'courseId') || 'julie-basic-grammar');
+    let lessons = all.filter(item => {
+      const id = String(BW_grammarVal(item, 'course_id', 'courseId') || '');
+      return id ? id === currentCourseId : BW_isJulieGrammarItem(item);
+    });
+    lessons = lessons.map((item, i) => Object.assign({}, item, {__lessonNo: BW_grammarLessonNo(item, i+1)}))
+      .sort((a,b) => a.__lessonNo - b.__lessonNo);
+    const idx = lessons.findIndex(x => x.slug === slug);
+    if(idx < 0 || lessons.length < 2) return;
+    const title = String(BW_grammarVal(current, 'course_title', 'courseTitle') || '基礎英文文法');
+    const level = String(BW_grammarVal(current, 'course_level', 'courseLevel') || 'L1');
+    const done = new Set(BW_getGrammarCompleted(currentCourseId));
+    document.getElementById('bwGrammarTitle').textContent = `${title}｜${level}`;
+    document.getElementById('bwGrammarLessonTitle').textContent = current.title || `第 ${idx+1} 課`;
+    document.getElementById('bwGrammarCount').textContent = `第 ${idx+1}／${lessons.length} 課・已完成 ${done.size}`;
+    document.getElementById('bwGrammarProgressBar').style.width = `${Math.min(100, Math.round(done.size / lessons.length * 100))}%`;
+    const prev = document.getElementById('bwGrammarPrev');
+    const next = document.getElementById('bwGrammarNext');
+    const complete = document.getElementById('bwGrammarComplete');
+    prev.disabled = idx === 0; next.disabled = idx === lessons.length - 1;
+    prev.onclick = () => BW_grammarGo(lessons[idx-1]);
+    next.onclick = () => BW_grammarGo(lessons[idx+1]);
+    const syncComplete = () => {
+      const completed = new Set(BW_getGrammarCompleted(currentCourseId));
+      const isDone = completed.has(slug);
+      complete.textContent = isDone ? '✓ 本課已完成' : '✓ 完成本課';
+      document.getElementById('bwGrammarCount').textContent = `第 ${idx+1}／${lessons.length} 課・已完成 ${completed.size}`;
+      document.getElementById('bwGrammarProgressBar').style.width = `${Math.min(100, Math.round(completed.size / lessons.length * 100))}%`;
+    };
+    complete.onclick = () => { BW_setGrammarCompleted(currentCourseId, slug); syncComplete(); };
+    syncComplete();
+    panel.classList.add('show');
+    BW_loadGrammarRecommendation(slug);
+  }catch(e){ console.warn('[BW grammar course] load failed', e); }
+}
 
 // PRO 模式：讀取 index-pro.json，並在「字幕」分頁顯示完整課程章節清單
 
