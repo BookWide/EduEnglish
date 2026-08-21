@@ -2103,14 +2103,29 @@ async function hikingApi(path,options={}){const headers=new Headers(options.head
       if(parsed && typeof parsed==='object' && !Array.isArray(parsed)){
         parsed.group_id=BOOKWIDE_GROUP_ID;
         nextOptions.body=JSON.stringify(parsed);}}catch(e){}}
-  const res=await fetch(HIKING_API_BASE+requestPath,{
-    ...nextOptions,
-    headers,
-    cache:'no-store'});
-  let data=null;
-  try{ data=await res.json(); }catch(e){}
-  if(!res.ok) throw new Error((data&&data.error)||('HTTP '+res.status));
-  return data;
+  const method=String(nextOptions.method||'GET').toUpperCase();
+  const retryDelays=method==='GET'?[0,350,900]:[0];
+  let lastError=null;
+  for(let attempt=0;attempt<retryDelays.length;attempt++){
+    if(retryDelays[attempt])await new Promise(r=>setTimeout(r,retryDelays[attempt]));
+    try{
+      const res=await fetch(HIKING_API_BASE+requestPath,{
+        ...nextOptions,
+        headers,
+        cache:'no-store'});
+      let data=null;
+      try{data=await res.json();}catch(e){}
+      if(res.ok)return data;
+      const message=(data&&data.error)||('HTTP '+res.status);
+      const retryable=method==='GET'&&(res.status>=500||/10001|internal error|R2_(GET|LIST)_FAILED|BOOTSTRAP_READ_FAILED/i.test(String(message)));
+      if(!retryable||attempt===retryDelays.length-1)throw new Error(message);
+      lastError=new Error(message);
+    }catch(error){
+      lastError=error;
+      if(method!=='GET'||attempt===retryDelays.length-1)throw error;
+    }
+  }
+  throw lastError||new Error('Worker 讀取失敗');
 }
 async function loadWorkerData(){const data=await hikingApi('/api/bootstrap',{admin:false});
   state.routes=Array.isArray(data.routes)?data.routes:[];
