@@ -261,7 +261,15 @@
     <div id="settingsStatus" class="muted"></div>
   </div>
 </section>
-<div id="status" class="status" style="display:none">準備中…</div><section class="panel collapsible collapsed" id="productEditorPanel"><div class="sectionHead" data-collapse="productEditorPanel"><div><h2>商品編輯</h2><div class="muted">按商品清單的「編輯商品」會自動展開並帶入該筆資料。</div></div><button type="button" class="collapseBtn"></button></div><div class="collapseBody">
+<div id="status" class="status" style="display:none">準備中…</div><section class="panel" id="taobaoFlowerImportPanel">
+  <div class="sectionHead"><div><h2>淘寶商品匯入（第一階段：花卉測試）</h2><div class="muted">貼淘寶／天貓商品網址 → 抓回商品草稿 → 自動帶入目前 Product Core。第一階段先用「送禮花卉」驗證，不會自動儲存、不會自動上架。</div></div></div>
+  <div class="formgrid">
+    <div class="field w4"><label>淘寶／天貓商品網址</label><input id="taobaoFlowerUrl" placeholder="貼上 https://item.taobao.com/... 或 https://detail.tmall.com/..."></div>
+  </div>
+  <div class="actions"><button type="button" class="btn" id="taobaoFlowerImportBtn">抓淘寶商品到草稿</button></div>
+  <div class="muted" style="margin-top:8px">匯入後會自動帶入：來源、來源商品 ID、店家、簡中原名、繁中草稿、價格／成本、主圖、圖庫、規格／Variation。第一階段分類先落「送禮花卉」，狀態固定下架草稿；圖片文字需人工確認。</div>
+</section>
+<section class="panel collapsible collapsed" id="productEditorPanel"><div class="sectionHead" data-collapse="productEditorPanel"><div><h2>商品編輯</h2><div class="muted">按商品清單的「編輯商品」會自動展開並帶入該筆資料。</div></div><button type="button" class="collapseBtn"></button></div><div class="collapseBody">
     <div class="wc548-head">
       <span class="title">商品資料 —</span>
       <select id="product_type">
@@ -1121,6 +1129,72 @@ async function uploadVariationImageV542(i){
   }
 }
 async function uploadGalleryV54(){const files=[...($('gallery_files')?.files||[])];if(!files.length)return alert('請先選擇多張商品圖片');const cp=editingId?products.find(x=>String(x.id)===String(editingId)):null;let productId=String($('external_id').value||cp?.external_id||cp?.id||editingId||'').trim();if(!productId){productId='bw-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);$('external_id').value=productId;}const {data:{session}}=await SB.auth.getSession();if(!session?.access_token)throw new Error('登入已失效');const urls=linesV54('gallery_urls');try{for(let i=0;i<files.length;i++){const fd=new FormData();fd.append('upload_type','gift');fd.append('product_id',productId);fd.append('slot','gallery-'+String(i+1).padStart(3,'0'));fd.append('file',files[i],files[i].name);setStatus(`⏳ 上傳商品圖庫 ${i+1}/${files.length}…`);const r=await fetch(HIKING_API_BASE+'/api/upload',{method:'POST',headers:{Authorization:'Bearer '+session.access_token},body:fd,cache:'no-store'}),j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false||!j.image_url)throw new Error(j.message||j.error||('HTTP '+r.status));if(!urls.includes(j.image_url))urls.push(j.image_url)}$('gallery_urls').value=urls.join('\n');galleryPreviewV54();if(editingId){const p=products.find(x=>String(x.id)===String(editingId));if(p)await productAdminPost('/api/bw-product-save',{id:p.id,product:{...p,gallery_urls:urls}});await load()}setStatus(`✅ 商品圖庫已上傳 ${files.length} 張`)}finally{if($('gallery_files'))$('gallery_files').value=''}}
+async function callTaobaoFlowerImporter(taobaoUrl){
+  const {data:{session},error:sessionError}=await SB.auth.getSession();
+  if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
+  if(!session?.access_token)throw new Error('登入狀態失效，請重新登入');
+  const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),35000);
+  try{
+    const r=await fetch(HIKING_API_BASE+'/api/taobao-flower-import',{
+      method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
+      body:JSON.stringify({url:String(taobaoUrl||'').trim()}),signal:ctl.signal,cache:'no-store'
+    });
+    const text=await r.text().catch(()=>''),j=(()=>{try{return text?JSON.parse(text):{}}catch(_){return {error:text||('HTTP '+r.status)}}})();
+    if(!r.ok||j.ok===false)throw new Error([j.error,j.message,j.stage?('stage='+j.stage):'',('HTTP '+r.status)].filter(Boolean).join('｜'));
+    return j;
+  }catch(e){if(e?.name==='AbortError')throw new Error('TAOBAO_IMPORT_TIMEOUT｜35 秒未收到 Worker 回應');throw e}
+  finally{clearTimeout(timer)}
+}
+function attrsToTextV1(attrs){return (Array.isArray(attrs)?attrs:[]).map(a=>`${a.name||''}|${(a.values||[]).join(',')}`).filter(x=>x[0]!=='|').join('\n')}
+async function importTaobaoFlowerDraft(){
+  const url=String($('taobaoFlowerUrl')?.value||'').trim();
+  if(!url)return alert('先貼淘寶／天貓商品網址');
+  const btn=$('taobaoFlowerImportBtn');if(btn)btn.disabled=true;
+  setStatus('⏳ 正在讀取淘寶／天貓商品；只建立 BookWide 草稿，不會自動上架…');
+  try{
+    const j=await callTaobaoFlowerImporter(url);
+    editingId=null;
+    if(typeof bwSetImportMeta==='function')bwSetImportMeta(j);
+    $('source_type').value='taobao';
+    $('external_id').value=j.external_id||j.item_id||'';
+    $('product_type').value=j.product_type||((j.variations||[]).length?'variable':'simple');
+    $('brand').value=j.brand||'';
+    $('name').value=j.name||j.title_zh_tw||j.source_title||'';
+    if($('name_zh_tw'))$('name_zh_tw').value=j.name||j.title_zh_tw||'';
+    if($('name_zh_cn'))$('name_zh_cn').value=j.source_title||j.title_zh_cn||'';
+    if($('name_en'))$('name_en').value=j.title_en||'';
+    $('price').value=Number(j.price||0);
+    refreshCategorySelect('送禮花卉');
+    $('sale_mode').value='redeem_or_buy';
+    $('fulfillment_type').value='ship';
+    $('supplier').value=j.supplier||j.seller||j.brand||'淘寶／天貓供應商';
+    $('cost_price').value=Number(j.cost_price||j.source_price||0);
+    $('stock_tracking_enabled').value='false';$('stock_qty').value='0';$('low_stock_qty').value='3';
+    setFestivals(Array.isArray(j.festival_keys)?j.festival_keys:[]);
+    $('sort_order').value='500';$('is_active').value='false';
+    $('line_url').value=j.source_url||url;if($('line_url_shadow'))$('line_url_shadow').value=j.source_url||url;
+    if($('source_platform'))$('source_platform').value='taobao';
+    if($('source_item_id'))$('source_item_id').value=j.external_id||j.item_id||'';
+    if($('source_url'))$('source_url').value=j.source_url||url;
+    if($('source_seller'))$('source_seller').value=j.supplier||j.seller||j.brand||'';
+    if($('source_currency'))$('source_currency').value=j.source_currency||'CNY';
+    if($('channel_line_gift'))$('channel_line_gift').checked=true;
+    $('image_url').value=j.image_url||'';renderMainImageV547();
+    $('gallery_urls').value=(j.gallery_urls||[]).join('\n');galleryPreviewV54();
+    $('detail_description').value=j.detail_description||'';
+    if($('description_zh_tw'))$('description_zh_tw').value=j.description_zh_tw||j.detail_description||'';
+    if($('description_zh_cn'))$('description_zh_cn').value=j.description_zh_cn||'';
+    if($('description_en'))$('description_en').value=j.description_en||'';
+    $('attributes_text').value=attrsToTextV1(j.attributes||[]);
+    v54Variations=Array.isArray(j.variations)?j.variations.map(v=>({...v,attributes:{...(v.attributes||{})}})):[];
+    syncProductTypeV544();
+    $('saveBtn').textContent='儲存淘寶商品草稿';
+    const panel=$('productEditorPanel');if(panel){panel.classList.remove('collapsed');setTimeout(()=>panel.scrollIntoView({behavior:'smooth',block:'start'}),40)}
+    setStatus(`✅ 淘寶商品已帶入「商品編輯」（尚未儲存／尚未上架）。\n原始：${j.source_title||''}\n繁中草稿：${j.name||''}\n規格：${(j.variations||[]).length} 個 Variation｜圖庫：${(j.gallery_urls||[]).length} 張`);
+  }catch(e){setStatus('❌ 淘寶匯入失敗：'+String(e?.message||e))}
+  finally{if(btn)btn.disabled=false}
+}
+
 async function callImporter(payload){
   const {data:{session},error:sessionError}=await SB.auth.getSession();
   if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
@@ -1238,7 +1312,7 @@ async function loadOrders(){
 async function setOrderStatus(id,status){if(status==='cancelled'&&!confirm('確定取消這筆訂單？取消後推薦點會釋放回可用點數。'))return;try{await productAdminPost('/api/bw-order-status',{order_id:String(id),status,note:null});await loadOrders()}catch(e){alert('訂單更新失敗：'+String(e?.message||e))}}
 async function boot(){const {data:{session}}=await SB.auth.getSession();if(!session){$('gate').innerHTML='<h2>請先登入</h2><p class="muted">登入 BookWide 後再進入商品後台。</p><p><a class="btn" href="/index.html#login">前往登入</a></p>';return}const {data,error}=await SB.from('profiles').select('is_admin').eq('id',session.user.id).maybeSingle();if(error||data?.is_admin!==true){$('gate').innerHTML='<h2>沒有管理權限</h2><p class="muted">此頁只開放 BookWide Admin。</p>';return}$('gate').style.display='none';$('app').style.display='block';await load();await loadCategories();await loadOrders();await loadInventory();await loadV49Dashboard();renderSuppliers()}
 document.querySelectorAll('.wc548-tab').forEach(b=>b.onclick=()=>wc548OpenTab(b.dataset.wctab));
-$('saveBtn').onclick=save;$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
+if($('taobaoFlowerImportBtn'))$('taobaoFlowerImportBtn').onclick=importTaobaoFlowerDraft;$('saveBtn').onclick=save;$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
 $('seedFlower12').onclick=seedFlowerPartner12;
 $('reloadCategories').onclick=loadCategories;$('catSaveBtn').onclick=saveCategory;$('catCancelBtn').onclick=resetCategoryEditor;initCollapsibles();initV49Layout();boot();
 </script>
