@@ -267,6 +267,7 @@
     <div class="field w4"><label>淘寶／天貓商品網址</label><input id="taobaoFlowerUrl" placeholder="貼上 https://item.taobao.com/... 或 https://detail.tmall.com/..."></div>
   </div>
   <div class="actions"><button type="button" class="btn" id="taobaoFlowerImportBtn">抓淘寶商品到草稿</button></div>
+  <div id="taobaoImportResult" style="margin-top:12px;padding:12px 14px;border:1px solid #dbe3ee;border-radius:12px;background:#f8fafc;white-space:pre-wrap;display:none"></div>
   <div class="muted" style="margin-top:8px">匯入後會自動帶入：來源、來源商品 ID、店家、簡中原名、繁中草稿、價格／成本、主圖、圖庫、規格／Variation。第一階段分類先落「送禮花卉」，狀態固定下架草稿；圖片文字需人工確認。</div>
 </section>
 <section class="panel collapsible collapsed" id="productEditorPanel"><div class="sectionHead" data-collapse="productEditorPanel"><div><h2>商品編輯</h2><div class="muted">按商品清單的「編輯商品」會自動展開並帶入該筆資料。</div></div><button type="button" class="collapseBtn"></button></div><div class="collapseBody">
@@ -1129,6 +1130,17 @@ async function uploadVariationImageV542(i){
   }
 }
 async function uploadGalleryV54(){const files=[...($('gallery_files')?.files||[])];if(!files.length)return alert('請先選擇多張商品圖片');const cp=editingId?products.find(x=>String(x.id)===String(editingId)):null;let productId=String($('external_id').value||cp?.external_id||cp?.id||editingId||'').trim();if(!productId){productId='bw-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);$('external_id').value=productId;}const {data:{session}}=await SB.auth.getSession();if(!session?.access_token)throw new Error('登入已失效');const urls=linesV54('gallery_urls');try{for(let i=0;i<files.length;i++){const fd=new FormData();fd.append('upload_type','gift');fd.append('product_id',productId);fd.append('slot','gallery-'+String(i+1).padStart(3,'0'));fd.append('file',files[i],files[i].name);setStatus(`⏳ 上傳商品圖庫 ${i+1}/${files.length}…`);const r=await fetch(HIKING_API_BASE+'/api/upload',{method:'POST',headers:{Authorization:'Bearer '+session.access_token},body:fd,cache:'no-store'}),j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false||!j.image_url)throw new Error(j.message||j.error||('HTTP '+r.status));if(!urls.includes(j.image_url))urls.push(j.image_url)}$('gallery_urls').value=urls.join('\n');galleryPreviewV54();if(editingId){const p=products.find(x=>String(x.id)===String(editingId));if(p)await productAdminPost('/api/bw-product-save',{id:p.id,product:{...p,gallery_urls:urls}});await load()}setStatus(`✅ 商品圖庫已上傳 ${files.length} 張`)}finally{if($('gallery_files'))$('gallery_files').value=''}}
+function setTaobaoImportResult(msg,type='info'){
+  const box=$('taobaoImportResult');if(!box)return;
+  box.style.display='block';
+  box.style.borderColor=type==='ok'?'#86efac':type==='error'?'#fca5a5':'#bfdbfe';
+  box.style.background=type==='ok'?'#f0fdf4':type==='error'?'#fef2f2':'#eff6ff';
+  box.style.color=type==='ok'?'#166534':type==='error'?'#991b1b':'#1e3a8a';
+  box.textContent=String(msg||'');
+}
+function canonicalTaobaoUrlV57(raw){
+  try{const u=new URL(String(raw||'').trim()),id=u.searchParams.get('id');if(!id)return u.href;const h=u.hostname.toLowerCase();if(h.includes('tmall.com'))return `https://detail.tmall.com/item.htm?id=${encodeURIComponent(id)}`;if(h.includes('taobao.com'))return `https://item.taobao.com/item.htm?id=${encodeURIComponent(id)}`;return u.href}catch(_){return String(raw||'').trim()}
+}
 async function callTaobaoFlowerImporter(taobaoUrl){
   const {data:{session},error:sessionError}=await SB.auth.getSession();
   if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
@@ -1147,9 +1159,13 @@ async function callTaobaoFlowerImporter(taobaoUrl){
 }
 function attrsToTextV1(attrs){return (Array.isArray(attrs)?attrs:[]).map(a=>`${a.name||''}|${(a.values||[]).join(',')}`).filter(x=>x[0]!=='|').join('\n')}
 async function importTaobaoFlowerDraft(){
-  const url=String($('taobaoFlowerUrl')?.value||'').trim();
+  const rawUrl=String($('taobaoFlowerUrl')?.value||'').trim();
+  const url=canonicalTaobaoUrlV57(rawUrl);
   if(!url)return alert('先貼淘寶／天貓商品網址');
-  const btn=$('taobaoFlowerImportBtn');if(btn)btn.disabled=true;
+  if($('taobaoFlowerUrl'))$('taobaoFlowerUrl').value=url;
+  const itemId=(()=>{try{return new URL(url).searchParams.get('id')||''}catch(_){return''}})();
+  const btn=$('taobaoFlowerImportBtn');if(btn){btn.disabled=true;btn.textContent='抓取中…'}
+  setTaobaoImportResult(`⏳ 抓取中…${itemId?'\n商品 ID：'+itemId:''}\n正在呼叫 BookWide Worker，請稍候。`,'info');
   setStatus('⏳ 正在讀取淘寶／天貓商品；只建立 BookWide 草稿，不會自動上架…');
   try{
     const j=await callTaobaoFlowerImporter(url);
@@ -1164,17 +1180,17 @@ async function importTaobaoFlowerDraft(){
     if($('name_zh_cn'))$('name_zh_cn').value=j.source_title||j.title_zh_cn||'';
     if($('name_en'))$('name_en').value=j.title_en||'';
     $('price').value=Number(j.price||0);
-    refreshCategorySelect('送禮花卉');
-    $('sale_mode').value='redeem_or_buy';
-    $('fulfillment_type').value='ship';
+    refreshCategorySelect(j.category||'送禮花卉');
+    $('sale_mode').value=j.sale_mode||'redeem_or_buy';
+    $('fulfillment_type').value=j.fulfillment_type||'ship';
     $('supplier').value=j.supplier||j.seller||j.brand||'淘寶／天貓供應商';
     $('cost_price').value=Number(j.cost_price||j.source_price||0);
-    $('stock_tracking_enabled').value='false';$('stock_qty').value='0';$('low_stock_qty').value='3';
+    $('stock_tracking_enabled').value=String(j.stock_tracking_enabled===true);$('stock_qty').value=Number(j.stock_qty||0);$('low_stock_qty').value=Number(j.low_stock_qty??3);
     setFestivals(Array.isArray(j.festival_keys)?j.festival_keys:[]);
-    $('sort_order').value='500';$('is_active').value='false';
+    $('sort_order').value=Number(j.sort_order??500);$('is_active').value='false';
     $('line_url').value=j.source_url||url;if($('line_url_shadow'))$('line_url_shadow').value=j.source_url||url;
     if($('source_platform'))$('source_platform').value='taobao';
-    if($('source_item_id'))$('source_item_id').value=j.external_id||j.item_id||'';
+    if($('source_item_id'))$('source_item_id').value=j.item_id||String(j.external_id||'').replace(/^taobao-/,'');
     if($('source_url'))$('source_url').value=j.source_url||url;
     if($('source_seller'))$('source_seller').value=j.supplier||j.seller||j.brand||'';
     if($('source_currency'))$('source_currency').value=j.source_currency||'CNY';
@@ -1189,37 +1205,21 @@ async function importTaobaoFlowerDraft(){
     v54Variations=Array.isArray(j.variations)?j.variations.map(v=>({...v,attributes:{...(v.attributes||{})}})):[];
     syncProductTypeV544();
     $('saveBtn').textContent='儲存淘寶商品草稿';
-    const panel=$('productEditorPanel');if(panel){panel.classList.remove('collapsed');setTimeout(()=>panel.scrollIntoView({behavior:'smooth',block:'start'}),40)}
-    setStatus(`✅ 淘寶商品已帶入「商品編輯」（尚未儲存／尚未上架）。\n原始：${j.source_title||''}\n繁中草稿：${j.name||''}\n規格：${(j.variations||[]).length} 個 Variation｜圖庫：${(j.gallery_urls||[]).length} 張`);
-  }catch(e){setStatus('❌ 淘寶匯入失敗：'+String(e?.message||e))}
-  finally{if(btn)btn.disabled=false}
-}
-
-async function callImporter(payload){
-  const {data:{session},error:sessionError}=await SB.auth.getSession();
-  if(sessionError)throw new Error('登入狀態讀取失敗：'+sessionError.message);
-  if(!session?.access_token)throw new Error('登入狀態失效，請重新登入');
-
-  const ctl=new AbortController();
-  const timer=setTimeout(()=>ctl.abort(),30000);
-  let r;
-  try{
-    r=await fetch(HIKING_API_BASE+'/api/line-gift-import',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
-      body:JSON.stringify({line_url:String(payload?.line_url||'').trim(),refresh_fields:payload?.refresh_fields!==false}),
-      signal:ctl.signal,cache:'no-store'
-    });
+    const panel=$('productEditorPanel');if(panel){panel.classList.remove('collapsed');setTimeout(()=>panel.scrollIntoView({behavior:'smooth',block:'start'}),80)}
+    const okMsg=`✅ 抓取成功${itemId?'｜商品 ID '+itemId:''}
+商品：${j.name||j.source_title||''}
+規格：${(j.variations||[]).length} 個 Variation
+圖片：${(j.image_url?1:0)+(j.gallery_urls||[]).length} 張
+狀態：已帶入下方「商品編輯」，尚未儲存、尚未上架。`;
+    setTaobaoImportResult(okMsg,'ok');setStatus(okMsg);
   }catch(e){
-    if(e?.name==='AbortError')throw new Error('IMPORT_TIMEOUT｜30 秒未收到 BookWide Worker 回應');
-    throw new Error('IMPORT_NETWORK_ERROR｜'+String(e?.message||e));
-  }finally{clearTimeout(timer)}
+    const msg=String(e?.message||e);
+    const errMsg=`❌ 淘寶／天貓抓取失敗${itemId?'｜商品 ID '+itemId:''}
+${msg}
 
-  const text=await r.text().catch(()=> '');
-  let j={};
-  try{j=text?JSON.parse(text):{}}catch(_){j={error:text||('HTTP '+r.status)}}
-  if(!r.ok||j.ok===false)throw new Error([j.error,j.message,j.stage?('stage='+j.stage):'',('HTTP '+r.status)].filter(Boolean).join('｜'));
-  return j;
+如果顯示登入／驗證、403、422 或抓不到標題，代表淘寶阻擋 Cloudflare Worker；不是草稿藏起來。`;
+    setTaobaoImportResult(errMsg,'error');setStatus(errMsg);
+  }finally{if(btn){btn.disabled=false;btn.textContent='抓淘寶商品到草稿'}}
 }
 
 async function importLineProduct(){
