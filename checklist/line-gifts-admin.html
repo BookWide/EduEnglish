@@ -43,6 +43,10 @@
 .v545-ai-actions button:disabled{opacity:.45;cursor:not-allowed}
 .v545-ai-actions .restore{grid-column:1/-1;color:#646970}
 .v545-ai-status{width:120px;font-size:11px;color:#646970;line-height:1.35;margin-top:6px;word-break:break-word}
+
+.aiPasteThumb{position:relative;width:82px;height:82px;border:1px solid #cbd5e1;border-radius:8px;overflow:hidden;background:#fff}
+.aiPasteThumb img{width:100%;height:100%;object-fit:cover;display:block}
+.aiPasteThumb button{position:absolute;right:3px;top:3px;width:22px;height:22px;border:0;border-radius:50%;background:#b91c1c;color:#fff;cursor:pointer;font-weight:900;padding:0}
 @media(max-width:760px){
   .v545-summary{grid-template-columns:28px 58px 1fr}
   .v545-actions{grid-column:3;justify-self:end}
@@ -390,7 +394,19 @@
             <div class="field"><label>來源幣別</label><input id="source_currency" value="TWD"></div>
             <div class="field"><label>來源商家</label><input id="source_seller"></div>
           </div>
-          <div class="field" style="margin-top:12px"><label>商品詳情／介紹（前台直接顯示，可自由修改）</label><textarea id="detail_description" rows="16"></textarea></div>
+          <div class="field" style="margin-top:12px">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+              <label style="margin:0">商品詳情／介紹（前台直接顯示，可自由修改）</label>
+              <button type="button" class="btn gray" id="aiProductIntroBtn">✨ AI 圖生產品介紹</button>
+              <span class="muted" id="aiProductIntroStatus" style="font-size:12px">可直接貼文字；游標放在下方後 Ctrl+V 也可貼入圖片供 AI 參考。</span>
+            </div>
+            <textarea id="detail_description" rows="16" placeholder="可直接輸入／貼上商品文字；也可 Ctrl+V 貼入商品圖片，AI 會一起參考。"></textarea>
+            <div id="aiProductPastePreview" style="display:none;margin-top:8px;padding:8px;border:1px dashed #cbd5e1;border-radius:8px;background:#f8fafc">
+              <div style="font-size:12px;font-weight:800;margin-bottom:6px">AI 參考圖片（由剪貼簿貼入，不會直接儲存到商品）</div>
+              <div id="aiProductPasteThumbs" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+              <button type="button" class="btn gray" id="aiProductPasteClearBtn" style="margin-top:7px">清除貼入圖片</button>
+            </div>
+          </div>
         </div>
 
         <div class="wc548-pane" data-wcpane="addons">
@@ -1343,8 +1359,98 @@ function taobaoPublishValidationV200(p){
   return '';
 }
 
+
+let aiProductClipboardImagesV5=[];
+
+function renderAiProductPastePreviewV5(){
+  const box=$('aiProductPastePreview'),thumbs=$('aiProductPasteThumbs');
+  if(!box||!thumbs)return;
+  box.style.display=aiProductClipboardImagesV5.length?'block':'none';
+  thumbs.innerHTML=aiProductClipboardImagesV5.map((src,i)=>`<div class="aiPasteThumb"><img src="${src}"><button type="button" data-ai-paste-remove="${i}">×</button></div>`).join('');
+  thumbs.querySelectorAll('[data-ai-paste-remove]').forEach(b=>b.onclick=()=>{
+    aiProductClipboardImagesV5.splice(Number(b.dataset.aiPasteRemove),1);
+    renderAiProductPastePreviewV5();
+  });
+}
+function readClipboardImageV5(file){
+  return new Promise((resolve,reject)=>{
+    if(!file||!/^image\//i.test(file.type||''))return reject(new Error('不是圖片'));
+    if(file.size>4*1024*1024)return reject(new Error('貼入圖片不可超過 4MB'));
+    const fr=new FileReader();
+    fr.onload=()=>resolve(String(fr.result||''));
+    fr.onerror=()=>reject(new Error('圖片讀取失敗'));
+    fr.readAsDataURL(file);
+  });
+}
+async function handleDetailPasteV5(ev){
+  const items=[...(ev.clipboardData?.items||[])];
+  const imageItems=items.filter(x=>String(x.type||'').startsWith('image/'));
+  if(!imageItems.length)return; // 純文字照 textarea 原本行為貼上
+  ev.preventDefault();
+  try{
+    for(const item of imageItems.slice(0,2)){
+      if(aiProductClipboardImagesV5.length>=2)break;
+      const file=item.getAsFile(); if(!file)continue;
+      const data=await readClipboardImageV5(file);
+      aiProductClipboardImagesV5.push(data);
+    }
+    renderAiProductPastePreviewV5();
+    const st=$('aiProductIntroStatus');
+    if(st)st.textContent=`✅ 已貼入 ${aiProductClipboardImagesV5.length} 張參考圖片；按「AI 圖生產品介紹」。`;
+  }catch(e){alert(String(e?.message||e))}
+}
+function aiProductImageUrlsV5(){
+  const urls=[],push=u=>{u=String(u||'').trim();if(/^https?:\/\//i.test(u)&&!urls.includes(u))urls.push(u)};
+  push($('image_url')?.value);
+  linesV54('gallery_urls').slice(0,3).forEach(push);
+  // Variation 圖可補作產品規格參考，但最多再取 2 張
+  (v54Variations||[]).map(v=>v?.image_url).filter(Boolean).slice(0,2).forEach(push);
+  return urls.slice(0,5);
+}
+async function generateProductIntroV5(){
+  const btn=$('aiProductIntroBtn'),st=$('aiProductIntroStatus');
+  const text=String($('detail_description')?.value||'').trim();
+  const urls=aiProductImageUrlsV5();
+  if(!urls.length&&!aiProductClipboardImagesV5.length&&!text){
+    return alert('請先有商品圖片，或在商品介紹欄貼入文字／圖片。');
+  }
+  const {data:{session}}=await SB.auth.getSession();
+  if(!session?.access_token)return alert('登入狀態失效，請重新登入');
+  if(btn){btn.disabled=true;btn.textContent='✨ AI 產生中…'}
+  if(st)st.textContent='AI 正在讀取商品圖片與你貼入的資料…';
+  try{
+    const payload={
+      name:String($('name')?.value||'').trim(),
+      brand:String($('brand')?.value||'').trim(),
+      category:String($('category')?.value||'').trim(),
+      supplier:String($('supplier')?.value||$('source_seller')?.value||'').trim(),
+      reference_text:text,
+      image_urls:urls,
+      pasted_images:aiProductClipboardImagesV5.slice(0,2),
+      variation_names:(v54Variations||[]).map(v=>String(v.display_name||Object.values(v.attributes||{}).join(' / ')).trim()).filter(Boolean).slice(0,20)
+    };
+    const r=await fetch(HIKING_API_BASE+'/api/bw-product-description-ai',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
+      body:JSON.stringify(payload),
+      cache:'no-store'
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));
+    const detail=String(j.description||'').trim();
+    if(!detail)throw new Error('AI 沒有回傳商品介紹');
+    $('detail_description').value=detail;
+    if(st)st.textContent=`✅ 已產生商品介紹（${detail.length} 字）；請人工確認後再儲存。`;
+  }catch(e){
+    if(st)st.textContent='❌ AI 商品介紹失敗：'+String(e?.message||e);
+    alert('AI 商品介紹失敗：'+String(e?.message||e));
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='✨ AI 圖生產品介紹'}
+  }
+}
+
 function formData(){const product_type=['simple','external','variable'].includes($('product_type').value)?$('product_type').value:'simple';const varsNow=product_type==='variable'?readVariationsV54():[];const vPrices=varsNow.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(x=>x>0);const price=product_type==='variable'?(vPrices.length?Math.min(...vPrices):0):Math.max(0,Number($('price').value||0));let sale_mode=$('sale_mode').value||'auto';if(price>0&&price<200)sale_mode='redeem_only';const attributes=product_type==='variable'?attributesV54():[],variations=product_type==='variable'?varsNow:[];return {is_addon_product:$('is_addon_product')?.checked===true,external_id:$('external_id').value.trim()||null,source_type:$('source_type').value||'manual',product_type,brand:$('brand').value.trim(),sku_prefix:bwSkuPrefixV4($('sku_prefix')?.value||''),name:$('name').value.trim(),price,category:$('category').value||'精選福利',sale_mode,fulfillment_type:$('fulfillment_type').value||'voucher',shipping_methods:shippingMethodsV563(),cost_price:Math.max(0,Number($('cost_price').value||0)),supplier:$('supplier').value.trim(),stock_tracking_enabled:$('stock_tracking_enabled').value==='true',stock_qty:Math.max(0,Number($('stock_qty').value||0)),low_stock_qty:Math.max(0,Number($('low_stock_qty').value||0)),festival_keys:selectedFestivals(),sort_order:Number($('sort_order').value||100),is_active:$('is_active').value==='true',line_url:String($('line_url_shadow')?.value||$('line_url')?.value||'').trim(),image_url:$('image_url').value.trim(),video_url:$('video_url').value.trim(),gallery_urls:linesV54('gallery_urls'),detail_summary:'',detail_description:$('detail_description').value.trim(),detail_highlights:[],detail_specs:[],detail_notices:[],add_on_product_ids:addonItemsV557().map(x=>x.product_id),add_on_items:addonItemsV557(),attributes,option_groups:attributes.map(a=>({name:a.name,required:true,values:a.values})),variations,source:{platform:$('source_platform')?.value.trim()||$('source_type').value,item_id:$('source_item_id')?.value.trim()||'',url:$('line_url_shadow')?.value.trim()||'',seller:$('source_seller')?.value.trim()||'',currency:$('source_currency')?.value.trim()||'TWD'}}}
-function clearForm(){if($('is_addon_product'))$('is_addon_product').checked=false;editingId=null;['external_id','brand','sku_prefix','name','price','line_url','image_url','video_url','detail_description','gallery_urls','attributes_text','add_on_product_ids','add_on_items_json','shipping_methods_json','source_platform','source_item_id','source_seller'].forEach(id=>$(id).value='');$('source_type').value='manual';if($('source_currency'))$('source_currency').value='TWD';$('product_type').value='simple';v54Variations=[];syncProductTypeV544();galleryPreviewV54();renderMainImageV547();renderVideoV552();refreshCategorySelect('精選福利');$('sale_mode').value='auto';$('fulfillment_type').value='voucher';setShippingMethodsV563([]);renderShippingMethodsV563();$('cost_price').value='0';$('supplier').value='';$('stock_tracking_enabled').value='false';$('stock_qty').value='0';$('low_stock_qty').value='3';setFestivals([]);$('sort_order').value='100';$('is_active').value='true';renderAddonConfigV557()}
+function clearForm(){aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();if($('is_addon_product'))$('is_addon_product').checked=false;editingId=null;['external_id','brand','sku_prefix','name','price','line_url','image_url','video_url','detail_description','gallery_urls','attributes_text','add_on_product_ids','add_on_items_json','shipping_methods_json','source_platform','source_item_id','source_seller'].forEach(id=>$(id).value='');$('source_type').value='manual';if($('source_currency'))$('source_currency').value='TWD';$('product_type').value='simple';v54Variations=[];syncProductTypeV544();galleryPreviewV54();renderMainImageV547();renderVideoV552();refreshCategorySelect('精選福利');$('sale_mode').value='auto';$('fulfillment_type').value='voucher';setShippingMethodsV563([]);renderShippingMethodsV563();$('cost_price').value='0';$('supplier').value='';$('stock_tracking_enabled').value='false';$('stock_qty').value='0';$('low_stock_qty').value='3';setFestivals([]);$('sort_order').value='100';$('is_active').value='true';renderAddonConfigV557()}
 function fill(p){
   if(!p)return;
   editingId=p.id;
@@ -1758,7 +1864,10 @@ window.addEventListener('message',e=>{
   if(e.source===window&&e.data?.type==='BOOKWIDE_COLLECTOR_PRODUCT'&&e.data.payload)applyChromeCollectorV200(e.data.payload);
 });
 
-$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('rebuildErpSkuBtn'))$('rebuildErpSkuBtn').onclick=rebuildErpSkuV4;$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
+$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;
+if($('detail_description'))$('detail_description').addEventListener('paste',handleDetailPasteV5);
+if($('aiProductPasteClearBtn'))$('aiProductPasteClearBtn').onclick=()=>{aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();};
+if($('rebuildErpSkuBtn'))$('rebuildErpSkuBtn').onclick=rebuildErpSkuV4;$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
 $('seedFlower12').onclick=seedFlowerPartner12;
 $('reloadCategories').onclick=loadCategories;$('catSaveBtn').onclick=saveCategory;$('catCancelBtn').onclick=resetCategoryEditor;initCollapsibles();initV49Layout();boot();
 </script>
