@@ -37,6 +37,12 @@
 .v545-checks{display:flex;gap:18px;align-items:center;min-height:38px;flex-wrap:wrap}
 .v545-checks label{display:flex;align-items:center;gap:6px;margin:0;font-weight:400}
 .v545-image-url{display:none}
+
+.v545-ai-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;width:120px;margin-top:8px}
+.v545-ai-actions button{width:100%;min-height:34px;border:1px solid #c3c4c7;background:#fff;border-radius:5px;cursor:pointer;font-size:12px;font-weight:700;color:#2271b1;padding:5px}
+.v545-ai-actions button[data-vrestore]{grid-column:1/-1;color:#646970}
+.v545-ai-status{font-size:11px;color:#646970;line-height:1.35;margin-top:6px;word-break:break-word}
+.v545-displayname{grid-column:1/-1}.v545-displayname input{font-weight:800;border-color:#8c8f94}.v545-auto-note{font-size:12px;color:#646970;line-height:1.55}
 @media(max-width:760px){
   .v545-summary{grid-template-columns:28px 58px 1fr}
   .v545-actions{grid-column:3;justify-self:end}
@@ -361,7 +367,8 @@
         </div>
 
         <div class="wc548-pane variableOnly" data-wcpane="attributes">
-          <div class="field"><label>商品屬性（每行：名稱|選項1,選項2）</label><textarea id="attributes_text" rows="5" placeholder="款式|紅蕾絲玫瑰,調香師玫瑰&#10;尺寸|S,M,L"></textarea></div>
+          <div class="field"><label>來源商品屬性（系統產生；不要為了前台短名稱改這裡）</label><textarea id="attributes_text" rows="5" placeholder="款式|紅蕾絲玫瑰,調香師玫瑰&#10;尺寸|S,M,L"></textarea></div>
+          <div class="v545-auto-note" style="margin-top:8px">來源屬性保留原始規格，用來對 SKU／價格／圖片。前台顯示名稱請到「變化類型」使用「前台短名稱」，不必手改這串資料。</div>
           <button type="button" class="btn gray" id="buildVariationsBtn" style="margin-top:10px">產生款式</button>
         </div>
 
@@ -911,11 +918,77 @@ function v545Thumb(v,i){
   const u=String(v?.image_url||'').trim();
   return u?`<img id="v545ThumbImg${i}" src="${esc(u)}" alt="規格圖片">`:`<div id="v545ThumbImg${i}" class="v545-thumb-empty">未設定規格圖片<br>將使用商品圖片／圖庫</div>`;
 }
+
+function bwTwShortSpecV1(raw){
+  let s=String(raw||'').trim();
+  const reps=[['亚克力','壓克力'],['首饰','首飾'],['礼盒','禮盒'],['礼物','禮物'],['颜色','顏色'],['高级','高級'],['绅士','紳士'],['守护','守護'],['无防尘罩','無防塵罩'],['防尘罩','防塵罩'],['许你','許你'],['诺言','諾言'],['不会','不會'],['凋谢','凋謝'],['美丽','美麗'],['热销','熱銷'],['旗舰店','旗艦店']];
+  for(const [x,y] of reps)s=s.split(x).join(y);
+  s=s.replace(/近期\s*熱銷/g,'').replace(/^\s*熊憨憨[·・:\s-]*/,'').trim();
+  s=s.replace(/[【\[]\s*壓克力首飾盒款\s*[】\]]/g,'｜壓克力盒')
+     .replace(/[【\[]\s*無防塵罩款\s*[】\]]/g,'｜無防塵罩')
+     .replace(/[【\[]\s*防塵罩款\s*[】\]]/g,'｜防塵罩')
+     .replace(/[【\[]\s*([^】\]]+?)款\s*[】\]]/g,'｜$1')
+     .replace(/[【\[]\s*([^】\]]+?)\s*[】\]]/g,'｜$1')
+     .replace(/\s*[|｜]\s*/g,'｜').replace(/\s{2,}/g,' ').trim();
+  return s.length>26?s.slice(0,25)+'…':s;
+}
+function bwVariationRawNameV1(v){return Object.values(v?.attributes||{}).map(x=>String(x||'').trim()).filter(Boolean).join(' / ')}
+function bwAutoShortNamesV1(){
+  v54Variations=v54Variations.map(v=>({...v,display_name:bwTwShortSpecV1(v.display_name||bwVariationRawNameV1(v))}));
+  renderVariationEditorV54();
+  setStatus('✅ 已整理前台短名稱。來源屬性、SKU、價格、圖片都沒有改；請檢查後再儲存。');
+}
+
+async function localizeVariationImageV2(i,target){
+  const v=v54Variations[i];if(!v)return;
+  const current=String(document.querySelector(`[data-vimage="${i}"]`)?.value||v.image_url||'').trim();
+  if(!current)return alert('此 Variation 尚未設定圖片');
+  const original=String(document.querySelector(`[data-voriginal="${i}"]`)?.value||v.original_image_url||current).trim();
+  let productId=String($('external_id')?.value||editingId||'').trim();
+  if(!productId){productId='bw-'+Date.now().toString(36);$('external_id').value=productId}
+  const sku=String(document.querySelector(`[data-vsku="${i}"]`)?.value||v.sku||'').trim();
+  const display=String(document.querySelector(`[data-vdisplay="${i}"]`)?.value||v.display_name||bwVariationRawNameV1(v)).trim();
+  const st=document.querySelector(`[data-vai-status="${i}"]`);
+  const btns=[...document.querySelectorAll(`[data-vai-tw="${i}"],[data-vai-en="${i}"],[data-vrestore="${i}"]`)];
+  btns.forEach(b=>b.disabled=true);
+  if(st)st.textContent=target==='zh-TW'?'⏳ AI 正在轉為繁體中文…':'⏳ AI 正在轉為英文…';
+  try{
+    const {data:{session}}=await SB.auth.getSession();
+    if(!session?.access_token)throw new Error('登入狀態失效');
+    const r=await fetch(HIKING_API_BASE+'/api/bw-product-variation-image-localize',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},
+      body:JSON.stringify({image_url:current,original_image_url:original,target_lang:target,product_id:productId,sku,display_name:display}),
+      cache:'no-store'
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false||!j.image_url)throw new Error(j.message||j.error||('HTTP '+r.status));
+    v54Variations[i]={...v54Variations[i],original_image_url:original,image_url:j.image_url,image_locale:target};
+    renderVariationEditorV54();
+    const row=document.querySelector(`[data-vrow="${i}"]`);if(row)row.classList.add('open');
+    setStatus(`✅ ${display||sku||'Variation'} 圖片已 AI ${target==='zh-TW'?'繁體化':'英文化'}；請確認後再儲存商品。`);
+  }catch(e){
+    if(st)st.textContent='❌ '+String(e?.message||e);
+    alert('AI 圖片處理失敗：'+String(e?.message||e));
+  }finally{
+    btns.forEach(b=>b.disabled=false);
+  }
+}
+function restoreVariationOriginalImageV2(i){
+  const v=v54Variations[i];if(!v)return;
+  const original=String(v.original_image_url||document.querySelector(`[data-voriginal="${i}"]`)?.value||'').trim();
+  if(!original)return alert('沒有保留原始圖片');
+  v54Variations[i]={...v,image_url:original,image_locale:'',original_image_url:original};
+  renderVariationEditorV54();
+  const row=document.querySelector(`[data-vrow="${i}"]`);if(row)row.classList.add('open');
+  setStatus('✅ 已恢復 Variation 原始圖片；請確認後再儲存商品。');
+}
+
 function renderVariationEditorV54(){
   const box=$('variationEditor');if(!box)return;
   if($('product_type').value!=='variable'){box.innerHTML='<div class="muted" style="padding:16px">目前是簡單商品。</div>';return}
   if(!v54Variations.length){box.innerHTML='<div class="muted" style="padding:16px">尚未產生變化類型。先設定「屬性」，再按「產生規格組合」。</div>';return}
-  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><span class="v545-count">${v54Variations.length} 個變化類型</span></div>`+
+  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545AutoShort">整理前台短名稱</button><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><span class="v545-count">${v54Variations.length} 個變化類型</span></div>`+
   v54Variations.map((v,i)=>`<div class="v545-variation" data-vrow="${i}">
     <div class="v545-summary">
       <div class="v545-handle" title="排序">≡</div>
@@ -931,10 +1004,19 @@ function renderVariationEditorV54(){
             <button type="button" class="btn gray" data-vupload="${i}">${v.image_url?'更換圖片':'設定圖片'}</button>
             <button type="button" class="v547-var-remove" data-vremove="${i}" style="${v.image_url?'':'display:none'}">移除圖片</button>
           </div>
+          <div class="v545-ai-actions" style="${v.image_url?'':'display:none'}">
+            <button type="button" data-vai-tw="${i}">AI 轉繁體</button>
+            <button type="button" data-vai-en="${i}">AI 轉英文</button>
+            <button type="button" data-vrestore="${i}" style="${v.original_image_url?'':'display:none'}">恢復原圖</button>
+          </div>
+          <div class="v545-ai-status" data-vai-status="${i}">${v.image_locale?`目前：${esc(v.image_locale)}`:''}</div>
           <input type="file" data-vfile="${i}" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none">
           <input class="v545-image-url" data-vimage="${i}" value="${esc(v.image_url||'')}">
+          <input class="v545-image-url" data-voriginal="${i}" value="${esc(v.original_image_url||'')}">
+          <input class="v545-image-url" data-vlocale="${i}" value="${esc(v.image_locale||'')}">
         </div>
         <div class="v545-fields">
+          <div class="v545-field v545-displayname"><label>前台短名稱（PC／手機共用）</label><input data-vdisplay="${i}" value="${esc(v.display_name||bwTwShortSpecV1(bwVariationRawNameV1(v)))}" placeholder="例如：小花花｜壓克力盒"></div>
           <div class="v545-field"><label>BookWide SKU（可修改）</label><input data-vsku="${i}" value="${esc(v.sku||'')}" placeholder="例如 BW-ITEM-01"></div><div class="v545-field"><label>來源 SKU</label><input data-vsourcesku="${i}" value="${esc(v.source_sku_id||'')}" placeholder="淘寶／供應商 SKU ID"></div><div class="v545-field"><label>來源價 (CNY)</label><input type="number" min="0" step="0.01" data-vsourceprice="${i}" value="${Number(v.source_price||0)}" readonly></div>
           <div class="v545-field"><label>狀態</label><select data-vactive="${i}"><option value="true" ${v.is_active!==false?'selected':''}>啟用</option><option value="false" ${v.is_active===false?'selected':''}>停用</option></select></div>
           <div class="v545-field"><label>定價 (NT$＝CNY × 10)</label><input type="number" min="0" step="1" data-vprice="${i}" value="${Number(v.price||0)}"></div>
@@ -967,6 +1049,10 @@ function renderVariationEditorV54(){
     if(fi)fi.onchange=()=>uploadVariationImageV542(i);
   });
   box.querySelectorAll('[data-vremove]').forEach(btn=>btn.onclick=()=>removeVariationImageV547(Number(btn.dataset.vremove)));
+  box.querySelectorAll('[data-vai-tw]').forEach(btn=>btn.onclick=()=>localizeVariationImageV2(Number(btn.dataset.vaiTw),'zh-TW'));
+  box.querySelectorAll('[data-vai-en]').forEach(btn=>btn.onclick=()=>localizeVariationImageV2(Number(btn.dataset.vaiEn),'en'));
+  box.querySelectorAll('[data-vrestore]').forEach(btn=>btn.onclick=()=>restoreVariationOriginalImageV2(Number(btn.dataset.vrestore)));
+  $('v545AutoShort').onclick=bwAutoShortNamesV1;
   $('v545ExpandAll').onclick=()=>{box.querySelectorAll('.v545-variation').forEach(x=>x.classList.add('open'));box.querySelectorAll('[data-vedit]').forEach(x=>x.textContent='收合')};
   $('v545CollapseAll').onclick=()=>{box.querySelectorAll('.v545-variation').forEach(x=>x.classList.remove('open'));box.querySelectorAll('[data-vedit]').forEach(x=>x.textContent='編輯')};
 }
@@ -980,12 +1066,15 @@ function buildVariationsV54(){
     return old?{...old,attributes:a}:{
       id:'var-'+(i+1),
       attributes:a,
+      display_name:bwTwShortSpecV1(Object.values(a).join(' / ')),
       sku:'',
       price:Number($('price').value||0),
       sale_price:0,
       stock_tracking_enabled:true,
       stock_qty:0,
       image_url:'',
+      original_image_url:'',
+      image_locale:'',
       is_active:true
     };
   });
@@ -999,6 +1088,7 @@ function readVariationsV54(){
     const entered=Math.max(0,Number(document.querySelector(`[data-vprice="${i}"]`)?.value||v.price||0));
     return {
       ...v,
+      display_name:String(document.querySelector(`[data-vdisplay="${i}"]`)?.value||v.display_name||bwTwShortSpecV1(bwVariationRawNameV1(v))).trim(),
       sku:String(document.querySelector(`[data-vsku="${i}"]`)?.value||v.sku||'').trim(),
       source_sku_id:String(document.querySelector(`[data-vsourcesku="${i}"]`)?.value||v.source_sku_id||'').trim(),
       source_price:sourcePrice,
@@ -1008,6 +1098,8 @@ function readVariationsV54(){
       stock_tracking_enabled:document.querySelector(`[data-vmanage="${i}"]`)?.checked!==false,
       stock_qty:Math.max(0,Number(document.querySelector(`[data-vstock="${i}"]`)?.value||v.stock_qty||0)),
       image_url:String(document.querySelector(`[data-vimage="${i}"]`)?.value||v.image_url||'').trim(),
+      original_image_url:String(document.querySelector(`[data-voriginal="${i}"]`)?.value||v.original_image_url||'').trim(),
+      image_locale:String(document.querySelector(`[data-vlocale="${i}"]`)?.value||v.image_locale||'').trim(),
       is_active:String(document.querySelector(`[data-vactive="${i}"]`)?.value||'true')==='true'
     };
   })
@@ -1251,7 +1343,7 @@ function fill(p){
   $('detail_description').value=p.detail_description||'';
   $('gallery_urls').value=(p.gallery_urls||[]).join('\n');galleryPreviewV54();setAddonItemsV557((p.add_on_items&&p.add_on_items.length)?p.add_on_items:(p.add_on_product_ids||[]).map((id,i)=>({product_id:id,default_qty:1,required:false,sort_order:i})));renderAddonConfigV557();
   $('attributes_text').value=attrsTextV54(p.attributes||p.option_groups||[]);
-  v54Variations=Array.isArray(p.variations)?p.variations.map(v=>({...v,attributes:{...(v.attributes||{})}})):[];syncProductTypeV544();
+  v54Variations=Array.isArray(p.variations)?p.variations.map(v=>({...v,display_name:String(v.display_name||bwTwShortSpecV1(Object.values(v.attributes||{}).join(' / '))).trim(),attributes:{...(v.attributes||{})}})):[];syncProductTypeV544();
   
 
   // V49.4：編輯商品時直接展開編輯器並捲到表單，不再只填值卻停在商品清單。
@@ -1605,6 +1697,7 @@ function applyChromeCollectorV200(payload){
     const cny=sourcePriceForVariationV200(j,{...v,attributes:attrs});
     return {
       ...v,
+      display_name:String(v.display_name||bwTwShortSpecV1(Object.values(attrs).join(' / '))).trim(),
       sku:String(v.sku||'').trim()||makeBookWideSkuV200(j.item_id,i,{...v,attributes:attrs}),
       source_sku_id:String(v.source_sku_id||'').trim(),
       source_price:cny,
