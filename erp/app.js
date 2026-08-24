@@ -17,8 +17,147 @@ function renderTree(nodes){$('tree').innerHTML=nodes.map(n=>nodeHTML(n)).join(''
 function nodeHTML(n){const has=n.children?.length;return `<div class="tree-node"><div class="tree-row" data-page="${n.page||''}" data-name="${esc(n.name)}"><span class="toggle">${has?'▾':'✦'}</span><span class="node-label">${has?'📁 ':''}${esc(t(n.name))}</span></div>${has?`<div class="children">${n.children.map(nodeHTML).join('')}</div>`:''}</div>`}
 function bindTree(){document.querySelectorAll('.tree-row').forEach(r=>r.onclick=e=>{e.stopPropagation();document.querySelectorAll('.tree-row').forEach(x=>x.classList.remove('selected'));r.classList.add('selected');const c=r.nextElementSibling;if(c?.classList.contains('children')){c.classList.toggle('closed');r.querySelector('.toggle').textContent=c.classList.contains('closed')?'▸':'▾'}else if(r.dataset.page)openPage(r.dataset.page,r.dataset.name);});}
 function showHome(){activePage='home';$('modulePage').classList.add('hidden');$('desktop').classList.remove('hidden');$('breadcrumb').textContent=`${t('首頁')} / ${t('功能導引')}`;const cards=[['sales','🧾','銷售管理'],['inventory','📦','存貨管理'],['purchase','🏷️','採購管理'],['ar','💵','應收管理'],['cost','🪙','成本管理'],['ap','📗','應付管理'],['invoice','🧮','發票管理'],['finance','💰','財務管理'],['bank','🏦','銀行管理']];$('desktop').innerHTML=`<div class="guide-grid">${cards.map((c,i)=>`<div class="guide-card" data-guide="${c[0]}"><div class="guide-icon">${c[1]}</div><div class="guide-name">${t(c[2])}</div>${i<6?'<div class="guide-arrow">↓</div>':''}</div>`).join('')}</div><div class="quick-links"><button data-page="items">${t('商品總覽')}</button><button data-page="warehouses">${t('倉庫總覽')}</button><button data-page="schedule">${t('計畫總覽')}</button><button data-page="people">${t('人員組織總覽')}</button><button data-page="general-ledger">${t('科目總覽')}</button></div>`;document.querySelectorAll('[data-guide]').forEach(x=>x.onclick=()=>openModule(x.dataset.guide));document.querySelectorAll('.quick-links [data-page]').forEach(x=>x.onclick=()=>openPage(x.dataset.page,x.textContent));}
+
+const ERP_SUPABASE_URL='https://jeajrwpmrgczimmrflxo.supabase.co';
+const ERP_SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYm1yZ2N6aW1tcmZseG8iLCJyZWYiOiJqZWFqcndwbXJnY3ppbW1yZmx4byIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzYwNzE4OTM5LCJleHAiOjIwNzYyOTQ5Mzl9.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do'.replace('c3ViYW1yZ2N6aW1tcmZseG8','c3ViIjo');
+const ERP_SB=window.supabase?window.supabase.createClient('https://jeajrwpmrgczimmrflxo.supabase.co','eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do'):null;
+const ERP_SALES_PAGES=new Set(['quotation','sales-order','shipment','sales-return']);
+let erpSalesState={type:'',rows:[],current:null,items:[]};
+
+function erpEsc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+function erpMoney(v){return Number(v||0).toLocaleString('zh-TW',{maximumFractionDigits:2})}
+function erpToday(){return new Date().toISOString().slice(0,10)}
+function erpTypeTitle(type){return {'quotation':'報價單','sales-order':'銷售訂單','shipment':'出貨單','sales-return':'銷售退回'}[type]||type}
+function erpPrefix(type){return {'quotation':'QT','sales-order':'SO','shipment':'SH','sales-return':'SR'}[type]||'DOC'}
+function erpNewNo(type){return erpPrefix(type)+'-'+erpToday().replaceAll('-','')+'-'+String(Date.now()).slice(-5)}
+async function erpToken(){try{return (await ERP_SB?.auth.getSession())?.data?.session?.access_token||''}catch{return ''}}
+async function erpApi(path,opt={}){
+  const headers={'Content-Type':'application/json',...(opt.headers||{})};
+  if((opt.method||'GET')!=='GET'){const tok=await erpToken();if(!tok)throw new Error('請先登入 BookWide Admin，再開 ERP');headers.Authorization='Bearer '+tok}
+  const r=await fetch(ERP_API+path,{cache:'no-store',...opt,headers});const j=await r.json().catch(()=>({}));
+  if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));return j;
+}
+function erpBlankDoc(type){
+  return {id:'',doc_no:erpNewNo(type),status:'draft',date:erpToday(),valid_until:'',customer_id:'',customer_name:'',customer_po:'',currency:'TWD',exchange_rate:1,tax_rate:5,delivery:'',payment_terms:'',salesperson:'',memo:'',source_doc_no:'',lines:[{sku:'',customer_sku:'',name:'',qty:1,unit:'PCS',list_price:0,discount:0,unit_price:0,delivery_date:''}]};
+}
+async function erpLoadItems(){
+  if(erpSalesState.items.length)return erpSalesState.items;
+  const j=await erpApi('/api/bw-erp-items');erpSalesState.items=j.items||j.products||[];return erpSalesState.items;
+}
+async function erpOpenSalesPage(type){
+  erpSalesState.type=type;erpSalesState.current=null;
+  $('desktop').classList.add('hidden');$('modulePage').classList.remove('hidden');
+  $('pageTitle').textContent=erpTypeTitle(type);$('breadcrumb').textContent='銷售 / '+erpTypeTitle(type);
+  document.querySelector('.page-head')?.classList.remove('customer-head-hidden');
+  $('pageActions').innerHTML=['新增','儲存','暫存','生效','複製','刪除','列印'].map(x=>`<button data-sales-action="${x}">${x}</button>`).join('');
+  $('tabs').innerHTML=['基本資料','交易明細','附件','狀態'].map((x,i)=>`<button class="${i?'':'active'}">${x}</button>`).join('');
+  $('pageBody').innerHTML=`<div class="runec-sales-shell"><aside class="runec-sales-list"><div class="runec-list-head"><b>${erpTypeTitle(type)}總覽</b><input id="erpSalesQ" placeholder="搜尋單號／客戶"></div><div id="erpSalesRows" class="runec-doc-list">讀取中…</div></aside><section id="erpSalesForm" class="runec-sales-form"></section></div>`;
+  document.querySelectorAll('[data-sales-action]').forEach(b=>b.onclick=()=>erpSalesAction(b.dataset.salesAction));
+  $('erpSalesQ').oninput=()=>erpRenderDocList();
+  await Promise.all([erpLoadItems(),erpLoadSalesDocs()]);
+  if(!erpSalesState.current)erpEditSalesDoc(erpBlankDoc(type));
+}
+async function erpLoadSalesDocs(){
+  const j=await erpApi('/api/erp-sales-list?type='+encodeURIComponent(erpSalesState.type));erpSalesState.rows=j.rows||[];
+  erpRenderDocList();
+}
+function erpRenderDocList(){
+  const q=String($('erpSalesQ')?.value||'').toLowerCase();
+  const rows=erpSalesState.rows.filter(d=>!q||[d.doc_no,d.customer_id,d.customer_name,d.status].some(v=>String(v||'').toLowerCase().includes(q)));
+  $('erpSalesRows').innerHTML=rows.length?rows.map(d=>`<button class="runec-doc-row ${erpSalesState.current?.id===d.id?'active':''}" data-docid="${erpEsc(d.id)}"><b>${erpEsc(d.doc_no)}</b><span>${erpEsc(d.customer_id)} ${erpEsc(d.customer_name)}</span><small>${erpEsc(d.date)}｜${d.status==='effective'?'已生效':'草稿'}</small></button>`).join(''):'<div class="muted-pad">尚無單據</div>';
+  document.querySelectorAll('[data-docid]').forEach(b=>b.onclick=()=>{const d=erpSalesState.rows.find(x=>String(x.id)===b.dataset.docid);if(d)erpEditSalesDoc(structuredClone(d))});
+}
+function erpLineHtml(l,i){
+  return `<tr data-line="${i}">
+    <td><input data-k="sku" value="${erpEsc(l.sku)}" list="erpSkuList" placeholder="SKU"></td>
+    <td><input data-k="customer_sku" value="${erpEsc(l.customer_sku)}" placeholder="客戶料號"></td>
+    <td><input data-k="name" value="${erpEsc(l.name)}"></td>
+    <td><input data-k="qty" type="number" min="0" step="0.01" value="${Number(l.qty||0)}"></td>
+    <td><input data-k="unit" value="${erpEsc(l.unit||'PCS')}"></td>
+    <td><input data-k="list_price" type="number" step="0.01" value="${Number(l.list_price||0)}"></td>
+    <td><input data-k="discount" type="number" step="0.01" value="${Number(l.discount||0)}"></td>
+    <td><input data-k="unit_price" type="number" step="0.01" value="${Number(l.unit_price||0)}"></td>
+    <td class="line-amount">${erpMoney(Number(l.qty||0)*Number(l.unit_price||0))}</td>
+    <td><input data-k="delivery_date" type="date" value="${erpEsc(l.delivery_date)}"></td>
+    <td><button type="button" data-remove-line="${i}">✕</button></td></tr>`;
+}
+function erpEditSalesDoc(doc){
+  erpSalesState.current=doc;const type=erpSalesState.type;
+  const items=erpSalesState.items||[];
+  $('erpSalesForm').innerHTML=`
+    <datalist id="erpSkuList">${items.map(x=>`<option value="${erpEsc(x.sku||x.id)}">${erpEsc(x.name||'')}</option>`).join('')}</datalist>
+    <div class="runec-form-top">
+      <label>單號<input id="sd_doc_no" value="${erpEsc(doc.doc_no)}" ${doc.status==='effective'?'readonly':''}></label>
+      <label>日期<input id="sd_date" type="date" value="${erpEsc(doc.date||erpToday())}"></label>
+      <label>狀態<input value="${doc.status==='effective'?'已生效':'草稿'}" readonly></label>
+      <label>客戶編號<input id="sd_customer_id" value="${erpEsc(doc.customer_id)}"></label>
+      <label>客戶名稱<input id="sd_customer_name" value="${erpEsc(doc.customer_name)}"></label>
+      <label>客戶詢價／PO<input id="sd_customer_po" value="${erpEsc(doc.customer_po)}"></label>
+      <label>有效日期<input id="sd_valid_until" type="date" value="${erpEsc(doc.valid_until)}"></label>
+      <label>幣別<select id="sd_currency">${['TWD','USD','CNY','JPY','EUR'].map(x=>`<option ${doc.currency===x?'selected':''}>${x}</option>`).join('')}</select></label>
+      <label>匯率<input id="sd_exchange_rate" type="number" step="0.0001" value="${Number(doc.exchange_rate||1)}"></label>
+      <label>稅率 %<input id="sd_tax_rate" type="number" step="0.01" value="${Number(doc.tax_rate??5)}"></label>
+      <label>付款條件<input id="sd_payment_terms" value="${erpEsc(doc.payment_terms)}"></label>
+      <label>送貨方式<input id="sd_delivery" value="${erpEsc(doc.delivery)}"></label>
+      <label>業務員<input id="sd_salesperson" value="${erpEsc(doc.salesperson)}"></label>
+      ${type!=='quotation'?`<label>來源單號<input id="sd_source_doc_no" value="${erpEsc(doc.source_doc_no)}"></label>`:''}
+    </div>
+    <div class="runec-line-tools"><button id="erpAddLine" type="button">＋ 新增明細</button><button id="erpPriceHistory" type="button">客戶歷史價格</button>${type==='quotation'?'<button id="erpToOrder" type="button">轉銷售訂單</button>':''}${type==='sales-order'?'<button id="erpToShipment" type="button">轉出貨單</button>':''}</div>
+    <div class="runec-lines-wrap"><table class="runec-lines"><thead><tr><th>商品 SKU</th><th>客戶料號</th><th>說明</th><th>數量</th><th>單位</th><th>牌價</th><th>折扣 %</th><th>報價/成交單價</th><th>金額</th><th>交期</th><th></th></tr></thead><tbody id="erpLineBody">${(doc.lines||[]).map(erpLineHtml).join('')}</tbody></table></div>
+    <div class="runec-sales-bottom"><label>備註<textarea id="sd_memo">${erpEsc(doc.memo)}</textarea></label><div class="runec-totals"><div>未稅 <b id="sd_subtotal">0</b></div><div>稅額 <b id="sd_tax">0</b></div><div>總計 <b id="sd_total">0</b></div></div></div>`;
+  erpBindSalesForm();erpCalcSales();erpRenderDocList();
+}
+function erpReadSalesForm(){
+  const d=structuredClone(erpSalesState.current||erpBlankDoc(erpSalesState.type));
+  const val=id=>$(id)?.value||'';
+  Object.assign(d,{doc_no:val('sd_doc_no'),date:val('sd_date'),customer_id:val('sd_customer_id'),customer_name:val('sd_customer_name'),customer_po:val('sd_customer_po'),valid_until:val('sd_valid_until'),currency:val('sd_currency'),exchange_rate:Number(val('sd_exchange_rate')||1),tax_rate:Number(val('sd_tax_rate')||0),payment_terms:val('sd_payment_terms'),delivery:val('sd_delivery'),salesperson:val('sd_salesperson'),source_doc_no:val('sd_source_doc_no'),memo:val('sd_memo')});
+  d.lines=[...document.querySelectorAll('#erpLineBody tr')].map(tr=>{const o={};tr.querySelectorAll('[data-k]').forEach(x=>o[x.dataset.k]=['qty','list_price','discount','unit_price'].includes(x.dataset.k)?Number(x.value||0):x.value);return o});
+  return d;
+}
+function erpBindSalesForm(){
+  $('erpAddLine').onclick=()=>{const d=erpReadSalesForm();d.lines.push({sku:'',customer_sku:'',name:'',qty:1,unit:'PCS',list_price:0,discount:0,unit_price:0,delivery_date:''});erpEditSalesDoc(d)};
+  document.querySelectorAll('[data-remove-line]').forEach(b=>b.onclick=()=>{const d=erpReadSalesForm();d.lines.splice(Number(b.dataset.removeLine),1);if(!d.lines.length)d.lines.push({sku:'',qty:1,unit:'PCS',list_price:0,discount:0,unit_price:0});erpEditSalesDoc(d)});
+  document.querySelectorAll('#erpLineBody input').forEach(inp=>inp.oninput=()=>erpCalcSales());
+  document.querySelectorAll('#erpLineBody [data-k="sku"]').forEach((inp,i)=>inp.onchange=async()=>{
+    const sku=inp.value.trim().toUpperCase(),item=erpSalesState.items.find(x=>String(x.sku||x.id).toUpperCase()===sku);if(!item)return;
+    const tr=inp.closest('tr');tr.querySelector('[data-k="name"]').value=item.name||'';tr.querySelector('[data-k="unit"]').value=item.unit||'PCS';tr.querySelector('[data-k="list_price"]').value=Number(item.price||0);tr.querySelector('[data-k="unit_price"]').value=Number(item.price||0);
+    const cid=$('sd_customer_id').value.trim();if(cid){try{const h=await erpApi('/api/erp-customer-price?customer_id='+encodeURIComponent(cid)+'&sku='+encodeURIComponent(sku));if(h.rows?.length){tr.querySelector('[data-k="unit_price"]').value=Number(h.rows[0].unit_price||item.price||0)}}catch{}}
+    erpCalcSales();
+  });
+  document.querySelectorAll('#erpLineBody [data-k="discount"]').forEach(inp=>inp.onchange=()=>{const tr=inp.closest('tr'),lp=Number(tr.querySelector('[data-k="list_price"]').value||0),dc=Number(inp.value||0);tr.querySelector('[data-k="unit_price"]').value=(lp*(1-dc/100)).toFixed(2);erpCalcSales()});
+  $('erpPriceHistory').onclick=erpShowPriceHistory;
+  if($('erpToOrder'))$('erpToOrder').onclick=()=>erpConvertDoc('sales-order');
+  if($('erpToShipment'))$('erpToShipment').onclick=()=>erpConvertDoc('shipment');
+}
+function erpCalcSales(){
+  let sub=0;document.querySelectorAll('#erpLineBody tr').forEach(tr=>{const q=Number(tr.querySelector('[data-k="qty"]')?.value||0),p=Number(tr.querySelector('[data-k="unit_price"]')?.value||0),a=q*p;sub+=a;const td=tr.querySelector('.line-amount');if(td)td.textContent=erpMoney(a)});
+  const tax=sub*Number($('sd_tax_rate')?.value||0)/100;if($('sd_subtotal'))$('sd_subtotal').textContent=erpMoney(sub);if($('sd_tax'))$('sd_tax').textContent=erpMoney(tax);if($('sd_total'))$('sd_total').textContent=erpMoney(sub+tax);
+}
+async function erpSalesAction(action){
+  if(action==='新增'){erpEditSalesDoc(erpBlankDoc(erpSalesState.type));return}
+  if(action==='列印'){window.print();return}
+  if(action==='複製'){const d=erpReadSalesForm();d.id='';d.doc_no=erpNewNo(erpSalesState.type);d.status='draft';erpEditSalesDoc(d);return}
+  if(action==='刪除'){const d=erpSalesState.current;if(!d?.id)return;if(!confirm('刪除 '+d.doc_no+'？'))return;await erpApi('/api/erp-sales-delete',{method:'POST',body:JSON.stringify({type:erpSalesState.type,id:d.id})});await erpLoadSalesDocs();erpEditSalesDoc(erpBlankDoc(erpSalesState.type));return}
+  const d=erpReadSalesForm();if(!d.customer_id&&!d.customer_name)return alert('請先填客戶');
+  if(!(d.lines||[]).some(x=>x.sku))return alert('至少需要一筆商品 SKU');
+  if(action==='生效')d.status='effective';else d.status='draft';
+  const j=await erpApi('/api/erp-sales-save',{method:'POST',body:JSON.stringify({type:erpSalesState.type,doc:d})});erpSalesState.current=j.doc;await erpLoadSalesDocs();erpEditSalesDoc(j.doc);$('statusText').textContent=`${d.doc_no} ${d.status==='effective'?'已生效':'已儲存'}`;
+}
+async function erpConvertDoc(target){
+  const src=erpReadSalesForm();if(!src.id&&src.status!=='effective')return alert('請先儲存／生效來源單據');
+  const d={...structuredClone(src),id:'',doc_no:erpNewNo(target),status:'draft',source_doc_no:src.doc_no,date:erpToday(),created_at:'',updated_at:''};
+  activePage=target;await erpOpenSalesPage(target);erpEditSalesDoc(d);
+}
+async function erpShowPriceHistory(){
+  const cid=$('sd_customer_id')?.value.trim();if(!cid)return alert('請先填客戶編號');
+  const j=await erpApi('/api/erp-customer-price?customer_id='+encodeURIComponent(cid));
+  const rows=(j.rows||[]).slice(0,30);
+  showDialog('客戶歷史價格｜'+cid,rows.length?`<div style="max-height:55vh;overflow:auto"><table style="width:100%;border-collapse:collapse"><tr><th>日期</th><th>SKU</th><th>客戶料號</th><th>牌價</th><th>成交/報價</th><th>來源</th></tr>${rows.map(x=>`<tr><td>${erpEsc(x.effective_date)}</td><td>${erpEsc(x.sku)}</td><td>${erpEsc(x.customer_sku)}</td><td>${erpMoney(x.list_price)}</td><td>${erpMoney(x.unit_price)}</td><td>${erpEsc(x.source_doc_no)}</td></tr>`).join('')}</table></div>`:'尚無歷史價格');
+}
+
 function openPage(page,name){
   activePage=page;
+  if(ERP_SALES_PAGES.has(page)){erpOpenSalesPage(page);return}
   if(page==='home'){showHome();return}
   if(page==='logout'){showDialog(t('簽出'),t('自有權限系統'));return}
   $('desktop').classList.add('hidden');$('modulePage').classList.remove('hidden');
