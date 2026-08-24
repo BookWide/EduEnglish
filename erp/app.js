@@ -244,7 +244,6 @@ async function api(path,options={}){
     let target=path;
     if(path.startsWith('/api/products')){const q=path.includes('?')?path.slice(path.indexOf('?')):'';target=ERP_API+'/api/bw-erp-items'+q}
     else if(path.startsWith('/api/product?id=')){target=ERP_API+'/api/bw-erp-item?id='+encodeURIComponent(new URL('https://x'+path).searchParams.get('id')||'')}
-    else if(path.startsWith('/api/party-tree')||path.startsWith('/api/customers')||path.startsWith('/api/customer?id=')||path.startsWith('/api/clone/tree')||path.startsWith('/api/clone/list')||path.startsWith('/api/clone/get')){target=ERP_API+path}
     const opts={cache:'no-store',signal:controller.signal,headers:{'Accept':'application/json',...(options.headers||{})},...options};
     const r=await fetch(target,opts);let j;try{j=await r.json()}catch{throw new Error(`HTTP ${r.status}：回傳不是 JSON`)}
     if(!r.ok||!j.ok)throw new Error(j.message||j.error||`HTTP ${r.status}`);return j;
@@ -400,7 +399,7 @@ async function loadPartyTree(){
     }).join('');
     box.querySelectorAll('.customer-row').forEach(b=>b.onclick=()=>selectCustomer(customers[Number(b.dataset.ci)],b));
     renderCustomerMasterList(customers);
-    $('statusText').textContent=`Cloud Party 已讀取 ${customers.length} 筆 P_Customer 客戶`;
+    $('statusText').textContent=`Cloud SKU 已讀取 ${customers.length} 筆 P_Customer 客戶`;
   }catch(e){box.innerHTML=`<div class="error">客戶讀取失敗：${esc(e.message)}</div>`;$('statusText').textContent='客戶 API 失敗：'+e.message;}
 }
 function renderCustomerMasterList(rows){
@@ -422,7 +421,7 @@ async function loadCustomers(q='',isSearch=true){
     box.innerHTML=`<div class="party-tree-root">▾ 📂 <b>Parties - 人員組織總覽</b></div><div class="party-tree-node"><button class="party-folder selected">▾ 🏢 <b>P_Customer</b></button><div class="party-customer-children">${rows.map((c,i)=>`<button class="customer-row" data-ci="${i}">└ 🏢 <b>${esc(c.id)}</b>${c.name?` - ${esc(c.name)}`:''}</button>`).join('')}</div></div>`;
     box.querySelectorAll('.customer-row').forEach(b=>b.onclick=()=>selectCustomer(rows[Number(b.dataset.ci)],b));
     renderCustomerMasterList(rows);
-    $('statusText').textContent=`Cloud Party 已讀取 ${rows.length} 筆客戶${q?`（搜尋：${q}）`:''}`;
+    $('statusText').textContent=`Cloud SKU 已讀取 ${rows.length} 筆客戶${q?`（搜尋：${q}）`:''}`;
     if(rows.length===1)await selectCustomer(rows[0],box.querySelector('.customer-row'));
   }catch(e){box.innerHTML=`<div class="db-error">客戶資料讀取失敗<br>${esc(e.message)}</div>`;$('statusText').textContent='客戶 API 失敗：'+e.message}
 }
@@ -450,15 +449,15 @@ function customerBasicHTML(c={}){return `<div class="customer-basic-grid">
 </div>`}
 function listField(title,items=[]){const vals=(Array.isArray(items)&&items.length)?items:[''];return `<div class="contact-box"><div class="contact-head">${title}<span>⊞⊟</span></div>${vals.map(v=>`<div class="contact-line"><input value="${cval(v)}"><span>⊞⊟</span></div>`).join('')}</div>`}
 function customerContactHTML(c={}){return `<div class="customer-contact-wrap">
-  <div class="contact-top"><label>主管*</label><input id="cManager" value="${cval(c.manager)}"><label>Web 網址</label><input id="cWebsite" value="${cval(c.website)}"></div><hr>
+  <div class="contact-top"><label>主管*</label><input value="${cval(c.manager)}"><label>Web 網址</label><input value="${cval(c.website)}"></div><hr>
   <div class="contact-two">${listField('聯絡人',c.contactPersons)}${listField('電子郵件',c.emails)}</div><hr>
   <div class="contact-two">${listField('手機',c.mobiles)}${listField('電話',c.phones)}</div>
   <div class="contact-two">${listField('傳真',c.faxes)}${listField('呼叫器',c.pagers)}</div><hr>
   <div class="address-note">*第一個地址為【帳單地址】，第二個地址為【送貨地址】</div>
-  <div class="address-box"><div class="contact-head">地址<span>⊞⊟</span></div><div class="address-grid"><label>街道號碼*</label><textarea id="cStreet">${cval(c.street)}</textarea><label>縣／市／區*</label><input id="cCity" value="${cval(c.city)}"><label>省／市*</label><input id="cState" value="${cval(c.state)}"><label>郵遞區號</label><input id="cZip" value="${cval(c.zip)}"><label>國家／地區</label><select><option>${cval(c.country||'台灣')}</option></select></div></div>
+  <div class="address-box"><div class="contact-head">地址<span>⊞⊟</span></div><div class="address-grid"><label>街道號碼*</label><textarea>${cval(c.street)}</textarea><label>縣／市／區*</label><input value="${cval(c.city)}"><label>省／市*</label><input value="${cval(c.state)}"><label>郵遞區號</label><input value="${cval(c.zip)}"><label>國家／地區</label><select><option>${cval(c.country||'台灣')}</option></select></div></div>
 </div>`}
 function customerBusinessHTML(c={}){return `<div class="customer-business-grid">
-  <label>成立日期</label><input id="cBirthday" value="${cval(c.birthday)}"><label>所營事業*</label><textarea id="cBizRealm">${cval(c.bizRealm)}</textarea>
+  <label>成立日期</label><input value="${cval(c.birthday)}"><label>所營事業*</label><textarea>${cval(c.bizRealm)}</textarea>
   <label>資本額</label><div><input value="${cval(c.capital||0)}"><select><option>${cval(c.capitalCurrency||'新台幣')}</option></select></div>
   <label>實收資本額</label><input value="${cval(c.issuedCapital||0)}"><label>成員人數</label><input value="${cval(c.estMemberCount||0)}">
   <label>年營業額</label><div><input value="${cval(c.estIncome||0)}"><select><option>${cval(c.estIncomeCurrency||'新台幣')}</option></select></div>
@@ -473,45 +472,9 @@ function showCustomerTab(tab){
   const body=$('customerTabBody');if(!body)return;const c=currentCustomer||{};
   body.innerHTML=tab==='basic'?customerBasicHTML(c):tab==='contact'?customerContactHTML(c):tab==='business'?customerBusinessHTML(c):tab==='attachment'?customerAttachmentHTML():customerStatusHTML(c);
 }
-
-function erpReadRunecPartyFormV12(base={}){
-  const get=id=>$(id)?.value??base[id]??'';
-  const c={...base};
-  if($('cId'))c.id=$('cId').value.trim().toUpperCase();
-  if($('cName'))c.name=$('cName').value.trim();
-  if($('cAbbr'))c.abbreviation=$('cAbbr').value.trim();
-  if($('cDescription'))c.description=$('cDescription').value;
-  if($('cChairman'))c.chairman=$('cChairman').value.trim();
-  if($('cDirectAgent'))c.directAgent=$('cDirectAgent').value.trim();
-  if($('cOfficialId'))c.officialId=$('cOfficialId').value.trim();
-  if($('cPricingType'))c.pricingType=$('cPricingType').value;
-  if($('cManager'))c.manager=$('cManager').value.trim();
-  if($('cWebsite'))c.website=$('cWebsite').value.trim();
-  if($('cStreet'))c.street=$('cStreet').value;
-  if($('cCity'))c.city=$('cCity').value.trim();
-  if($('cState'))c.state=$('cState').value.trim();
-  if($('cZip'))c.zip=$('cZip').value.trim();
-  if($('cBirthday'))c.birthday=$('cBirthday').value.trim();
-  if($('cBizRealm'))c.bizRealm=$('cBizRealm').value;
-  return c;
-}
-async function erpSavePartyV12(kind,row){
-  const tok=await erpToken();if(!tok)throw new Error('請先登入 BookWide Admin');
-  const r=await fetch(ERP_API+'/api/erp-party-save',{method:'POST',cache:'no-store',headers:{'Content-Type':'application/json','Authorization':'Bearer '+tok},body:JSON.stringify({kind,row})});
-  const j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));return j;
-}
-
 async function handleCustomerAction(action){
   if(action==='重新載入'){if(originalCustomerId)await selectCustomer({id:originalCustomerId});else await loadPartyTree();return}
-  if(action==='新增'){currentCustomer={id:'',name:'',pricingType:'直銷',country:'台灣'};originalCustomerId='';showCustomerTab('basic');$('statusText').textContent='新增客戶';return}
-  if(action==='儲存'){
-    try{
-      const row=erpReadRunecPartyFormV12(currentCustomer||{});
-      if(!row.id||!row.name)return alert('客戶編號、名稱必填');
-      const j=await erpSavePartyV12('customer',row);currentCustomer=j.row;originalCustomerId=j.row.id;await loadPartyTree();await selectCustomer({id:j.row.id});$('statusText').textContent=`客戶 ${j.row.id} 已儲存`;
-    }catch(e){alert('客戶儲存失敗：'+e.message)}
-    return;
-  }
+  if(action==='儲存'){showDialog('儲存','V2.6 先完成 RunEC 客戶真實讀取與克隆畫面；寫入會在欄位確認後開放。');return}
   showDialog(action,`保留 RunEC 原位置：「${action}」。`);
 }
 
@@ -531,20 +494,7 @@ function openClonePartyPage(page){
   $('pageBody').innerHTML=`<section class="runec-customer-form"><div class="party-kind-bar"><button class="active">🏢 公司</button><button>👤 個人</button><button>🧑‍💼 員工</button></div><h3 id="clonePath">人員組織 /Things/Parties/Parties/</h3><div id="cloneTabBody" class="customer-tab-body"></div><div class="customer-user-title standalone">用戶帳號</div><div class="customer-pay-strip"><span>${label}付款條件 <a id="clonePayLink" href="#">[未指定]</a></span><span>交易付款條件 [未指定]</span></div><div class="customer-lower-actions"><div><button>✓ 儲存</button><span>|</span><button>↕ 重新載入</button><span>|</span><button>▧ 新增人員組織</button><button>▧ 複製</button></div><div><button>↗ 移動</button><button>✂ 刪除</button><span>|</span><button>♟ 權限</button></div></div><div class="customer-master-list-wrap"><table class="customer-master-list"><thead><tr><th>編號</th><th>名稱</th><th>編號</th><th>名稱</th></tr></thead><tbody id="cloneMasterBody"><tr><td colspan="4">正在讀取 ${label}…</td></tr></tbody></table></div></section>`;
   renderCloneSidebar(); showCloneTab('basic'); loadCloneTree();
   document.querySelectorAll('[data-clone-tab]').forEach(b=>b.onclick=()=>showCloneTab(b.dataset.cloneTab));
-  document.querySelectorAll('[data-clone-action]').forEach(b=>b.onclick=async()=>{
-    const a=b.dataset.cloneAction;
-    if(a==='重新載入'){await loadCloneTree();return}
-    if(a==='新增'){cloneCurrent={id:'',name:'',pricingType:'直銷',country:'台灣'};showCloneTab('basic');$('statusText').textContent='新增'+CLONE_LABEL[cloneKind];return}
-    if(a==='儲存'){
-      try{
-        const row=erpReadRunecPartyFormV12(cloneCurrent||{});
-        if(!row.id||!row.name)return alert(CLONE_LABEL[cloneKind]+'編號、名稱必填');
-        const j=await erpSavePartyV12(cloneKind,row);cloneCurrent=j.row;await loadCloneTree();await selectCloneRow({id:j.row.id});$('statusText').textContent=CLONE_LABEL[cloneKind]+' '+j.row.id+' 已儲存';
-      }catch(e){alert(CLONE_LABEL[cloneKind]+'儲存失敗：'+e.message)}
-      return;
-    }
-    showDialog(a,`保留 RunEC 原位置：「${a}」。`);
-  });
+  document.querySelectorAll('[data-clone-action]').forEach(b=>b.onclick=()=>{if(b.dataset.cloneAction==='重新載入')loadCloneTree();else showDialog(b.dataset.cloneAction,'V2.7 Clone Engine 保留 RunEC 原操作位置；寫入逐類型驗證後開放。')});
 }
 function renderCloneSidebar(){
  const label=CLONE_LABEL[cloneKind];
@@ -555,7 +505,7 @@ async function loadCloneTree(){
  const box=$('cloneTree'); if(!box)return; const label=CLONE_LABEL[cloneKind];
  try{const data=await api('/api/clone/tree?kind='+encodeURIComponent(cloneKind)); cloneRows=data.rows||[]; const roots=data.roots||[];
  box.innerHTML=`<div class="party-tree-root">▾ 📂 <b>Parties - 人員組織總覽</b></div>`+roots.map(r=>`<div class="party-tree-node"><button class="party-folder selected">▾ 🏢 <b>${esc(r.id)}</b>${r.name?` - ${esc(r.name)}`:''}</button></div>`).join('')+`<div class="party-customer-children">${cloneRows.slice(0,120).map((c,i)=>`<button class="customer-row" data-cli="${i}">└ 🏢 <b>${esc(c.id)}</b>${c.name?` - ${esc(c.name)}`:''}</button>`).join('')}</div>`;
- box.querySelectorAll('[data-cli]').forEach(b=>b.onclick=()=>selectCloneRow(cloneRows[Number(b.dataset.cli)],b)); renderCloneMaster(); $('statusText').textContent=`Cloud Party 已讀取 ${cloneRows.length} 筆${label}`;
+ box.querySelectorAll('[data-cli]').forEach(b=>b.onclick=()=>selectCloneRow(cloneRows[Number(b.dataset.cli)],b)); renderCloneMaster(); $('statusText').textContent=`Cloud SKU 已讀取 ${cloneRows.length} 筆${label}`;
  }catch(e){box.innerHTML=`<div class="db-error">${label}讀取失敗：${esc(e.message)}</div>`;$('statusText').textContent=e.message}
 }
 async function loadCloneRows(q=''){
@@ -567,7 +517,14 @@ async function selectCloneRow(summary,button=null){try{const data=await api('/ap
 function showCloneTab(tab){cloneTab=tab;document.querySelectorAll('[data-clone-tab]').forEach(b=>b.classList.toggle('active',b.dataset.cloneTab===tab));const body=$('cloneTabBody');if(!body)return;const c=cloneCurrent||{};body.innerHTML=tab==='basic'?customerBasicHTML(c):tab==='contact'?customerContactHTML(c):tab==='business'?customerBusinessHTML(c):tab==='attachment'?customerAttachmentHTML():customerStatusHTML(c)}
 
 function showDialog(title,body){$('dialogTitle').textContent=title;$('dialogBody').textContent=body;$('dialog').classList.remove('hidden')}
-async function health(){try{await erpApi('/api/bw-erp-items');$('statusText').textContent='BookWide Cloud ERP 已連線';}catch(e){$('statusText').textContent='BookWide Cloud ERP 連線失敗：'+e.message;}}
+async function health(){try{const j=await api('/api/health');$('statusText').textContent=`PostgreSQL ${j.host}:${j.port}/${j.database} 已連線（可讀寫）`;}catch(e){$('statusText').textContent=t('PostgreSQL 尚未連線：')+e.message;}}
+
+function initSidebarResizer(){
+  const grip=$('sidebarResizer'),shell=document.querySelector('.shell'); if(!grip||!shell)return;
+  let startX=0,startW=0;
+  grip.addEventListener('mousedown',e=>{startX=e.clientX;startW=document.querySelector('.sidebar').getBoundingClientRect().width;document.body.classList.add('resizing');const move=ev=>{const w=Math.max(190,Math.min(430,startW+ev.clientX-startX));shell.style.gridTemplateColumns=`${w}px 6px minmax(0,1fr)`;localStorage.setItem('bookwide.erp.sidebarWidth',String(w))};const up=()=>{window.removeEventListener('mousemove',move);window.removeEventListener('mouseup',up);document.body.classList.remove('resizing')};window.addEventListener('mousemove',move);window.addEventListener('mouseup',up)});
+  const saved=Number(localStorage.getItem('bookwide.erp.sidebarWidth'));if(saved>=190&&saved<=430)shell.style.gridTemplateColumns=`${saved}px 6px minmax(0,1fr)`;
+}
 function boot(){
   applyStaticTranslations();
   const langSel=$('languageSelect');if(langSel)langSel.onchange=()=>{currentLang=langSel.value;localStorage.setItem('bookwide.erp.lang',currentLang);applyStaticTranslations();renderModuleBar();renderTree(moduleById(activeModule).tree);if(activePage==='home')showHome();else openPage(activePage,pages[activePage]?.title||activePage);};
