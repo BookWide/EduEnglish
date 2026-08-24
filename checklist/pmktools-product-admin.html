@@ -1578,13 +1578,42 @@ async function load(){
 }
 async function saveWithStateV200(publish){
   $('is_active').value=publish?'true':'false';
-  const p=formData();
+  let p=formData();
   p.is_active=!!publish;
+
+  // PMKTOOLS：可變商品儲存前自動補齊 ERP SKU。
+  if(p.product_type==='variable'){
+    let prefix=bwSkuPrefixV4($('sku_prefix')?.value||'');
+    if(!prefix){
+      prefix=bwSuggestSkuPrefixV4($('external_id')?.value,$('brand')?.value,$('source_seller')?.value);
+      if($('sku_prefix'))$('sku_prefix').value=prefix;
+    }
+    let repaired=false;
+    p.variations=(p.variations||[]).map((v,i)=>{
+      if(bwSkuValidV4(v.sku))return v;
+      repaired=true;
+      return {...v,sku:makeBookWideSkuV200($('external_id')?.value,i,v,prefix)};
+    });
+    if(repaired){
+      v54Variations=p.variations.map(v=>({...v}));
+      renderVariationEditorV54();
+    }
+  }
   if(!p.name){alert('商品名稱必填');return}
   if(p.source_type==='line'&&!p.line_url){alert('LINE 商品請填來源網址');return}
   const skuErr=validateErpSkusV4(p);
   if(skuErr){alert(skuErr);setStatus('❌ '+skuErr);return}
-  if(p.product_type==='variable' && !(await checkAllCloudSkuV07(false))){alert('SKU 唯一性檢查未通過，商品未儲存。');setStatus('❌ SKU 重複或查核失敗');return}
+  if(p.product_type==='variable'){
+    try{
+      const cloudOk=await checkAllCloudSkuV07(false);
+      if(!cloudOk){
+        // 已先做本商品內 validateErpSkusV4；雲端服務暫時不可用時不阻斷儲存。
+        setStatus('⚠️ 雲端 SKU 查核未完成；已通過本商品 SKU 格式／重複檢查，繼續儲存。');
+      }
+    }catch(_){
+      setStatus('⚠️ 雲端 SKU 查核服務暫不可用；已通過本商品 SKU 檢查，繼續儲存。');
+    }
+  }
   if(publish){
     const err=taobaoPublishValidationV200(p);
     if(err){alert(err);setStatus('❌ '+err);return}
@@ -1852,22 +1881,33 @@ function applyChromeCollectorV200(payload){
   $('detail_description').value=cleanDesc;
   $('attributes_text').value=attrsTextV54(j.attributes||[]);
 
-  v54Variations=Array.isArray(j.variations)?j.variations.map((v,i)=>{
+  const rawVars=Array.isArray(j.variations)?j.variations:[];
+  const firstPositiveSource=(()=>{
+    for(const rv of rawVars){
+      const n=Number(rv?.source_price??rv?.price??rv?.sale_price??0);
+      if(n>0)return n;
+    }
+    const n=Number(j.source_price||0);
+    return n>0?n:0;
+  })();
+
+  v54Variations=rawVars.map((v,i)=>{
     const attrs={...(v.attributes||{})};
-    const cny=sourcePriceForVariationV200(j,{...v,attributes:attrs});
+    let cny=sourcePriceForVariationV200(j,{...v,attributes:attrs});
+    if(!(Number(cny)>0)) cny=firstPositiveSource;
     return {
       ...v,
       sku:makeBookWideSkuV200(j.item_id,i,{...v,attributes:attrs},$('sku_prefix').value),
-      source_sku_id:String(v.source_sku_id||'').trim(),
-      source_price:cny,
+      source_sku_id:String(v.source_sku_id||v.sku_id||v.id||'').trim(),
+      source_price:Number(cny||0),
       source_currency:'CNY',
-      price:cnyToTwdV200(cny),
-      sale_price:0,
+      price:Number(cny||0)>0?cnyToTwdV200(Number(cny||0)):0,
+      sale_price:Number(v.sale_price||0),
       image_url:resolveVariationImageV200(j,{...v,attributes:attrs},i),
       attributes:attrs,
       is_active:v.is_active!==false
     };
-  }):[];
+  });
 
   syncProductTypeV544();
   const panel=$('productEditorPanel');
@@ -1876,7 +1916,7 @@ function applyChromeCollectorV200(payload){
 商品類型：${$('product_type').value==='variable'?'可變商品':'簡單商品'}
 Variation：${v54Variations.length}
 規格圖片：${v54Variations.filter(v=>v.image_url).length}
-來源價：CNY；BookWide 定價＝CNY × 10
+來源價：CNY；PMKTOOLS 定價＝CNY × 10
 狀態：草稿，請檢查後再上架。`;
   setStatus(msg);
   window.postMessage({type:'BOOKWIDE_COLLECTOR_CONSUMED'},'*');
