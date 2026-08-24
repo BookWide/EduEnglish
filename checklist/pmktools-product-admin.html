@@ -1080,11 +1080,52 @@ async function batchLocalizeVariationsV5(target='zh-TW'){
   if(fail)alert(`批次完成：成功 ${ok}、失敗 ${fail}。\n\n${errors.slice(0,8).join('\n')}`);
 }
 
+
+async function batchBrandifyVariationsV5(){
+  try{v54Variations=readVariationsV54()}catch(_e){}
+  const btn=$('v545BatchBrand'),prog=$('v545BatchProgress');
+  const groups=new Map();
+  for(let i=0;i<v54Variations.length;i++){
+    const v=v54Variations[i]||{},current=String(v.image_url||'').trim();
+    if(!current)continue;
+    if(String(v.image_mode||'')==='brandify')continue;
+    const original=String(v.original_image_url||current).trim();
+    if(!groups.has(original))groups.set(original,{original,indexes:[]});
+    groups.get(original).indexes.push(i);
+  }
+  const jobs=[...groups.values()];
+  if(!jobs.length)return alert('目前沒有需要品牌化的規格圖片。');
+  if(!confirm(`AI 批次品牌化：${v54Variations.length} 個規格，實際送 AI ${jobs.length} 張不重複來源圖。\n\n會同時完成：繁體化＋換成自有商品圖版面＋移除供應商視覺標記；商品本體、型號、尺寸必須保留。\n\n開始嗎？`))return;
+  const {data:{session}}=await SB.auth.getSession();if(!session?.access_token)return alert('登入狀態失效，請重新登入');
+  let productId=String($('external_id')?.value||editingId||'').trim();if(!productId){productId='bw-'+Date.now().toString(36);$('external_id').value=productId}
+  let done=0,ok=0,fail=0,reused=0,cursor=0;const errors=[];
+  const status=()=>{const s=`AI 批次品牌化 ${done}/${jobs.length}｜成功 ${ok}｜失敗 ${fail}｜共用 ${reused}`;if(prog)prog.textContent=s;setStatus('⏳ '+s)};
+  if(btn)btn.disabled=true;status();
+  async function one(job){
+    const idx=job.indexes[0],v=v54Variations[idx]||{},sku=String(v.sku||'').trim(),rawName=Object.values(v.attributes||{}).join(' / ');
+    try{
+      const r=await fetch(HIKING_API_BASE+'/api/bw-product-variation-image-localize',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},body:JSON.stringify({image_url:job.original,original_image_url:job.original,target_lang:'zh-TW',mode:'brandify',product_id:productId,sku,display_name:rawName}),cache:'no-store'});
+      const j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false||(!j.image_url&&!j.proxy_image_url&&!j.r2_key))throw new Error(j.message||j.error||('HTTP '+r.status));
+      const readableUrl=await bwResolveAiImageUrl(j);
+      for(const i of job.indexes){const old=v54Variations[i]||{};v54Variations[i]={...old,original_image_url:String(old.original_image_url||job.original),image_url:readableUrl,image_locale:'zh-TW',image_mode:'brandify',ai_r2_key:String(j.r2_key||'')}}
+      reused+=Math.max(0,job.indexes.length-1);ok++;
+    }catch(e){fail++;errors.push(`${sku||rawName||('規格 '+(idx+1))}：${String(e?.message||e)}`)}
+    finally{done++;status()}
+  }
+  async function runner(){while(true){const n=cursor++;if(n>=jobs.length)return;await one(jobs[n])}}
+  await Promise.all([runner(),runner()]);
+  renderVariationEditorV54();
+  try{await productAdminPost('/api/bw-product-save',{id:editingId||'',product:formData()});await load();setStatus(`✅ AI 批次品牌化完成：送 AI ${jobs.length} 張，成功 ${ok}、失敗 ${fail}、共用 ${reused} 個規格；商品已儲存。`+(errors.length?'\n'+errors.join('\n'):''))}
+  catch(e){setStatus(`⚠️ 品牌化已完成，但自動儲存失敗：${String(e?.message||e)}；請按「儲存商品」。`)}
+  if(btn)btn.disabled=false;
+  if(fail)alert(`批次品牌化完成：成功 ${ok}、失敗 ${fail}。\n\n${errors.slice(0,8).join('\n')}`);
+}
+
 function renderVariationEditorV54(){
   const box=$('variationEditor');if(!box)return;
   if($('product_type').value!=='variable'){box.innerHTML='<div class="muted" style="padding:16px">目前是簡單商品。</div>';return}
   if(!v54Variations.length){box.innerHTML='<div class="muted" style="padding:16px">尚未產生變化類型。先設定「屬性」，再按「產生規格組合」。</div>';return}
-  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="v545BatchTw">✨ AI 批次轉繁體</button><span class="v545-count">${v54Variations.length} 個變化類型</span><span id="v545BatchProgress" class="muted" style="margin-left:8px"></span></div>`+
+  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="v545BatchTw">✨ AI 批次轉繁體</button><button type="button" class="btn" id="v545BatchBrand">✨ AI 批次品牌化</button><span class="v545-count">${v54Variations.length} 個變化類型</span><span id="v545BatchProgress" class="muted" style="margin-left:8px"></span></div>`+
   v54Variations.map((v,i)=>`<div class="v545-variation" data-vrow="${i}">
     <div class="v545-summary">
       <div class="v545-handle" title="排序">≡</div>
@@ -1149,6 +1190,7 @@ function renderVariationEditorV54(){
   box.querySelectorAll('[data-vai-en]').forEach(btn=>btn.onclick=()=>localizeVariationImageV4(Number(btn.dataset.vaiEn),'en'));
   box.querySelectorAll('[data-vrestore]').forEach(btn=>btn.onclick=()=>restoreVariationOriginalImageV4(Number(btn.dataset.vrestore)));
   if($('v545BatchTw'))$('v545BatchTw').onclick=()=>batchLocalizeVariationsV5('zh-TW');
+  if($('v545BatchBrand'))$('v545BatchBrand').onclick=()=>batchBrandifyVariationsV5();
   $('v545ExpandAll').onclick=()=>{box.querySelectorAll('.v545-variation').forEach(x=>x.classList.add('open'));box.querySelectorAll('[data-vedit]').forEach(x=>x.textContent='收合')};
   $('v545CollapseAll').onclick=()=>{box.querySelectorAll('.v545-variation').forEach(x=>x.classList.remove('open'));box.querySelectorAll('[data-vedit]').forEach(x=>x.textContent='編輯')};
 }
