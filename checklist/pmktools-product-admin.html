@@ -933,6 +933,22 @@ function v545Thumb(v,i){
   const u=String(v?.image_url||'').trim();
   return u?`<img id="v545ThumbImg${i}" src="${esc(u)}" alt="規格圖片">`:`<div id="v545ThumbImg${i}" class="v545-thumb-empty">未設定規格圖片<br>將使用商品圖片／圖庫</div>`;
 }
+function bwWaitImageReadable(url,timeout=12000){
+  return new Promise((resolve,reject)=>{
+    const u=String(url||'').trim();if(!u)return reject(new Error('圖片網址為空'));
+    const img=new Image();let done=false;
+    const end=(ok,msg)=>{if(done)return;done=true;clearTimeout(timer);img.onload=img.onerror=null;ok?resolve(u):reject(new Error(msg||'圖片無法讀取'))};
+    const timer=setTimeout(()=>end(false,'圖片讀取逾時'),timeout);
+    img.onload=()=>end(true);img.onerror=()=>end(false,'圖片網址無法顯示');
+    img.src=u+(u.includes('?')?'&':'?')+'_bwcheck='+Date.now();
+  });
+}
+async function bwResolveAiImageUrl(j){
+  const candidates=[j?.image_url,j?.proxy_image_url,j?.r2_key?(HIKING_API_BASE+'/api/pmk-asset?key='+encodeURIComponent(j.r2_key)):''].map(x=>String(x||'').trim()).filter(Boolean);
+  let last=null;
+  for(const u of [...new Set(candidates)]){try{await bwWaitImageReadable(u);return u}catch(e){last=e}}
+  throw new Error('AI 圖已存 R2，但公開網址仍無法讀取'+(last?'：'+last.message:''));
+}
 async function localizeVariationImageV4(i,target){
   const v=v54Variations[i]; if(!v)return;
   const current=String(document.querySelector(`[data-vimage="${i}"]`)?.value||v.image_url||'').trim();
@@ -963,8 +979,9 @@ async function localizeVariationImageV4(i,target){
       cache:'no-store'
     });
     const j=await r.json().catch(()=>({}));
-    if(!r.ok||j.ok===false||!j.image_url)throw new Error(j.message||j.error||('HTTP '+r.status));
-    v54Variations[i]={...v54Variations[i],original_image_url:original,image_url:j.image_url,image_locale:target};
+    if(!r.ok||j.ok===false||(!j.image_url&&!j.proxy_image_url&&!j.r2_key))throw new Error(j.message||j.error||('HTTP '+r.status));
+    const readableUrl=await bwResolveAiImageUrl(j);
+    v54Variations[i]={...v54Variations[i],original_image_url:original,image_url:readableUrl,image_locale:target,ai_r2_key:String(j.r2_key||'')};
     renderVariationEditorV54();
     const row=document.querySelector(`[data-vrow="${i}"]`); if(row)row.classList.add('open');
     setStatus(`✅ ${target==='zh-TW'?'繁體':'英文'}規格圖已產生；請確認圖片後再儲存商品。`);
