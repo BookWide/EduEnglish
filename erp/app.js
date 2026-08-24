@@ -22,7 +22,7 @@ const ERP_SUPABASE_URL='https://jeajrwpmrgczimmrflxo.supabase.co';
 const ERP_SUPABASE_ANON_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYm1yZ2N6aW1tcmZseG8iLCJyZWYiOiJqZWFqcndwbXJnY3ppbW1yZmx4byIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzYwNzE4OTM5LCJleHAiOjIwNzYyOTQ5Mzl9.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do'.replace('c3ViYW1yZ2N6aW1tcmZseG8','c3ViIjo');
 const ERP_SB=window.supabase?window.supabase.createClient('https://jeajrwpmrgczimmrflxo.supabase.co','eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImplYWpyd3BtcmdjemltbXJmbHhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjA3MTg5MzksImV4cCI6MjA3NjI5NDkzOX0.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do'):null;
 const ERP_SALES_PAGES=new Set(['quotation','sales-order','shipment','sales-return']);
-let erpSalesState={type:'',rows:[],current:null,items:[]};
+let erpSalesState={type:'',rows:[],current:null,items:[],customers:[]};
 
 function erpEsc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 function erpMoney(v){return Number(v||0).toLocaleString('zh-TW',{maximumFractionDigits:2})}
@@ -38,8 +38,38 @@ async function erpApi(path,opt={}){
   if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));return j;
 }
 function erpBlankDoc(type){
-  return {id:'',doc_no:erpNewNo(type),status:'draft',date:erpToday(),valid_until:'',customer_id:'',customer_name:'',customer_po:'',currency:'TWD',exchange_rate:1,tax_rate:5,delivery:'',payment_terms:'',salesperson:'',memo:'',source_doc_no:'',lines:[{sku:'',customer_sku:'',name:'',qty:1,unit:'PCS',list_price:0,discount:0,unit_price:0,delivery_date:''}]};
+  return {id:'',doc_no:erpNewNo(type),status:'draft',date:erpToday(),valid_until:'',customer_id:'',customer_name:'',customer_po:'',currency:'TWD',exchange_rate:1,tax_rate:5,delivery:'',payment_terms:'',salesperson:'',memo:'',source_doc_no:'',lines:[
+{sku:'',customer_sku:'',name:'',qty:1,unit:'PCS',list_price:0,discount:1,unit_price:0,delivery_date:''},
+{sku:'',customer_sku:'',name:'',qty:0,unit:'PCS',list_price:0,discount:1,unit_price:0,delivery_date:''},
+{sku:'',customer_sku:'',name:'',qty:0,unit:'PCS',list_price:0,discount:1,unit_price:0,delivery_date:''}
+]};
 }
+
+async function erpLoadCustomersV11(){
+  try{const j=await erpApi('/api/erp-customers');erpSalesState.customers=j.rows||[]}catch{erpSalesState.customers=[]}
+}
+function erpCustomerByIdV11(id){return erpSalesState.customers.find(x=>String(x.customer_id).toUpperCase()===String(id||"").trim().toUpperCase())}
+function erpOpenCustomerMasterV11(){
+  const c={customer_id:'',name:'',tax_id:'',contact:'',phone:'',mobile:'',email:'',address:'',invoice_title:'',payment_terms:'',delivery:'',currency:'TWD',salesperson:'',notes:''};
+  showDialog('客戶資料維護',`<div class="customer-master-v11">
+    <label>客戶編號<input id="cm_id"></label><label>客戶名稱<input id="cm_name"></label>
+    <label>統一編號<input id="cm_tax"></label><label>聯絡人<input id="cm_contact"></label>
+    <label>電話<input id="cm_phone"></label><label>手機<input id="cm_mobile"></label>
+    <label>E-mail<input id="cm_email"></label><label>發票抬頭<input id="cm_invoice"></label>
+    <label class="wide">地址<input id="cm_address"></label><label>付款條件<input id="cm_payment"></label>
+    <label>送貨方式<input id="cm_delivery"></label><label>幣別<input id="cm_currency" value="TWD"></label>
+    <label>業務員<input id="cm_sales"></label><label class="wide">備註<textarea id="cm_notes"></textarea></label>
+    <div class="wide customer-master-actions"><select id="cm_existing"><option value="">載入既有客戶…</option>${erpSalesState.customers.map(x=>`<option value="${erpEsc(x.customer_id)}">${erpEsc(x.customer_id)}｜${erpEsc(x.name)}</option>`).join('')}</select><button id="cm_save">儲存客戶</button></div>
+  </div>`);
+  const fill=x=>{[['cm_id','customer_id'],['cm_name','name'],['cm_tax','tax_id'],['cm_contact','contact'],['cm_phone','phone'],['cm_mobile','mobile'],['cm_email','email'],['cm_invoice','invoice_title'],['cm_address','address'],['cm_payment','payment_terms'],['cm_delivery','delivery'],['cm_currency','currency'],['cm_sales','salesperson'],['cm_notes','notes']].forEach(([a,b])=>{if($(a))$(a).value=x[b]||''})};
+  $('cm_existing').onchange=()=>{const x=erpCustomerByIdV11($('cm_existing').value);if(x)fill(x)};
+  $('cm_save').onclick=async()=>{const get=id=>$(id).value.trim(),x={customer_id:get('cm_id'),name:get('cm_name'),tax_id:get('cm_tax'),contact:get('cm_contact'),phone:get('cm_phone'),mobile:get('cm_mobile'),email:get('cm_email'),invoice_title:get('cm_invoice'),address:get('cm_address'),payment_terms:get('cm_payment'),delivery:get('cm_delivery'),currency:get('cm_currency')||'TWD',salesperson:get('cm_sales'),notes:get('cm_notes')};if(!x.customer_id||!x.name)return alert('客戶編號、客戶名稱必填');await erpApi('/api/erp-customer-save',{method:'POST',body:JSON.stringify({customer:x})});await erpLoadCustomersV11();alert('客戶資料已儲存')};
+}
+function erpApplyCustomerV11(){
+  const c=erpCustomerByIdV11($('sd_customer_id')?.value);if(!c)return;
+  $('sd_customer_name').value=c.name||'';if($('sd_payment_terms'))$('sd_payment_terms').value=c.payment_terms||'';if($('sd_delivery'))$('sd_delivery').value=c.delivery||'';if($('sd_currency'))$('sd_currency').value=c.currency||'TWD';if($('sd_salesperson'))$('sd_salesperson').value=c.salesperson||'';
+}
+
 async function erpLoadItems(){
   if(erpSalesState.items.length)return erpSalesState.items;
   const j=await erpApi('/api/bw-erp-items');erpSalesState.items=j.items||j.products||[];return erpSalesState.items;
@@ -54,7 +84,7 @@ async function erpOpenSalesPage(type){
   $('pageBody').innerHTML=`<div class="runec-sales-shell"><aside class="runec-sales-list"><div class="runec-list-head"><b>${erpTypeTitle(type)}總覽</b><input id="erpSalesQ" placeholder="搜尋單號／客戶"></div><div id="erpSalesRows" class="runec-doc-list">讀取中…</div></aside><section id="erpSalesForm" class="runec-sales-form"></section></div>`;
   document.querySelectorAll('[data-sales-action]').forEach(b=>b.onclick=()=>erpSalesAction(b.dataset.salesAction));
   $('erpSalesQ').oninput=()=>erpRenderDocList();
-  await Promise.all([erpLoadItems(),erpLoadSalesDocs()]);
+  await Promise.all([erpLoadItems(),erpLoadCustomersV11(),erpLoadSalesDocs()]);
   if(!erpSalesState.current)erpEditSalesDoc(erpBlankDoc(type));
 }
 async function erpLoadSalesDocs(){
@@ -74,8 +104,8 @@ function erpLineHtml(l,i){
     <td><input data-k="name" value="${erpEsc(l.name)}"></td>
     <td><input data-k="qty" type="number" min="0" step="0.01" value="${Number(l.qty||0)}"></td>
     <td><input data-k="unit" value="${erpEsc(l.unit||'PCS')}"></td>
-    <td><input data-k="list_price" type="number" step="0.01" value="${Number(l.list_price||0)}"></td>
-    <td><input data-k="discount" type="number" step="0.01" value="${Number(l.discount||0)}"></td>
+    <td class="print-hide"><input data-k="list_price" type="number" step="0.01" value="${Number(l.list_price||0)}"></td>
+    <td class="print-hide"><input data-k="discount" type="number" step="0.01" value="${Number(l.discount||0)}"></td>
     <td><input data-k="unit_price" type="number" step="0.01" value="${Number(l.unit_price||0)}"></td>
     <td class="line-amount">${erpMoney(Number(l.qty||0)*Number(l.unit_price||0))}</td>
     <td><input data-k="delivery_date" type="date" value="${erpEsc(l.delivery_date)}"></td>
@@ -85,12 +115,13 @@ function erpEditSalesDoc(doc){
   erpSalesState.current=doc;const type=erpSalesState.type;
   const items=erpSalesState.items||[];
   $('erpSalesForm').innerHTML=`
+    <datalist id="erpCustomerList">${erpSalesState.customers.map(x=>`<option value="${erpEsc(x.customer_id)}">${erpEsc(x.name)}</option>`).join('')}</datalist>
     <datalist id="erpSkuList">${items.map(x=>`<option value="${erpEsc(x.sku||x.id)}">${erpEsc(x.name||'')}</option>`).join('')}</datalist>
     <div class="runec-form-top">
       <label>單號<input id="sd_doc_no" value="${erpEsc(doc.doc_no)}" ${doc.status==='effective'?'readonly':''}></label>
       <label>日期<input id="sd_date" type="date" value="${erpEsc(doc.date||erpToday())}"></label>
       <label>狀態<input value="${doc.status==='effective'?'已生效':'草稿'}" readonly></label>
-      <label>客戶編號<input id="sd_customer_id" value="${erpEsc(doc.customer_id)}"></label>
+      <label>客戶編號<input id="sd_customer_id" list="erpCustomerList" value="${erpEsc(doc.customer_id)}"></label>
       <label>客戶名稱<input id="sd_customer_name" value="${erpEsc(doc.customer_name)}"></label>
       <label>客戶詢價／PO<input id="sd_customer_po" value="${erpEsc(doc.customer_po)}"></label>
       <label>有效日期<input id="sd_valid_until" type="date" value="${erpEsc(doc.valid_until)}"></label>
@@ -102,8 +133,8 @@ function erpEditSalesDoc(doc){
       <label>業務員<input id="sd_salesperson" value="${erpEsc(doc.salesperson)}"></label>
       ${type!=='quotation'?`<label>來源單號<input id="sd_source_doc_no" value="${erpEsc(doc.source_doc_no)}"></label>`:''}
     </div>
-    <div class="runec-line-tools"><button id="erpAddLine" type="button">＋ 新增明細</button><button id="erpPriceHistory" type="button">客戶歷史價格</button>${type==='quotation'?'<button id="erpToOrder" type="button">轉銷售訂單</button>':''}${type==='sales-order'?'<button id="erpToShipment" type="button">轉出貨單</button>':''}</div>
-    <div class="runec-lines-wrap"><table class="runec-lines"><thead><tr><th>商品 SKU</th><th>客戶料號</th><th>說明</th><th>數量</th><th>單位</th><th>牌價</th><th>折扣 %</th><th>報價/成交單價</th><th>金額</th><th>交期</th><th></th></tr></thead><tbody id="erpLineBody">${(doc.lines||[]).map(erpLineHtml).join('')}</tbody></table></div>
+    <div class="runec-line-tools"><button id="erpCustomerMaster" type="button">客戶資料</button><button id="erpAddLine" type="button">＋ 新增明細</button><button id="erpPriceHistory" type="button">客戶歷史價格</button>${type==='quotation'?'<button id="erpToOrder" type="button">轉銷售訂單</button>':''}${type==='sales-order'?'<button id="erpToShipment" type="button">轉出貨單</button>':''}</div>
+    <div class="runec-lines-wrap"><table class="runec-lines"><thead><tr><th>商品 SKU</th><th>客戶料號</th><th>說明</th><th>數量</th><th>單位</th><th class="print-hide">牌價</th><th class="print-hide">折扣</th><th>報價/成交單價</th><th>金額</th><th>交期</th><th></th></tr></thead><tbody id="erpLineBody">${(doc.lines||[]).map(erpLineHtml).join('')}</tbody></table></div>
     <div class="runec-sales-bottom"><label>備註<textarea id="sd_memo">${erpEsc(doc.memo)}</textarea></label><div class="runec-totals"><div>未稅 <b id="sd_subtotal">0</b></div><div>稅額 <b id="sd_tax">0</b></div><div>總計 <b id="sd_total">0</b></div></div></div>`;
   erpBindSalesForm();erpCalcSales();erpRenderDocList();
 }
@@ -115,8 +146,10 @@ function erpReadSalesForm(){
   return d;
 }
 function erpBindSalesForm(){
-  $('erpAddLine').onclick=()=>{const d=erpReadSalesForm();d.lines.push({sku:'',customer_sku:'',name:'',qty:1,unit:'PCS',list_price:0,discount:0,unit_price:0,delivery_date:''});erpEditSalesDoc(d)};
-  document.querySelectorAll('[data-remove-line]').forEach(b=>b.onclick=()=>{const d=erpReadSalesForm();d.lines.splice(Number(b.dataset.removeLine),1);if(!d.lines.length)d.lines.push({sku:'',qty:1,unit:'PCS',list_price:0,discount:0,unit_price:0});erpEditSalesDoc(d)});
+  if($('erpCustomerMaster'))$('erpCustomerMaster').onclick=erpOpenCustomerMasterV11;
+  if($('sd_customer_id'))$('sd_customer_id').onchange=erpApplyCustomerV11;
+  $('erpAddLine').onclick=()=>{const d=erpReadSalesForm();d.lines.push({sku:'',customer_sku:'',name:'',qty:1,unit:'PCS',list_price:0,discount:1,unit_price:0,delivery_date:''});erpEditSalesDoc(d)};
+  document.querySelectorAll('[data-remove-line]').forEach(b=>b.onclick=()=>{const d=erpReadSalesForm();d.lines.splice(Number(b.dataset.removeLine),1);if(!d.lines.length)d.lines.push({sku:'',qty:1,unit:'PCS',list_price:0,discount:1,unit_price:0});erpEditSalesDoc(d)});
   document.querySelectorAll('#erpLineBody input').forEach(inp=>inp.oninput=()=>erpCalcSales());
   document.querySelectorAll('#erpLineBody [data-k="sku"]').forEach((inp,i)=>inp.onchange=async()=>{
     const sku=inp.value.trim().toUpperCase(),item=erpSalesState.items.find(x=>String(x.sku||x.id).toUpperCase()===sku);if(!item)return;
@@ -124,7 +157,7 @@ function erpBindSalesForm(){
     const cid=$('sd_customer_id').value.trim();if(cid){try{const h=await erpApi('/api/erp-customer-price?customer_id='+encodeURIComponent(cid)+'&sku='+encodeURIComponent(sku));if(h.rows?.length){tr.querySelector('[data-k="unit_price"]').value=Number(h.rows[0].unit_price||item.price||0)}}catch{}}
     erpCalcSales();
   });
-  document.querySelectorAll('#erpLineBody [data-k="discount"]').forEach(inp=>inp.onchange=()=>{const tr=inp.closest('tr'),lp=Number(tr.querySelector('[data-k="list_price"]').value||0),dc=Number(inp.value||0);tr.querySelector('[data-k="unit_price"]').value=(lp*(1-dc/100)).toFixed(2);erpCalcSales()});
+  document.querySelectorAll('#erpLineBody [data-k="discount"]').forEach(inp=>inp.onchange=()=>{const tr=inp.closest('tr'),lp=Number(tr.querySelector('[data-k="list_price"]').value||0),raw=Number(inp.value||0);let factor=raw;if(raw>1)factor=raw/100;if(raw===0)factor=1;factor=Math.max(0,Math.min(1,factor));tr.querySelector('[data-k="unit_price"]').value=(lp*factor).toFixed(2);erpCalcSales()});
   $('erpPriceHistory').onclick=erpShowPriceHistory;
   if($('erpToOrder'))$('erpToOrder').onclick=()=>erpConvertDoc('sales-order');
   if($('erpToShipment'))$('erpToShipment').onclick=()=>erpConvertDoc('shipment');
