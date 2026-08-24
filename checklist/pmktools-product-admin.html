@@ -1585,57 +1585,50 @@ function applyChromeCollectorV200(payload){
 
   $('source_type').value='taobao';
   $('external_id').value='taobao-'+String(j.item_id||Date.now());
-  const collectorVariations=Array.isArray(j.variations)?j.variations.filter(Boolean):[];
-  const collectorAttributes=Array.isArray(j.attributes)?j.attributes.filter(Boolean):[];
+  const rawVariationSources=[
+    j.variations,j.variation,j.variants,j.skus,j.skuList,j.sku_list,
+    j.items,j.options,j.specs,j.specifications
+  ];
+  const collectorVariations=rawVariationSources.find(x=>Array.isArray(x)&&x.length) || [];
+  const collectorAttributes=Array.isArray(j.attributes)?j.attributes:
+    Array.isArray(j.attrs)?j.attrs:
+    Array.isArray(j.properties)?j.properties:[];
   const hasMultiValueAttribute=collectorAttributes.some(a=>{
-    const raw=Array.isArray(a?.values)?a.values:
-      Array.isArray(a?.options)?a.options:
-      String(a?.values||a?.options||'').split(/[,，|]/).map(x=>x.trim()).filter(Boolean);
-    return raw.length>1;
+    const v=a?.values ?? a?.options ?? a?.items ?? a?.value ?? '';
+    const vals=Array.isArray(v)?v:String(v).split(/[,，|/]/).map(x=>x.trim()).filter(Boolean);
+    return vals.length>1;
   });
-  // 一個淘寶商品頁只建立 1 筆主商品；多規格全部保留在 variations[]。
-  $('product_type').value=(collectorVariations.length>1||hasMultiValueAttribute)?'variable':'simple';
-  $('brand').value='';
-  $('name').value=sourceTitle;
-  $('price').value=String(cnyToTwdV200(Number(j.source_price||0)));
-  $('supplier').value=j.seller||'淘寶／天貓供應商';
-  $('is_active').value='false';
+  const explicitVariable =
+    j.product_type==='variable'||j.productType==='variable'||
+    j.type==='variable'||j.hasVariations===true||j.has_variations===true;
+  const explicitSimple =
+    j.product_type==='simple'||j.productType==='simple'||j.type==='simple';
 
-  $('line_url').value=j.source_url||'';
-  $('line_url_shadow').value=j.source_url||'';
-  $('source_platform').value=j.source_platform||'taobao';
-  $('source_item_id').value=j.item_id||'';
-  $('source_currency').value='CNY';
-  $('source_seller').value=j.seller||'';
+  // 核心規則：只要 Collector 帶有 SKU/規格陣列，就絕不能降成簡單商品。
+  const isVariable = explicitVariable ||
+    collectorVariations.length>0 ||
+    hasMultiValueAttribute ||
+    (!explicitSimple && collectorAttributes.length>0);
+  $('product_type').value=isVariable?'variable':'simple';
 
-  $('image_url').value=j.image_url||'';renderMainImageV547();
-  if($('video_url')){$('video_url').value=String(j.video_url||'');renderVideoV552()}
-  $('gallery_urls').value=(j.gallery_urls||[]).join('\n');galleryPreviewV54();
-  $('detail_description').value=cleanDesc;
-  $('attributes_text').value=attrsTextV54(j.attributes||[]);
-
-  v54Variations=Array.isArray(j.variations)?j.variations.map((v,i)=>{
-    const attrs={...(v.attributes||{})};
-    const cny=sourcePriceForVariationV200(j,{...v,attributes:attrs});
-    return {
-      ...v,
-      sku:String(v.sku||'').trim()||makeBookWideSkuV200(j.item_id,i,{...v,attributes:attrs}),
-      source_sku_id:String(v.source_sku_id||'').trim(),
-      source_price:cny,
-      source_currency:'CNY',
-      price:cnyToTwdV200(cny),
-      sale_price:0,
-      image_url:resolveVariationImageV200(j,{...v,attributes:attrs},i),
-      attributes:attrs,
-      is_active:v.is_active!==false
-    };
-  }):[];
-
+  // 將 Collector 原始 SKU 正規化後保留，不可因欄位名稱不同而清空。
+  if(isVariable && collectorVariations.length){
+    const norm = collectorVariations.map((v,i)=>{
+      if(typeof v==='string') return {name:v, sku:'', price:0, stock:0, enabled:true};
+      const name=v.name||v.title||v.label||v.spec||v.option||v.value||v.skuName||v.sku_name||('規格 '+String(i+1).padStart(2,'0'));
+      const sku=v.sku||v.skuId||v.sku_id||v.id||v.code||'';
+      const price=Number(v.price??v.salePrice??v.sale_price??v.amount??0)||0;
+      const stock=Number(v.stock??v.quantity??v.qty??v.inventory??0)||0;
+      return {...v,name,sku,price,stock,enabled:v.enabled!==false};
+    });
+    // 只有 Collector 確實提供 SKU 時才覆寫；絕不把已抓到的 variations 清空。
+    v54Variations=norm;
+  }
   if($('product_type').value!=='variable'){
     v54Variations=[];
     $('attributes_text').value='';
   }else{
-    $('attributes_text').value=attrsTextV54(j.attributes||[]);
+    $('attributes_text').value=attrsTextV54(collectorAttributes);
   }
   syncProductTypeV544();
   const panel=$('productEditorPanel');
