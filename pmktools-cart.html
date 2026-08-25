@@ -773,6 +773,7 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
 }
 </style>
 
+<script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 </head><body>
 <div class="wrap">
   <div class="top"><a class="back" href="/pmktools.html">← 返回商品庫</a></div>
@@ -921,8 +922,204 @@ document.addEventListener('change',e=>{if(!e.target.matches('[data-qty]'))return
 $('clear').onclick=()=>{if(confirm('確定清空購物車？'))save([])};
 $('checkout').onclick=()=>location.href='/pmktools-checkout.html?mode=cart';
 
+
+async function exportQuotationExcel(){
+  saveQuote();
+  if(typeof ExcelJS==='undefined'){
+    alert('Excel 元件載入失敗，請重新整理後再試。');
+    return;
+  }
+
+  const wb=new ExcelJS.Workbook();
+  wb.creator='PMKTOOLS';
+  wb.company='聯鑽企業有限公司';
+  wb.subject='報價單';
+  wb.title=`聯鑽報價單 ${$('qQuoteNo')?.value||''}`;
+
+  const ws=wb.addWorksheet('報價單',{
+    pageSetup:{
+      paperSize:9,
+      orientation:'portrait',
+      fitToPage:true,
+      fitToWidth:1,
+      fitToHeight:1,
+      horizontalCentered:true,
+      verticalCentered:false,
+      margins:{left:0.28,right:0.28,top:0.35,bottom:0.35,header:0.15,footer:0.15}
+    },
+    properties:{defaultRowHeight:19}
+  });
+
+  ws.columns=[
+    {key:'A',width:18},{key:'B',width:12},{key:'C',width:26},{key:'D',width:26},
+    {key:'E',width:13},{key:'F',width:13},{key:'G',width:14},{key:'H',width:14}
+  ];
+
+  const thin={style:'thin',color:{argb:'FF666666'}};
+  const border={top:thin,left:thin,bottom:thin,right:thin};
+  const labelFill={type:'pattern',pattern:'solid',fgColor:{argb:'FFF2F4F7'}};
+  const headerFill={type:'pattern',pattern:'solid',fgColor:{argb:'FFE8EDF3'}};
+  const fontName='Microsoft JhengHei';
+
+  ws.mergeCells('A1:D2');
+  ws.getCell('A1').value='聯鑽企業有限公司';
+  ws.getCell('A1').font={name:fontName,size:18,bold:true};
+  ws.getCell('A1').alignment={vertical:'middle'};
+
+  ws.mergeCells('E1:H1');
+  ws.getCell('E1').value='報 價 單';
+  ws.getCell('E1').font={name:fontName,size:18,bold:true};
+  ws.getCell('E1').alignment={horizontal:'center',vertical:'middle'};
+
+  ws.mergeCells('A3:D3');
+  ws.getCell('A3').value='聯鑽企業有限公司｜統一編號：53270306｜Taichung City, Taiwan';
+  ws.getCell('A3').font={name:fontName,size:9,bold:true};
+
+  ws.mergeCells('A4:D4');
+  ws.getCell('A4').value='BookWide Enterprise Co., Ltd. ｜ Tel: +886 4 24623591';
+  ws.getCell('A4').font={name:fontName,size:9};
+
+  ws.mergeCells('E2:H2');
+  ws.getCell('E2').value=`印表日期：${twDate()}`;
+  ws.getCell('E2').font={name:fontName,size:10,bold:true};
+  ws.getCell('E2').alignment={horizontal:'center'};
+
+  const meta=[
+    ['客戶',$('qCustomer')?.value||'','聯絡人',$('qContact')?.value||'','編號',$('qQuoteNo')?.value||''],
+    ['客戶統編',$('qTaxId')?.value||'','電話',$('qPhone')?.value||'','交易日',$('qTradeDate')?.value||''],
+    ['客戶詢價單編號',$('qRefNo')?.value||'','傳真',$('qFax')?.value||'','倉庫',$('qDepot')?.value||''],
+    ['帳單地址',$('qBillAddress')?.value||'','','','業務人員',$('qAgent')?.value||'RAYMOND'],
+    ['送貨地址',$('qShipAddress')?.value||'','','','業務電話',$('qAgentPhone')?.value||'+886 4 24623591']
+  ];
+  let mr=6;
+  for(const row of meta){
+    const vals=[row[0],row[1],row[2],row[3],row[4],row[5]];
+    ws.getCell(mr,1).value=vals[0]; ws.mergeCells(mr,1,mr,1);
+    ws.getCell(mr,2).value=vals[1]; ws.mergeCells(mr,2,mr,3);
+    ws.getCell(mr,4).value=vals[2];
+    ws.getCell(mr,5).value=vals[3];
+    ws.getCell(mr,6).value=vals[4];
+    ws.getCell(mr,7).value=vals[5]; ws.mergeCells(mr,7,mr,8);
+
+    [1,4,6].forEach(c=>{
+      const cell=ws.getCell(mr,c);
+      cell.fill=labelFill;
+      cell.font={name:fontName,size:10,bold:true};
+      cell.border=border;
+      cell.alignment={vertical:'middle'};
+    });
+    [[2,3],[5,5],[7,8]].forEach(([c1,c2])=>{
+      for(let c=c1;c<=c2;c++){
+        const cell=ws.getCell(mr,c);
+        cell.font={name:fontName,size:10,bold:true};
+        cell.border=border;
+        cell.alignment={vertical:'middle',wrapText:true};
+      }
+    });
+    ws.getRow(mr).height=25;
+    mr++;
+  }
+
+  const start=12;
+  const headers=['編號','名稱／規格','數量','單位','單價','金額','稅','備註'];
+  headers.forEach((v,i)=>{
+    const c=ws.getCell(start,i+1);
+    c.value=v;c.font={name:fontName,size:10,bold:true};
+    c.fill=headerFill;c.border=border;c.alignment={horizontal:'center',vertical:'middle'};
+  });
+  ws.getRow(start).height=23;
+
+  const rows=flatten(cart());
+  let rowNo=start+1;
+  let subtotal=0;
+  rows.forEach(({line:l})=>{
+    const q=Math.max(1,Number(l?.quantity||1));
+    const price=Number(l?.unit_price||0);
+    const amount=q*price;
+    subtotal+=amount;
+    const spec=specText(l);
+    const values=[
+      lineSku(l),
+      spec?`${l?.name||'商品'}\n${spec}`:(l?.name||'商品'),
+      q,'PCS',price,amount,'V',''
+    ];
+    values.forEach((v,i)=>{
+      const cell=ws.getCell(rowNo,i+1);
+      cell.value=v;
+      cell.font={name:fontName,size:11,bold:(i===0||i===1||i===5)};
+      cell.border=border;
+      cell.alignment={
+        vertical:'middle',
+        horizontal:[2,4,5].includes(i)?'right':(i===2||i===3||i===6?'center':'left'),
+        wrapText:true
+      };
+      if(i===4||i===5)cell.numFmt='"NT$" #,##0';
+    });
+    ws.getRow(rowNo).height=34;
+    rowNo++;
+  });
+
+  const tax=Math.round(subtotal*0.05);
+  const grand=subtotal+tax;
+  const totals=[
+    ['付款條件',$('qPaymentTerm')?.value||'依雙方約定','金額合計',subtotal],
+    ['送貨方式',$('qShippingNote')?.value||'一般配送','銷項稅',tax],
+    ['總計',zhMoney(grand),'總計',grand],
+    ['','','已付',0]
+  ];
+  totals.forEach((r,idx)=>{
+    const rr=rowNo+idx;
+    ws.getCell(rr,1).value=r[0]; ws.getCell(rr,2).value=r[1]; ws.mergeCells(rr,2,rr,4);
+    ws.getCell(rr,5).value=r[2]; ws.getCell(rr,6).value=r[3]; ws.mergeCells(rr,6,rr,8);
+    [1,5].forEach(c=>{
+      ws.getCell(rr,c).font={name:fontName,size:10,bold:true};
+      ws.getCell(rr,c).fill=labelFill;
+    });
+    for(let c=1;c<=8;c++){
+      const cell=ws.getCell(rr,c);
+      cell.border=border;
+      if(!cell.font)cell.font={name:fontName,size:10,bold:true};
+      cell.alignment={vertical:'middle',wrapText:true};
+    }
+    ws.getCell(rr,6).numFmt='"NT$" #,##0';
+    ws.getRow(rr).height=24;
+  });
+
+  const signRow=rowNo+5;
+  ws.mergeCells(signRow,1,signRow,4);
+  ws.mergeCells(signRow,5,signRow,8);
+  ws.getCell(signRow,1).value='業務代表：____________________';
+  ws.getCell(signRow,5).value='客戶確認：____________________';
+  [ws.getCell(signRow,1),ws.getCell(signRow,5)].forEach(c=>{
+    c.font={name:fontName,size:10,bold:true};
+    c.alignment={vertical:'middle'};
+  });
+  ws.getRow(signRow).height=30;
+
+  ws.mergeCells(signRow+2,1,signRow+2,8);
+  ws.getCell(signRow+2,1).value='聯鑽企業有限公司｜統一編號：53270306｜Taichung City, Taiwan ｜ BookWide Enterprise Co., Ltd. ｜ Tel: +886 4 24623591';
+  ws.getCell(signRow+2,1).font={name:fontName,size:8,bold:true};
+  ws.getCell(signRow+2,1).alignment={horizontal:'center'};
+
+  ws.pageSetup.printArea=`A1:H${signRow+2}`;
+  ws.headerFooter.oddFooter='&C聯鑽企業有限公司｜報價單';
+  ws.views=[{showGridLines:false}];
+
+  const buf=await wb.xlsx.writeBuffer();
+  const blob=new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  const no=($('qQuoteNo')?.value||quoteNo()).replace(/[\\/:*?"<>|]/g,'-');
+  a.href=url;
+  a.download=`聯鑽報價單_${no}.xlsx`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1500);
+}
+
 document.querySelectorAll('.quoteMeta input,.quoteTerms input').forEach(el=>el.addEventListener('input',saveQuote));
-$('printQuote').onclick=()=>{saveQuote();document.body.classList.add('quote-preview');setTimeout(()=>window.print(),80)};
+$('printQuote').onclick=()=>exportQuotationExcel();
 loadQuote();
 window.addEventListener('afterprint',()=>document.body.classList.remove('quote-preview'));
 render();
