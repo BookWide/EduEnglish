@@ -40,20 +40,14 @@ function normalizeIndustrialItem(x={}){
     source_group:'industrial', _tables:['PMKTOOLS R2','_meta/pmktools/products.json']
   };
 }
-function normalizeGiftItem(x={}){return {...x,source_group:'gift'};}
 async function loadAllErpItems(search=''){
-  const qs=search?'?search='+encodeURIComponent(search):'';
-  const [gift,industrial]=await Promise.allSettled([
-    erpApi('/api/bw-erp-items'+qs),
-    pmkApi('/api/pmk-erp-items')
-  ]);
-  const gifts=gift.status==='fulfilled'?(gift.value.items||gift.value.products||[]).map(normalizeGiftItem):[];
-  let inds=industrial.status==='fulfilled'?(industrial.value.rows||[]).map(normalizeIndustrialItem):[];
+  const industrial=await pmkApi('/api/pmk-erp-items');
+  let inds=(industrial.rows||[]).map(normalizeIndustrialItem);
   if(search){
     const q=String(search).toLowerCase();
     inds=inds.filter(x=>[x.id,x.name,x.category,x.memo].some(v=>String(v||'').toLowerCase().includes(q)));
   }
-  return {rows:[...inds,...gifts],industrialCount:inds.length,giftCount:gifts.length,industrialOk:industrial.status==='fulfilled',giftOk:gift.status==='fulfilled'};
+  return {rows:inds,industrialCount:inds.length,industrialOk:true};
 }
 
 const ERP_SALES_PAGES=new Set(['quotation','sales-order','shipment','sales-return']);
@@ -237,19 +231,7 @@ function openPage(page,name){
     $('pageActions').innerHTML=['儲存','重新載入','新增','複製','移動','刪除','權限'].map(x=>`<button data-action="${x}">${t(x)}</button>`).join('');
     $('tabs').innerHTML=['基本資料','其他資料','交易對象','安全存量','庫存數量','附件','狀態'].map((x,i)=>`<button class="${i?'':'active'}">${t(x)}</button>`).join('');
     renderProductPage();setupProductSidebar();
-  }else if(page==='customers'){
-    // V3.6: 客戶主檔不可再走尚未實作的 /api/clone/* 路由。
-    // 直接使用 PMK customer core (/api/pmk-erp-customer*)，避免 bookwide.net/api/clone/* 404 HTML。
-    document.querySelector('.page-head')?.classList.add('customer-head-hidden');
-    $('pageActions').innerHTML='';
-    $('tabs').innerHTML=[['basic','基本資料'],['contact','通訊資料'],['business','營業資料'],['attachment','附件'],['status','狀態']]
-      .map(([id,x],i)=>`<button data-customer-tab="${id}" class="${i?'':'active'}">${x}</button>`).join('');
-    renderCustomerPage();
-    setupCustomerSidebar();
-    document.querySelectorAll('[data-customer-tab]').forEach(b=>b.onclick=()=>showCustomerTab(b.dataset.customerTab));
-    $('statusText').textContent='正在讀取 PMKTOOLS 客戶主檔…';
-    return;
-  }else if(['suppliers','companies','employees'].includes(page)){
+  }else if(['customers','suppliers','companies','employees'].includes(page)){
     document.querySelector('.page-head')?.classList.add('customer-head-hidden');
     openClonePartyPage(page);
     return;
@@ -272,7 +254,7 @@ function renderProductPage(){
 }
 function setupProductSidebar(){
   productNavMode='tree';
-  $('tree').innerHTML=`<div class="product-nav"><div class="product-nav-title">🔧 Items - ${t('商品總覽')}</div><div class="product-nav-switch"><button id="productTreeMode" class="active">📁 ${t('樹狀')}</button><button id="productSearchMode">🔎 ${t('搜尋')}</button></div><div id="productTreePane"><div id="productList" class="sidebar-product-list"><div class="loading">${t('正在讀取 PMKTOOLS 工業品 + BookWide Gift SKU…')}</div></div></div><div id="productSearchPane" class="hidden"><div class="sidebar-search"><input id="productSearch" placeholder="${t('品號／名稱')}"><button id="productSearchBtn">${t('搜尋')}</button></div><div id="productSearchResults" class="sidebar-product-list"></div></div></div>`;
+  $('tree').innerHTML=`<div class="product-nav"><div class="product-nav-title">🔧 Items - ${t('商品總覽')}</div><div class="product-nav-switch"><button id="productTreeMode" class="active">📁 ${t('樹狀')}</button><button id="productSearchMode">🔎 ${t('搜尋')}</button></div><div id="productTreePane"><div id="productList" class="sidebar-product-list"><div class="loading">${t('正在讀取 PMKTOOLS 工業品 SKU…')}</div></div></div><div id="productSearchPane" class="hidden"><div class="sidebar-search"><input id="productSearch" placeholder="${t('品號／名稱')}"><button id="productSearchBtn">${t('搜尋')}</button></div><div id="productSearchResults" class="sidebar-product-list"></div></div></div>`;
   $('productTreeMode').onclick=()=>setProductNavMode('tree');
   $('productSearchMode').onclick=()=>setProductNavMode('search');
   $('productSearchBtn').onclick=()=>loadProducts($('productSearch').value.trim(),true);
@@ -319,13 +301,13 @@ async function api(path,options={}){
 async function loadProducts(q='',isSearch=false){
   const box=isSearch?$('productSearchResults'):$('productList');
   if(!box)return;
-  box.innerHTML=`<div class="loading">${t('正在讀取 PMKTOOLS 工業品 + BookWide Gift SKU…')}</div>`;
+  box.innerHTML=`<div class="loading">${t('正在讀取 PMKTOOLS 工業品 SKU…')}</div>`;
   try{
     const data=await loadAllErpItems(q);
     const rows=data.rows||[];
     if(!isSearch)products=rows;
     renderProductTree(rows,box,isSearch);
-    $('statusText').textContent=`PMKTOOLS 工業品 ${data.industrialCount} SKU｜BookWide Gift ${data.giftCount} SKU${q?'（搜尋）':''}`;
+    $('statusText').textContent=`PMKTOOLS 工業品 ${data.industrialCount} SKU${q?'（搜尋）':''}`;
     if(isSearch)setProductNavMode('search');
   }catch(e){
     box.innerHTML=`<div class="db-error">${t('商品讀取失敗')}：${esc(e.message)}</div>`;
@@ -338,7 +320,6 @@ function renderProductTree(items,box,isSearch=false){
     box.innerHTML=items.map((p,i)=>`<button class="real-product ${p.source_group||''}" data-i="${i}">🔧 <b>${esc(p.id)}</b><span>${esc(p.name)}</span></button>`).join('');
   }else{
     const industrial=items.filter(x=>x.source_group==='industrial');
-    const gift=items.filter(x=>x.source_group!=='industrial');
     const major=(title,kind,rows)=>{
       const groups={};
       rows.forEach(p=>(groups[p.category||t('未分類')]??=[]).push(p));
@@ -353,7 +334,7 @@ function renderProductTree(items,box,isSearch=false){
         </div>`).join('')}
       </div>`;
     };
-    box.innerHTML=major('PMKTOOLS 工業品','industrial',industrial)+major('BookWide Gift / LINE 福利品','gift',gift);
+    box.innerHTML=major('PMKTOOLS 工業品','industrial',industrial);
     box.querySelectorAll('.product-folder').forEach(b=>b.onclick=()=>{
       const c=b.nextElementSibling;
       c.classList.toggle('closed');
@@ -365,13 +346,8 @@ function renderProductTree(items,box,isSearch=false){
 async function selectProduct(summary,button){
   try{
     let p;
-    if(summary.source_group==='industrial'){
-      const data=await pmkApi('/api/pmk-erp-item?sku='+encodeURIComponent(summary.id));
-      p=normalizeIndustrialItem(data.item||{});
-    }else{
-      const data=await api('/api/product?id='+encodeURIComponent(summary.id));
-      p={...data.product,source_group:'gift'};
-    }
+    const data=await pmkApi('/api/pmk-erp-item?sku='+encodeURIComponent(summary.id));
+    p=normalizeIndustrialItem(data.item||{});
     currentProduct=p;
     originalProductId=p.id;
     isNewProduct=false;
@@ -384,7 +360,7 @@ async function selectProduct(summary,button){
   }
 }
 function fillProductForm(p){
-  $('pId').value=p.id||'';$('pName').value=p.name||'';$('pMemo').value=p.memo||p.description||'';$('pInternal').value=p.internalMemo||'';$('pUnit').value=p.unit||'';$('pReference').value=p.reference||'';$('pBarcode').value=p.barcode||'';$('pStatus').value=p.status||'CLOUD SKU REGISTRY';$('pTables').value=(p._tables||[]).join(', ');$('productPath').textContent=`${t('商品')} /${p.source_group==='industrial'?'PMKTOOLS 工業品':'BookWide Gift'}/${p.category||''}/${p.id||''}`;
+  $('pId').value=p.id||'';$('pName').value=p.name||'';$('pMemo').value=p.memo||p.description||'';$('pInternal').value=p.internalMemo||'';$('pUnit').value=p.unit||'';$('pReference').value=p.reference||'';$('pBarcode').value=p.barcode||'';$('pStatus').value=p.status||'CLOUD SKU REGISTRY';$('pTables').value=(p._tables||[]).join(', ');$('productPath').textContent=`${t('商品')} /PMKTOOLS 工業品/${p.category||''}/${p.id||''}`;
   const img=$('pPhoto');
   img.onerror=()=>{img.removeAttribute('src');img.alt=t('商品照片讀取失敗')+'：'+(p.id||'')};
   img.onload=()=>{img.alt=t('商品照片')};
@@ -491,9 +467,6 @@ function setupCustomerSidebar(){
   </div>`;
   $('customerSearchBtn').onclick=()=>loadCustomers($('customerSearch').value.trim(),true);
   $('customerSearch').onkeydown=e=>{if(e.key==='Enter')loadCustomers(e.target.value.trim(),true)};
-  const quick=[...document.querySelectorAll('.runec-party-links a')];
-  quick.forEach(a=>a.onclick=e=>e.preventDefault());
-  if(quick[1])quick[1].onclick=e=>{e.preventDefault();pmkNewCustomer()};
   loadPartyTree();
 }
 function setCustomerNavMode(mode){ customerNavMode=mode; }
@@ -615,22 +588,9 @@ function showCustomerTab(tab){
   body.innerHTML=tab==='basic'?customerBasicHTML(c):tab==='contact'?customerContactHTML(c):tab==='business'?customerBusinessHTML(c):tab==='attachment'?customerAttachmentHTML():customerStatusHTML(c);
 }
 async function handleCustomerAction(action){
-  try{
-    if(action==='重新載入'){
-      if(originalCustomerId)await selectCustomer({id:originalCustomerId});
-      else await loadPartyTree();
-      return;
-    }
-    if(action==='儲存'){await pmkSaveCurrentCustomer();return}
-    if(action==='新增人員組織'){pmkNewCustomer();return}
-    if(action==='刪除'){await pmkDeleteCurrentCustomer();return}
-    if(action==='複製'){
-      if(!currentCustomer)return pmkNewCustomer();
-      currentCustomer={...currentCustomer,id:'',customer_id:'',name:(currentCustomer.name||'')+' - 複製'};
-      originalCustomerId='';showCustomerTab('basic');$('statusText').textContent='複製客戶：請輸入新客戶編號後儲存';return;
-    }
-    showDialog(action,`此功能保留 RunEC 原位置：「${action}」。`);
-  }catch(e){showDialog('客戶作業失敗',e.message||String(e))}
+  if(action==='重新載入'){if(originalCustomerId)await selectCustomer({id:originalCustomerId});else await loadPartyTree();return}
+  if(action==='儲存'){showDialog('儲存','V2.6 先完成 RunEC 客戶真實讀取與克隆畫面；寫入會在欄位確認後開放。');return}
+  showDialog(action,`保留 RunEC 原位置：「${action}」。`);
 }
 
 
