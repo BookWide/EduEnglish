@@ -793,7 +793,8 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
     </div>
   </div>
   <div class="quoteMeta">
-    <label><span>統編 / 身分證 / 客戶代號</span><div style="display:flex;width:100%"><input id="qCustomerKey" placeholder="公司輸入統編；個人輸入身分證；也可輸入客戶代號" style="flex:1;border:0;padding:9px"><button id="qCustomerKeyBtn" type="button" style="border:0;border-left:1px solid #ddd;padding:0 14px">套用</button></div><select id="qCustomerId" style="display:none"><option value=""></option></select><input id="qCustomer" type="hidden"></label>
+    <label><span>統編 / 身分證 / 客戶代號</span><div style="display:flex;width:100%"><input id="qCustomerKey" placeholder="公司輸入統編；個人輸入身分證；也可輸入客戶代號" style="flex:1;border:0;padding:9px"><button id="qCustomerKeyBtn" type="button" style="border:0;border-left:1px solid #ddd;padding:0 14px">套用</button></div><select id="qCustomerId" style="display:none"><option value=""></option></select></label>
+    <label><span>客戶名稱</span><input id="qCustomer" placeholder="公司名稱 / 個人姓名"></label>
     <label><span>聯絡人</span><input id="qContact" placeholder="聯絡人"></label>
     <label><span>編號</span><input id="qQuoteNo" readonly></label>
 
@@ -812,7 +813,7 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
     <label><span>業務電話</span><input id="qAgentPhone" value="+886 4 24623591"></label>
   </div>
 </div>
-<div class="quoteToolbar"><button id="printQuote" class="quoteBtn ghost">Excel 報價單</button><span id="erpCustomerState" class="erpCustomerState">ERP 客戶主檔連線中…</span><span class="erpCustomerState">個人身分證僅作客戶辨識，不顯示於報價單。</span></div>
+<div class="quoteToolbar"><button id="printQuote" class="quoteBtn ghost">Excel 報價單</button><button id="saveFrontCustomer" class="quoteBtn ghost" type="button">儲存客戶資料</button><span id="erpCustomerState" class="erpCustomerState">前台客戶資料可直接存入 PMKTOOLS CRM</span><span class="erpCustomerState">個人身分證僅作客戶辨識，不顯示於報價單。</span></div>
   <div class="card">
     <div class="head"><div>編號</div><div>名稱</div><div>數量</div><div>單位</div><div>單價</div><div>金額</div><div>稅</div><div>操作</div></div>
     <div id="list"></div>
@@ -856,6 +857,85 @@ function erpCustomerSnapshot(c){
   return {customer_id:String(c?.customer_id||'').trim(),customer_name:String(c?.name||c?.customer_name||'').trim(),tax_id:String(c?.tax_id||'').trim(),contact:String(c?.contact||'').trim(),phone:String(c?.phone||'').trim(),email:String(c?.email||'').trim(),currency:String(c?.currency||'TWD').trim()||'TWD',payment_terms:String(c?.payment_terms||'').trim(),billing_address:address,shipping_address:address,customer_ref:String(c?.customer_ref||'').trim(),note:String(c?.note||'').trim()};
 }
 function currentErpCustomer(){try{return JSON.parse(localStorage.getItem(ERP_CUSTOMER_KEY)||'{}')||{}}catch(_){return{}}}
+
+const PMK_FRONT_CRM_KEY='pmktools_front_customers_v1';
+
+function pmkFrontCustomers(){
+  try{
+    const v=JSON.parse(localStorage.getItem(PMK_FRONT_CRM_KEY)||'[]');
+    return Array.isArray(v)?v:[];
+  }catch(_){return []}
+}
+function pmkNormCustomerKey(v){
+  return String(v||'').trim().toUpperCase().replace(/\s+/g,'').slice(0,64);
+}
+function pmkFrontFindCustomer(rawKey){
+  const key=pmkNormCustomerKey(rawKey);
+  if(!key)return null;
+  return pmkFrontCustomers().find(c=>
+    pmkNormCustomerKey(c.key)===key ||
+    pmkNormCustomerKey(c.tax_id)===key ||
+    pmkNormCustomerKey(c.customer_id)===key
+  )||null;
+}
+function pmkFrontApplyCustomer(c){
+  if(!c)return;
+  if($('qCustomerKey'))$('qCustomerKey').value=c.key||c.tax_id||c.customer_id||'';
+  if($('qCustomerId'))$('qCustomerId').value=c.customer_id||c.key||'';
+  if($('qCustomer'))$('qCustomer').value=c.name||c.customer_name||'';
+  if($('qContact'))$('qContact').value=c.contact||'';
+  if($('qTaxId'))$('qTaxId').value=c.tax_id||'';
+  if($('qPhone'))$('qPhone').value=c.phone||'';
+  if($('qFax'))$('qFax').value=c.fax||'';
+  if($('qBillAddress'))$('qBillAddress').value=c.billing_address||c.address||'';
+  if($('qShipAddress'))$('qShipAddress').value=c.shipping_address||c.address||'';
+  if($('qPaymentTerm'))$('qPaymentTerm').value=c.payment_terms||$('qPaymentTerm').value||'';
+  if($('qShippingNote'))$('qShippingNote').value=c.delivery||$('qShippingNote').value||'';
+  if($('qDepot'))$('qDepot').value=c.depot||'';
+  if($('qAgent'))$('qAgent').value=c.salesperson||$('qAgent').value||'';
+  if($('qAgentPhone'))$('qAgentPhone').value=c.sales_phone||$('qAgentPhone').value||'';
+  localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(c));
+  saveQuote();
+}
+function pmkSaveFrontCustomer(){
+  const key=pmkNormCustomerKey($('qCustomerKey')?.value||$('qTaxId')?.value||'');
+  const name=String($('qCustomer')?.value||'').trim();
+  if(!key){alert('請先輸入統編、身分證或客戶代號');return false}
+  if(!name){alert('請輸入客戶名稱');$('qCustomer')?.focus();return false}
+  const rows=pmkFrontCustomers();
+  const now=new Date().toISOString();
+  const idx=rows.findIndex(c=>pmkNormCustomerKey(c.key)===key||pmkNormCustomerKey(c.tax_id)===key||pmkNormCustomerKey(c.customer_id)===key);
+  const old=idx>=0?rows[idx]:{};
+  const c={
+    ...old,
+    customer_id:old.customer_id||('FC-'+key.replace(/[^A-Z0-9]/g,'').slice(0,24)),
+    key,
+    name,
+    tax_id:String($('qTaxId')?.value||key).trim(),
+    contact:String($('qContact')?.value||'').trim(),
+    phone:String($('qPhone')?.value||'').trim(),
+    fax:String($('qFax')?.value||'').trim(),
+    billing_address:String($('qBillAddress')?.value||'').trim(),
+    shipping_address:String($('qShipAddress')?.value||'').trim(),
+    customer_po:String($('qRefNo')?.value||'').trim(),
+    depot:String($('qDepot')?.value||'').trim(),
+    payment_terms:String($('qPaymentTerm')?.value||'').trim(),
+    delivery:String($('qShippingNote')?.value||'').trim(),
+    salesperson:String($('qAgent')?.value||'').trim(),
+    sales_phone:String($('qAgentPhone')?.value||'').trim(),
+    source:'PMKTOOLS_CART',
+    created_at:old.created_at||now,
+    updated_at:now
+  };
+  if(idx>=0)rows[idx]=c;else rows.unshift(c);
+  localStorage.setItem(PMK_FRONT_CRM_KEY,JSON.stringify(rows));
+  localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(c));
+  if($('qCustomerId'))$('qCustomerId').value=c.customer_id;
+  saveQuote();
+  const st=$('erpCustomerState');
+  if(st){st.textContent=`已存入 PMKTOOLS CRM：${c.name}（${c.key}）`;st.className='erpCustomerState ok'}
+  return true;
+}
 function applyErpCustomer(c,force=true){
   if(!c)return; const s=erpCustomerSnapshot(c);
   $('qCustomerId').value=s.customer_id;$('qCustomer').value=s.customer_name;
@@ -881,10 +961,18 @@ async function loadErpCustomers(){
   }
   $('qCustomerKeyBtn').onclick=applyCustomerKey;
   $('qCustomerKey').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();applyCustomerKey()}};
+  if($('saveFrontCustomer'))$('saveFrontCustomer').onclick=()=>pmkSaveFrontCustomer();
 }
 async function applyCustomerKey(){
   const key=String($('qCustomerKey').value||'').trim().toUpperCase();
   if(!key){localStorage.removeItem(ERP_CUSTOMER_KEY);$('qCustomer').value='';$('qCustomerId').value='';saveQuote();alert('已使用匿名／新客戶牌價模式');return}
+  const localCustomer=pmkFrontFindCustomer(key);
+  if(localCustomer){
+    pmkFrontApplyCustomer(localCustomer);
+    const st=$('erpCustomerState');
+    if(st){st.textContent=`已從 PMKTOOLS CRM 帶入：${localCustomer.name||''}`;st.className='erpCustomerState ok'}
+    return;
+  }
   try{
     const r=await fetch(ERP_API+'/api/pmk-erp-customer?key='+encodeURIComponent(key),{cache:'no-store'}),j=await r.json();
     if(!r.ok||j.ok===false)throw new Error(j.error||'找不到客戶');
