@@ -337,7 +337,7 @@
   <div class="v49-page-title">
     <div>
       <h1>價格規則</h1>
-      <p>比照 WooCommerce Role-based Pricing：來源價先轉基礎售價，再套分類倍率；客戶等級另有成交倍率。</p>
+      <p>比照 WooCommerce Role-based Pricing：大分類與客戶分類都用下拉選擇；儲存規則後立即重算既有商品。</p>
     </div>
     <button class="btn" id="savePricingRules" type="button">儲存價格規則</button>
   </div>
@@ -365,7 +365,7 @@
 
   <div class="v49-card">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px">
-      <div><h2 style="margin:0">分類倍率</h2><div class="muted" style="margin-top:4px">沒有指定的分類自動使用 1.00。</div></div>
+      <div><h2 style="margin:0">分類倍率</h2><div class="muted" style="margin-top:4px">從 R2 大分類下拉選擇；目前選中的分類會直接顯示，不再手打名稱。</div></div>
       <button class="btn gray" id="addPricingCategoryRule" type="button">＋ 新增分類規則</button>
     </div>
     <div class="tablewrap">
@@ -378,7 +378,7 @@
 
   <div class="v49-card">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px">
-      <div><h2 style="margin:0">客戶等級倍率</h2><div class="muted" style="margin-top:4px">一般客戶 1.00；VIP 可設 0.80；經銷商可設 0.75。CRM 可為每位客戶指定等級。</div></div>
+      <div><h2 style="margin:0">客戶等級倍率</h2><div class="muted" style="margin-top:4px">客戶分類使用下拉選擇：一般客戶 / VIP / 經銷商；CRM 也用同一組分類。</div></div>
       <button class="btn gray" id="addPricingTierRule" type="button">＋ 新增客戶等級</button>
     </div>
     <div class="tablewrap">
@@ -949,10 +949,18 @@ function pricingApplyProduct(p){
 }
 function pricingTierOptions(selected){
   const rules=pricingRules();
-  return (rules.tiers||[]).map(t=>`<option value="${esc(t.code)}" ${String(t.code)===String(selected)?'selected':''}>${esc(t.name)}（×${Number(t.multiplier||1).toFixed(2)}）</option>`).join('');
+  const rows=(rules.tiers||[]).length?rules.tiers:pricingDefaultRules().tiers;
+  return rows.map(t=>`<option value="${esc(t.code)}" ${String(t.code)===String(selected)?'selected':''}>${esc(t.name)}（×${Number(t.multiplier||1).toFixed(2)}）</option>`).join('');
+}
+function refreshCrmTierSelect(){
+  const el=$('pmkCrmTier');if(!el)return;
+  const keep=el.value||'standard';
+  el.innerHTML=pricingTierOptions(keep);
+  if([...el.options].some(o=>o.value===keep))el.value=keep;
 }
 function renderPricingRules(){
   const r=pricingRules();
+  refreshCrmTierSelect();
   if($('pricingSourceFactor'))$('pricingSourceFactor').value=Number(r.source_factor||10);
   if($('pricingGlobalMarkup'))$('pricingGlobalMarkup').value=Number(r.global_markup||1);
   if($('pricingAutoApply'))$('pricingAutoApply').checked=r.auto_apply!==false;
@@ -960,14 +968,24 @@ function renderPricingRules(){
   if(catBody){
     catBody.innerHTML=(r.categories||[]).map((x,i)=>{
       const test=Math.round(100*Number(r.source_factor||10)*Number(r.global_markup||1)*Math.max(.01,Number(x.multiplier||1)));
-      return `<tr><td><input data-price-cat="${i}" value="${esc(x.category||'')}" placeholder="例如：切削刀具"></td><td><input data-price-cat-m="${i}" type="number" min="0.01" step="0.01" value="${Number(x.multiplier||1)}"></td><td>${v49Money(test)}</td><td><button class="rowbtn danger" data-price-cat-del="${i}">刪除</button></td></tr>`;
+      const catNames=categories.filter(c=>c.active!==false).slice().sort((a,b)=>(Number(a.sort)||0)-(Number(b.sort)||0)).map(c=>String(c.name||'').trim()).filter(Boolean);
+      const selectedCat=String(x.category||'');
+      const catOptions=['<option value="">— 請選大分類 —</option>'].concat(catNames.map(n=>`<option value="${esc(n)}" ${n===selectedCat?'selected':''}>${esc(n)}</option>`)).join('');
+      return `<tr><td><select data-price-cat="${i}">${catOptions}</select></td><td><input data-price-cat-m="${i}" type="number" min="0.01" step="0.01" value="${Number(x.multiplier||1)}"></td><td>${v49Money(test)}</td><td><button class="rowbtn danger" data-price-cat-del="${i}">刪除</button></td></tr>`;
     }).join('')||'<tr><td colspan="4" class="muted">尚未設定分類倍率；全部分類使用 1.00。</td></tr>';
   }
   const tierBody=$('pricingTierRows');
   if(tierBody){
     tierBody.innerHTML=(r.tiers||[]).map((x,i)=>{
       const test=Math.round(1200*Math.max(.01,Number(x.multiplier||1)));
-      return `<tr><td><input data-price-tier-code="${i}" value="${esc(x.code||'')}" ${i===0?'readonly':''}></td><td><input data-price-tier-name="${i}" value="${esc(x.name||'')}"></td><td><input data-price-tier-m="${i}" type="number" min="0.01" step="0.01" value="${Number(x.multiplier||1)}"></td><td>${v49Money(test)}</td><td>${i===0?'—':`<button class="rowbtn danger" data-price-tier-del="${i}">刪除</button>`}</td></tr>`;
+      const known=[
+        {code:'standard',name:'一般客戶'},
+        {code:'vip',name:'VIP'},
+        {code:'dealer',name:'經銷商'}
+      ];
+      if(x.code && !known.some(k=>k.code===x.code))known.push({code:x.code,name:x.name||x.code});
+      const roleOptions=known.map(k=>`<option value="${esc(k.code)}" ${String(k.code)===String(x.code)?'selected':''}>${esc(k.name)}</option>`).join('');
+      return `<tr><td><select data-price-tier-code="${i}">${roleOptions}</select></td><td><input data-price-tier-name="${i}" value="${esc(x.name||'')}"></td><td><input data-price-tier-m="${i}" type="number" min="0.01" step="0.01" value="${Number(x.multiplier||1)}"></td><td>${v49Money(test)}</td><td>${i===0?'—':`<button class="rowbtn danger" data-price-tier-del="${i}">刪除</button>`}</td></tr>`;
     }).join('');
   }
   document.querySelectorAll('[data-price-cat-del]').forEach(b=>b.onclick=()=>{const n=Number(b.dataset.priceCatDel),q=pricingReadForm();q.categories.splice(n,1);localStorage.setItem(PMK_PRICING_RULES_KEY,JSON.stringify(q));renderPricingRules()});
@@ -991,12 +1009,57 @@ function pricingReadForm(){
     tiers:tiers.length?tiers:pricingDefaultRules().tiers
   };
 }
-function savePricingRulesV1(){
+async function savePricingRulesV1(){
   const r=pricingReadForm();
   localStorage.setItem(PMK_PRICING_RULES_KEY,JSON.stringify(r));
   renderPricingRules();
-  if($('pricingStatus'))$('pricingStatus').textContent=`✅ 已儲存：CNY × ${r.source_factor} × 全站 ${r.global_markup}；分類規則 ${r.categories.length} 組；客戶等級 ${r.tiers.length} 組。`;
   renderPmkCrm();
+
+  const st=$('pricingStatus');
+  if(st)st.textContent='儲存規則中，並套用到既有商品…';
+
+  // 立即套用到目前 R2 商品，不再等你逐筆重新打開商品按儲存。
+  // 僅對有 source_price 的 Variation 重算，避免簡單商品被重複累乘。
+  let ok=0,skip=0,fail=0;
+  const rows=Array.isArray(products)?products:[];
+  for(const src of rows){
+    try{
+      const p=JSON.parse(JSON.stringify(src));
+      let changed=false;
+      if(Array.isArray(p.variations)&&p.variations.length){
+        p.variations=p.variations.map(v=>{
+          const cny=Math.max(0,Number(v.source_price||0));
+          if(!(cny>0))return v;
+          const next=pricingPublicFromCny(cny,p.category||'',r);
+          if(Number(v.price||0)!==next)changed=true;
+          return {...v,price:next,pricing_auto:true};
+        });
+        const active=p.variations.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(n=>n>0);
+        if(active.length){
+          const min=Math.min(...active);
+          if(Number(p.price||0)!==min)changed=true;
+          p.price=min;
+        }
+      }else{
+        skip++;
+        continue;
+      }
+      if(!changed){skip++;continue}
+      p.pricing_rule={
+        source_factor:Number(r.source_factor||10),
+        global_markup:Number(r.global_markup||1),
+        category_multiplier:pricingCategoryMultiplier(p.category||'',r),
+        auto_apply:r.auto_apply!==false
+      };
+      await productAdminPost('/api/bw-product-save',{id:p.id||'',product:p});
+      ok++;
+    }catch(e){
+      fail++;
+      console.warn('pricing apply failed',src?.id,e);
+    }
+  }
+  await load();
+  if(st)st.textContent=`✅ 價格規則已儲存並套用：更新 ${ok} 筆商品，略過 ${skip} 筆${fail?`，失敗 ${fail} 筆`:''}。CNY × ${r.source_factor} × 全站 ${r.global_markup}。`;
 }
 function addPricingCategoryRuleV1(){
   const r=pricingReadForm();r.categories.push({category:'',multiplier:1});localStorage.setItem(PMK_PRICING_RULES_KEY,JSON.stringify(r));renderPricingRules();
