@@ -923,6 +923,25 @@ $('clear').onclick=()=>{if(confirm('確定清空購物車？'))save([])};
 $('checkout').onclick=()=>location.href='/pmktools-checkout.html?mode=cart';
 
 
+
+async function imageUrlToDataUrl(url){
+  if(!url)return null;
+  try{
+    const res=await fetch(url,{mode:'cors',cache:'force-cache'});
+    if(!res.ok)throw new Error(`HTTP ${res.status}`);
+    const blob=await res.blob();
+    return await new Promise((resolve,reject)=>{
+      const fr=new FileReader();
+      fr.onload=()=>resolve(String(fr.result||''));
+      fr.onerror=reject;
+      fr.readAsDataURL(blob);
+    });
+  }catch(err){
+    console.warn('Excel 商品圖載入失敗：',url,err);
+    return null;
+  }
+}
+
 async function exportQuotationExcel(){
   saveQuote();
   if(typeof ExcelJS==='undefined'){
@@ -951,8 +970,14 @@ async function exportQuotationExcel(){
   });
 
   ws.columns=[
-    {key:'A',width:18},{key:'B',width:12},{key:'C',width:26},{key:'D',width:26},
-    {key:'E',width:13},{key:'F',width:13},{key:'G',width:14},{key:'H',width:14}
+    {key:'A',width:12},  // 商品圖
+    {key:'B',width:19},  // 編號
+    {key:'C',width:32},  // 名稱／規格
+    {key:'D',width:10},  // 數量
+    {key:'E',width:9},   // 單位
+    {key:'F',width:13},  // 單價
+    {key:'G',width:14},  // 金額
+    {key:'H',width:8}    // 稅
   ];
 
   const thin={style:'thin',color:{argb:'FF666666'}};
@@ -1021,7 +1046,7 @@ async function exportQuotationExcel(){
   }
 
   const start=12;
-  const headers=['編號','名稱／規格','數量','單位','單價','金額','稅','備註'];
+  const headers=['商品圖','編號','名稱／規格','數量','單位','單價','金額','稅'];
   headers.forEach((v,i)=>{
     const c=ws.getCell(start,i+1);
     c.value=v;c.font={name:fontName,size:10,bold:true};
@@ -1032,32 +1057,53 @@ async function exportQuotationExcel(){
   const rows=flatten(cart());
   let rowNo=start+1;
   let subtotal=0;
-  rows.forEach(({line:l})=>{
+  for(const {line:l} of rows){
     const q=Math.max(1,Number(l?.quantity||1));
     const price=Number(l?.unit_price||0);
     const amount=q*price;
     subtotal+=amount;
     const spec=specText(l);
+
+    // A: image placeholder; B:H: ERP data.
     const values=[
+      '',
       lineSku(l),
       spec?`${l?.name||'商品'}\n${spec}`:(l?.name||'商品'),
-      q,'PCS',price,amount,'V',''
+      q,'PCS',price,amount,'V'
     ];
     values.forEach((v,i)=>{
       const cell=ws.getCell(rowNo,i+1);
       cell.value=v;
-      cell.font={name:fontName,size:11,bold:(i===0||i===1||i===5)};
+      cell.font={name:fontName,size:11,bold:(i===1||i===2||i===6)};
       cell.border=border;
       cell.alignment={
         vertical:'middle',
-        horizontal:[2,4,5].includes(i)?'right':(i===2||i===3||i===6?'center':'left'),
+        horizontal:[3,4,5,6,7].includes(i)?(i===3||i===4||i===7?'center':'right'):'left',
         wrapText:true
       };
-      if(i===4||i===5)cell.numFmt='"NT$" #,##0';
+      if(i===5||i===6)cell.numFmt='"NT$" #,##0';
     });
-    ws.getRow(rowNo).height=34;
+
+    // Auto-embed current cart product image. If CORS blocks one image,
+    // the quotation still exports normally and simply leaves that photo blank.
+    const dataUrl=await imageUrlToDataUrl(l?.image_url||'');
+    if(dataUrl){
+      try{
+        const ext=/^data:image\/png/i.test(dataUrl)?'png':'jpeg';
+        const imageId=wb.addImage({base64:dataUrl,extension:ext});
+        ws.addImage(imageId,{
+          tl:{col:0.08,row:rowNo-1+0.08},
+          ext:{width:62,height:52},
+          editAs:'oneCell'
+        });
+      }catch(err){
+        console.warn('Excel 商品圖嵌入失敗：',err);
+      }
+    }
+
+    ws.getRow(rowNo).height=46;
     rowNo++;
-  });
+  }
 
   const tax=Math.round(subtotal*0.05);
   const grand=subtotal+tax;
@@ -1111,7 +1157,7 @@ async function exportQuotationExcel(){
   const a=document.createElement('a');
   const no=($('qQuoteNo')?.value||quoteNo()).replace(/[\\/:*?"<>|]/g,'-');
   a.href=url;
-  a.download=`聯鑽報價單_${no}.xlsx`;
+  a.download=`聯鑽報價單_${no}_含商品圖.xlsx`;
   document.body.appendChild(a);
   a.click();
   a.remove();
