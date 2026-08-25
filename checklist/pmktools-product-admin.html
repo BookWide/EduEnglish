@@ -257,9 +257,21 @@
   </div>
 
   <div class="v49-card">
-    <h2 style="margin:0 0 10px">BookWide 會員客戶</h2>
-    <div class="v49-toolbar"><input id="customerQ" placeholder="搜尋姓名、Email、電話、會員 ID"><select id="customerSort"><option value="spent">消費最高</option><option value="orders">訂單最多</option><option value="recent">最近訂單</option></select></div>
-    <div class="tablewrap"><table><thead><tr><th>客戶</th><th>聯絡</th><th>訂單</th><th>總消費</th><th>推薦點使用</th><th>最近訂單</th><th>操作</th></tr></thead><tbody id="customerRows"><tr><td colspan="7" class="muted">讀取中…</td></tr></tbody></table></div>
+    <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px">
+      <div>
+        <h2 style="margin:0">客戶交易紀錄</h2>
+        <div class="muted" style="margin-top:4px">只顯示已出貨／已完成訂單；舊會員客戶彙總已移除。</div>
+      </div>
+      <button class="btn gray" id="clearOldCustomerView" type="button">清除舊顯示</button>
+    </div>
+    <div class="v49-toolbar">
+      <input id="customerQ" placeholder="搜尋訂單、客戶、電話、商品">
+      <select id="customerSort"><option value="recent">最近出貨</option><option value="spent">金額最高</option></select>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>出貨時間</th><th>訂單</th><th>客戶</th><th>聯絡</th><th>商品</th><th>數量</th><th>金額</th><th>物流／狀態</th></tr></thead>
+      <tbody id="customerRows"><tr><td colspan="8" class="muted">讀取已完成訂單…</td></tr></tbody>
+    </table></div>
   </div>
 </section>
 
@@ -842,20 +854,34 @@ function renderPmkCrm(){
 async function loadCustomers(){
   renderPmkCrm();
   await loadV49Shared();
-  const map=new Map();
-  for(const o of v49Orders){
-    if(!o.user_id)continue;
-    if(!map.has(o.user_id))map.set(o.user_id,{uid:o.user_id,orders:0,cash:0,points:0,last:null});
-    const c=map.get(o.user_id);c.orders++;c.cash+=Number(o.cash_amount||0);c.points+=Number(o.points_used||0);
-    if(!c.last||String(o.created_at)>String(c.last.created_at))c.last=o;
+
+  let rows=v49Orders.filter(o=>o.status==='sent');
+  const q=String($('customerQ')?.value||'').trim().toLowerCase();
+  if(q){
+    rows=rows.filter(o=>[
+      v49OrderNo(o),v49CustomerName(o),v49Contact(o).email,v49Contact(o).phone,
+      o.product_name,o.shipping_address,o.tracking_no
+    ].join(' ').toLowerCase().includes(q));
   }
-  let rows=[...map.values()];
-  const q=String($('customerQ')?.value||'').toLowerCase();
-  if(q)rows=rows.filter(c=>{const p=v49Profile(c.uid),txt=[c.uid,p.display_name,p.full_name,p.email,p.phone,p.mobile].join(' ').toLowerCase();return txt.includes(q)});
-  const sort=$('customerSort')?.value||'spent';
-  rows.sort((a,b)=>sort==='orders'?b.orders-a.orders:sort==='recent'?String(b.last?.created_at||'').localeCompare(String(a.last?.created_at||'')):b.cash-a.cash);
-  $('customerRows').innerHTML=rows.map(c=>{const p=v49Profile(c.uid),email=p.email||'',phone=p.phone||p.mobile||'';return `<tr><td><b>${esc(p.display_name||p.full_name||p.name||email||String(c.uid).slice(0,10))}</b><div class="muted">${esc(String(c.uid))}</div></td><td>${esc(email)}<div class="muted">${esc(phone)}</div></td><td>${c.orders}</td><td>${v49Money(c.cash)}</td><td>${c.points.toLocaleString('zh-TW')} 點</td><td>${c.last?new Date(c.last.created_at).toLocaleString('zh-TW',{hour12:false}):'—'}</td><td><button class="rowbtn" data-customer-orders="${c.uid}">看訂單</button></td></tr>`}).join('')||'<tr><td colspan="7" class="muted">沒有客戶資料。</td></tr>';
-  document.querySelectorAll('[data-customer-orders]').forEach(b=>b.onclick=()=>{v49SwitchModule('orders');$('orderQ').value=b.dataset.customerOrders;loadOrders()});
+
+  const sort=$('customerSort')?.value||'recent';
+  rows.sort((a,b)=>sort==='spent'
+    ? Number(b.cash_amount||0)-Number(a.cash_amount||0)
+    : String(b.fulfilled_at||b.updated_at||b.created_at||'').localeCompare(String(a.fulfilled_at||a.updated_at||a.created_at||'')));
+
+  $('customerRows').innerHTML=rows.map(o=>{
+    const c=v49Contact(o),when=o.fulfilled_at||o.updated_at||o.created_at;
+    return `<tr>
+      <td>${when?new Date(when).toLocaleString('zh-TW',{hour12:false}):'—'}</td>
+      <td><b>${esc(v49OrderNo(o))}</b><div class="muted">${esc(String(o.id||'').slice(0,12))}</div></td>
+      <td><b>${esc(v49CustomerName(o))}</b></td>
+      <td>${esc(c.phone||'—')}<div class="muted">${esc(c.email||'')}</div></td>
+      <td>${esc(o.product_name||'')}</td>
+      <td>${Number(o.quantity||1)}</td>
+      <td><b>${v49Money(Number(o.cash_amount||0))}</b></td>
+      <td>${esc(o.tracking_no||'已完成')}<div class="muted">${esc(v49OrderStatus(o.status))}</div></td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="8" class="muted">目前尚無已出貨／已完成交易紀錄。</td></tr>';
 }
 
 async function loadShipping(){
@@ -1850,7 +1876,7 @@ function filteredOrders(rows){
 }
 async function fulfillOrder(id,kind){
   const tracking=prompt(kind==='voucher'?'請輸入券號／發券識別碼（可留空）':'請輸入物流單號（可留空）','');if(tracking===null)return;const note=prompt('備註（可留空）','');if(note===null)return;
-  try{await productAdminPost('/api/bw-order-fulfill',{order_id:String(id),tracking_no:tracking||null,note:note||null});await loadOrders();await load();await loadInventory()}catch(e){alert('完成訂單失敗：'+String(e?.message||e))}
+  try{await productAdminPost('/api/bw-order-fulfill',{order_id:String(id),tracking_no:tracking||null,note:note||null});await loadOrders();await load();await loadInventory();if(document.getElementById('v49-customers')?.classList.contains('active'))await loadCustomers()}catch(e){alert('完成訂單失敗：'+String(e?.message||e))}
 }
 
 async function loadOrders(){
@@ -1936,7 +1962,7 @@ window.addEventListener('message',e=>{
   if(e.source===window&&e.data?.type==='BOOKWIDE_COLLECTOR_PRODUCT'&&e.data.payload)applyChromeCollectorV200(e.data.payload);
 });
 
-$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;if($('detail_description'))$('detail_description').addEventListener('paste',handleDetailPasteV5);if($('aiProductPasteClearBtn'))$('aiProductPasteClearBtn').onclick=()=>{aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();};$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;if($('pmkCrmQ'))$('pmkCrmQ').oninput=renderPmkCrm;if($('pmkCrmNew'))$('pmkCrmNew').onclick=()=>pmkCrmOpen({});if($('pmkCrmSave'))$('pmkCrmSave').onclick=pmkCrmSave;if($('pmkCrmCancel'))$('pmkCrmCancel').onclick=pmkCrmClose;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
+$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;if($('detail_description'))$('detail_description').addEventListener('paste',handleDetailPasteV5);if($('aiProductPasteClearBtn'))$('aiProductPasteClearBtn').onclick=()=>{aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();};$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;if($('clearOldCustomerView'))$('clearOldCustomerView').onclick=()=>{localStorage.removeItem('pmktools_customer_transactions_v1');loadCustomers();};if($('pmkCrmQ'))$('pmkCrmQ').oninput=renderPmkCrm;if($('pmkCrmNew'))$('pmkCrmNew').onclick=()=>pmkCrmOpen({});if($('pmkCrmSave'))$('pmkCrmSave').onclick=pmkCrmSave;if($('pmkCrmCancel'))$('pmkCrmCancel').onclick=pmkCrmClose;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
 $('seedFlower12').onclick=seedFlowerPartner12;
 $('reloadCategories').onclick=loadCategories;$('catSaveBtn').onclick=saveCategory;$('catCancelBtn').onclick=resetCategoryEditor;initCollapsibles();initV49Layout();boot();
 </script>
