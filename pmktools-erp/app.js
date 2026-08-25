@@ -237,7 +237,19 @@ function openPage(page,name){
     $('pageActions').innerHTML=['儲存','重新載入','新增','複製','移動','刪除','權限'].map(x=>`<button data-action="${x}">${t(x)}</button>`).join('');
     $('tabs').innerHTML=['基本資料','其他資料','交易對象','安全存量','庫存數量','附件','狀態'].map((x,i)=>`<button class="${i?'':'active'}">${t(x)}</button>`).join('');
     renderProductPage();setupProductSidebar();
-  }else if(['customers','suppliers','companies','employees'].includes(page)){
+  }else if(page==='customers'){
+    // V3.6: 客戶主檔不可再走尚未實作的 /api/clone/* 路由。
+    // 直接使用 PMK customer core (/api/pmk-erp-customer*)，避免 bookwide.net/api/clone/* 404 HTML。
+    document.querySelector('.page-head')?.classList.add('customer-head-hidden');
+    $('pageActions').innerHTML='';
+    $('tabs').innerHTML=[['basic','基本資料'],['contact','通訊資料'],['business','營業資料'],['attachment','附件'],['status','狀態']]
+      .map(([id,x],i)=>`<button data-customer-tab="${id}" class="${i?'':'active'}">${x}</button>`).join('');
+    renderCustomerPage();
+    setupCustomerSidebar();
+    document.querySelectorAll('[data-customer-tab]').forEach(b=>b.onclick=()=>showCustomerTab(b.dataset.customerTab));
+    $('statusText').textContent='正在讀取 PMKTOOLS 客戶主檔…';
+    return;
+  }else if(['suppliers','companies','employees'].includes(page)){
     document.querySelector('.page-head')?.classList.add('customer-head-hidden');
     openClonePartyPage(page);
     return;
@@ -479,6 +491,9 @@ function setupCustomerSidebar(){
   </div>`;
   $('customerSearchBtn').onclick=()=>loadCustomers($('customerSearch').value.trim(),true);
   $('customerSearch').onkeydown=e=>{if(e.key==='Enter')loadCustomers(e.target.value.trim(),true)};
+  const quick=[...document.querySelectorAll('.runec-party-links a')];
+  quick.forEach(a=>a.onclick=e=>e.preventDefault());
+  if(quick[1])quick[1].onclick=e=>{e.preventDefault();pmkNewCustomer()};
   loadPartyTree();
 }
 function setCustomerNavMode(mode){ customerNavMode=mode; }
@@ -600,9 +615,22 @@ function showCustomerTab(tab){
   body.innerHTML=tab==='basic'?customerBasicHTML(c):tab==='contact'?customerContactHTML(c):tab==='business'?customerBusinessHTML(c):tab==='attachment'?customerAttachmentHTML():customerStatusHTML(c);
 }
 async function handleCustomerAction(action){
-  if(action==='重新載入'){if(originalCustomerId)await selectCustomer({id:originalCustomerId});else await loadPartyTree();return}
-  if(action==='儲存'){showDialog('儲存','V2.6 先完成 RunEC 客戶真實讀取與克隆畫面；寫入會在欄位確認後開放。');return}
-  showDialog(action,`保留 RunEC 原位置：「${action}」。`);
+  try{
+    if(action==='重新載入'){
+      if(originalCustomerId)await selectCustomer({id:originalCustomerId});
+      else await loadPartyTree();
+      return;
+    }
+    if(action==='儲存'){await pmkSaveCurrentCustomer();return}
+    if(action==='新增人員組織'){pmkNewCustomer();return}
+    if(action==='刪除'){await pmkDeleteCurrentCustomer();return}
+    if(action==='複製'){
+      if(!currentCustomer)return pmkNewCustomer();
+      currentCustomer={...currentCustomer,id:'',customer_id:'',name:(currentCustomer.name||'')+' - 複製'};
+      originalCustomerId='';showCustomerTab('basic');$('statusText').textContent='複製客戶：請輸入新客戶編號後儲存';return;
+    }
+    showDialog(action,`此功能保留 RunEC 原位置：「${action}」。`);
+  }catch(e){showDialog('客戶作業失敗',e.message||String(e))}
 }
 
 
