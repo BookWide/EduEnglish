@@ -793,7 +793,7 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
     </div>
   </div>
   <div class="quoteMeta">
-    <label><span>客戶</span><input id="qCustomer" placeholder="客戶名稱"></label>
+    <label><span>ERP 客戶</span><select id="qCustomerId"><option value="">讀取 ERP 客戶中…</option></select><input id="qCustomer" type="hidden"></label>
     <label><span>聯絡人</span><input id="qContact" placeholder="聯絡人"></label>
     <label><span>編號</span><input id="qQuoteNo" readonly></label>
 
@@ -812,19 +812,14 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
     <label><span>業務電話</span><input id="qAgentPhone" value="+886 4 24623591"></label>
   </div>
 </div>
-<div class="quoteToolbar"><button id="printQuote" class="quoteBtn ghost">Excel 報價單</button><span style="font-size:12px;color:#64748b">網站單價鎖定；Excel 下載後可自行調整報價。</span></div>
+<div class="quoteToolbar"><button id="printQuote" class="quoteBtn ghost">Excel 報價單</button><span id="erpCustomerState" class="erpCustomerState">ERP 客戶主檔連線中…</span></div>
   <div class="card">
     <div class="head"><div>編號</div><div>名稱</div><div>數量</div><div>單位</div><div>單價</div><div>金額</div><div>稅</div><div>操作</div></div>
     <div id="list"></div>
   </div>
   <div class="quoteTerms">
     <div><b>付款條件</b><input id="qPaymentTerm" value="依雙方約定"></div>
-    <div><b>金額合計</b><span id="qSubtotalText">NT$ 0</span></div>
     <div><b>送貨方式</b><input id="qShippingNote" value="一般配送"></div>
-    <div><b>銷項稅</b><span id="qTaxText">NT$ 0</span></div>
-    <div><b>總計</b><span id="qGrandText">NT$ 0</span></div>
-    <div><b>已付</b><span>NT$ 0</span></div>
-    <div class="quoteTotalWords"><b>總計</b><span id="qTotalText">—</span></div>
     <div class="signLine"><span>業務代表：____________________</span><span>客戶確認：____________________</span></div>
   </div>
   <div class="footer">
@@ -840,21 +835,73 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
   <button id="checkout" class="checkout">前往結帳</button>
 </div></div>
 <script>
-const CART_KEY='pmktools_cart_v1',QUOTE_KEY='pmktools_quote_customer_v1',$=id=>document.getElementById(id),fmt=n=>'NT$ '+Number(n||0).toLocaleString('zh-TW');
+const CART_KEY='pmktools_cart_v1',QUOTE_KEY='pmktools_quote_customer_v1',ERP_CUSTOMER_KEY='pmktools_erp_customer_v1',ERP_QUOTE_KEY='pmktools_erp_quote_v1',ERP_API='https://bookwide-hiking-api.pmktools.workers.dev',$=id=>document.getElementById(id),fmt=n=>'NT$ '+Number(n||0).toLocaleString('zh-TW');let ERP_CUSTOMERS=[];
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 function twDate(d=new Date()){try{return new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(d)}catch(_){return d.toISOString().slice(0,10)}}
 function isoDate(d=new Date()){const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`}
 function quoteNo(){const d=new Date(),s=`${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;let n=localStorage.getItem('pmktools_quote_no_v1');if(!n||!n.startsWith('SQ'+s))n='SQ'+s+String(Math.floor(Math.random()*900)+100);localStorage.setItem('pmktools_quote_no_v1',n);return n}
 function loadQuote(){
   let q={};try{q=JSON.parse(localStorage.getItem(QUOTE_KEY)||'{}')||{}}catch(_){}
-  const ids=['qCustomer','qContact','qTaxId','qPhone','qRefNo','qFax','qDepot','qBillAddress','qShipAddress','qAgent','qAgentPhone','qPaymentTerm','qShippingNote'];
+  const ids=['qCustomerId','qCustomer','qContact','qTaxId','qPhone','qRefNo','qFax','qDepot','qBillAddress','qShipAddress','qAgent','qAgentPhone','qPaymentTerm','qShippingNote'];
   ids.forEach(id=>{if($(id)&&q[id]!=null)$(id).value=q[id]});
   $('qQuoteNo').value=q.qQuoteNo||quoteNo();$('qTradeDate').value=q.qTradeDate||isoDate();$('quotePrintDate').textContent=twDate();
 }
 function saveQuote(){
-  const ids=['qCustomer','qContact','qTaxId','qPhone','qRefNo','qFax','qDepot','qBillAddress','qShipAddress','qAgent','qAgentPhone','qPaymentTerm','qShippingNote','qQuoteNo','qTradeDate'];
-  const q={};ids.forEach(id=>{if($(id))q[id]=$(id).value});localStorage.setItem(QUOTE_KEY,JSON.stringify(q))
+  const ids=['qCustomerId','qCustomer','qContact','qTaxId','qPhone','qRefNo','qFax','qDepot','qBillAddress','qShipAddress','qAgent','qAgentPhone','qPaymentTerm','qShippingNote','qQuoteNo','qTradeDate'];
+  const q={};ids.forEach(id=>{if($(id))q[id]=$(id).value});localStorage.setItem(QUOTE_KEY,JSON.stringify(q));if($('qCustomerId')?.value){let s=currentErpCustomer();s={...s,customer_id:$('qCustomerId').value,customer_name:$('qCustomer').value,tax_id:$('qTaxId').value,contact:$('qContact').value,phone:$('qPhone').value,billing_address:$('qBillAddress').value,shipping_address:$('qShipAddress').value,payment_terms:$('qPaymentTerm').value,customer_po:$('qRefNo').value,quote_no:$('qQuoteNo').value};localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(s));}
 }
+
+function erpCustomerSnapshot(c){
+  const address=String(c?.address||'').trim();
+  return {customer_id:String(c?.customer_id||'').trim(),customer_name:String(c?.name||c?.customer_name||'').trim(),tax_id:String(c?.tax_id||'').trim(),contact:String(c?.contact||'').trim(),phone:String(c?.phone||'').trim(),email:String(c?.email||'').trim(),currency:String(c?.currency||'TWD').trim()||'TWD',payment_terms:String(c?.payment_terms||'').trim(),billing_address:address,shipping_address:address,customer_ref:String(c?.customer_ref||'').trim(),note:String(c?.note||'').trim()};
+}
+function currentErpCustomer(){try{return JSON.parse(localStorage.getItem(ERP_CUSTOMER_KEY)||'{}')||{}}catch(_){return{}}}
+function applyErpCustomer(c,force=true){
+  if(!c)return; const s=erpCustomerSnapshot(c);
+  $('qCustomerId').value=s.customer_id;$('qCustomer').value=s.customer_name;
+  if(force||!$('qContact').value)$('qContact').value=s.contact;
+  if(force||!$('qTaxId').value)$('qTaxId').value=s.tax_id;
+  if(force||!$('qPhone').value)$('qPhone').value=s.phone;
+  if(force||!$('qBillAddress').value)$('qBillAddress').value=s.billing_address;
+  if(force||!$('qShipAddress').value)$('qShipAddress').value=s.shipping_address;
+  if(force||!$('qPaymentTerm').value||$('qPaymentTerm').value==='依雙方約定')$('qPaymentTerm').value=s.payment_terms||'依雙方約定';
+  localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify({...s,billing_address:$('qBillAddress').value,shipping_address:$('qShipAddress').value,contact:$('qContact').value,phone:$('qPhone').value,payment_terms:$('qPaymentTerm').value,customer_po:$('qRefNo').value,quote_no:$('qQuoteNo').value}));
+  saveQuote();
+}
+async function loadErpCustomers(){
+  const st=$('erpCustomerState');
+  try{
+    const r=await fetch(ERP_API+'/api/erp-customers',{cache:'no-store',credentials:'include'}),t=await r.text();
+    let j={};try{j=JSON.parse(t)}catch(_){throw new Error('ERP 回傳不是 JSON')}
+    if(!r.ok||j.ok===false)throw new Error(j.error||j.message||('HTTP '+r.status));
+    ERP_CUSTOMERS=j.rows||j.customers||[];
+    const sel=$('qCustomerId'),saved=sel.value||currentErpCustomer().customer_id||'';
+    sel.innerHTML='<option value="">請選擇 ERP 客戶</option>'+ERP_CUSTOMERS.map(c=>`<option value="${esc(c.customer_id||'')}">${esc(c.customer_id||'')}｜${esc(c.name||c.customer_name||'')}</option>`).join('');
+    if(saved&&ERP_CUSTOMERS.some(c=>String(c.customer_id)===String(saved))){sel.value=saved;applyErpCustomer(ERP_CUSTOMERS.find(c=>String(c.customer_id)===String(saved)),false)}
+    sel.onchange=()=>{const c=ERP_CUSTOMERS.find(x=>String(x.customer_id)===String(sel.value));if(c)applyErpCustomer(c,true);else{localStorage.removeItem(ERP_CUSTOMER_KEY);$('qCustomer').value='';saveQuote()}};
+    if(st){st.textContent=`ERP 客戶主檔 ${ERP_CUSTOMERS.length} 筆`;st.className='erpCustomerState ok'}
+  }catch(e){
+    $('qCustomerId').innerHTML='<option value="">ERP 客戶讀取失敗</option>';
+    if(st){st.textContent='ERP 客戶主檔連線失敗：'+String(e.message||e);st.className='erpCustomerState bad'}
+  }
+}
+async function erpPost(path,body){
+  const r=await fetch(ERP_API+path,{method:'POST',credentials:'include',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}),t=await r.text();
+  let j={};try{j=JSON.parse(t)}catch(_){throw new Error('ERP 回傳不是 JSON')}
+  if(!r.ok||j.ok===false)throw new Error(j.error||j.message||('HTTP '+r.status));return j;
+}
+function buildErpQuote(status='draft'){
+  const c=currentErpCustomer(),rows=flatten(cart());
+  return {type:'quotation',doc_no:$('qQuoteNo').value||'',date:$('qTradeDate').value||isoDate(),customer_id:c.customer_id||'',customer_name:c.customer_name||$('qCustomer').value||'',customer_po:$('qRefNo').value||'',valid_until:$('qTradeDate').value||isoDate(),currency:c.currency||'TWD',exchange_rate:1,tax_rate:5,payment_terms:$('qPaymentTerm').value||c.payment_terms||'',shipping_method:$('qShippingNote').value||'',salesperson:$('qAgent').value||'RAYMOND',note:'PMKTOOLS 網站報價單',status,customer_snapshot:{...c,billing_address:$('qBillAddress').value,shipping_address:$('qShipAddress').value,contact:$('qContact').value,phone:$('qPhone').value,tax_id:$('qTaxId').value},lines:rows.map(({line:l})=>({sku:lineSku(l),customer_sku:'',name:String(l?.name||'商品'),qty:Math.max(1,Number(l?.quantity||1)),unit:'PCS',list_price:Number(l?.unit_price||0),discount:0,unit_price:Number(l?.unit_price||0),delivery_date:''}))};
+}
+async function syncErpQuote(status='draft'){
+  const c=currentErpCustomer();if(!c.customer_id)return null;
+  const j=await erpPost('/api/erp-sales-save',{type:'quotation',doc:buildErpQuote(status)}),doc=j.doc||{};
+  localStorage.setItem(ERP_QUOTE_KEY,JSON.stringify({doc_no:doc.doc_no||$('qQuoteNo').value||'',id:doc.id||'',customer_id:c.customer_id,status}));
+  if(doc.doc_no&&doc.doc_no!==$('qQuoteNo').value){$('qQuoteNo').value=doc.doc_no;saveQuote()}
+  return doc;
+}
+
 const zhDigits=['零','壹','貳','參','肆','伍','陸','柒','捌','玖'];
 function zhMoney(n){n=Math.round(Number(n||0));if(!n)return '新台幣零元整';const units=['','拾','佰','仟','萬','拾','佰','仟','億'];const ds=String(n).split('').reverse();let out='',zero=false;for(let i=ds.length-1;i>=0;i--){const d=Number(ds[i]);if(d===0){zero=true;continue}if(zero&&out)out+='零';zero=false;out+=zhDigits[d]+units[i]}return '新台幣'+out+'元整'}
 
@@ -911,7 +958,7 @@ function render(){
   }).join('');
   const total=rows.reduce((s,r)=>s+Number(r.line.unit_price||0)*Math.max(1,Number(r.line.quantity||1)),0);
   const tax=Math.round(total*0.05),grand=total+tax;
-  $('total').textContent=fmt(total);if($('qSubtotalText'))$('qSubtotalText').textContent=fmt(total);if($('qTaxText'))$('qTaxText').textContent=fmt(tax);if($('qGrandText'))$('qGrandText').textContent=fmt(grand);if($('qTotalText'))$('qTotalText').textContent=zhMoney(grand);$('checkout').disabled=false
+  $('total').textContent=fmt(total);$('checkout').disabled=false
 }
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-act]');if(!b)return;
@@ -927,7 +974,7 @@ document.addEventListener('change',e=>{
   if(e.target.matches('[data-price]'))return setUnitPrice(Number(e.target.dataset.gi),e.target.dataset.kind,Number(e.target.dataset.ci),e.target.value);
 });
 $('clear').onclick=()=>{if(confirm('確定清空購物車？'))save([])};
-$('checkout').onclick=()=>location.href='/pmktools-checkout.html?mode=cart';
+$('checkout').onclick=async()=>{const c=currentErpCustomer();if(!c.customer_id)return alert('請先選擇 ERP 客戶，再進入訂購確認。');$('checkout').disabled=true;try{await syncErpQuote('effective')}catch(e){$('checkout').disabled=false;return alert('ERP 報價單儲存失敗：'+String(e.message||e))}location.href='/pmktools-checkout.html?mode=cart';};
 
 
 
@@ -951,6 +998,7 @@ async function imageUrlToDataUrl(url){
 
 async function exportQuotationExcel(){
   saveQuote();
+  try{await syncErpQuote('draft')}catch(e){console.warn('ERP 報價同步略過',e)}
   if(typeof ExcelJS==='undefined'){
     alert('Excel 元件載入失敗，請重新整理後再試。');
     return;
@@ -1174,6 +1222,7 @@ async function exportQuotationExcel(){
 document.querySelectorAll('.quoteMeta input,.quoteTerms input').forEach(el=>el.addEventListener('input',saveQuote));
 $('printQuote').onclick=()=>exportQuotationExcel();
 loadQuote();
+loadErpCustomers();
 window.addEventListener('afterprint',()=>document.body.classList.remove('quote-preview'));
 render();
 </script></body></html>

@@ -190,15 +190,11 @@ function erpSpec(previewLine,srcLine){
   return '';
 }
 function renderErpMeta(){
-  setText('confirmDate',erpToday());
-  setText('erpAccount',session?.user?.email||'—');
-  const p=currentShippingPayload();
-  setText('confirmName',p.shipping_name||'—');
-  setText('confirmPhone',p.shipping_phone||'—');
-  setText('confirmAddress',[p.shipping_postal,p.shipping_address].filter(Boolean).join(' ')||'—');
-  const methods=preview?.available_shipping_methods||[];
-  const method=methods.find(m=>m.code===p.shipping_method)||preview?.selected_shipping_method;
-  setText('confirmMethod',method?.label||p.shipping_method||'—');
+  const c=readErpCustomer(),q=readErpQuote(),p=currentShippingPayload();
+  setText('confirmDate',erpToday());setText('erpAccount',session?.user?.email||'—');
+  setText('confirmName',c.customer_name||p.shipping_name||'—');setText('confirmPhone',c.phone||p.shipping_phone||'—');setText('confirmAddress',c.shipping_address||c.billing_address||p.shipping_address||'—');
+  setText('erpOrderNo',q.doc_no?('報價 '+q.doc_no+' / 付款建立時產生'):'付款建立時產生');
+  const methods=preview?.available_shipping_methods||[];const method=methods.find(m=>m.code===p.shipping_method)||preview?.selected_shipping_method;setText('confirmMethod',method?.label||p.shipping_method||'—');
 }
 const P=new URL(location.href).searchParams,mode=P.get('mode')||'single';let session=null,preview=null,groups=[],shippingState={};
 function error(m){const e=$('err');if(e){e.style.display='block';e.textContent=m}if($('pay'))$('pay').disabled=true}
@@ -214,44 +210,26 @@ function getGroups(){
 function readShippingState(){
  try{return JSON.parse(localStorage.getItem('pmktools_shipping_v1')||'{}')||{}}catch(_){return{}}
 }
+function readErpCustomer(){try{return JSON.parse(localStorage.getItem(ERP_CUSTOMER_KEY)||'{}')||{}}catch(_){return{}}}
+function readErpQuote(){try{return JSON.parse(localStorage.getItem(ERP_QUOTE_KEY)||'{}')||{}}catch(_){return{}}}
+
 function currentShippingPayload(){
- return {
-   shipping_method:shippingState.method||'',
-   shipping_name:document.getElementById('shipName')?.value||shippingState.name||'',
-   shipping_phone:document.getElementById('shipPhone')?.value||shippingState.phone||'',
-   shipping_postal:document.getElementById('shipPostal')?.value||shippingState.postal||'',
-   shipping_address:document.getElementById('shipAddress')?.value||shippingState.address||''
- };
+ const c=readErpCustomer();
+ return {shipping_method:shippingState.method||'',shipping_name:c.contact||c.customer_name||'',shipping_phone:c.phone||'',shipping_postal:'',shipping_address:c.shipping_address||c.billing_address||''};
 }
-async function saveProfileAddressIfNeeded(){
- const p=currentShippingPayload(),addr=String(p.shipping_address||'').trim();
- if(!addr||!session?.user?.id)return;
- try{
-   const {data:existing}=await SB.from('profiles').select('id,address,phone,display_name').eq('id',session.user.id).maybeSingle();
-   const patch={address:addr,updated_at:new Date().toISOString()};
-   if(p.shipping_phone)patch.phone=p.shipping_phone;
-   if(p.shipping_name&&!existing?.display_name)patch.display_name=p.shipping_name;
-   if(existing?.id)await SB.from('profiles').update(patch).eq('id',session.user.id);
-   else await SB.from('profiles').insert({id:session.user.id,...patch});
- }catch(e){console.warn('profile address save skipped',e)}
-}
+async function saveProfileAddressIfNeeded(){return true}
 function renderShippingCheckout(v){
- const methods=v.available_shipping_methods||[],selected=v.selected_shipping_method||{};
- shippingState=Object.assign({},readShippingState(),shippingState);
- if(selected.code)shippingState.method=selected.code;
+ const methods=v.available_shipping_methods||[],selected=v.selected_shipping_method||{},c=readErpCustomer();
+ shippingState=Object.assign({},readShippingState(),shippingState);if(selected.code)shippingState.method=selected.code;
  const mbox=$('shippingMethods'),abox=$('shippingAddressFields');
  if(!methods.length){$('shippingBlock').style.display='none';return}
  $('shippingBlock').style.display='block';
  mbox.innerHTML=methods.map(m=>`<label style="display:flex;gap:8px;align-items:center;padding:6px 0"><input type="radio" name="checkoutShip" value="${m.code}" ${m.code===shippingState.method?'checked':''}> ${m.label}<b style="margin-left:auto">${Number(m.fee||0)>0?fmt(m.fee):'免費'}</b></label>`).join('');
  const chosen=methods.find(x=>x.code===shippingState.method)||selected||methods[0];
- if(chosen?.requires_address!==false){
-   abox.innerHTML=`<input id="shipName" placeholder="收件人" value="${String(shippingState.name||'').replace(/"/g,'&quot;')}" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px"><input id="shipPhone" placeholder="聯絡電話" value="${String(shippingState.phone||'').replace(/"/g,'&quot;')}" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px"><input id="shipPostal" placeholder="郵遞區號（可不填）" value="${String(shippingState.postal||'').replace(/"/g,'&quot;')}" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px"><input id="shipAddress" placeholder="收件地址" value="${String(shippingState.address||'').replace(/"/g,'&quot;')}" style="padding:10px;border:1px solid #cbd5e1;border-radius:8px"><div class="muted">有 Profile 地址會自動帶入；若沒有，請在此填寫，付款前會回存 Profile。</div>`;
- }else abox.innerHTML='<div class="muted">此方式不需要收件地址。</div>';
+ if(chosen?.requires_address!==false){abox.innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px"><div class="notice"><b>ERP 客戶</b><br>${esc(c.customer_id||'—')}｜${esc(c.customer_name||'—')}</div><div class="notice"><b>聯絡人 / 電話</b><br>${esc(c.contact||'—')}｜${esc(c.phone||'—')}</div><div class="notice" style="grid-column:1/-1"><b>送貨地址</b><br>${esc(c.shipping_address||c.billing_address||'ERP 客戶主檔未設定地址')}</div></div><div class="muted" style="margin-top:8px">工業品客戶資料來自 ERP 客戶主檔；訂購確認頁不讀取或回存 BookWide Profile。</div>`}else abox.innerHTML='<div class="muted">此方式不需要收件地址。</div>';
  mbox.querySelectorAll('input[name="checkoutShip"]').forEach(r=>r.onchange=async()=>{shippingState.method=r.value;localStorage.setItem('pmktools_shipping_v1',JSON.stringify(Object.assign(readShippingState(),shippingState)));await refreshPreview()});
- ['shipName','shipPhone','shipPostal','shipAddress'].forEach(id=>{const el=$(id);if(el)el.addEventListener('input',renderErpMeta)});
  renderErpMeta();
 }
-
 function serverPricedGroups(input){
   return (input||[]).map(g=>({
     group_id:g.group_id,
@@ -302,15 +280,17 @@ function renderItems(cart){
  }).join('')}</tbody></table></div>`;
 }
 function paint(v){preview=v;ensurePaymentSummary();renderItems(v.cart);renderShippingCheckout(v);renderErpMeta();setText('subtotal',fmt(v.subtotal??v.cart?.total_price??0));setText('shippingFee',fmt(v.shipping_fee||0));setText('price',fmt(v.price));setText('net',fmt(v.net_after_points??v.price));setText('fee',fmt(v.fee_5));setText('cash',fmt(v.cash_amount));setText('pay',`確認訂單並付款 ${fmt(v.cash_amount)}`);if($('pay'))$('pay').disabled=Number(v.cash_amount||0)<=0}
-async function boot(){groups=getGroups();if(!groups.length)return error('購物車是空的');const a=await SB.auth.getSession();session=a.data?.session||null;if(!session){setText('loginState','尚未登入');return error('請先登入後再進行 PMKTOOLS 結帳。')}setText('loginState',session.user.email||'已登入');shippingState=readShippingState();try{const {data:p}=await SB.from('profiles').select('display_name,phone,address').eq('id',session.user.id).maybeSingle();if(p){if(!shippingState.name)shippingState.name=p.display_name||'';if(!shippingState.phone)shippingState.phone=p.phone||'';if(!shippingState.address)shippingState.address=p.address||'';}await refreshPreview()}catch(e){error('結帳預覽失敗：'+String(e.message||e))}}
-$('pay').onclick=async()=>{if(!preview)return;const msg=`確認一次結帳全部商品？\n\n商品總額 ${fmt(preview.price)}\n5% ${fmt(preview.fee_5)}\n信用卡 ${fmt(preview.cash_amount)}`;if(!confirm(msg))return;$('pay').disabled=true;$('err').style.display='none';try{await saveProfileAddressIfNeeded();const payload={
-  groups:groups.map(g=>({
-    ...g,
-    parent:g.parent?{...g.parent,quoted_unit_price:Number(g.parent.quoted_unit_price??g.parent.unit_price??0),quote_price_locked:!!g.parent.quote_price_locked}:g.parent,
-    children:(g.children||[]).map(c=>({...c,quoted_unit_price:Number(c.quoted_unit_price??c.unit_price??0),quote_price_locked:!!c.quote_price_locked}))
-  })),
-  ...currentShippingPayload()
-};localStorage.setItem('pmktools_shipping_v1',JSON.stringify(Object.assign(readShippingState(),currentShippingPayload(),{method:currentShippingPayload().shipping_method})));const o=await api('/api/pmk-cart-checkout-create',payload);localStorage.setItem('pmktools_pending_order',String(o.order_id||''));setText('erpOrderNo',o.order_no||o.order_id||'已建立');if(Number(o.cash_amount||0)<=0){
+async function boot(){groups=getGroups();if(!groups.length)return error('購物車是空的');const c=readErpCustomer();if(!c.customer_id)return error('尚未選擇 ERP 客戶，請返回購物車／報價單選擇客戶。');const a=await SB.auth.getSession();session=a.data?.session||null;if(!session){setText('loginState','尚未登入');return error('請先登入後再進行 PMKTOOLS 結帳。')}setText('loginState',session.user.email||'已登入');shippingState=readShippingState();try{await refreshPreview()}catch(e){error('結帳預覽失敗：'+String(e.message||e))}}
+
+async function syncErpSalesOrder(pmkOrder,cartPreview){
+  const c=readErpCustomer(),q=readErpQuote();if(!c.customer_id)return null;
+  const lines=[],pg=cartPreview?.cart?.groups||[];
+  pg.forEach((g,gi)=>{const srcg=groups[gi]||{};const add=(l,src)=>{if(!l)return;const qty=Math.max(1,Number(l.quantity||src?.quantity||1)),unit=Number(l.unit_price??l.price??0);lines.push({sku:erpSku(l,src||{}),customer_sku:'',name:String(l.name||src?.name||'商品'),qty,unit:'PCS',list_price:unit,discount:0,unit_price:unit,delivery_date:''})};add(g.parent,srcg.parent);(g.children||[]).forEach((l,ci)=>add(l,(srcg.children||[])[ci]))});
+  const doc={type:'sales-order',doc_no:'',date:new Date().toISOString().slice(0,10),customer_id:c.customer_id,customer_name:c.customer_name||'',customer_po:c.customer_po||'',valid_until:new Date().toISOString().slice(0,10),currency:c.currency||'TWD',exchange_rate:1,tax_rate:5,payment_terms:c.payment_terms||'',shipping_method:currentShippingPayload().shipping_method||'',salesperson:'RAYMOND',status:'draft',source_quote:q.doc_no||q.quote_no||'',note:`PMKTOOLS 訂單 ${pmkOrder?.order_no||pmkOrder?.order_id||''}｜PAYUNi 待付款`,customer_snapshot:c,lines};
+  const r=await fetch(ERP_API+'/api/erp-sales-save',{method:'POST',credentials:'include',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'sales-order',doc})}),t=await r.text();let j={};try{j=JSON.parse(t)}catch(_){throw new Error('ERP 銷售訂單回傳不是 JSON')}if(!r.ok||j.ok===false)throw new Error(j.error||j.message||('HTTP '+r.status));localStorage.setItem('pmktools_erp_sales_order_v1',JSON.stringify(j.doc||{}));return j.doc||null;
+}
+
+$('pay').onclick=async()=>{if(!preview)return;const msg=`確認一次結帳全部商品？\n\n商品總額 ${fmt(preview.price)}\n5% ${fmt(preview.fee_5)}\n信用卡 ${fmt(preview.cash_amount)}`;if(!confirm(msg))return;$('pay').disabled=true;$('err').style.display='none';try{await saveProfileAddressIfNeeded();const c=readErpCustomer(),q=readErpQuote();const payload={groups:serverPricedGroups(groups),...currentShippingPayload(),erp_customer_id:c.customer_id||'',erp_customer_snapshot:c,erp_quote_no:q.doc_no||q.quote_no||''};localStorage.setItem('pmktools_shipping_v1',JSON.stringify(Object.assign(readShippingState(),currentShippingPayload(),{method:currentShippingPayload().shipping_method})));const o=await api('/api/pmk-cart-checkout-create',payload);localStorage.setItem('pmktools_pending_order',String(o.order_id||''));setText('erpOrderNo',o.order_no||o.order_id||'已建立');try{const so=await syncErpSalesOrder(o,preview);if(so?.doc_no)setText('erpOrderNo',(o.order_no||o.order_id||'')+' / ERP '+so.doc_no)}catch(e){console.warn('ERP 銷售訂單同步失敗',e)}if(Number(o.cash_amount||0)<=0){
   throw new Error('PMKTOOLS 工業品不使用推薦點兌換，付款金額不可為 0');
 }
 const resp=await fetch(SUPABASE_URL+'/functions/v1/pmk-payuni-checkout',{
