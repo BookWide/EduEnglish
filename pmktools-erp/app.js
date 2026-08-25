@@ -88,7 +88,7 @@ function erpOpenCustomerMasterV11(){
   const c={customer_id:'',name:'',tax_id:'',contact:'',phone:'',mobile:'',email:'',address:'',invoice_title:'',payment_terms:'',delivery:'',currency:'TWD',salesperson:'',notes:''};
   showDialog('客戶資料維護',`<div class="customer-master-v11">
     <label>客戶編號<input id="cm_id"></label><label>客戶名稱<input id="cm_name"></label>
-    <label>統一編號<input id="cm_tax"></label><label>聯絡人<input id="cm_contact"></label>
+    <label>統編 / 身分證<input id="cm_tax" placeholder="公司填統編；個人填身分證"></label><label>聯絡人<input id="cm_contact"></label>
     <label>電話<input id="cm_phone"></label><label>手機<input id="cm_mobile"></label>
     <label>E-mail<input id="cm_email"></label><label>發票抬頭<input id="cm_invoice"></label>
     <label class="wide">地址<input id="cm_address"></label><label>付款條件<input id="cm_payment"></label>
@@ -535,7 +535,7 @@ function customerFormToPmk(){
   return {
     customer_id:String($('cId')?.value||'').trim(),
     name:String($('cName')?.value||'').trim(),
-    tax_id:String($('cOfficialId')?.value||'').trim(),
+    tax_id:String($('cOfficialId')?.value||'').trim().toUpperCase(),
     contact:String($('cDirectAgent')?.value||$('cChairman')?.value||'').trim(),
     pricing_type:String($('cPricingType')?.value||'RETAIL').trim(),
     notes:String($('cDescription')?.value||'').trim()
@@ -570,7 +570,7 @@ function customerBasicHTML(c={}){return `<div class="customer-basic-grid">
   <label>簡稱*</label><input id="cAbbr" value="${cval(c.abbreviation)}"><span></span><span></span>
   <label>負責人*</label><input id="cChairman" value="${cval(c.chairman)}"><span></span><span></span>
   <label>負責經辦人</label><input id="cDirectAgent" value="${cval(c.directAgent)}"><span></span><span></span>
-  <label>統一編號</label><input id="cOfficialId" value="${cval(c.officialId)}"><label class="c-right-label c-price-label">定價類別</label><select id="cPricingType"><option>${cval(c.pricingType||'直銷')}</option><option>直銷</option><option>經銷</option></select>
+  <label>統編 / 身分證</label><input id="cOfficialId" value="${cval(c.officialId)}"><label class="c-right-label c-price-label">定價類別</label><select id="cPricingType"><option>${cval(c.pricingType||'直銷')}</option><option>直銷</option><option>經銷</option></select>
   <label>人員組織歸類</label><div class="customer-category-line"><select id="cCategories"><option>${cval(c.categories||'不限')}</option><option>不限</option></select><input value="" readonly></div><span></span><span></span>
   <label class="customer-photo-label">照片</label><div class="customer-photo"><div class="customer-photo-placeholder">Image<br>Unavailable<br>未定義</div><button type="button">▧ 上傳照片</button></div><span></span><span></span>
 </div>`}
