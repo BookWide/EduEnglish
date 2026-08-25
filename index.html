@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V36.5_DEVICE_SLOT_STABLE" /><script>window.BOOKWIDE_BUILD="V36.5_DEVICE_SLOT_STABLE";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
+<!doctype html><html lang="zh-Hant"><!-- BookWide V35.2: device guard real fix; takeover only on explicit login; local kick only --><head><meta charset="utf-8" /><meta name="bookwide-build" content="V36.4_CLEAN_CORE" /><script>window.BOOKWIDE_BUILD="V36.4_CLEAN_CORE";</script><title>BookWide 多語學習｜聽故事｜聽音樂｜看電影｜看新聞學英文日文</title><meta name="description" content="BookWide 是多語言學習平台，可聽故事、聽音樂、看電影、看新聞、做旅遊任務與闖關練習，用英文、日文與多國語言練聽力、會話、單字與測驗。" />
 <meta name="keywords" content="BookWide,多語言學習,看影片學英文,聽故事學英文,聽音樂學英文,看電影學英文,看新聞學英文,英文聽力,英文會話,日文學習,旅遊英文,機場英文,飯店英文,餐廳英文" />
 <link rel="canonical" href="https://bookwide.net/" />
 <meta property="og:type" content="website" />
@@ -3129,22 +3129,33 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
     }
 
     function BW_getPhysicalMobileSlotId(){
-      // V36.5：同一支手機在 LINE WebView / Safari / Chrome 必須得到同一個 mobile slot。
-      // 不再把 OS 版本放進 ID；系統更新後不能被誤判成「另一台手機」。
-      // 不使用完整 UA / browser version / localStorage（LINE 與 Safari 儲存區彼此隔離）。
+      // 目標：同一支 iPhone 在 LINE WebView / Safari 取得相同 slot。
+      // 故意不使用完整 UA / browser version，避免 LINE 與 Safari 被分成兩台。
       try{
         const ua = navigator.userAgent || '';
+        let os = 'mobile';
+        let m = ua.match(/(?:CPU iPhone OS|CPU OS) ([0-9_]+)/i);
+        if(m) os = 'ios-' + String(m[1]).split('_').slice(0,2).join('.');
+        else {
+          m = ua.match(/Android\s+([0-9.]+)/i);
+          if(m) os = 'android-' + String(m[1]).split('.').slice(0,2).join('.');
+        }
+
         const sw = Number(screen.width || 0);
         const sh = Number(screen.height || 0);
         const a = Math.min(sw, sh);
         const b = Math.max(sw, sh);
         const dpr = Number(window.devicePixelRatio || 1).toFixed(2);
-        const platform = /iPhone/i.test(ua) ? 'iphone' : /iPad/i.test(ua) ? 'ipad' : /Android/i.test(ua) ? 'android' : 'mobile';
-        const colorDepth = Number(screen.colorDepth || 0);
-        const raw = [platform, a, b, dpr, colorDepth].join('|');
-        return 'mob2-' + BW_hash32(raw);
+        const touch = Number(navigator.maxTouchPoints || 0);
+        const platform =
+          /iPhone/i.test(ua) ? 'iphone' :
+          /iPad/i.test(ua) ? 'ipad' :
+          /Android/i.test(ua) ? 'android' : 'mobile';
+
+        const raw = [platform, os, a, b, dpr, touch].join('|');
+        return 'mob-' + BW_hash32(raw);
       }catch(_e){
-        return 'mob2-' + BW_hash32('fallback|' + String(screen.width||0) + '|' + String(screen.height||0));
+        return 'mob-' + BW_hash32('fallback|' + String(screen.width||0) + '|' + String(screen.height||0));
       }
     }
 
@@ -3166,21 +3177,6 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         return { type, idCol:'current_mobile_device_id', seenCol:'mobile_last_seen_at' };
       }
       return { type, idCol:'current_desktop_device_id', seenCol:'desktop_last_seen_at' };
-    }
-
-    function BW_isLegacyMobileSlot(id){
-      return BW_PAGE_DEVICE_TYPE === 'mobile' && /^mob-(?!2-)/.test(String(id||''));
-    }
-    async function BW_migrateLegacyMobileSlot(user, cols, my, currentId){
-      if(!user?.id || cols.type !== 'mobile' || !BW_isLegacyMobileSlot(currentId) || !/^mob2-/.test(String(my||''))) return false;
-      try{
-        const now = new Date().toISOString();
-        const payload = { last_seen_at: now };
-        payload[cols.idCol] = my; payload[cols.seenCol] = now;
-        const up = await supa.from('profiles').update(payload).eq('id', user.id).eq(cols.idCol, currentId);
-        if(up.error){ console.warn('[BW] legacy mobile slot migration blocked:', up.error.message || up.error); return false; }
-        return true;
-      }catch(e){ console.warn('[BW] legacy mobile slot migration error:', e); return false; }
     }
 
     function BW_showKickedModal(){
@@ -3270,14 +3266,10 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
           return true;
         }
 
-        let currentId = String((data && data[cols.idCol]) || '');
+        const currentId = String((data && data[cols.idCol]) || '');
         if(currentId && currentId !== my){
-          if(await BW_migrateLegacyMobileSlot(user, cols, my, currentId)){
-            currentId = my;
-          }else{
-            await BW_forceSignOut();
-            return false;
-          }
+          await BW_forceSignOut();
+          return false;
         }
 
         // 尚未登記過此類裝置：只在欄位為空時認領，不覆蓋別台
@@ -3329,14 +3321,10 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
             return;
           }
 
-          let currentId = String((data && data[cols.idCol]) || '');
+          const currentId = String((data && data[cols.idCol]) || '');
           if(currentId && currentId !== my){
-            if(await BW_migrateLegacyMobileSlot(user, cols, my, currentId)){
-              currentId = my;
-            }else{
-              await BW_forceSignOut();
-              return;
-            }
+            await BW_forceSignOut();
+            return;
           }
 
           const now = new Date().toISOString();
