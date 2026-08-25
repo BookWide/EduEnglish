@@ -81,7 +81,7 @@ function erpBlankDoc(type){
 }
 
 async function erpLoadCustomersV11(){
-  try{const j=await erpApi('/api/erp-customers');erpSalesState.customers=j.rows||[]}catch{erpSalesState.customers=[]}
+  try{const j=await pmkApi('/api/pmk-erp-customers');erpSalesState.customers=j.rows||[]}catch{erpSalesState.customers=[]}
 }
 function erpCustomerByIdV11(id){return erpSalesState.customers.find(x=>String(x.customer_id).toUpperCase()===String(id||"").trim().toUpperCase())}
 function erpOpenCustomerMasterV11(){
@@ -94,11 +94,12 @@ function erpOpenCustomerMasterV11(){
     <label class="wide">地址<input id="cm_address"></label><label>付款條件<input id="cm_payment"></label>
     <label>送貨方式<input id="cm_delivery"></label><label>幣別<input id="cm_currency" value="TWD"></label>
     <label>業務員<input id="cm_sales"></label><label class="wide">備註<textarea id="cm_notes"></textarea></label>
-    <div class="wide customer-master-actions"><select id="cm_existing"><option value="">載入既有客戶…</option>${erpSalesState.customers.map(x=>`<option value="${erpEsc(x.customer_id)}">${erpEsc(x.customer_id)}｜${erpEsc(x.name)}</option>`).join('')}</select><button id="cm_save">儲存客戶</button></div>
+    <div class="wide customer-master-actions"><select id="cm_existing"><option value="">載入既有客戶…</option>${erpSalesState.customers.map(x=>`<option value="${erpEsc(x.customer_id)}">${erpEsc(x.customer_id)}｜${erpEsc(x.name)}</option>`).join('')}</select><button id="cm_save">儲存客戶</button><button id="cm_delete" type="button">刪除客戶</button></div>
   </div>`);
   const fill=x=>{[['cm_id','customer_id'],['cm_name','name'],['cm_tax','tax_id'],['cm_contact','contact'],['cm_phone','phone'],['cm_mobile','mobile'],['cm_email','email'],['cm_invoice','invoice_title'],['cm_address','address'],['cm_payment','payment_terms'],['cm_delivery','delivery'],['cm_currency','currency'],['cm_sales','salesperson'],['cm_notes','notes']].forEach(([a,b])=>{if($(a))$(a).value=x[b]||''})};
   $('cm_existing').onchange=()=>{const x=erpCustomerByIdV11($('cm_existing').value);if(x)fill(x)};
-  $('cm_save').onclick=async()=>{const get=id=>$(id).value.trim(),x={customer_id:get('cm_id'),name:get('cm_name'),tax_id:get('cm_tax'),contact:get('cm_contact'),phone:get('cm_phone'),mobile:get('cm_mobile'),email:get('cm_email'),invoice_title:get('cm_invoice'),address:get('cm_address'),payment_terms:get('cm_payment'),delivery:get('cm_delivery'),currency:get('cm_currency')||'TWD',salesperson:get('cm_sales'),notes:get('cm_notes')};if(!x.customer_id||!x.name)return alert('客戶編號、客戶名稱必填');await erpApi('/api/erp-customer-save',{method:'POST',body:JSON.stringify({customer:x})});await erpLoadCustomersV11();alert('客戶資料已儲存')};
+  $('cm_save').onclick=async()=>{const get=id=>$(id).value.trim(),x={customer_id:get('cm_id'),name:get('cm_name'),tax_id:get('cm_tax'),contact:get('cm_contact'),phone:get('cm_phone'),mobile:get('cm_mobile'),email:get('cm_email'),invoice_title:get('cm_invoice'),address:get('cm_address'),payment_terms:get('cm_payment'),delivery:get('cm_delivery'),currency:get('cm_currency')||'TWD',salesperson:get('cm_sales'),notes:get('cm_notes')};if(!x.customer_id||!x.name)return alert('客戶編號、客戶名稱必填');await pmkApi('/api/pmk-erp-customer-save',{method:'POST',body:JSON.stringify({customer:x})});await erpLoadCustomersV11();alert('客戶資料已儲存')}; 
+  $('cm_delete').onclick=async()=>{const id=$('cm_existing').value||$('cm_id').value.trim();if(!id)return alert('請先選擇客戶');if(!confirm('確定刪除客戶 '+id+'？'))return;await pmkApi('/api/pmk-erp-customer-delete',{method:'POST',body:JSON.stringify({customer_id:id})});await erpLoadCustomersV11();['cm_id','cm_name','cm_tax','cm_contact','cm_phone','cm_mobile','cm_email','cm_invoice','cm_address','cm_payment','cm_delivery','cm_sales','cm_notes'].forEach(k=>{if($(k))$(k).value=''});alert('客戶已刪除')};
 }
 function erpApplyCustomerV11(){
   const c=erpCustomerByIdV11($('sd_customer_id')?.value);if(!c)return;
@@ -277,6 +278,26 @@ async function api(path,options={}){
   const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),60000);
   try{
     let target=path;
+    if(path==='/api/party-tree'){
+      const j=await pmkApi('/api/pmk-erp-customers');
+      return {ok:true,nodes:[{id:'P_Customer',name:'客戶'}],customers:(j.rows||[]).map(c=>({id:c.customer_id,name:c.name}))};
+    }
+    if(path.startsWith('/api/customers')){
+      const q=path.includes('?')?path.slice(path.indexOf('?')):'';
+      const j=await pmkApi('/api/pmk-erp-customers'+q);
+      return {ok:true,customers:(j.rows||[]).map(c=>({id:c.customer_id,name:c.name,...c}))};
+    }
+    if(path.startsWith('/api/customer?id=')){
+      const id=new URL('https://x'+path).searchParams.get('id')||'';
+      const j=await pmkApi('/api/pmk-erp-customer?customer_id='+encodeURIComponent(id));
+      const c=j.customer||{};
+      return {ok:true,customer:{
+        ...c,id:c.customer_id,abbreviation:c.name,officialId:c.tax_id,directAgent:c.contact,
+        pricingType:c.pricing_type||'直銷',manager:c.contact,phones:[c.phone].filter(Boolean),
+        mobiles:[c.mobile].filter(Boolean),emails:[c.email].filter(Boolean),
+        street:c.address||c.shipping_address||'',country:'台灣',_tables:['PMKTOOLS R2', '_meta/pmktools/customers.json']
+      }};
+    }
     if(path.startsWith('/api/product?id=')){target=ERP_API+'/api/bw-erp-item?id='+encodeURIComponent(new URL('https://x'+path).searchParams.get('id')||'')}
     const opts={cache:'no-store',signal:controller.signal,headers:{'Accept':'application/json',...(options.headers||{})},...options};
     const r=await fetch(target,opts);let j;try{j=await r.json()}catch{throw new Error(`HTTP ${r.status}：回傳不是 JSON`)}
@@ -509,6 +530,39 @@ async function selectCustomer(summary,button=null){
     $('statusText').textContent=`客戶 ${currentCustomer.id} ${currentCustomer.name}｜${(currentCustomer._tables||[]).join(' / ')}`;
   }catch(e){showDialog('客戶讀取失敗',e.message)}
 }
+
+function customerFormToPmk(){
+  return {
+    customer_id:String($('cId')?.value||'').trim(),
+    name:String($('cName')?.value||'').trim(),
+    tax_id:String($('cOfficialId')?.value||'').trim(),
+    contact:String($('cDirectAgent')?.value||$('cChairman')?.value||'').trim(),
+    pricing_type:String($('cPricingType')?.value||'RETAIL').trim(),
+    notes:String($('cDescription')?.value||'').trim()
+  };
+}
+async function pmkSaveCurrentCustomer(){
+  const c=customerFormToPmk();
+  if(!c.customer_id||!c.name)return alert('客戶編號、名稱必填');
+  const j=await pmkApi('/api/pmk-erp-customer-save',{method:'POST',body:JSON.stringify({customer:c})});
+  await loadPartyTree();
+  await selectCustomer({id:j.customer.customer_id});
+  alert(j.created?'新客戶已建立':'客戶資料已更新');
+}
+async function pmkDeleteCurrentCustomer(){
+  const id=String(currentCustomer?.id||$('cId')?.value||'').trim();
+  if(!id)return alert('尚未選擇客戶');
+  if(!confirm(`確定刪除客戶 ${id}？歷史單據不會刪除。`))return;
+  await pmkApi('/api/pmk-erp-customer-delete',{method:'POST',body:JSON.stringify({customer_id:id})});
+  currentCustomer=null;originalCustomerId='';await loadPartyTree();
+  alert('客戶已刪除');
+}
+function pmkNewCustomer(){
+  currentCustomer={id:'',name:'',pricingType:'直銷'};originalCustomerId='';
+  showCustomerTab('basic');
+  $('statusText').textContent='新增客戶：請輸入客戶代號與名稱後儲存';
+}
+
 function cval(v){return esc(v??'')}
 function customerBasicHTML(c={}){return `<div class="customer-basic-grid">
   <label>編號*</label><input id="cId" value="${cval(c.id)}"><label class="c-right-label">說明*</label><textarea id="cDescription" class="customer-description">${cval(c.description)}</textarea>
