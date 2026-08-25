@@ -259,19 +259,37 @@
   <div class="v49-card">
     <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:10px">
       <div>
-        <h2 style="margin:0">客戶交易紀錄</h2>
-        <div class="muted" style="margin-top:4px">只顯示已出貨／已完成訂單；舊會員客戶彙總已移除。</div>
+        <h2 style="margin:0">客戶交易摘要</h2>
+        <div class="muted" style="margin-top:4px">每位客戶只佔一列；按「查看交易」才展開明細，不會一直把頁面往下撐。</div>
       </div>
       <button class="btn gray" id="clearOldCustomerView" type="button">清除舊顯示</button>
     </div>
     <div class="v49-toolbar">
-      <input id="customerQ" placeholder="搜尋訂單、客戶、電話、商品">
-      <select id="customerSort"><option value="recent">最近出貨</option><option value="spent">金額最高</option></select>
+      <input id="customerQ" placeholder="搜尋客戶、電話、Email、訂單">
+      <select id="customerSort">
+        <option value="recent">最近交易</option>
+        <option value="spent">累計金額</option>
+        <option value="orders">交易筆數</option>
+      </select>
     </div>
+
     <div class="tablewrap"><table>
-      <thead><tr><th>出貨時間</th><th>訂單</th><th>客戶</th><th>聯絡</th><th>商品</th><th>數量</th><th>金額</th><th>物流／狀態</th></tr></thead>
-      <tbody id="customerRows"><tr><td colspan="8" class="muted">讀取已完成訂單…</td></tr></tbody>
+      <thead><tr><th>客戶</th><th>聯絡</th><th>已完成交易</th><th>累計金額</th><th>最近出貨</th><th>操作</th></tr></thead>
+      <tbody id="customerRows"><tr><td colspan="6" class="muted">讀取交易摘要…</td></tr></tbody>
     </table></div>
+
+    <div id="customerHistoryDetail" style="display:none;margin-top:12px;border:1px solid #dbe3ec;border-radius:12px;overflow:hidden">
+      <div style="padding:10px 12px;background:#f8fafc;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center">
+        <b id="customerHistoryTitle">交易明細</b>
+        <button class="rowbtn" id="customerHistoryClose" type="button">收起</button>
+      </div>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>出貨時間</th><th>訂單</th><th>商品</th><th>數量</th><th>金額</th><th>物流</th></tr></thead>
+          <tbody id="customerHistoryRows"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -851,37 +869,94 @@ function renderPmkCrm(){
   document.querySelectorAll('[data-pmk-del]').forEach(b=>b.onclick=()=>pmkCrmDelete(b.dataset.pmkDel));
 }
 
+let pmkHistoryGroups=[];
+
+function pmkCustomerKeyFromOrder(o){
+  const c=v49Contact(o);
+  return String(
+    o.erp_customer_id ||
+    o.customer_id ||
+    o.customer_key ||
+    o.customer_tax_id ||
+    o.user_id ||
+    c.email ||
+    c.phone ||
+    v49CustomerName(o) ||
+    'UNKNOWN'
+  ).trim();
+}
+function pmkBuildHistoryGroups(){
+  const map=new Map();
+  v49Orders.filter(o=>o.status==='sent').forEach(o=>{
+    const key=pmkCustomerKeyFromOrder(o);
+    if(!map.has(key)){
+      const c=v49Contact(o);
+      map.set(key,{
+        key,
+        name:v49CustomerName(o),
+        phone:c.phone||'',
+        email:c.email||'',
+        rows:[],
+        total:0,
+        last:''
+      });
+    }
+    const g=map.get(key);
+    g.rows.push(o);
+    g.total+=Number(o.cash_amount||0);
+    const dt=String(o.fulfilled_at||o.updated_at||o.created_at||'');
+    if(dt>g.last)g.last=dt;
+  });
+  return [...map.values()];
+}
+function pmkOpenHistoryDetail(key){
+  const g=pmkHistoryGroups.find(x=>x.key===key);
+  if(!g)return;
+  $('customerHistoryDetail').style.display='block';
+  $('customerHistoryTitle').textContent=`${g.name||g.key}｜已完成 ${g.rows.length} 筆`;
+  const rows=[...g.rows].sort((a,b)=>String(b.fulfilled_at||b.updated_at||b.created_at||'').localeCompare(String(a.fulfilled_at||a.updated_at||a.created_at||'')));
+  $('customerHistoryRows').innerHTML=rows.map(o=>{
+    const when=o.fulfilled_at||o.updated_at||o.created_at;
+    return `<tr>
+      <td>${when?new Date(when).toLocaleString('zh-TW',{hour12:false}):'—'}</td>
+      <td><b>${esc(v49OrderNo(o))}</b></td>
+      <td>${esc(o.product_name||'')}</td>
+      <td>${Number(o.quantity||1)}</td>
+      <td><b>${v49Money(Number(o.cash_amount||0))}</b></td>
+      <td>${esc(o.tracking_no||'已完成')}</td>
+    </tr>`;
+  }).join('');
+  $('customerHistoryDetail').scrollIntoView({behavior:'smooth',block:'nearest'});
+}
+
 async function loadCustomers(){
   renderPmkCrm();
   await loadV49Shared();
 
-  let rows=v49Orders.filter(o=>o.status==='sent');
+  pmkHistoryGroups=pmkBuildHistoryGroups();
   const q=String($('customerQ')?.value||'').trim().toLowerCase();
-  if(q){
-    rows=rows.filter(o=>[
-      v49OrderNo(o),v49CustomerName(o),v49Contact(o).email,v49Contact(o).phone,
-      o.product_name,o.shipping_address,o.tracking_no
-    ].join(' ').toLowerCase().includes(q));
-  }
+  let groups=pmkHistoryGroups.filter(g=>!q || [
+    g.name,g.phone,g.email,g.key,
+    ...g.rows.map(o=>v49OrderNo(o))
+  ].join(' ').toLowerCase().includes(q));
 
   const sort=$('customerSort')?.value||'recent';
-  rows.sort((a,b)=>sort==='spent'
-    ? Number(b.cash_amount||0)-Number(a.cash_amount||0)
-    : String(b.fulfilled_at||b.updated_at||b.created_at||'').localeCompare(String(a.fulfilled_at||a.updated_at||a.created_at||'')));
+  groups.sort((a,b)=>
+    sort==='spent' ? b.total-a.total :
+    sort==='orders' ? b.rows.length-a.rows.length :
+    String(b.last||'').localeCompare(String(a.last||''))
+  );
 
-  $('customerRows').innerHTML=rows.map(o=>{
-    const c=v49Contact(o),when=o.fulfilled_at||o.updated_at||o.created_at;
-    return `<tr>
-      <td>${when?new Date(when).toLocaleString('zh-TW',{hour12:false}):'—'}</td>
-      <td><b>${esc(v49OrderNo(o))}</b><div class="muted">${esc(String(o.id||'').slice(0,12))}</div></td>
-      <td><b>${esc(v49CustomerName(o))}</b></td>
-      <td>${esc(c.phone||'—')}<div class="muted">${esc(c.email||'')}</div></td>
-      <td>${esc(o.product_name||'')}</td>
-      <td>${Number(o.quantity||1)}</td>
-      <td><b>${v49Money(Number(o.cash_amount||0))}</b></td>
-      <td>${esc(o.tracking_no||'已完成')}<div class="muted">${esc(v49OrderStatus(o.status))}</div></td>
-    </tr>`;
-  }).join('')||'<tr><td colspan="8" class="muted">目前尚無已出貨／已完成交易紀錄。</td></tr>';
+  $('customerRows').innerHTML=groups.map(g=>`<tr>
+    <td><b>${esc(g.name||'—')}</b><div class="muted">${esc(g.key||'')}</div></td>
+    <td>${esc(g.phone||'—')}<div class="muted">${esc(g.email||'')}</div></td>
+    <td><b>${g.rows.length}</b> 筆</td>
+    <td><b>${v49Money(g.total)}</b></td>
+    <td>${g.last?new Date(g.last).toLocaleString('zh-TW',{hour12:false}):'—'}</td>
+    <td><button class="rowbtn" data-history-key="${esc(g.key)}">查看交易</button></td>
+  </tr>`).join('')||'<tr><td colspan="6" class="muted">目前尚無已出貨／已完成交易。</td></tr>';
+
+  document.querySelectorAll('[data-history-key]').forEach(b=>b.onclick=()=>pmkOpenHistoryDetail(b.dataset.historyKey));
 }
 
 async function loadShipping(){
@@ -1962,7 +2037,7 @@ window.addEventListener('message',e=>{
   if(e.source===window&&e.data?.type==='BOOKWIDE_COLLECTOR_PRODUCT'&&e.data.payload)applyChromeCollectorV200(e.data.payload);
 });
 
-$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;if($('detail_description'))$('detail_description').addEventListener('paste',handleDetailPasteV5);if($('aiProductPasteClearBtn'))$('aiProductPasteClearBtn').onclick=()=>{aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();};$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;if($('clearOldCustomerView'))$('clearOldCustomerView').onclick=()=>{localStorage.removeItem('pmktools_customer_transactions_v1');loadCustomers();};if($('pmkCrmQ'))$('pmkCrmQ').oninput=renderPmkCrm;if($('pmkCrmNew'))$('pmkCrmNew').onclick=()=>pmkCrmOpen({});if($('pmkCrmSave'))$('pmkCrmSave').onclick=pmkCrmSave;if($('pmkCrmCancel'))$('pmkCrmCancel').onclick=pmkCrmClose;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
+$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;if($('detail_description'))$('detail_description').addEventListener('paste',handleDetailPasteV5);if($('aiProductPasteClearBtn'))$('aiProductPasteClearBtn').onclick=()=>{aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();};$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;if($('customerHistoryClose'))$('customerHistoryClose').onclick=()=>{$('customerHistoryDetail').style.display='none'};if($('clearOldCustomerView'))$('clearOldCustomerView').onclick=()=>{localStorage.removeItem('pmktools_customer_transactions_v1');loadCustomers();};if($('pmkCrmQ'))$('pmkCrmQ').oninput=renderPmkCrm;if($('pmkCrmNew'))$('pmkCrmNew').onclick=()=>pmkCrmOpen({});if($('pmkCrmSave'))$('pmkCrmSave').onclick=pmkCrmSave;if($('pmkCrmCancel'))$('pmkCrmCancel').onclick=pmkCrmClose;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
 $('seedFlower12').onclick=seedFlowerPartner12;
 $('reloadCategories').onclick=loadCategories;$('catSaveBtn').onclick=saveCategory;$('catCancelBtn').onclick=resetCategoryEditor;initCollapsibles();initV49Layout();boot();
 </script>
