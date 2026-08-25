@@ -115,7 +115,7 @@ h1{font-size:28px!important;margin:0 0 12px!important}
     <div class="confirm-field wide2"><div class="confirm-k">收件地址</div><div id="confirmAddress" class="confirm-v">—</div></div>
     <div class="confirm-field"><div class="confirm-k">配送方式</div><div id="confirmMethod" class="confirm-v">—</div></div>
     <div class="confirm-field wide2"><div class="confirm-k">登入帳號</div><div id="erpAccount" class="confirm-v">—</div></div>
-    <div class="confirm-field"><div class="confirm-k">付款方式</div><div class="confirm-v">信用卡 / PAYUNi</div></div>
+    <div class="confirm-field"><div class="confirm-k">付款方式</div><div id="confirmPaymentMode" class="confirm-v">信用卡現結</div></div>
   </div>
 </div>
 <div class="confirm-section">訂購明細</div>
@@ -127,8 +127,13 @@ h1{font-size:28px!important;margin:0 0 12px!important}
 <div id="shippingBlock" class="notice"><b>運送方式</b><div id="shippingMethods"></div><div id="shippingAddressFields" style="display:grid"></div></div>
 </section>
 <aside class="checkout-right">
+<div class="section-title">付款方式</div>
+<div id="paymentModeBox" class="notice" style="margin-bottom:12px">
+<label style="display:flex;gap:9px;align-items:flex-start;padding:8px 0"><input type="radio" name="paymentMode" value="card" checked><span><b>1. 信用卡現結</b><br><span class="muted">PAYUNi 信用卡立即付款，另計 5%。</span></span></label>
+<label id="monthlyModeLabel" style="display:flex;gap:9px;align-items:flex-start;padding:8px 0"><input id="monthlyModeRadio" type="radio" name="paymentMode" value="monthly"><span><b>2. 月結客戶</b><br><span id="monthlyModeHelp" class="muted">僅限後台核准月結客戶；繞開信用卡，直接成立待出貨訂單。</span></span></label>
+</div>
 <div class="section-title">訂單摘要</div>
-<div id="paymentSummary"><div class="row"><span>商品小計</span><b id="subtotal">—</b></div><div class="row"><span>運費</span><b id="shippingFee">—</b></div><div class="row"><span>商品總額</span><b id="price">—</b></div><div class="row"><span>計費金額</span><b id="net">—</b></div><div class="row"><span>5%</span><b id="fee">—</b></div><div class="row"><span>信用卡實際收款</span><b class="total" id="cash">—</b></div></div>
+<div id="paymentSummary"><div class="row"><span>商品小計</span><b id="subtotal">—</b></div><div class="row"><span>運費</span><b id="shippingFee">—</b></div><div class="row"><span>商品總額</span><b id="price">—</b></div><div class="row"><span id="netLabel">計費金額</span><b id="net">—</b></div><div class="row"><span id="feeLabel">信用卡 5%</span><b id="fee">—</b></div><div class="row"><span id="cashLabel">信用卡實際收款</span><b class="total" id="cash">—</b></div></div>
 <div class="notice">主商品與加購項合併為同一筆訂單、一次付款。</div>
 <button id="pay" class="btn" disabled>確認訂單並付款</button>
 <div id="err" class="err"></div>
@@ -194,9 +199,18 @@ function renderErpMeta(){
   setText('confirmDate',erpToday());setText('erpAccount',session?.user?.email||'—');
   setText('confirmName',[c.customer_name,c.contact].filter(Boolean).join(' / ')||p.shipping_name||'—');setText('confirmPhone',c.phone||p.shipping_phone||'—');setText('confirmAddress',c.shipping_address||c.billing_address||p.shipping_address||'—');
   setText('erpOrderNo',q.doc_no?('報價 '+q.doc_no+' / 付款建立時產生'):'付款建立時產生');
-  const methods=preview?.available_shipping_methods||[];const method=methods.find(m=>m.code===p.shipping_method)||preview?.selected_shipping_method;setText('confirmMethod',method?.label||p.shipping_method||'—');
+  const methods=preview?.available_shipping_methods||[];const method=methods.find(m=>m.code===p.shipping_method)||preview?.selected_shipping_method;setText('confirmMethod',method?.label||p.shipping_method||'—');syncPaymentModeUI();
 }
-const P=new URL(location.href).searchParams,mode=P.get('mode')||'single';let session=null,preview=null,groups=[],shippingState={};
+const P=new URL(location.href).searchParams,mode=P.get('mode')||'single';let session=null,preview=null,groups=[],shippingState={},paymentMode='card';
+function isMonthlyCustomer(c){return String(c?.payment_terms||'').toLowerCase()==='monthly_30'}
+function currentPaymentMode(){return paymentMode==='monthly'?'monthly':'card'}
+function syncPaymentModeUI(){
+  const c=readErpCustomer(),allowed=isMonthlyCustomer(c),mr=$('monthlyModeRadio'),help=$('monthlyModeHelp'),label=$('monthlyModeLabel');
+  if(mr){mr.disabled=!allowed;if(!allowed&&paymentMode==='monthly'){paymentMode='card';const cr=document.querySelector('input[name="paymentMode"][value="card"]');if(cr)cr.checked=true}}
+  if(help)help.textContent=allowed?'已核准：月結 30 天；不刷卡，訂單直接進待出貨。':'此客戶未核准月結；請由後台 CRM 將付款條件設為「月結 30 天」。';
+  if(label)label.style.opacity=allowed?'1':'.55';
+  setText('confirmPaymentMode',paymentMode==='monthly'?'月結 30 天':'信用卡現結 / PAYUNi');
+}
 function error(m){const e=$('err');if(e){e.style.display='block';e.textContent=m}if($('pay'))$('pay').disabled=true}
 function getGroups(){
  if(mode==='cart'){
@@ -263,7 +277,7 @@ function serverPricedGroups(input){
 }
 
 async function refreshPreview(){
- const v=await api('/api/pmk-cart-checkout-preview',{groups:serverPricedGroups(groups),...currentShippingPayload()});
+ const v=await api('/api/pmk-cart-checkout-preview',{groups:serverPricedGroups(groups),...currentShippingPayload(),payment_mode:currentPaymentMode()});
  paint(v);
 }
 async function api(path,body){const r=await fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},body:JSON.stringify(body),cache:'no-store'}),t=await r.text();let j={};try{j=JSON.parse(t)}catch(_){throw new Error(t||('HTTP '+r.status))}if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));return j}
@@ -293,7 +307,16 @@ function renderItems(cart){
    </tr>`
  }).join('')}</tbody></table></div>`;
 }
-function paint(v){preview=v;ensurePaymentSummary();renderItems(v.cart);renderShippingCheckout(v);renderErpMeta();setText('subtotal',fmt(v.subtotal??v.cart?.total_price??0));setText('shippingFee',fmt(v.shipping_fee||0));setText('price',fmt(v.price));setText('net',fmt(v.net_after_points??v.price));setText('fee',fmt(v.fee_5));setText('cash',fmt(v.cash_amount));setText('pay',`確認訂單並付款 ${fmt(v.cash_amount)}`);if($('pay'))$('pay').disabled=Number(v.cash_amount||0)<=0}
+function paint(v){
+  preview=v;ensurePaymentSummary();renderItems(v.cart);renderShippingCheckout(v);renderErpMeta();
+  const monthly=currentPaymentMode()==='monthly';
+  setText('subtotal',fmt(v.subtotal??v.cart?.total_price??0));setText('shippingFee',fmt(v.shipping_fee||0));setText('price',fmt(v.price));
+  if(monthly){
+    setText('netLabel','月結應收金額');setText('net',fmt(v.price));setText('feeLabel','信用卡 5%');setText('fee',fmt(0));setText('cashLabel','本次信用卡收款');setText('cash',fmt(0));setText('pay',`確認月結訂單 ${fmt(v.price)}`);if($('pay'))$('pay').disabled=Number(v.price||0)<=0;
+  }else{
+    setText('netLabel','計費金額');setText('net',fmt(v.net_after_points??v.price));setText('feeLabel','信用卡 5%');setText('fee',fmt(v.fee_5));setText('cashLabel','信用卡實際收款');setText('cash',fmt(v.cash_amount));setText('pay',`確認訂單並付款 ${fmt(v.cash_amount)}`);if($('pay'))$('pay').disabled=Number(v.cash_amount||0)<=0;
+  }
+}
 async function boot(){groups=getGroups();if(!groups.length)return error('購物車是空的');const c=readErpCustomer();const a=await SB.auth.getSession();session=a.data?.session||null;if(!session){setText('loginState','尚未登入');return error('請先登入後再進行 PMKTOOLS 結帳。')}setText('loginState',session.user.email||'已登入');shippingState=readShippingState();try{await refreshPreview()}catch(e){error('結帳預覽失敗：'+String(e.message||e))}}
 
 async function syncErpSalesOrder(pmkOrder,cartPreview){
@@ -304,27 +327,35 @@ async function syncErpSalesOrder(pmkOrder,cartPreview){
   const r=await fetch(ERP_API+'/api/erp-sales-save',{method:'POST',credentials:'include',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'sales-order',doc})}),t=await r.text();let j={};try{j=JSON.parse(t)}catch(_){throw new Error('ERP 銷售訂單回傳不是 JSON')}if(!r.ok||j.ok===false)throw new Error(j.error||j.message||('HTTP '+r.status));localStorage.setItem('pmktools_erp_sales_order_v1',JSON.stringify(j.doc||{}));return j.doc||null;
 }
 
-$('pay').onclick=async()=>{if(!preview)return;const msg=`確認一次結帳全部商品？\n\n商品總額 ${fmt(preview.price)}\n5% ${fmt(preview.fee_5)}\n信用卡 ${fmt(preview.cash_amount)}`;if(!confirm(msg))return;$('pay').disabled=true;$('err').style.display='none';try{await saveProfileAddressIfNeeded();const c=readErpCustomer(),q=readErpQuote();const payload={groups:serverPricedGroups(groups),...currentShippingPayload(),erp_customer_id:c.customer_id||'',erp_customer_snapshot:c,erp_quote_no:q.doc_no||q.quote_no||''};localStorage.setItem('pmktools_shipping_v1',JSON.stringify(Object.assign(readShippingState(),currentShippingPayload(),{method:currentShippingPayload().shipping_method})));const o=await api('/api/pmk-cart-checkout-create',payload);localStorage.setItem('pmktools_pending_order',String(o.order_id||''));setText('erpOrderNo',o.order_no||o.order_id||'已建立');if(Number(o.cash_amount||0)<=0){
-  throw new Error('PMKTOOLS 工業品不使用推薦點兌換，付款金額不可為 0');
-}
-const resp=await fetch(SUPABASE_URL+'/functions/v1/pmk-payuni-checkout',{
-  method:'POST',
-  headers:{'Content-Type':'application/json','apikey':KEY,'Authorization':'Bearer '+session.access_token},
-  body:JSON.stringify({order_id:o.order_id})
-});
-const text=await resp.text();
-if(!resp.ok)throw new Error('PAYUNi 付款建立失敗：'+text);
-
-// 與目前 BookWide / LINE 禮物正式 PAYUNi 流程相同：
-// Edge Function 回傳 PAYUNi 自動 POST 表單；直接在本分頁送往 PAYUNi，避免 popup 被瀏覽器擋下。
-if(/<form[^>]+payuniForm/i.test(text)||/api\.payuni\.com\.tw/i.test(text)){
-  document.open();document.write(text);document.close();return;
-}
-let pj=null;try{pj=JSON.parse(text)}catch(_){}
-if(pj?.html){
-  document.open();document.write(pj.html);document.close();return;
-}
-throw new Error('PAYUNi 付款建立失敗：缺少付款表單');
-}catch(e){error(String(e.message||e));$('pay').disabled=false}};
+document.querySelectorAll('input[name="paymentMode"]').forEach(r=>r.onchange=async()=>{paymentMode=r.value==='monthly'?'monthly':'card';syncPaymentModeUI();try{await refreshPreview()}catch(e){error('結帳預覽失敗：'+String(e.message||e))}});
+syncPaymentModeUI();
+$('pay').onclick=async()=>{
+  if(!preview)return;
+  const c=readErpCustomer(),monthly=currentPaymentMode()==='monthly';
+  if(monthly&&!isMonthlyCustomer(c))return error('此客戶未核准月結，請回後台 CRM 設定「月結 30 天」。');
+  const msg=monthly?`確認建立月結訂單？\n\n商品總額 ${fmt(preview.price)}\n付款條件：月結 30 天\n本次不刷卡`:`確認一次結帳全部商品？\n\n商品總額 ${fmt(preview.price)}\n5% ${fmt(preview.fee_5)}\n信用卡 ${fmt(preview.cash_amount)}`;
+  if(!confirm(msg))return;
+  $('pay').disabled=true;$('err').style.display='none';
+  try{
+    await saveProfileAddressIfNeeded();
+    const q=readErpQuote();
+    const payload={groups:serverPricedGroups(groups),...currentShippingPayload(),payment_mode:monthly?'monthly':'card',payment_terms:monthly?'monthly_30':'cash',erp_customer_id:c.customer_id||'',erp_customer_snapshot:c,erp_quote_no:q.doc_no||q.quote_no||''};
+    localStorage.setItem('pmktools_shipping_v1',JSON.stringify(Object.assign(readShippingState(),currentShippingPayload(),{method:currentShippingPayload().shipping_method})));
+    const o=await api('/api/pmk-cart-checkout-create',payload);
+    localStorage.setItem('pmktools_pending_order',String(o.order_id||''));setText('erpOrderNo',o.order_no||o.order_id||'已建立');
+    if(monthly){
+      $('ok').style.display='block';$('ok').textContent=`月結訂單已成立：${o.order_no||o.order_id}｜應收 ${fmt(o.invoice_amount??preview.price)}｜不刷信用卡`;
+      if(mode==='cart')localStorage.removeItem(CART_KEY);
+      setText('pay','月結訂單已成立');$('pay').disabled=true;return;
+    }
+    if(Number(o.cash_amount||0)<=0)throw new Error('信用卡付款金額不可為 0');
+    const resp=await fetch(SUPABASE_URL+'/functions/v1/pmk-payuni-checkout',{method:'POST',headers:{'Content-Type':'application/json','apikey':KEY,'Authorization':'Bearer '+session.access_token},body:JSON.stringify({order_id:o.order_id})});
+    const text=await resp.text();if(!resp.ok)throw new Error('PAYUNi 付款建立失敗：'+text);
+    if(/<form[^>]+payuniForm/i.test(text)||/api\.payuni\.com\.tw/i.test(text)){document.open();document.write(text);document.close();return}
+    let pj=null;try{pj=JSON.parse(text)}catch(_){}
+    if(pj?.html){document.open();document.write(pj.html);document.close();return}
+    throw new Error('PAYUNi 付款建立失敗：缺少付款表單');
+  }catch(e){error(String(e.message||e));$('pay').disabled=false}
+};
 boot();
 </script></body></html>
