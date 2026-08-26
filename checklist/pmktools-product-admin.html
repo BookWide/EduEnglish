@@ -200,7 +200,7 @@
       <div class="sep"></div>
       <button data-module="settings">⚙ 系統設定</button>
     </nav>
-    <div class="v49-side-note">V4.4 D1 AUTH / PRICE / ORDER / 來源網址可編輯回存＋WooCommerce 商品／加購／運送方式＋R2 唯一商品主檔；PMKTOOLS 登入、客戶、價格與訂單改由 Cloudflare D1；商品／圖片維持 R2。pmktools-erp.html 暫不接入。</div>
+    <div class="v49-side-note">V4.4.3 D1 AUTH / PRICE / ORDER / 來源網址可編輯回存＋WooCommerce 商品／加購／運送方式＋R2 唯一商品主檔；PMKTOOLS 登入、客戶、價格與訂單改由 Cloudflare D1；商品／圖片維持 R2。pmktools-erp.html 暫不接入。</div>
   </aside>
   <main class="v49-main">
   
@@ -889,12 +889,27 @@ function initV49Layout(){
 }
 
 async function loadV49Shared(){
-  const [orderRes,profileRes]=await Promise.all([
-    SB.from('line_gift_orders').select('*').order('created_at',{ascending:false}).limit(500),
-    SB.from('profiles').select('*').limit(1000)
-  ]);
-  v49Orders=orderRes.data||[];
-  v49Profiles=profileRes.data||[];
+  // V4.4.3 D1 ONLY: 不再呼叫 Supabase SB.from()
+  try{
+    const j=await productAdminGet('/api/pmk-admin-orders');
+    v49Orders=Array.isArray(j.orders)?j.orders:(Array.isArray(j.rows)?j.rows:[]);
+  }catch(e){
+    console.warn('[PMK D1 orders]',e);
+    v49Orders=[];
+  }
+  try{
+    const j=await productAdminGet('/api/pmk-erp-customers');
+    const rows=Array.isArray(j.rows)?j.rows:[];
+    v49Profiles=rows.map(r=>({
+      id:r.user_id||r.customer_id||r.id||r.tax_id||'',
+      email:r.email||'', phone:r.phone||'', mobile:r.phone||'',
+      display_name:r.customer_name||r.name||r.company_name||'',
+      full_name:r.customer_name||r.name||r.company_name||''
+    }));
+  }catch(e){
+    console.warn('[PMK D1 customers]',e);
+    v49Profiles=[];
+  }
 }
 
 async function loadV49Dashboard(){
@@ -1530,19 +1545,17 @@ async function loadReports(){
 }
 
 async function loadBusinessSettings(render=true){
-  try{
-    const {data,error}=await SB.from('bw_business_settings').select('*').eq('id','default').maybeSingle();
-    if(!error&&data)v49Settings=data;else v49Settings={company_name:'BookWide',footer_text:'感謝您的支持'};
-  }catch(_){v49Settings={company_name:'BookWide',footer_text:'感謝您的支持'}}
+  // V4.4.3 D1 AUTH 後台：先移除 Supabase 相依；公司列印設定保留在本機。
+  try{v49Settings=JSON.parse(localStorage.getItem('pmktools_business_settings_v1')||'null')||{company_name:'BookWide',footer_text:'感謝您的支持'}}
+  catch(_){v49Settings={company_name:'BookWide',footer_text:'感謝您的支持'}}
   if(render){
     $('setCompanyName').value=v49Settings.company_name||'BookWide';$('setTaxId').value=v49Settings.tax_id||'';$('setPhone').value=v49Settings.phone||'';$('setEmail').value=v49Settings.email||'';$('setAddress').value=v49Settings.address||'';$('setFooter').value=v49Settings.footer_text||'感謝您的支持';
   }
 }
 async function saveBusinessSettings(){
   const row={id:'default',company_name:$('setCompanyName').value.trim()||'BookWide',tax_id:$('setTaxId').value.trim(),phone:$('setPhone').value.trim(),email:$('setEmail').value.trim(),address:$('setAddress').value.trim(),footer_text:$('setFooter').value.trim(),updated_at:new Date().toISOString()};
-  const {error}=await SB.from('bw_business_settings').upsert(row,{onConflict:'id'});
-  $('settingsStatus').textContent=error?'❌ '+error.message:'✅ 設定已儲存';
-  if(!error)v49Settings=row;
+  localStorage.setItem('pmktools_business_settings_v1',JSON.stringify(row));
+  v49Settings=row;$('settingsStatus').textContent='✅ 設定已儲存';
 }
 
 function renderMainImageV547(){
@@ -2555,11 +2568,19 @@ async function loadInventory(){
   rebuildInventoryProducts();
   const box=$('invRows');if(!box)return;
   box.innerHTML='<tr><td colspan="7" class="muted">讀取流水中…</td></tr>';
-  const {data,error}=await SB.from('bw_inventory_movements').select('id,product_id,movement_type,qty_delta,unit_cost,stock_after,note,created_at').order('created_at',{ascending:false}).limit(150);
-  if(error){box.innerHTML=`<tr><td colspan="7" class="muted">尚未建立進銷存：${esc(error.message)}</td></tr>`;return}
+  let data=[];
+  try{
+    const j=await productAdminGet('/api/bw-inventory-movements');
+    data=Array.isArray(j.rows)?j.rows:(Array.isArray(j.movements)?j.movements:[]);
+  }catch(e){
+    console.warn('[PMK D1 inventory]',e);
+    box.innerHTML='<tr><td colspan="7" class="muted">庫存流水 API 尚未提供；不影響管理員登入與商品管理。</td></tr>';
+    if($('invStatus'))$('invStatus').textContent='⚠ 庫存流水暫未載入';
+    return;
+  }
   const map=Object.fromEntries(products.map(p=>[String(p.id),p.name]));
-  box.innerHTML=(data||[]).length?(data||[]).map(x=>`<tr><td>${new Date(x.created_at).toLocaleString('zh-TW',{hour12:false})}</td><td>${esc(map[String(x.product_id)]||x.product_id)}</td><td>${esc(x.movement_type)}</td><td>${Number(x.qty_delta)>0?'+':''}${Number(x.qty_delta)}</td><td>NT$ ${Number(x.unit_cost||0).toLocaleString('zh-TW')}</td><td>${Number(x.stock_after||0)}</td><td>${esc(x.note||'')}</td></tr>`).join(''):'<tr><td colspan="7" class="muted">目前沒有庫存流水。</td></tr>';
-  $('invStatus').textContent=`✅ 已讀取 ${(data||[]).length} 筆庫存異動`;
+  box.innerHTML=data.length?data.map(x=>`<tr><td>${new Date(x.created_at).toLocaleString('zh-TW',{hour12:false})}</td><td>${esc(map[String(x.product_id)]||x.product_id)}</td><td>${esc(x.movement_type)}</td><td>${Number(x.qty_delta)>0?'+':''}${Number(x.qty_delta)}</td><td>NT$ ${Number(x.unit_cost||0).toLocaleString('zh-TW')}</td><td>${Number(x.stock_after||0)}</td><td>${esc(x.note||'')}</td></tr>`).join(''):'<tr><td colspan="7" class="muted">目前沒有庫存流水。</td></tr>';
+  $('invStatus').textContent=`✅ 已讀取 ${data.length} 筆庫存異動`;
 }
 async function postInventory(){
   const productId=String($('invProduct').value||'').trim(),type=$('invType').value,qty=Math.max(1,Number($('invQty').value||1));if(!productId)return alert('請先選商品');
@@ -2727,8 +2748,15 @@ async function boot(){
     PMK_ADMIN_USER=j.user;$('gate').style.display='none';$('app').style.display='block';
     if($('pmkAdminWho'))$('pmkAdminWho').textContent='D1 Admin｜'+String(j.user.account||j.user.email||'');
     if($('pmkAdminLogout')){$('pmkAdminLogout').style.display='inline-flex';$('pmkAdminLogout').onclick=pmkAdminLogout}
-    await load();await loadCategories();await loadOrders();await loadInventory();await loadV49Dashboard();renderSuppliers();renderPricingRules();
-  }catch(e){pmkRenderAdminLogin('後台啟動失敗：'+String(e?.message||e))}
+    const jobs=[load,loadCategories,loadOrders,loadInventory,loadV49Dashboard];
+    for(const fn of jobs){try{await fn()}catch(e){console.warn('[PMK boot module]',fn?.name,e)}}
+    try{renderSuppliers()}catch(e){console.warn(e)}
+    try{renderPricingRules()}catch(e){console.warn(e)}
+  }catch(e){
+    // 只有 D1 /api/pmk-auth/me 驗證失敗才應回登入頁；模組錯誤不得把已登入 Admin 踢出去。
+    console.error('[PMK boot fatal]',e);
+    if(!$('app')||$('app').style.display==='none')pmkRenderAdminLogin('後台啟動失敗：'+String(e?.message||e));
+  }
 }
 
 
