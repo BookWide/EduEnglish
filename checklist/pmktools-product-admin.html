@@ -339,7 +339,7 @@
 <section class="v49-page" id="v49-pricing" data-page="pricing">
   <div class="v49-page-title">
     <div>
-      <h1>價格規則 <small style="font-size:13px;color:#64748b">V4.1.2 SAVE BUTTON FIX</small></h1>
+      <h1>價格規則 <small style="font-size:13px;color:#64748b">V4.1.3 R2 BULK PRICE APPLY</small></h1>
       <p>比照 WooCommerce Role-based Pricing：大分類與客戶分類都用下拉選擇；儲存規則後立即重算既有商品。</p>
     </div>
     <button class="btn" id="savePricingRules" type="button">儲存價格規則</button>
@@ -1152,125 +1152,50 @@ async function savePricingRulesV1(){
 
   if(btn){
     btn.disabled=true;
-    btn.textContent='套用中…';
+    btn.textContent='套用價格中…';
     btn.style.opacity='.7';
     btn.style.cursor='wait';
   }
-  if(st)st.textContent='⏳ 正在讀取價格規則並準備寫入 R2…';
+  if(st){
+    st.textContent='⏳ 將價格規則送到 Worker；Worker 只讀 R2 一次、寫 R2 一次…';
+    st.style.color='#475569';
+    st.style.fontWeight='700';
+  }
 
   try{
-    const r=pricingReadForm();
-    localStorage.setItem(PMK_PRICING_RULES_KEY,JSON.stringify(r));
+    const rules=pricingReadForm();
+    localStorage.setItem(PMK_PRICING_RULES_KEY,JSON.stringify(rules));
 
-    const rows=Array.isArray(products)?products:[];
-    let ok=0,skip=0,fail=0,done=0;
-    const total=rows.length;
+    // 核心修正：不再 73 筆商品逐筆 /api/bw-product-save。
+    // 由 Worker 在 R2 master 內一次重算、一次寫回。
+    const j=await productAdminPost('/api/pmk-pricing-apply',{rules});
 
-    for(const src of rows){
-      done++;
-      if(btn)btn.textContent=`套用中 ${done}/${total}`;
-      if(st)st.textContent=`⏳ 套用價格規則 ${done}/${total}｜成功 ${ok}｜略過 ${skip}｜失敗 ${fail}`;
-
-      try{
-        const p=JSON.parse(JSON.stringify(src));
-        let changed=false;
-
-        if(Array.isArray(p.variations)&&p.variations.length){
-          const pid=pricingRuleProductId(p);
-
-          p.variations=p.variations.map(v=>{
-            const cny=Math.max(0,Number(v.source_price||0));
-            if(!(cny>0))return v;
-
-            const next=pricingPublicFromCny(cny,p.category||'',r,pid);
-
-            if(Number(v.price||0)!==next || Number(v.sale_price||0)!==0)changed=true;
-
-            return {
-              ...v,
-              price:next,
-              sale_price:0,
-              pricing_auto:true,
-              pricing_applied_price:next
-            };
-          });
-
-          const active=p.variations
-            .filter(v=>v&&v.is_active!==false)
-            .map(v=>Number(v.price||0))
-            .filter(n=>n>0);
-
-          if(active.length){
-            const parentNext=Math.min(...active);
-            if(Number(p.price||0)!==parentNext)changed=true;
-            p.price=parentNext;
-          }
-        }else{
-          const pid=pricingRuleProductId(p);
-          const oldPrice=Math.max(0,Number(p.price||0));
-          const rule=pricingProductRule(pid,r);
-          if(rule?.enabled===true && oldPrice>0){
-            const next=Math.round(oldPrice*Math.max(.01,Number(rule.multiplier||1)));
-            if(next!==oldPrice){
-              p.price=next;
-              changed=true;
-            }
-          }
-        }
-
-        if(!changed){
-          skip++;
-          continue;
-        }
-
-        p.pricing_rule={
-          source_factor:Number(r.source_factor||10),
-          global_markup:Number(r.global_markup||1),
-          category_multiplier:pricingCategoryMultiplier(p.category||'',r),
-          product_multiplier:pricingProductMultiplier(pricingRuleProductId(p),r),
-          auto_apply:r.auto_apply!==false
-        };
-
-        await productAdminPost('/api/bw-product-save',{id:p.id||'',product:p});
-        ok++;
-      }catch(e){
-        fail++;
-        console.error('[PRICE RULE SAVE FAILED]',src?.id,e);
-      }
-    }
-
-    if(st)st.textContent='⏳ R2 寫入完成，正在重新讀取商品驗證…';
-    if(btn)btn.textContent='重新讀取驗證…';
+    if(btn)btn.textContent='重新讀取 R2…';
+    if(st)st.textContent=`⏳ Worker 已更新 ${Number(j.changed_products||0)} 商品 / ${Number(j.changed_variations||0)} 規格；重新讀取驗證中…`;
 
     await load();
+    renderPricingRules();
 
-    // 重新載入後再重畫規則頁，避免舊畫面造成「看起來沒改」。
-    try{renderPricingRules()}catch(e){console.warn('renderPricingRules failed',e)}
-
+    const examples=Array.isArray(j.verify)?j.verify:[];
+    const ex=examples.find(x=>Number(x.product_multiplier||1)!==1)||examples[0];
     if(st){
-      st.textContent=`✅ 價格規則已執行：更新 ${ok} 筆，略過 ${skip} 筆${fail?`，失敗 ${fail} 筆`:''}。請回商品編輯確認定價。`;
-      st.style.color=fail?'#b45309':'#15803d';
-      st.style.fontWeight='800';
+      st.style.color='#15803d';
+      st.style.fontWeight='850';
+      st.textContent=`✅ R2 價格已重算：商品 ${Number(j.changed_products||0)} 筆、規格 ${Number(j.changed_variations||0)} 筆`+
+        (ex?`｜驗證 ${ex.sku||''}: CNY ${ex.source_price} → NT$ ${Number(ex.new_price||0).toLocaleString('zh-TW')}`:'');
     }
 
-    if(btn){
-      btn.textContent=fail?`完成（失敗 ${fail}）`:'✅ 已套用';
-      btn.style.opacity='1';
-      btn.style.cursor='pointer';
-    }
-
-    setTimeout(()=>{
-      if(btn)btn.textContent=oldText;
-    },2500);
+    if(btn)btn.textContent='✅ 已寫入 R2';
+    setTimeout(()=>{if(btn)btn.textContent=oldText},2500);
 
   }catch(e){
-    console.error('[PRICE RULE FATAL]',e);
+    console.error('[PMK PRICING APPLY FAILED]',e);
     if(st){
-      st.textContent='❌ 儲存價格規則失敗：'+String(e?.message||e);
       st.style.color='#b91c1c';
-      st.style.fontWeight='800';
+      st.style.fontWeight='850';
+      st.textContent='❌ 價格規則寫入失敗：'+String(e?.message||e);
     }
-    if(btn)btn.textContent='❌ 套用失敗';
+    if(btn)btn.textContent='❌ 寫入失敗';
   }finally{
     if(btn){
       btn.disabled=false;
@@ -2810,14 +2735,7 @@ document.querySelectorAll('.wc548-tab').forEach(b=>b.onclick=()=>wc548OpenTab(b.
 
 $('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;if($('detail_description'))$('detail_description').addEventListener('paste',handleDetailPasteV5);if($('aiProductPasteClearBtn'))$('aiProductPasteClearBtn').onclick=()=>{aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();};$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=render;$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;if($('customerHistoryClose'))$('customerHistoryClose').onclick=()=>{$('customerHistoryDetail').style.display='none'};if($('clearOldCustomerView'))$('clearOldCustomerView').onclick=()=>{localStorage.removeItem('pmktools_customer_transactions_v1');loadCustomers();};if($('pmkCrmQ'))$('pmkCrmQ').oninput=renderPmkCrm;if($('pmkCrmNew'))$('pmkCrmNew').onclick=()=>pmkCrmOpen({});if($('pmkCrmSave'))$('pmkCrmSave').onclick=pmkCrmSave;if($('pmkCrmCancel'))$('pmkCrmCancel').onclick=pmkCrmClose;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
 $('seedFlower12').onclick=seedFlowerPartner12;
-$('reloadCategories').onclick=loadCategories;$('catSaveBtn').onclick=saveCategory;$('catCancelBtn').onclick=resetCategoryEditor;initCollapsibles();initV49Layout();if($('savePricingRules')){
-  $('savePricingRules').onclick=async()=>{
-    const btn=$('savePricingRules');
-    btn.textContent='啟動中…';
-    await new Promise(r=>setTimeout(r,30));
-    return savePricingRulesV1();
-  };
-}
+$('reloadCategories').onclick=loadCategories;$('catSaveBtn').onclick=saveCategory;$('catCancelBtn').onclick=resetCategoryEditor;initCollapsibles();initV49Layout();if($('savePricingRules'))$('savePricingRules').onclick=savePricingRulesV1;
 if($('addPricingCategoryRule'))$('addPricingCategoryRule').onclick=addPricingCategoryRuleV1;
 if($('addPricingTierRule'))$('addPricingTierRule').onclick=addPricingTierRuleV1;
 bindNameSyncV341();boot();
