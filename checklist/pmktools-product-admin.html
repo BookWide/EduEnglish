@@ -200,7 +200,7 @@
       <div class="sep"></div>
       <button data-module="settings">⚙ 系統設定</button>
     </nav>
-    <div class="v49-side-note">V3.4.1 商品名稱同步 / SKU：來源網址可編輯回存＋WooCommerce 商品／加購／運送方式＋R2 唯一商品主檔；Supabase 只處理會員、推薦點、訂單、付款與交易流水。咖啡／LINE 商品／花卉共用同一 Checkout Core。</div>
+    <div class="v49-side-note">V4.1.1 PRICE RULE FIX / 來源網址可編輯回存＋WooCommerce 商品／加購／運送方式＋R2 唯一商品主檔；Supabase 只處理會員、推薦點、訂單、付款與交易流水。咖啡／LINE 商品／花卉共用同一 Checkout Core。</div>
   </aside>
   <main class="v49-main">
   
@@ -954,6 +954,15 @@ function pricingTier(code,rules=pricingRules()){
   const key=String(code||'standard').trim().toLowerCase();
   return (rules.tiers||[]).find(x=>String(x.code||'').trim().toLowerCase()===key) || (rules.tiers||[])[0] || {code:'standard',name:'一般客戶',multiplier:1};
 }
+function pricingRuleProductId(p){
+  return String(
+    p?.id ||
+    p?.external_id ||
+    p?.source_item_id ||
+    p?.source?.item_id ||
+    ''
+  ).trim();
+}
 function pricingProductRule(productId,rules=pricingRules()){
   const id=String(productId||'').trim();
   return (rules.products||[]).find(x=>String(x.product_id||'').trim()===id) || null;
@@ -976,25 +985,48 @@ function pricingApplyProduct(p){
   const rules=pricingRules();
   if(!rules.auto_apply)return p;
   const cat=p.category||'';
+  const pid=pricingRuleProductId(p);
+
   if(Array.isArray(p.variations)&&p.variations.length){
     p.variations=p.variations.map(v=>{
       const cny=Math.max(0,Number(v.source_price||0));
       if(!(cny>0))return v;
-      return {...v,price:pricingPublicFromCny(cny,cat,rules,p.id||p.external_id||''),pricing_auto:true};
+
+      const next=pricingPublicFromCny(cny,cat,rules,pid);
+
+      // 價格規則的結果就是正式「定價」。
+      // 不再讓舊 sale_price 蓋回舊價。
+      return {
+        ...v,
+        price:next,
+        sale_price:0,
+        pricing_auto:true,
+        pricing_applied_price:next
+      };
     });
-    const active=p.variations.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(n=>n>0);
+
+    const active=p.variations
+      .filter(v=>v&&v.is_active!==false)
+      .map(v=>Number(v.price||0))
+      .filter(n=>n>0);
+
     if(active.length)p.price=Math.min(...active);
   }else{
-    // 簡單商品沒有獨立 source_price 欄位時，以目前牌價作為 CNY×10 後基礎價再套 markup。
     const current=Math.max(0,Number(p.price||0));
-    const baseFactor=Math.max(.01,Number(rules.source_factor||10));
-    if(current>0)p.price=Math.round(current*Math.max(.01,Number(rules.global_markup||1))*pricingCategoryMultiplier(cat,rules)*pricingProductMultiplier(p.id||p.external_id||'',rules));
+    if(current>0){
+      const mult=
+        Math.max(.01,Number(rules.global_markup||1)) *
+        pricingCategoryMultiplier(cat,rules) *
+        pricingProductMultiplier(pid,rules);
+      p.price=Math.round(current*mult);
+    }
   }
+
   p.pricing_rule={
     source_factor:Number(rules.source_factor||10),
     global_markup:Number(rules.global_markup||1),
     category_multiplier:pricingCategoryMultiplier(cat,rules),
-    product_multiplier:pricingProductMultiplier(p.id||p.external_id||'',rules),
+    product_multiplier:pricingProductMultiplier(pid,rules),
     auto_apply:true
   };
   return p;
@@ -1045,7 +1077,7 @@ function renderPricingRules(){
       return hay.includes(pq);
     });
     productBody.innerHTML=list.map(p=>{
-      const id=String(p.id||p.external_id||'').trim();
+      const id=String(pricingRuleProductId(p)).trim();
       const rule=pricingProductRule(id,r);
       const enabled=rule?.enabled===true;
       const mult=Math.max(.01,Number(rule?.multiplier||1));
@@ -1081,6 +1113,8 @@ function renderPricingRules(){
     const r2=pricingReadForm();
     localStorage.setItem(PMK_PRICING_RULES_KEY,JSON.stringify(r2));
     renderPricingRules();
+    const st=$('pricingStatus');
+    if(st)st.textContent='⚠️ 規則已修改；請按「儲存價格規則」才會真正寫入 R2 商品價格。';
   });
   document.querySelectorAll('[data-price-cat-del]').forEach(b=>b.onclick=()=>{const n=Number(b.dataset.priceCatDel),q=pricingReadForm();q.categories.splice(n,1);localStorage.setItem(PMK_PRICING_RULES_KEY,JSON.stringify(q));renderPricingRules()});
   document.querySelectorAll('[data-price-tier-del]').forEach(b=>b.onclick=()=>{const n=Number(b.dataset.priceTierDel),q=pricingReadForm();q.tiers.splice(n,1);localStorage.setItem(PMK_PRICING_RULES_KEY,JSON.stringify(q));renderPricingRules()});
@@ -1129,21 +1163,24 @@ async function savePricingRulesV1(){
       const p=JSON.parse(JSON.stringify(src));
       let changed=false;
       if(Array.isArray(p.variations)&&p.variations.length){
+        const pid=pricingRuleProductId(p);
         p.variations=p.variations.map(v=>{
           const cny=Math.max(0,Number(v.source_price||0));
           if(!(cny>0))return v;
-          const next=pricingPublicFromCny(cny,p.category||'',r,p.id||p.external_id||'');
-          if(Number(v.price||0)!==next || (Number(v.sale_price||0)>0 && Number(v.sale_price||0)!==next))changed=true;
+          const next=pricingPublicFromCny(cny,p.category||'',r,pid);
+          if(Number(v.price||0)!==next || Number(v.sale_price||0)!==0)changed=true;
           return {
             ...v,
             price:next,
-            // 單品倍率是「成交牌價規則」；若舊資料有 sale_price，checkout 會優先讀它。
-            // 因此規則套用時同步更新，避免畫面試算 1470、購物車仍拿舊 980。
-            sale_price:Number(v.sale_price||0)>0 ? next : v.sale_price,
-            pricing_auto:true
+            sale_price:0,
+            pricing_auto:true,
+            pricing_applied_price:next
           };
         });
-        const active=p.variations.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(n=>n>0);
+        const active=p.variations
+          .filter(v=>v&&v.is_active!==false)
+          .map(v=>Number(v.price||0))
+          .filter(n=>n>0);
         if(active.length){
           const min=Math.min(...active);
           if(Number(p.price||0)!==min)changed=true;
@@ -1158,7 +1195,7 @@ async function savePricingRulesV1(){
         source_factor:Number(r.source_factor||10),
         global_markup:Number(r.global_markup||1),
         category_multiplier:pricingCategoryMultiplier(p.category||'',r),
-        product_multiplier:pricingProductMultiplier(p.id||p.external_id||'',r),
+        product_multiplier:pricingProductMultiplier(pricingRuleProductId(p),r),
         auto_apply:r.auto_apply!==false
       };
       await productAdminPost('/api/bw-product-save',{id:p.id||'',product:p});
