@@ -814,6 +814,7 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
   </div>
 </div>
 <div class="quoteToolbar"><button id="printQuote" class="quoteBtn ghost">Excel 報價單</button><button id="saveFrontCustomer" class="quoteBtn ghost" type="button">儲存客戶資料</button><button id="frontCustomerHistory" class="quoteBtn ghost" type="button">交易紀錄</button><span id="erpCustomerState" class="erpCustomerState">PMKTOOLS 工業客戶 CRM｜目前不連 ERP</span></div>
+<div id="pmkIdentityBar" style="margin:0 0 10px;padding:10px 12px;border:1px solid #dbe3ec;border-radius:10px;background:#f8fafc;display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:14px"><b id="pmkLoginIdentity">登入帳號：檢查中…</b><span id="pmkCustomerIdentity">客戶：檢查中…</span></div>
 <div id="frontHistoryPanel" style="display:none;margin:10px 0 12px;border:1px solid #dbe3ec;border-radius:12px;background:#fff;overflow:hidden">
   <div style="padding:10px 12px;font-weight:900;background:#f8fafc;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center">
     <span>已出貨交易紀錄</span>
@@ -850,6 +851,47 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
 </div></div>
 <script>
 const CART_KEY='pmktools_cart_v1',QUOTE_KEY='pmktools_quote_customer_v1',ERP_CUSTOMER_KEY='pmktools_erp_customer_v1',ERP_QUOTE_KEY='pmktools_erp_quote_v1',ERP_API='https://pmktools-api.pmktools.workers.dev',$=id=>document.getElementById(id),fmt=n=>'NT$ '+Number(n||0).toLocaleString('zh-TW');let ERP_CUSTOMERS=[];
+const PMK_D1_SESSION_KEY='pmk_session_v1';
+let PMK_D1_USER=null;
+function pmkD1Token(){return localStorage.getItem(PMK_D1_SESSION_KEY)||''}
+function pmkSetIdentityText(loginText,customerText){if($('pmkLoginIdentity'))$('pmkLoginIdentity').textContent=loginText;if($('pmkCustomerIdentity'))$('pmkCustomerIdentity').textContent=customerText}
+function pmkCurrentCustomerLabel(){const code=String($('qCustomerKey')?.value||'').trim(),name=String($('qCustomer')?.value||'').trim();return name?(name+(code?'（'+code+'）':'')):(code||'未指定')}
+function pmkRefreshCustomerIdentity(){if(!PMK_D1_USER)return;const account=String(PMK_D1_USER.account||PMK_D1_USER.email||'').trim()||'已登入';const role=String(PMK_D1_USER.role||'').toLowerCase();pmkSetIdentityText('登入帳號：'+account+(role==='admin'?'（Admin）':''),'客戶：'+pmkCurrentCustomerLabel())}
+async function pmkLoadD1Identity(){
+  const token=pmkD1Token();
+  if(!token){PMK_D1_USER=null;pmkSetIdentityText('登入帳號：尚未登入','客戶：未指定');return null}
+  try{
+    const r=await fetch(ERP_API+'/api/pmk-auth/me',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j?.user){localStorage.removeItem(PMK_D1_SESSION_KEY);PMK_D1_USER=null;pmkSetIdentityText('登入帳號：登入已失效','客戶：未指定');return null}
+    const u=PMK_D1_USER=j.user;
+    const role=String(u.role||'').toLowerCase();
+    const account=String(u.account||u.email||'').trim()||'已登入';
+    if(role==='customer'){
+      const code=String(u.customer_code||u.account||'').trim().toUpperCase();
+      let c=pmkFrontFindCustomer(code);
+      if(c){pmkFrontApplyCustomer(c)}else{
+        if($('qCustomerKey'))$('qCustomerKey').value=code;
+        if($('qCustomerId'))$('qCustomerId').value=String(u.customer_id||code);
+        if($('qCustomer'))$('qCustomer').value=String(u.customer_name||'');
+        if($('qPaymentTerm')&&u.payment_terms)$('qPaymentTerm').value=String(u.payment_terms);
+        localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify({customer_id:String(u.customer_id||code),key:code,name:String(u.customer_name||''),customer_name:String(u.customer_name||''),payment_terms:String(u.payment_terms||''),price_group_code:String(u.price_group_code||'')}));
+        saveQuote();
+      }
+      if($('qCustomerKey')){$('qCustomerKey').readOnly=true;$('qCustomerKey').title='客戶帳號登入後固定使用自己的客戶代號'}
+      if($('qCustomerKeyBtn')){$('qCustomerKeyBtn').disabled=true;$('qCustomerKeyBtn').style.opacity='.45';$('qCustomerKeyBtn').title='客戶帳號不可切換其他客戶'}
+      pmkSetIdentityText('登入帳號：'+account,'客戶：'+(u.customer_name||$('qCustomer')?.value||code)+'（'+code+'）');
+    }else if(role==='admin'){
+      if($('qCustomerKey')){$('qCustomerKey').readOnly=false;$('qCustomerKey').title='Admin 可指定代客報價客戶'}
+      if($('qCustomerKeyBtn')){$('qCustomerKeyBtn').disabled=false;$('qCustomerKeyBtn').style.opacity='';$('qCustomerKeyBtn').title=''}
+      pmkSetIdentityText('登入帳號：'+account+'（Admin）','帶入客戶：'+pmkCurrentCustomerLabel());
+    }else{
+      pmkSetIdentityText('登入帳號：'+account,'客戶：'+pmkCurrentCustomerLabel());
+    }
+    return u;
+  }catch(e){console.warn('[PMK D1 identity]',e);pmkSetIdentityText('登入帳號：檢查失敗','客戶：'+pmkCurrentCustomerLabel());return null}
+}
+
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 function twDate(d=new Date()){try{return new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(d)}catch(_){return d.toISOString().slice(0,10)}}
 function isoDate(d=new Date()){const y=d.getFullYear(),m=String(d.getMonth()+1).padStart(2,'0'),day=String(d.getDate()).padStart(2,'0');return `${y}-${m}-${day}`}
@@ -947,6 +989,7 @@ function pmkSaveFrontCustomer(){
   saveQuote();
   const st=$('erpCustomerState');
   if(st){st.textContent=`已存入 PMKTOOLS CRM：${c.name}（${c.key}）`;st.className='erpCustomerState ok'}
+  pmkRefreshCustomerIdentity();
   return true;
 }
 function applyErpCustomer(c,force=true){
@@ -1029,6 +1072,7 @@ async function applyCustomerKey(){
       $('erpCustomerState').textContent=`已帶入：${c.name||''}（${c.key||c.tax_id||''}）`;
       $('erpCustomerState').className='erpCustomerState ok';
     }
+    pmkRefreshCustomerIdentity();
     return;
   }
   $('qCustomerId').value='';
@@ -1376,6 +1420,7 @@ if($('frontHistoryClose'))$('frontHistoryClose').onclick=()=>{$('frontHistoryPan
 $('printQuote').onclick=()=>exportQuotationExcel();
 loadQuote();
 loadErpCustomers();
+pmkLoadD1Identity();
 window.addEventListener('afterprint',()=>document.body.classList.remove('quote-preview'));
 render();
 </script></body></html>
