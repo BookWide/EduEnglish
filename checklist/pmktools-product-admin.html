@@ -1780,7 +1780,7 @@ async function loadShipping(){
 
   $('shippingRows').innerHTML=rows.map(o=>{
     const status=String(o.status||'');
-    const kind=o.fulfillment_type||'ship';
+    const kind=(o.fulfillment_type==='voucher'||o.fulfillment_type==='pickup'||o.fulfillment_type==='service')?o.fulfillment_type:'ship';
     const isWaiting=waiting.includes(status);
     const addr=kind==='voucher'
       ? (o.tracking_no||'尚未發券')
@@ -1854,12 +1854,160 @@ async function pmkShipOrderV264(id,kind){
   }
 }
 
+function pmkOrderItemsForPrint(o){
+  const items=Array.isArray(o.items)?o.items:[];
+  if(items.length)return items.map(x=>({
+    sku:String(x.sku||x.source_sku_id||''),
+    name:String(x.product_name||x.name||'商品'),
+    spec:String(x.variation_name||x.spec||''),
+    qty:Number(x.quantity||x.qty||1),
+    unit:String(x.unit||'PCS')
+  }));
+  return [{
+    sku:String(o.sku||o.source_sku_id||''),
+    name:String(o.product_name||o.name||'商品'),
+    spec:String(o.variation_name||o.spec||''),
+    qty:Number(o.quantity||1),
+    unit:String(o.unit||'PCS')
+  }];
+}
+
+function pmkShippingSnapshot(o){
+  const snap=(o.cart_snapshot&&typeof o.cart_snapshot==='object')?o.cart_snapshot:{};
+  const c=(o.customer_snapshot&&typeof o.customer_snapshot==='object')?o.customer_snapshot:{};
+  const profile=(o.profile&&typeof o.profile==='object')?o.profile:{};
+  const contact=v49Contact(o);
+
+  return {
+    customer_name:String(
+      o.customer_name||c.customer_name||c.name||v49CustomerName(o)||''
+    ),
+    contact_name:String(
+      o.shipping_name||snap.shipping_name||c.contact||profile.display_name||''
+    ),
+    phone:String(
+      o.shipping_phone||snap.shipping_phone||c.phone||contact.phone||''
+    ),
+    email:String(
+      o.customer_email||c.email||contact.email||''
+    ),
+    address:String(
+      [
+        o.shipping_postal||snap.shipping_postal||'',
+        o.shipping_address||snap.shipping_address||c.shipping_address||c.address||''
+      ].filter(Boolean).join(' ').trim()
+    ),
+    payment:String(
+      snap.payment_mode==='monthly'
+        ? (c.payment_terms||o.payment_terms||'月結')
+        : (o.payment_method||'信用卡現結')
+    ),
+    tracking:String(o.tracking_no||snap.tracking_no||''),
+    note:String(o.fulfillment_note||o.note||'')
+  };
+}
+
 function v49PrintHtml(o,type,settings){
   const title={invoice:'銷貨單',delivery:'出貨單',packing:'包裝單',pick:'揀貨單'}[type]||'單據';
-  const c=v49Contact(o),orderNo=v49OrderNo(o);
-  const prices=type==='packing'||type==='pick'?'':`<tr><th>單價</th><td>${v49Money(o.product_price||0)}</td><th>推薦點</th><td>${Number(o.points_used||0)} 點</td></tr><tr><th>現金</th><td>${v49Money(o.cash_amount||0)}</td><th>總額</th><td>${v49Money(Number(o.cash_amount||0)+Number(o.points_used||0))}</td></tr>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${title} ${orderNo}</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",Arial,sans-serif;color:#111;padding:28px}h1{font-size:24px;margin:0}header{display:flex;justify-content:space-between;border-bottom:2px solid #111;padding-bottom:12px;margin-bottom:18px}.muted{color:#666;font-size:12px}table{width:100%;border-collapse:collapse;margin:14px 0}th,td{border:1px solid #bbb;padding:9px;text-align:left;font-size:13px}th{background:#f3f4f6}.check{font-size:22px}.footer{margin-top:30px;border-top:1px solid #aaa;padding-top:10px;font-size:12px;color:#555}@media print{button{display:none}}</style></head><body><header><div><h1>${esc(settings.company_name||'BookWide')}</h1><div class="muted">${esc(settings.address||'')} ${esc(settings.phone||'')}</div><div class="muted">${settings.tax_id?'統編 '+esc(settings.tax_id):''}</div></div><div style="text-align:right"><h1>${title}</h1><div>${orderNo}</div><div class="muted">${new Date(o.created_at).toLocaleString('zh-TW',{hour12:false})}</div></div></header><table><tr><th>客戶／收件人</th><td>${esc(v49CustomerName(o))}</td><th>電話</th><td>${esc(c.phone||'')}</td></tr><tr><th>Email</th><td>${esc(c.email||'')}</td><th>收件地址</th><td>${esc(v49ShippingAddress(o))}</td></tr></table><table><thead><tr><th class="check">✓</th><th>商品</th><th>數量</th><th>履約</th></tr></thead><tbody><tr><td>□</td><td>${esc(o.product_name||'')}</td><td>${Number(o.quantity||1)}</td><td>${esc(o.fulfillment_type||'voucher')}</td></tr></tbody></table><table>${prices}<tr><th>物流／券號</th><td colspan="3">${esc(o.tracking_no||'')}</td></tr><tr><th>備註</th><td colspan="3">${esc(o.fulfillment_note||o.note||'')}</td></tr></table><div class="footer">${esc(settings.footer_text||'感謝您的支持')}</div><script>window.onload=()=>window.print()<\/script></body></html>`;
+  const orderNo=v49OrderNo(o);
+  const ship=pmkShippingSnapshot(o);
+  const items=pmkOrderItemsForPrint(o);
+
+  const rows=items.map((x,i)=>`<tr>
+    <td class="center">${i+1}</td>
+    <td><b>${esc(x.sku||'')}</b></td>
+    <td>${esc(x.name||'')}${x.spec?`<div class="muted">${esc(x.spec)}</div>`:''}</td>
+    <td class="center">${Number(x.qty||1)}</td>
+    <td class="center">${esc(x.unit||'PCS')}</td>
+  </tr>`).join('');
+
+  const moneyRows=type==='invoice'
+    ? `<table class="money">
+         <tr><th>商品小計</th><td>${v49Money(Number(o.subtotal||0))}</td><th>運費</th><td>${v49Money(Number(o.shipping_fee||0))}</td></tr>
+         <tr><th>總額</th><td>${v49Money(Number(o.total_amount||o.cash_amount||0))}</td><th>付款方式</th><td>${esc(ship.payment)}</td></tr>
+       </table>`
+    : '';
+
+  const shipRows=type==='delivery'
+    ? `<table class="shipmeta">
+         <tr><th>物流公司</th><td>${esc(o.shipping_method||o.carrier||'')}</td><th>物流單號</th><td>${esc(ship.tracking)}</td></tr>
+         <tr><th>出貨狀態</th><td>${esc(v49OrderStatus(o.status))}</td><th>出貨日期</th><td>${esc(o.shipped_at?new Date(o.shipped_at).toLocaleString('zh-TW',{hour12:false}):'')}</td></tr>
+       </table>`
+    : '';
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>${title} ${orderNo}</title>
+<style>
+@page{size:A4 portrait;margin:12mm}
+*{box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",Arial,sans-serif;color:#111;margin:0;font-size:12px}
+.sheet{width:100%;max-width:190mm;margin:0 auto}
+header{display:grid;grid-template-columns:1fr auto;gap:16px;align-items:start;border-bottom:2px solid #111;padding-bottom:8px;margin-bottom:10px}
+h1{font-size:22px;margin:0 0 3px}
+.docTitle{text-align:right}
+.docTitle .t{font-size:21px;font-weight:900}
+.muted{color:#666;font-size:10.5px;line-height:1.45}
+.meta,.items,.money,.shipmeta{width:100%;border-collapse:collapse;margin:8px 0}
+th,td{border:1px solid #999;padding:6px 7px;vertical-align:top}
+th{background:#f3f4f6;font-weight:800}
+.center{text-align:center}
+.items th:nth-child(1){width:7%}.items th:nth-child(2){width:22%}.items th:nth-child(4){width:9%}.items th:nth-child(5){width:10%}
+.section{font-weight:900;font-size:13px;margin:12px 0 5px}
+.note{min-height:42px;border:1px solid #999;padding:7px;margin-top:8px}
+.sign{display:grid;grid-template-columns:1fr 1fr 1fr;gap:18px;margin-top:22px}
+.sign div{border-top:1px solid #666;padding-top:6px;text-align:center;color:#555}
+.footer{margin-top:16px;border-top:1px solid #999;padding-top:7px;font-size:10.5px;color:#555}
+@media print{button{display:none}}
+</style>
+</head>
+<body>
+<div class="sheet">
+<header>
+  <div>
+    <h1>${esc(settings.company_name||'聯鑽企業有限公司')}</h1>
+    <div class="muted">${esc(settings.address||'')}</div>
+    <div class="muted">${settings.phone?`電話 ${esc(settings.phone)}`:''}${settings.tax_id?`　統編 ${esc(settings.tax_id)}`:''}</div>
+  </div>
+  <div class="docTitle">
+    <div class="t">${title}</div>
+    <div><b>${esc(orderNo)}</b></div>
+    <div class="muted">${o.created_at?new Date(o.created_at).toLocaleString('zh-TW',{hour12:false}):''}</div>
+  </div>
+</header>
+
+<table class="meta">
+  <tr><th>客戶／公司</th><td>${esc(ship.customer_name)}</td><th>聯絡人</th><td>${esc(ship.contact_name)}</td></tr>
+  <tr><th>電話</th><td>${esc(ship.phone)}</td><th>Email</th><td>${esc(ship.email)}</td></tr>
+  <tr><th>送貨地址</th><td colspan="3">${esc(ship.address)}</td></tr>
+</table>
+
+<div class="section">商品明細</div>
+<table class="items">
+  <thead><tr><th>#</th><th>SKU</th><th>商品／規格</th><th>數量</th><th>單位</th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+
+${shipRows}
+${moneyRows}
+
+<div class="section">備註</div>
+<div class="note">${esc(ship.note)}</div>
+
+<div class="sign">
+  <div>倉庫／出貨</div>
+  <div>覆核</div>
+  <div>收件確認</div>
+</div>
+
+<div class="footer">${esc(settings.footer_text||'PMKTOOLS 工業品出貨單')}</div>
+</div>
+<script>window.onload=()=>window.print()<\/script>
+</body></html>`;
 }
+
 function printOrderDocument(id,type){
   const o=v49Orders.find(x=>String(x.id)===String(id));if(!o)return alert('找不到訂單');
   const w=window.open('','_blank','width=900,height=760');if(!w)return alert('瀏覽器阻擋了列印視窗');
