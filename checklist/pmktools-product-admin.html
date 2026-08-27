@@ -394,7 +394,7 @@
   <main class="v49-main">
   
 <section class="v49-page" id="v49-dashboard" data-page="dashboard">
-  <div class="v49-page-title"><div><h1>管理總覽 <small style="font-size:13px;color:#64748b">V51 UNIFIED CHECKOUT CORE</small></h1><p>商品、訂單、客戶、庫存與出貨狀態集中管理。</p></div><button class="btn green" id="dashNewProduct">＋ 新增商品</button></div>
+  <div class="v49-page-title"><div><h1>PMKTOOLS 管理總覽 <small style="font-size:13px;color:#64748b">D1 INDUSTRIAL CORE</small></h1><p>PMKTOOLS 工業品商品、訂單、客戶、庫存與出貨狀態集中管理。</p></div><button class="btn green" id="dashNewProduct">＋ 新增商品</button></div>
   <div class="v49-dashboard-grid">
     <div class="v49-stat"><span>上架商品</span><b id="kpiProducts">0</b><small id="kpiProductsSub">—</small></div>
     <div class="v49-stat"><span>待處理訂單</span><b id="kpiOrders">0</b><small>待付款＋待履約</small></div>
@@ -1128,7 +1128,7 @@ async function deleteCategory(id){
 
 
 function v49Money(n){return 'NT$ '+Number(n||0).toLocaleString('zh-TW')}
-function v49OrderNo(o){return 'BW-'+new Date(o.created_at||Date.now()).toISOString().slice(0,10).replace(/-/g,'')+'-'+String(o.id||'').replace(/[^A-Za-z0-9]/g,'').slice(-6).toUpperCase()}
+function v49OrderNo(o){return String(o.order_no||o.order_number||o.id||'—')}
 function v49OrderStatus(s){return ({pending_payment:'待付款',pending_fulfillment:'待出貨／發券',sent:'已完成',cancelled:'已取消',pending_gift:'待送禮',paid:'已付款'})[s]||s||'—'}
 function v49Profile(uid){return v49Profiles.find(p=>String(p.id)===String(uid))||{}}
 function v49CustomerName(o){const p=v49Profile(o.user_id);return o.shipping_name||o.customer_name||p.display_name||p.full_name||p.name||p.email||String(o.user_id||'').slice(0,8)}
@@ -1200,25 +1200,41 @@ async function loadV49Shared(){
 async function loadV49Dashboard(){
   await loadV49Shared();
   const active=products.filter(p=>p.is_active!==false);
-  const pending=v49Orders.filter(o=>['pending_payment','pending_fulfillment','pending_gift','paid'].includes(o.status));
-  const today=new Date();const ymd=today.toISOString().slice(0,10);
-  const tod=v49Orders.filter(o=>String(o.created_at||'').slice(0,10)===ymd && o.status!=='cancelled');
-  const unique=new Set(v49Orders.map(o=>o.user_id).filter(Boolean));
+  const pending=v49Orders.filter(o=>['pending_payment','processing','paid','pending_fulfillment'].includes(String(o.status||'')));
+  const today=new Date(), ymd=today.toISOString().slice(0,10);
+  const tod=v49Orders.filter(o=>String(o.created_at||'').slice(0,10)===ymd && String(o.status||'')!=='cancelled');
+  const unique=new Set(v49Orders.map(o=>o.customer_email||o.email||o.user_id||o.customer_id||o.tax_id).filter(Boolean));
   const low=products.filter(p=>p.stock_tracking_enabled===true&&Number(p.stock_qty||0)<=Number(p.low_stock_qty??3));
-  $('kpiProducts').textContent=active.length;$('kpiProductsSub').textContent=`全部 ${products.length} 件`;
+
+  $('kpiProducts').textContent=active.length;
+  $('kpiProductsSub').textContent=`全部 ${products.length} 件`;
   $('kpiOrders').textContent=pending.length;
-  $('kpiSales').textContent=v49Money(tod.reduce((s,o)=>s+Number(o.cash_amount||0),0));
-  $('kpiSalesSub').textContent=`${tod.length} 筆訂單`;
+  $('kpiSales').textContent=v49Money(tod.reduce((s,o)=>s+Number(o.total_amount??o.cash_amount??0),0));
+  $('kpiSalesSub').textContent=`${tod.length} 筆 PMKTOOLS 訂單`;
   $('kpiCustomers').textContent=unique.size;
   $('kpiLowStock').textContent=low.length;
-  $('dashOrderRows').innerHTML=v49Orders.slice(0,8).map(o=>`<tr><td>${v49OrderNo(o)}</td><td>${esc(v49CustomerName(o))}</td><td>${esc(o.product_name||'')}</td><td>${v49Money(o.cash_amount||0)}<div class="muted">${Number(o.points_used||0)} 點</div></td><td>${esc(v49OrderStatus(o.status))}</td></tr>`).join('')||'<tr><td colspan="5" class="muted">目前沒有訂單。</td></tr>';
+
+  $('dashOrderRows').innerHTML=v49Orders.slice(0,8).map(o=>{
+    const items=Array.isArray(o.items)?o.items:[];
+    const itemText=items.length
+      ? items.map(x=>`${esc(x.sku||x.source_sku_id||'')} ${esc(x.product_name||'')} × ${Number(x.quantity||1)}`).join('<br>')
+      : esc(o.product_name||'—');
+    return `<tr>
+      <td>${esc(v49OrderNo(o))}</td>
+      <td>${esc(v49CustomerName(o))}</td>
+      <td>${itemText}</td>
+      <td>${v49Money(o.total_amount??o.cash_amount??0)}</td>
+      <td>${esc(pmkOrderStatusName(o.status)||v49OrderStatus(o.status))}</td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="5" class="muted">目前沒有 PMKTOOLS 工業品訂單。</td></tr>';
+
   const alerts=[];
   if(low.length)alerts.push(`<div class="status">⚠ ${low.length} 件商品達低庫存警戒。</div>`);
-  const waitShip=v49Orders.filter(o=>o.status==='pending_fulfillment').length;
-  if(waitShip)alerts.push(`<div class="status">📦 ${waitShip} 筆訂單等待出貨／發券。</div>`);
-  const waitPay=v49Orders.filter(o=>o.status==='pending_payment').length;
-  if(waitPay)alerts.push(`<div class="status">💳 ${waitPay} 筆訂單等待付款。</div>`);
-  $('dashAlerts').innerHTML=alerts.join('')||'<div class="status">✅ 目前沒有需要立即處理的項目。</div>';
+  const waitShip=v49Orders.filter(o=>['processing','paid','pending_fulfillment'].includes(String(o.status||''))).length;
+  if(waitShip)alerts.push(`<div class="status">📦 ${waitShip} 筆 PMKTOOLS 訂單等待出貨。</div>`);
+  const waitPay=v49Orders.filter(o=>String(o.status||'')==='pending_payment').length;
+  if(waitPay)alerts.push(`<div class="status">💳 ${waitPay} 筆 PMKTOOLS 訂單等待付款。</div>`);
+  $('dashAlerts').innerHTML=alerts.join('')||'<div class="status">✅ 目前沒有需要立即處理的 PMKTOOLS 訂單。</div>';
 }
 
 
@@ -3117,7 +3133,7 @@ bindNameSyncV341();boot();
 async function loadSiteContentAdmin(){
   const st=$('siteContentStatus');if(st)st.textContent='讀取中…';
   try{
-    const r=await fetch(PMK_API_BASE+'/api/pmk-site-content',{cache:'no-store'});
+    const r=await fetch(HIKING_API_BASE+'/api/pmk-site-content',{cache:'no-store'});
     const j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));
     const c=j.content||{},a=c.about||{},n=c.news||{},v=c.video||{},k=c.catalog||{},x=c.contact||{};
     $('siteAboutTitle').value=a.title||'關於我們';$('siteAboutBody').value=a.body||'';
