@@ -353,6 +353,13 @@
 #pmkTaxonomyPath{margin-top:10px;padding:9px 11px;background:#fff;border:1px solid #dbeafe;border-radius:7px;color:#1e3a8a;font-weight:850}
 @media(max-width:700px){.pmk-taxonomy-grid>div{grid-template-columns:1fr!important;gap:4px!important}}
 </style>
+
+<style id="pmk-duplicate-manager-v206">
+.pmk-dupwarn{display:inline-flex;align-items:center;gap:5px;margin-top:5px;padding:3px 7px;border-radius:999px;background:#fff3cd;color:#8a5a00;font-size:11px;font-weight:900}
+.pmk-dupbtn{border:1px solid #f0b429;background:#fff8df;color:#7a4b00;border-radius:9px;padding:6px 9px;font-weight:900;cursor:pointer}
+.pmk-dupbtn:hover{background:#ffefb5}
+</style>
+
 </head>
 <body>
 <header class="top"><div class="topin"><a class="brand" href="/pmktools.html">← PMKTOOLS</a><span id="pmkAdminWho" style="font-size:12px;opacity:.8"></span><button class="linkbtn" id="pmkAdminLogout" type="button" style="display:none">登出</button><a class="linkbtn" href="/admin.html">返回 Admin</a></div></header>
@@ -3129,13 +3136,214 @@ function rebuildProductCategoryFilter(){
   if([...el.options].some(o=>o.value===prev))el.value=prev;
 }
 
+function pmkProductTimeV206(p){
+  const keys=['created_at','imported_at','collected_at','collector_created_at','updated_at'];
+  for(const k of keys){const t=Date.parse(String(p?.[k]||''));if(Number.isFinite(t))return t}
+  const n=Number(p?.id);return Number.isFinite(n)?n:0;
+}
+function pmkNewestFirstV206(list){
+  const pos=new Map((products||[]).map((p,i)=>[String(p?.id),i]));
+  return list.slice().sort((a,b)=>{
+    const d=pmkProductTimeV206(b)-pmkProductTimeV206(a);
+    if(d)return d;
+    return (pos.get(String(b?.id))??0)-(pos.get(String(a?.id))??0);
+  });
+}
+function pmkNormDupTextV207(v){
+  return String(v||'').normalize('NFKC').toUpperCase()
+    .replace(/[\s\u3000]+/g,'')
+    .replace(/[｜|【】\[\]（）()，,。:：;；'"“”‘’]/g,'')
+    .trim();
+}
+function pmkNormImageKeyV207(v){
+  let x=String(v||'').trim();
+  if(!x)return '';
+  try{
+    const u=new URL(x,location.href);
+    const path=decodeURIComponent(u.pathname||'').replace(/\/+/g,'/');
+    const file=(path.split('/').pop()||'').toLowerCase()
+      .replace(/(?:[-_](?:thumb|small|medium|large|\d+x\d+))(?=\.[a-z0-9]+$)/i,'');
+    return file || path.toLowerCase();
+  }catch(_){
+    return x.split('?')[0].split('#')[0].split('/').pop().toLowerCase();
+  }
+}
+function pmkVariationSkuSetV207(p){
+  const set=new Set();
+  const main=String(productPrimarySkuV204(p)||'').normalize('NFKC').trim().toUpperCase();
+  if(main&&!industrialSkuLooksWeakV204(main))set.add(main);
+  for(const v of (Array.isArray(p?.variations)?p.variations:[])){
+    const sku=String(v?.sku||'').normalize('NFKC').trim().toUpperCase();
+    if(sku&&!industrialSkuLooksWeakV204(sku))set.add(sku);
+  }
+  return set;
+}
+function pmkDupReasonsV207(a,b){
+  const reasons=[];
+  const ap=String(a?.source?.platform||a?.source_type||'').trim().toLowerCase();
+  const bp=String(b?.source?.platform||b?.source_type||'').trim().toLowerCase();
+  const ai=String(a?.source?.item_id||a?.source_item_id||'').trim();
+  const bi=String(b?.source?.item_id||b?.source_item_id||'').trim();
+  if(ai&&bi&&ai===bi&&(!ap||!bp||ap===bp))reasons.push('同來源商品ID');
+
+  const ae=String(a?.external_id||'').trim().toLowerCase();
+  const be=String(b?.external_id||'').trim().toLowerCase();
+  if(ae&&be&&ae===be)reasons.push('同 external_id');
+
+  const as=pmkVariationSkuSetV207(a), bs=pmkVariationSkuSetV207(b);
+  const sameSku=[...as].find(x=>bs.has(x));
+  if(sameSku)reasons.push('同 SKU '+sameSku);
+
+  const an=pmkNormDupTextV207(a?.name), bn=pmkNormDupTextV207(b?.name);
+  if(an&&bn&&an===bn)reasons.push('同商品名稱');
+
+  const am=pmkNormImageKeyV207(a?.image_url), bm=pmkNormImageKeyV207(b?.image_url);
+  if(am&&bm&&am===bm)reasons.push('同主圖');
+
+  // 同圖 + 名稱接近：即使重新採集造成 item_id / external_id 改變，也列為疑似重複。
+  if(am&&bm&&am===bm&&an&&bn){
+    const short=an.length<bn.length?an:bn, long=an.length<bn.length?bn:an;
+    if(short.length>=4 && long.includes(short) && !reasons.includes('同商品名稱'))reasons.push('同圖＋名稱近似');
+  }
+  return reasons;
+}
+function pmkShouldGroupDupV207(a,b){
+  const r=pmkDupReasonsV207(a,b);
+  // 任一強訊號即可警告；「同名稱」單獨成立時也只警告，絕不自動覆蓋。
+  return r.length>0;
+}
+function pmkDuplicateGroupsV206(){
+  const list=products||[], n=list.length;
+  const parent=Array.from({length:n},(_,i)=>i);
+  const find=i=>parent[i]===i?i:(parent[i]=find(parent[i]));
+  const join=(a,b)=>{a=find(a);b=find(b);if(a!==b)parent[b]=a};
+
+  // O(n²) 但後台通常數百筆；只做字串/Set 比對，不下載圖片。
+  for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){
+    if(pmkShouldGroupDupV207(list[i],list[j]))join(i,j);
+  }
+
+  const groups=new Map();
+  for(let i=0;i<n;i++){
+    const r=find(i);
+    if(!groups.has(r))groups.set(r,[]);
+    groups.get(r).push(list[i]);
+  }
+  const out=new Map();
+  let k=0;
+  for(const g of groups.values())if(g.length>1)out.set('dup-'+(++k),pmkNewestFirstV206(g));
+  return out;
+}
+function pmkDuplicateGroupForV206(p){
+  for(const g of pmkDuplicateGroupsV206().values()){
+    if(g.some(x=>String(x.id)===String(p?.id)))return g;
+  }
+  return [];
+}
+function pmkDuplicateReasonLabelV207(group){
+  const set=new Set();
+  for(let i=0;i<group.length;i++)for(let j=i+1;j<group.length;j++){
+    for(const r of pmkDupReasonsV207(group[i],group[j]))set.add(r);
+  }
+  return [...set].slice(0,3).join('／');
+}
 function filteredProducts(){
   const q=String($('q')?.value||'').trim().toLowerCase(),cat=String($('productCategoryFilter')?.value||''),st=String($('productStatusFilter')?.value||'');
-  return products.filter(p=>{if(cat&&String(p.category||'精選福利')!==cat)return false;if(st==='active'&&p.is_active===false)return false;if(st==='inactive'&&p.is_active!==false)return false;if(q){const hay=[p.name,p.brand,p.category,p.external_id,p.source_type,p.line_url].map(x=>String(x||'').toLowerCase()).join(' ');if(!hay.includes(q))return false}return true});
+  const list=products.filter(p=>{if(cat&&String(p.category||'精選福利')!==cat)return false;if(st==='active'&&p.is_active===false)return false;if(st==='inactive'&&p.is_active!==false)return false;if(q){const hay=[p.name,p.brand,p.category,p.external_id,p.source_type,p.line_url,p.sku,p?.source?.item_id].map(x=>String(x||'').toLowerCase()).join(' ');if(!hay.includes(q))return false}return true});
+  return pmkNewestFirstV206(list);
 }
 function initCollapsibles(){document.querySelectorAll('[data-collapse]').forEach(h=>h.onclick=()=>document.getElementById(h.dataset.collapse)?.classList.toggle('collapsed'))}
 
-function render(){rebuildProductCategoryFilter();const arr=filteredProducts();$('count').textContent=arr.length;$('rows').innerHTML=arr.length?arr.map(p=>{const sku=productPrimarySkuV204(p),st=productSkuStateV204(p);return `<tr><td>${p.image_url?`<img class="thumb" src="${esc(p.image_url)}" onerror="this.style.visibility='hidden'">`:'—'}</td><td><div class="name">${esc(p.name)}</div><div class="muted">${esc(p.brand||'')} · ${esc(p.source_type||'manual')} · ${esc(p.external_id||'')}</div></td><td style="min-width:220px"><div style="display:flex;gap:6px;align-items:center"><input data-list-sku="${esc(String(p.id))}" value="${esc(sku)}" placeholder="待確認 SKU" style="min-width:130px;padding:7px 8px"><button class="rowbtn" type="button" data-save-sku="${esc(String(p.id))}">確認</button></div><div class="muted" style="margin-top:5px"><span class="badge ${st.cls}">${st.label}</span>${industrialSkuLooksWeakV204(sku)?' 尺寸碼不當 SKU':''}</div></td><td>NT$ ${Number(p.price||0).toLocaleString('zh-TW')}<div class="muted">庫存 ${Number(p.stock_qty||0)}${Number(p.stock_qty||0)<=Number(p.low_stock_qty??3)?' ⚠':''} · ${(Number(p.price||0)<200||p.sale_mode==='redeem_only')?'只兌換':'可折抵／付款'}</div></td><td>${esc(p.category||'')}<div class="muted">${festivalNames(p.festival_keys)}</div></td><td>${Number(p.sort_order||0)}</td><td><span class="badge ${p.is_active?'on':'off'}">${p.is_active?'上架':'下架'}</span></td><td>${p.line_url?`<a class="rowbtn" href="${esc(p.line_url)}" target="_blank" rel="noopener noreferrer">來源 ↗</a> `:''}<button class="rowbtn" data-edit="${p.id}">編輯商品</button> <button class="rowbtn" data-toggle="${p.id}">${p.is_active?'下架':'上架'}</button> <button class="rowbtn danger" data-del="${p.id}">刪除</button></td></tr>`}).join(''):'<tr><td colspan="8" class="muted">目前沒有商品。</td></tr>';document.querySelectorAll('[data-save-sku]').forEach(b=>b.onclick=()=>saveSkuFromListV204(b.dataset.saveSku));document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>fill(products.find(p=>String(p.id)===b.dataset.edit)));document.querySelectorAll('[data-toggle]').forEach(b=>b.onclick=()=>toggle(b.dataset.toggle));document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>del(b.dataset.del))}
+
+function pmkMergeArraysUniqueV206(a,b){
+  const out=[];const seen=new Set();
+  for(const x of [...(Array.isArray(a)?a:[]),...(Array.isArray(b)?b:[])]){
+    const k=typeof x==='string'?x:JSON.stringify(x);
+    if(!k||seen.has(k))continue;seen.add(k);out.push(x);
+  }
+  return out;
+}
+function pmkMergeVariationsV206(primary,others){
+  const map=new Map();
+  const key=v=>pmkCollectorVariationKeyV1(v)||String(v?.sku||'').trim().toUpperCase()||JSON.stringify(v?.attributes||{});
+  for(const v of (Array.isArray(primary)?primary:[]))map.set(key(v),{...v});
+  for(const v of (Array.isArray(others)?others:[])){
+    const k=key(v);if(!map.has(k)){map.set(k,{...v});continue}
+    const cur=map.get(k);
+    const merged={...v,...cur};
+    if(v?.sku_manual_locked===true&&!cur?.sku_manual_locked)merged.sku=v.sku;
+    merged.image_url=cur.image_url||v.image_url||'';
+    map.set(k,merged);
+  }
+  return [...map.values()];
+}
+function pmkDuplicateDiffFieldsV206(group){
+  const fields=['name','price','image_url','video_url','detail_description','category','subcategory','subcategory_detail','supplier','sku'];
+  return fields.filter(f=>new Set(group.map(p=>JSON.stringify(p?.[f]??''))).size>1);
+}
+async function pmkMergeDuplicateGroupV206(id){
+  const clicked=products.find(p=>String(p.id)===String(id));if(!clicked)return;
+  const group=pmkNewestFirstV206(pmkDuplicateGroupForV206(clicked));if(group.length<2)return alert('目前沒有重複商品。');
+  const primary=group[0],extras=group.slice(1);
+  const diffs=pmkDuplicateDiffFieldsV206(group);
+  const msg=[
+    `偵測到 ${group.length} 筆疑似同一商品。`,`判斷依據：${pmkDuplicateReasonLabelV207(group)||'來源／SKU／名稱／主圖比對'}`,
+    `將保留最新一筆：${primary.name||primary.external_id||primary.id}`,
+    diffs.length?`內容有差異：${diffs.join('、')}`:'內容未發現主要差異。',
+    '',
+    '整合方式：',
+    '• 最新一筆當主商品',
+    '• 圖庫、規格、附加資料合併，不直接整筆覆蓋',
+    '• 人工確認 SKU 優先保留',
+    '• 舊筆內容快照寫入 duplicate_merge_history 後才刪除重複筆',
+    '',
+    '確定整合成單一商品？'
+  ].join('\n');
+  if(!confirm(msg))return;
+  setStatus(`⏳ 正在整合 ${group.length} 筆重複商品…`);
+  try{
+    let merged={...primary};
+    const locked=group.find(p=>p?.sku_manual_locked===true&&String(p?.sku||'').trim());
+    if(locked){merged.sku=locked.sku;merged.sku_manual_locked=true;merged.sku_confirmed_at=locked.sku_confirmed_at||merged.sku_confirmed_at}
+    for(const p of extras){
+      for(const f of ['brand','name','category','subcategory','subcategory_detail','supplier','image_url','video_url','detail_description','line_url']){
+        if(!String(merged?.[f]||'').trim()&&String(p?.[f]||'').trim())merged[f]=p[f];
+      }
+      if(!(Number(merged.price)>0)&&Number(p.price)>0)merged.price=p.price;
+      merged.gallery_urls=pmkMergeArraysUniqueV206(merged.gallery_urls,p.gallery_urls);
+      merged.detail_highlights=pmkMergeArraysUniqueV206(merged.detail_highlights,p.detail_highlights);
+      merged.detail_specs=pmkMergeArraysUniqueV206(merged.detail_specs,p.detail_specs);
+      merged.detail_notices=pmkMergeArraysUniqueV206(merged.detail_notices,p.detail_notices);
+      merged.attributes=pmkMergeArraysUniqueV206(merged.attributes,p.attributes);
+      merged.option_groups=pmkMergeArraysUniqueV206(merged.option_groups,p.option_groups);
+      merged.variations=pmkMergeVariationsV206(merged.variations,p.variations);
+    }
+    const history=Array.isArray(primary.duplicate_merge_history)?primary.duplicate_merge_history.slice():[];
+    history.push({
+      merged_at:new Date().toISOString(),
+      duplicate_key:'v207-multi-signal',duplicate_reasons:pmkDuplicateReasonLabelV207(group),
+      kept_id:String(primary.id),
+      removed_ids:extras.map(x=>String(x.id)),
+      differing_fields:diffs,
+      snapshots:extras.map(x=>({
+        id:x.id,external_id:x.external_id,source:x.source,sku:x.sku,name:x.name,price:x.price,
+        image_url:x.image_url,video_url:x.video_url,gallery_urls:x.gallery_urls,
+        detail_description:x.detail_description,variations:x.variations,updated_at:x.updated_at,created_at:x.created_at
+      }))
+    });
+    merged.duplicate_merge_history=history;
+    merged.duplicate_merged_at=new Date().toISOString();
+    await productAdminPost('/api/bw-product-save',{id:primary.id,product:merged});
+    for(const p of extras)await productAdminPost('/api/bw-product-delete',{id:p.id});
+    await load();
+    setStatus(`✅ 已整合成 1 筆商品；移除 ${extras.length} 筆重複資料。`);
+  }catch(e){
+    setStatus('❌ 重複商品整合失敗：'+(e?.message||String(e)));
+    alert('整合失敗，已停止後續刪除。\n'+(e?.message||String(e)));
+  }
+}
+
+function render(){rebuildProductCategoryFilter();const arr=filteredProducts();const dupGroups=pmkDuplicateGroupsV206();const dupCount=[...dupGroups.values()].reduce((n,g)=>n+g.length,0);$('count').textContent=arr.length+(dupCount?`｜⚠ 重複 ${dupCount} 筆`:'');$('rows').innerHTML=arr.length?arr.map(p=>{const sku=productPrimarySkuV204(p),st=productSkuStateV204(p),dg=pmkDuplicateGroupForV206(p);return `<tr${dg.length>1?' style="background:#fffdf4"':''}><td>${p.image_url?`<img class="thumb" src="${esc(p.image_url)}" onerror="this.style.visibility='hidden'">`:'—'}</td><td><div class="name">${esc(p.name)}</div><div class="muted">${esc(p.brand||'')} · ${esc(p.source_type||'manual')} · ${esc(p.external_id||'')}</div>${dg.length>1?`<div class="pmk-dupwarn">⚠ 疑似同商品 ${dg.length} 筆｜${esc(pmkDuplicateReasonLabelV207(dg)||'內容可能不同')}</div>`:''}</td><td style="min-width:220px"><div style="display:flex;gap:6px;align-items:center"><input data-list-sku="${esc(String(p.id))}" value="${esc(sku)}" placeholder="待確認 SKU" style="min-width:130px;padding:7px 8px"><button class="rowbtn" type="button" data-save-sku="${esc(String(p.id))}">確認</button></div><div class="muted" style="margin-top:5px"><span class="badge ${st.cls}">${st.label}</span>${industrialSkuLooksWeakV204(sku)?' 尺寸碼不當 SKU':''}</div></td><td>NT$ ${Number(p.price||0).toLocaleString('zh-TW')}<div class="muted">庫存 ${Number(p.stock_qty||0)}${Number(p.stock_qty||0)<=Number(p.low_stock_qty??3)?' ⚠':''} · ${(Number(p.price||0)<200||p.sale_mode==='redeem_only')?'只兌換':'可折抵／付款'}</div></td><td>${esc(p.category||'')}<div class="muted">${festivalNames(p.festival_keys)}</div></td><td>${Number(p.sort_order||0)}</td><td><span class="badge ${p.is_active?'on':'off'}">${p.is_active?'上架':'下架'}</span></td><td>${dg.length>1?`<button class="pmk-dupbtn" data-merge-dup="${esc(String(p.id))}">⚠ 整合 ${dg.length} 筆</button> `:''}${p.line_url?`<a class="rowbtn" href="${esc(p.line_url)}" target="_blank" rel="noopener noreferrer">來源 ↗</a> `:''}<button class="rowbtn" data-edit="${p.id}">編輯商品</button> <button class="rowbtn" data-toggle="${p.id}">${p.is_active?'下架':'上架'}</button> <button class="rowbtn danger" data-del="${p.id}">刪除</button></td></tr>`}).join(''):'<tr><td colspan="8" class="muted">目前沒有商品。</td></tr>';document.querySelectorAll('[data-save-sku]').forEach(b=>b.onclick=()=>saveSkuFromListV204(b.dataset.saveSku));document.querySelectorAll('[data-merge-dup]').forEach(b=>b.onclick=()=>pmkMergeDuplicateGroupV206(b.dataset.mergeDup));document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>fill(products.find(p=>String(p.id)===b.dataset.edit)));document.querySelectorAll('[data-toggle]').forEach(b=>b.onclick=()=>toggle(b.dataset.toggle));document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>del(b.dataset.del))}
 
 const BW_FLOWER12_DRAFTS=[{"external_id":"flower-fang-001","source_type":"partner","brand":"芳太美 花店","name":"香氛永生花束 x 水晶筆組","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["teachers_day","qixi","mother_day"],"sort_order":501,"is_active":false,"line_url":"https://www.pinkoi.com/product/PtN49rhS","image_url":""},{"external_id":"flower-fang-002","source_type":"partner","brand":"芳太美 花店","name":"霧光擴香花","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["teachers_day","mother_day"],"sort_order":502,"is_active":false,"line_url":"https://www.pinkoi.com/product/yXGVQHE4","image_url":""},{"external_id":"flower-fang-003","source_type":"partner","brand":"芳太美 花店","name":"永生花乾燥花 香氛花束（小型）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":503,"is_active":false,"line_url":"https://www.pinkoi.com/product/7ffLDMQC","image_url":""},{"external_id":"flower-fang-004","source_type":"partner","brand":"芳太美 花店","name":"針織花小花束","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":504,"is_active":false,"line_url":"https://www.pinkoi.com/product/SAAHfDKi","image_url":""},{"external_id":"flower-fang-005","source_type":"partner","brand":"芳太美 花店","name":"母親節 康乃馨花束 香皂花","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["mother_day"],"sort_order":505,"is_active":false,"line_url":"https://www.pinkoi.com/product/Uz2gmQpb","image_url":""},{"external_id":"flower-fang-006","source_type":"partner","brand":"芳太美 花店","name":"炭培奶茶香氛花束 永生花乾燥花","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":506,"is_active":false,"line_url":"https://www.pinkoi.com/product/bMidfmdt","image_url":""},{"external_id":"flower-ailsa-001","source_type":"partner","brand":"Ailsa Florist","name":"永生花玻璃盅（客製色系）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":511,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-002","source_type":"partner","brand":"Ailsa Florist","name":"客製乾燥花束","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","teachers_day","mother_day"],"sort_order":512,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-003","source_type":"partner","brand":"Ailsa Florist","name":"客製永生花束","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":513,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-004","source_type":"partner","brand":"Ailsa Florist","name":"鮮花花束（客製）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"pickup","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":514,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-005","source_type":"partner","brand":"Ailsa Florist","name":"開幕花禮（客製）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"service","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":[],"sort_order":515,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-006","source_type":"partner","brand":"Ailsa Florist","name":"新娘捧花（客製）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"service","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":[],"sort_order":516,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""}];
 
@@ -3805,6 +4013,15 @@ function pmkCollectorVariationKeyV1(v){
 function applyChromeCollectorV200(payload){
   let j=ensureVariationAttributesV200(payload||{});
   const existing=pmkCollectorExistingProductV1(j);
+  if(existing){
+    const oldName=String(existing.name||existing.external_id||existing.id);
+    const changed=[];
+    const incomingName=cleanImportedTitleV200(String(j.source_title||j.name||'').trim());
+    if(incomingName&&incomingName!==String(existing.name||''))changed.push('名稱');
+    if(Number(j.source_price||0)>0&&Number(existing.source_price||0)>0&&Number(j.source_price)!==Number(existing.source_price))changed.push('來源價格');
+    if(String(j.image_url||'')&&String(existing.image_url||'')&&String(j.image_url)!==String(existing.image_url))changed.push('主圖');
+    setStatus(`⚠ 已存在同一來源商品：${oldName}。本次資料會載入同一筆編輯，不新增第二筆${changed.length?'；偵測到變更：'+changed.join('、'):''}。`);
+  }
   editingId=existing?.id||null;
   const sourceTitle=cleanImportedTitleV200(String(j.source_title||j.name||'').trim());
   const cleanDesc=cleanImportedDescriptionV200(String(j.source_description||''));
