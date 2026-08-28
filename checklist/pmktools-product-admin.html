@@ -2535,7 +2535,7 @@ function renderVariationEditorV54(){
   const box=$('variationEditor');if(!box)return;
   if($('product_type').value!=='variable'){box.innerHTML='<div class="muted" style="padding:16px">目前是簡單商品。</div>';return}
   if(!v54Variations.length){box.innerHTML='<div class="muted" style="padding:16px">尚未產生變化類型。先設定「屬性」，再按「產生規格組合」。</div>';return}
-  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><span class="v545-count">${v54Variations.length} 個變化類型</span></div>`+
+  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="pmkRepairPriceBtn" style="background:#0f766e;color:#fff">修復價格</button><button type="button" class="btn" id="pmkRepairSkuBtn" style="background:#7c3aed;color:#fff">修復 SKU</button><span class="v545-count">${v54Variations.length} 個變化類型</span><span id="pmkRepairStatus" class="muted" style="margin-left:8px"></span></div>`+
   v54Variations.map((v,i)=>`<div class="v545-variation" data-vrow="${i}">
     <div class="v545-summary">
       <div class="v545-handle" title="排序">≡</div>
@@ -2608,6 +2608,8 @@ function renderVariationEditorV54(){
   box.querySelectorAll('[data-vrestore]').forEach(btn=>btn.onclick=()=>restoreVariationOriginalImageV4(Number(btn.dataset.vrestore)));
   $('v545ExpandAll').onclick=()=>{box.querySelectorAll('.v545-variation').forEach(x=>x.classList.add('open'));box.querySelectorAll('[data-vedit]').forEach(x=>x.textContent='收合')};
   $('v545CollapseAll').onclick=()=>{box.querySelectorAll('.v545-variation').forEach(x=>x.classList.remove('open'));box.querySelectorAll('[data-vedit]').forEach(x=>x.textContent='編輯')};
+  if($('pmkRepairPriceBtn'))$('pmkRepairPriceBtn').onclick=()=>startCollectorRepairV1('price');
+  if($('pmkRepairSkuBtn'))$('pmkRepairSkuBtn').onclick=()=>startCollectorRepairV1('sku');
 }
 function buildVariationsV54(){
   const attrs=attributesV54();
@@ -3607,6 +3609,80 @@ function variationDisplayNameV33(v,productTitle,sku){
   const code=asciiSkuV33(sku);
   return code?`${cn}/${code}`:cn;
 }
+
+// PMKTOOLS SOURCE REPAIR V1
+// True repair does not guess from current admin values. It asks the Chrome collector
+// to reopen the saved Taobao/Tmall source page and return only the requested field.
+function pmkRepairSourceUrlV1(){
+  return String($('line_url_shadow')?.value||$('line_url')?.value||'').trim();
+}
+function pmkRepairItemIdV1(){
+  return String($('source_item_id')?.value||'').trim();
+}
+function startCollectorRepairV1(mode){
+  readVariationsV54().forEach((v,i)=>{ if(v54Variations[i])v54Variations[i]={...v54Variations[i],...v}; });
+  const source_url=pmkRepairSourceUrlV1(), item_id=pmkRepairItemIdV1();
+  if(!/^https:\/\/[^/]*(?:taobao|tmall)\.com\//i.test(source_url))return alert('這個商品沒有可用的淘寶／天貓來源網址，無法回來源修復。');
+  if(!item_id)return alert('缺少來源商品 ID，無法安全比對修復結果。');
+  const label=mode==='price'?'價格':'SKU';
+  if(!confirm(`開始「修復${label}」？\n\n系統會開啟原淘寶／天貓商品頁，只重新採集 ${label}。\n不重建商品、不改庫存，也不會順便修改另一項。`))return;
+  const st=$('pmkRepairStatus');if(st)st.textContent=`正在開啟來源頁修復${label}…`;
+  window.postMessage({type:'BOOKWIDE_COLLECTOR_START_REPAIR',request:{mode,source_url,item_id,admin_url:location.href.split('?')[0]}},'*');
+  setStatus(`⏳ 修復${label}：已交給 Collector。來源頁完成後會自動回到後台。`);
+}
+function pmkRepairVarKeyV1(v){
+  const sid=String(v?.source_sku_id||'').trim();
+  if(sid)return 'sid:'+sid;
+  const a=v?.attributes||{};
+  const parts=Object.keys(a).sort().map(k=>`${String(k).trim()}=${String(a[k]).normalize('NFKC').trim()}`);
+  return 'attr:'+parts.join('|').toLowerCase();
+}
+function applyCollectorRepairResultV1(r){
+  if(!r||!Array.isArray(r.variations))return;
+  const currentItem=pmkRepairItemIdV1();
+  if(currentItem&&String(r.item_id||'')&&String(r.item_id)!==currentItem){
+    alert(`修復結果商品 ID 不一致，已拒絕套用。\n目前：${currentItem}\n回傳：${r.item_id}`);return;
+  }
+  const byKey=new Map();for(const x of r.variations)byKey.set(pmkRepairVarKeyV1(x),x);
+  const plan=[];let skipped=0,missing=0;
+  for(let i=0;i<v54Variations.length;i++){
+    const v=v54Variations[i],hit=byKey.get(pmkRepairVarKeyV1(v));if(!hit){missing++;continue}
+    if(r.mode==='price'){
+      const n=Number(hit.source_price||0),old=Number(v.source_price||0);if(!(n>0)||old===n){skipped++;continue}
+      plan.push({i,old,newValue:n,label:`${v.sku||v.source_sku_id||('#'+(i+1))}: ¥${old||0} → ¥${n}`});
+    }else if(r.mode==='sku'){
+      const candidate=asciiSkuV33(hit.image_model_code||hit.sku_candidate||''),old=asciiSkuV33(v.sku||'');
+      if(!candidate||v.sku_manual_locked===true||old===candidate){skipped++;continue}
+      plan.push({i,old,newValue:candidate,label:`${old||'(空白)'} → ${candidate}`});
+    }
+  }
+  const label=r.mode==='price'?'價格':'SKU';
+  if(!plan.length){
+    setStatus(`ℹ️ 修復${label}掃描完成：沒有可安全套用的變更；無有效值/相同 ${skipped} 筆；無法配對 ${missing} 筆。`);
+    window.postMessage({type:'BOOKWIDE_COLLECTOR_REPAIR_CONSUMED'},'*');return;
+  }
+  const sample=plan.slice(0,10).map(x=>x.label).join('\n');
+  if(!confirm(`修復${label}找到 ${plan.length} 筆變更。\n\n${sample}${plan.length>10?'\n…其餘 '+(plan.length-10)+' 筆':''}\n\n確定套用到目前草稿？`))return;
+  for(const x of plan){
+    const v=v54Variations[x.i];
+    if(r.mode==='price'){
+      const n=x.newValue,nt=pricingPublicFromCny(n,$('category')?.value||'',pricingRules(),currentEditId||$('external_id')?.value||'');
+      v.source_price=n;v.source_currency='CNY';v.price=nt;v.price_repaired_at=new Date().toISOString();v.price_source='collector-live-repair';
+      const sp=document.querySelector(`[data-vsourceprice="${x.i}"]`),pp=document.querySelector(`[data-vprice="${x.i}"]`);if(sp)sp.value=String(n);if(pp)pp.value=String(nt);
+    }else{
+      v.sku=x.newValue;v.sku_source='variation-image-repair';v.sku_repaired_at=new Date().toISOString();
+      const se=document.querySelector(`[data-vsku="${x.i}"]`);if(se)se.value=x.newValue;
+    }
+  }
+  syncVariationNamesFromProductV341();
+  const st=$('pmkRepairStatus');if(st)st.textContent=`修復${label}：${plan.length} 筆已套用`;
+  setStatus(`✅ 修復${label}已套用 ${plan.length} 筆；未變更/無有效值 ${skipped} 筆；無法配對 ${missing} 筆。\n請檢查後按「儲存草稿」。`);
+  window.postMessage({type:'BOOKWIDE_COLLECTOR_REPAIR_CONSUMED'},'*');
+}
+window.addEventListener('message',e=>{
+  if(e.source===window&&e.data?.type==='BOOKWIDE_COLLECTOR_REPAIR_RESULT'&&e.data.payload)applyCollectorRepairResultV1(e.data.payload);
+});
+
 function pmkCollectorExistingProductV1(j){
   const item=String(j?.item_id||'').trim();if(!item)return null;
   return (products||[]).find(p=>String(p?.source?.item_id||'').trim()===item||String(p?.external_id||'')==='taobao-'+item)||null;
