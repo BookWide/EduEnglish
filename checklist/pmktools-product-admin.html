@@ -2609,7 +2609,7 @@ function renderVariationEditorV54(){
   $('v545ExpandAll').onclick=()=>{box.querySelectorAll('.v545-variation').forEach(x=>x.classList.add('open'));box.querySelectorAll('[data-vedit]').forEach(x=>x.textContent='收合')};
   $('v545CollapseAll').onclick=()=>{box.querySelectorAll('.v545-variation').forEach(x=>x.classList.remove('open'));box.querySelectorAll('[data-vedit]').forEach(x=>x.textContent='編輯')};
   if($('pmkRepairPriceBtn'))$('pmkRepairPriceBtn').onclick=()=>startCollectorRepairV1('price');
-  if($('pmkRepairSkuBtn'))$('pmkRepairSkuBtn').onclick=()=>startCollectorRepairV1('sku');
+  if($('pmkRepairSkuBtn'))$('pmkRepairSkuBtn').onclick=()=>startLocalSkuRepairV12();
 }
 function buildVariationsV54(){
   const attrs=attributesV54();
@@ -3651,6 +3651,88 @@ async function startCollectorRepairV1(mode){
   window.postMessage({type:'BOOKWIDE_COLLECTOR_START_REPAIR',request:{mode,source_url,item_id,admin_url:location.href.split('?')[0]}},'*');
   setStatus(`✅ 草稿已自動儲存。\n⏳ 修復${label}：已交給 Collector；來源頁完成後會自動回到後台。`);
 }
+
+async function pmkReadImageModelCodeV12(v){
+  const url=String(v?.image_url||v?.image||'').trim();
+  if(!url)return '';
+  if(typeof globalThis.TextDetector!=='function')throw new Error('此瀏覽器沒有啟用圖片文字辨識 TextDetector，無法在後台直接修復 SKU。');
+  let bmp=null;
+  try{
+    const res=await fetch(url,{mode:'cors',credentials:'omit',cache:'no-store'});
+    if(!res.ok)throw new Error('圖片讀取失敗 HTTP '+res.status);
+    const blob=await res.blob();
+    bmp=await createImageBitmap(blob);
+    const det=new TextDetector();
+    const blocks=await det.detect(bmp);
+    const raws=[];
+    for(const b of (blocks||[])){
+      const t=String(b?.rawValue||b?.text||'').normalize('NFKC').trim().toUpperCase();
+      if(t)raws.push(t);
+    }
+    const text=raws.join(' ');
+    const tokens=(text.match(/[A-Z0-9][A-Z0-9._\/\-]{3,31}/g)||[])
+      .map(x=>x.replace(/^[._\/-]+|[._\/-]+$/g,''))
+      .filter(Boolean);
+    const old=asciiSkuV33(v?.sku||'');
+    let best='';let score=-1;
+    for(const t0 of tokens){
+      const t=asciiSkuV33(t0);
+      if(!t||t===old)continue;
+      if(/^(?:HTTP|HTTPS|WWW|COM|JPEG|JPG|PNG|IMG|SKU)$/i.test(t))continue;
+      const alpha=/[A-Z]/.test(t),digit=/\d/.test(t);
+      if(!alpha||!digit)continue;
+      const sep=(t.match(/[-._\/]/g)||[]).length;
+      const sc=t.length + sep*3 + (/[A-Z].*\d|\d.*[A-Z]/.test(t)?6:0);
+      if(sc>score){score=sc;best=t}
+    }
+    return best;
+  }finally{try{bmp&&bmp.close&&bmp.close()}catch(_){}}
+}
+async function startLocalSkuRepairV12(){
+  try{
+    readVariationsV54().forEach((v,i)=>{ if(v54Variations[i])v54Variations[i]={...v54Variations[i],...v}; });
+    if(!v54Variations.length)return alert('目前沒有變化商品可修復 SKU。');
+    if(!confirm('開始「修復 SKU」？\n\n會先自動儲存目前草稿，然後直接讀取後台已保存的 variation 圖片辨識完整型號。\n不開淘寶、不重新採集、不修改價格或庫存。'))return;
+    await pmkAutoSaveDraftBeforeRepairV11('sku');
+    const st=$('pmkRepairStatus');
+    const plan=[];let noimg=0,nomatch=0,locked=0,failed=0;
+    for(let i=0;i<v54Variations.length;i++){
+      const v=v54Variations[i];
+      if(v?.sku_manual_locked===true){locked++;continue}
+      if(!String(v?.image_url||v?.image||'').trim()){noimg++;continue}
+      if(st)st.textContent=`SKU 圖片辨識 ${i+1}/${v54Variations.length}…`;
+      let candidate='';
+      try{candidate=await pmkReadImageModelCodeV12(v)}catch(e){
+        if(String(e?.message||e).includes('TextDetector'))throw e;
+        failed++;continue;
+      }
+      const old=asciiSkuV33(v?.sku||'');
+      if(!candidate||candidate===old){nomatch++;continue}
+      plan.push({i,old,newValue:candidate,label:`${old||'(空白)'} → ${candidate}`});
+      await new Promise(r=>setTimeout(r,25));
+    }
+    if(!plan.length){
+      if(st)st.textContent='SKU 修復完成：沒有可安全套用的候選值';
+      setStatus(`ℹ️ SKU 圖片辨識完成：沒有可安全套用的變更。\n無圖片 ${noimg} 筆；無候選/相同 ${nomatch} 筆；人工鎖定 ${locked} 筆；圖片讀取失敗 ${failed} 筆。`);
+      return;
+    }
+    const sample=plan.slice(0,12).map(x=>x.label).join('\n');
+    if(!confirm(`SKU 圖片辨識找到 ${plan.length} 筆候選變更。\n\n${sample}${plan.length>12?'\n…其餘 '+(plan.length-12)+' 筆':''}\n\n確定套用到目前草稿？`)){if(st)st.textContent='SKU 修復已取消套用';return}
+    for(const x of plan){
+      const v=v54Variations[x.i];
+      v.sku=x.newValue;v.image_model_code=x.newValue;v.sku_source='variation-image-repair';v.sku_repaired_at=new Date().toISOString();
+      const se=document.querySelector(`[data-vsku="${x.i}"]`);if(se)se.value=x.newValue;
+    }
+    syncVariationNamesFromProductV341();
+    if(st)st.textContent=`SKU 修復：${plan.length} 筆已套用`;
+    setStatus(`✅ SKU 圖片修復已套用 ${plan.length} 筆。\n無圖片 ${noimg} 筆；無候選/相同 ${nomatch} 筆；人工鎖定 ${locked} 筆；圖片讀取失敗 ${failed} 筆。\n請檢查後按「儲存草稿」。`);
+  }catch(e){
+    const msg=e?.message||String(e);
+    const st=$('pmkRepairStatus');if(st)st.textContent='SKU 修復失敗';
+    setStatus('❌ SKU 修復失敗：'+msg);alert(msg);
+  }
+}
+
 function pmkRepairVarKeyV1(v){
   const sid=String(v?.source_sku_id||'').trim();
   if(sid)return 'sid:'+sid;
