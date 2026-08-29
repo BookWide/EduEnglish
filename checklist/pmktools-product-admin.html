@@ -4210,6 +4210,41 @@ window.addEventListener('message',e=>{
   if(e.source===window&&e.data?.type==='BOOKWIDE_COLLECTOR_PRODUCT'&&e.data.payload)applyChromeCollectorV200(e.data.payload);
 });
 
+// V57.3 BATCH10 ONLY — receive one same-store batch (max 10), save every item as draft, then let Collector continue.
+let pmkBatchSavingV573=false;
+function pmkSleepV573(ms){return new Promise(r=>setTimeout(r,ms))}
+async function pmkSaveCollectorBatchV573(payload){
+  if(pmkBatchSavingV573)return;
+  const items=Array.isArray(payload?.items)?payload.items.slice(0,10):[];if(!items.length)return;
+  pmkBatchSavingV573=true;
+  let ok=0,failed=0;
+  try{
+    v49SwitchModule('products');
+    for(let i=0;i<items.length;i++){
+      const j=items[i]||{};
+      setStatus(`⏳ 同店批量：正在存草稿 ${i+1} / ${items.length}…`);
+      try{
+        applyChromeCollectorV200(j);
+        if($('supplier'))$('supplier').value=String(j.supplier||j.seller||'淘寶／天貓供應商');
+        if($('is_active'))$('is_active').value='false';
+        let p=formData();
+        p=pmkSequenceDuplicateVariationSkusV570(p);
+        p=pricingApplyProduct(p);p.is_active=false;
+        if(!p.name)throw new Error('商品名稱空白');
+        await productAdminPost('/api/bw-product-save',{id:editingId||'',product:p});
+        ok++;
+      }catch(e){failed++;console.warn('[PMKTOOLS batch draft]',e)}
+      await pmkSleepV573(120);
+    }
+    clearForm();await load();
+    setStatus(`✅ 同店批量：本批 ${items.length} 筆，草稿成功 ${ok}，失敗 ${failed}。${failed?'失敗筆已記錄；':' '}Collector 將繼續下一批。`);
+    window.postMessage({type:'BOOKWIDE_COLLECTOR_BATCH_CONSUMED',result:{ok,failed,total:items.length}},'*');
+  }finally{pmkBatchSavingV573=false}
+}
+window.addEventListener('message',e=>{
+  if(e.source===window&&e.data?.type==='BOOKWIDE_COLLECTOR_BATCH'&&e.data.payload)pmkSaveCollectorBatchV573(e.data.payload);
+});
+
 document.querySelectorAll('.wc548-tab').forEach(b=>b.onclick=()=>wc548OpenTab(b.dataset.wctab));
 
 if($('sku_rule_system'))$('sku_rule_system').onchange=()=>refreshSkuRuleFamilyV1('');refreshSkuRuleFamilyV1('');
