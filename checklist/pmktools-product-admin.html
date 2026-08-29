@@ -367,7 +367,7 @@
 .pmk-notdupbtn{border:1px solid #94a3b8;background:#fff;color:#334155;border-radius:9px;padding:6px 9px;font-weight:900;cursor:pointer}
 .pmk-notdupbtn:hover{background:#f8fafc}
 .pmk-recheckbtn{border:1px solid #bfdbfe;background:#eff6ff;color:#1d4ed8;border-radius:9px;padding:6px 9px;font-weight:900;cursor:pointer}
-.pmk-ignorebadge{display:inline-flex;align-items:center;gap:4px;margin-top:5px;padding:3px 7px;border-radius:999px;background:#e0f2fe;color:#075985;font-size:11px;font-weight:900}
+.pmk-ignorebadge{display:inline-flex;align-items:center;gap:4px;margin-top:5px;padding:3px 7px;border-radius:999px;background:#e0f2fe;color:#075985;font-size:11px;font-weight:900}.pmk-sku-hard{display:inline-flex;margin-top:5px;padding:3px 7px;border-radius:999px;background:#fee2e2;color:#991b1b;font-size:11px;font-weight:950}
 </style>
 
 
@@ -990,7 +990,7 @@
               <div class="field"><label>編碼體系（Admin 指定）</label><select id="sku_rule_system"><option value="manual">手動</option><option value="sandvik_style">Sandvik-style</option><option value="iscar_style">ISCAR-style</option></select></div>
               <div class="field"><label>產品分類碼</label><select id="sku_rule_family"><option value="">— 尚未指定 —</option></select></div>
             </div>
-            <div class="muted" id="skuRuleNote" style="margin-top:7px;font-size:12px">分類碼只能由固定規則表選擇；AI 不得建立分類碼或 SKU。品牌名稱不寫入 SKU。</div>
+            <div class="muted" id="skuRuleNote" style="margin-top:7px;font-size:12px">分類碼只能由固定規則表選擇；AI 不得建立分類碼或 SKU。PMKTOOLS SKU 全站唯一，不可重複。品牌名稱不寫入 SKU。</div>
           </div>
           <div class="field" style="margin-top:12px">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
@@ -3081,12 +3081,14 @@ function productSkuStateV204(p){
 async function saveSkuFromListV204(id){
   const p=products.find(x=>String(x.id)===String(id)); if(!p)return;
   const el=document.querySelector(`[data-list-sku="${CSS.escape(String(id))}"]`); if(!el)return;
-  const sku=String(el.value||'').normalize('NFKC').trim().toUpperCase();
+  const sku=pmkSkuUniqueNormV568(el.value||'');
   if(!sku){alert('SKU 不可空白；無法判斷可先保留待確認。');return}
+  el.value=sku;
   const next={...p,sku,sku_manual_locked:true,sku_confirmed_at:new Date().toISOString()};
   if(Array.isArray(next.variations)&&next.variations.length===1){
     next.variations=[{...next.variations[0],sku,sku_manual_locked:true}];
   }
+  if(!pmkRequireUniqueSkuV568(next,p.id))return;
   setStatus('儲存 SKU 中…');
   try{
     await productAdminPost('/api/bw-product-save',{id:p.id,product:next});
@@ -3398,6 +3400,62 @@ function pmkNewestFirstV206(list){
     return (pos.get(String(b?.id))??0)-(pos.get(String(a?.id))??0);
   });
 }
+function pmkSkuUniqueNormV568(v){
+  return String(v||'').normalize('NFKC').trim().toUpperCase()
+    .replace(/[＊*﹡∗✱✲✳]/g,'-')
+    .replace(/\s+/g,'')
+    .replace(/-{2,}/g,'-')
+    .replace(/^-+|-+$/g,'');
+}
+function pmkProductSkuListV568(p){
+  const out=[],seen=new Set();
+  const add=v=>{
+    const sku=pmkSkuUniqueNormV568(v);
+    if(!sku||industrialSkuLooksWeakV204(sku)||seen.has(sku))return;
+    seen.add(sku);out.push(sku);
+  };
+  add(p?.sku);
+  for(const v of (Array.isArray(p?.variations)?p.variations:[]))add(v?.sku);
+  return out;
+}
+function pmkFormSkuConflictV568(p,ignoreId){
+  const own=pmkProductSkuListV568(p);
+  const rawVars=(Array.isArray(p?.variations)?p.variations:[])
+    .map(v=>pmkSkuUniqueNormV568(v?.sku))
+    .filter(x=>x&&!industrialSkuLooksWeakV204(x));
+  const dupInside=[...new Set(rawVars.filter((x,i,a)=>a.indexOf(x)!==i))];
+  if(dupInside.length)return {type:'inside',sku:dupInside[0],message:`同一商品內有重複 SKU：${dupInside[0]}`};
+  for(const other of (products||[])){
+    if(ignoreId&&String(other?.id)===String(ignoreId))continue;
+    const theirs=new Set(pmkProductSkuListV568(other));
+    const hit=own.find(x=>theirs.has(x));
+    if(hit)return {type:'global',sku:hit,other,message:`SKU「${hit}」全站已被商品「${other.name||other.external_id||other.id}」使用。`};
+  }
+  return null;
+}
+function pmkRequireUniqueSkuV568(p,ignoreId){
+  const c=pmkFormSkuConflictV568(p,ignoreId);
+  if(!c)return true;
+  const detail=c.type==='inside'
+    ? `${c.message}\n\n每個 Variation 必須使用不同 PMKTOOLS SKU。`
+    : `${c.message}\n\nPMKTOOLS SKU 全站只能唯一綁定一個商品／規格。\n請改 SKU，或回商品清單整合到既有商品。`;
+  alert('❌ SKU 重複，禁止儲存\n\n'+detail);
+  setStatus('❌ SKU 唯一守門：'+c.message);
+  return false;
+}
+function pmkHardSkuConflictGroupV568(group){
+  if(!Array.isArray(group)||group.length<2)return '';
+  for(let i=0;i<group.length;i++){
+    const a=new Set(pmkProductSkuListV568(group[i]));
+    for(let j=i+1;j<group.length;j++){
+      const b=new Set(pmkProductSkuListV568(group[j]));
+      const hit=[...a].find(x=>b.has(x));
+      if(hit)return hit;
+    }
+  }
+  return '';
+}
+
 function pmkNormDupTextV207(v){
   return String(v||'').normalize('NFKC').toUpperCase()
     .replace(/[\s\u3000]+/g,'')
@@ -3443,6 +3501,8 @@ async function pmkMarkNotDuplicateV208(id){
   const clicked=products.find(p=>String(p.id)===String(id));if(!clicked)return;
   const group=pmkDuplicateGroupForV206(clicked);
   if(group.length<2)return alert('目前沒有需要解除的重複警告。');
+  const hardSku=pmkHardSkuConflictGroupV568(group);
+  if(hardSku)return alert(`SKU「${hardSku}」屬於全站唯一鍵，不能標記為「非重複」。\n\n請修改其中一筆 SKU，或整合成同一商品。`);
   const names=group.map(p=>p.name||p.external_id||p.id).join('\n• ');
   if(!confirm(`把這 ${group.length} 筆標記為「非重複」？\n\n• ${names}\n\n之後即使同主圖、同名稱或相似 SKU，也不會再互相標成重複。\n可用「重新檢查」解除。`))return;
   setStatus(`⏳ 正在解除 ${group.length} 筆重複警告…`);
@@ -3669,7 +3729,7 @@ async function pmkMergeDuplicateGroupV206(id){
   }
 }
 
-function render(){rebuildProductCategoryFilter();const arr=filteredProducts();const dupGroups=pmkDuplicateGroupsV206();const dupCount=[...dupGroups.values()].reduce((n,g)=>n+g.length,0);$('count').textContent=arr.length+(dupCount?`｜⚠ 重複 ${dupCount} 筆`:'');$('rows').innerHTML=arr.length?arr.map(p=>{const sku=productPrimarySkuV204(p),st=productSkuStateV204(p),dg=pmkDuplicateGroupForV206(p);return `<tr${dg.length>1?' style="background:#fffdf4"':''}><td>${p.image_url?`<img class="thumb" src="${esc(p.image_url)}" onerror="this.style.visibility='hidden'">`:'—'}</td><td><div class="name">${esc(p.name)}</div><div class="muted">${esc(p.brand||'')} · ${esc(p.source_type||'manual')} · ${esc(p.external_id||'')}</div>${dg.length>1?`<div class="pmk-dupwarn">⚠ 疑似同商品 ${dg.length} 筆｜${esc(pmkDuplicateReasonLabelV207(dg)||'內容可能不同')}</div>`:''}${pmkHasIgnoredDupV208(p)?`<div class="pmk-ignorebadge">✓ 已忽略誤判</div>`:''}</td><td style="min-width:220px"><div style="display:flex;gap:6px;align-items:center"><input data-list-sku="${esc(String(p.id))}" value="${esc(sku)}" placeholder="待確認 SKU" style="min-width:130px;padding:7px 8px"><button class="rowbtn" type="button" data-save-sku="${esc(String(p.id))}">確認</button></div><div class="muted" style="margin-top:5px"><span class="badge ${st.cls}">${st.label}</span>${industrialSkuLooksWeakV204(sku)?' 尺寸碼不當 SKU':''}</div></td><td>NT$ ${Number(p.price||0).toLocaleString('zh-TW')}<div class="muted">庫存 ${Number(p.stock_qty||0)}${Number(p.stock_qty||0)<=Number(p.low_stock_qty??3)?' ⚠':''} · ${(Number(p.price||0)<200||p.sale_mode==='redeem_only')?'只兌換':'可折抵／付款'}</div></td><td>${esc(p.category||'')}<div class="muted">${festivalNames(p.festival_keys)}</div></td><td>${Number(p.sort_order||0)}</td><td><span class="badge ${p.is_active?'on':'off'}">${p.is_active?'上架':'下架'}</span></td><td>${dg.length>1?`<button class="pmk-dupbtn" data-merge-dup="${esc(String(p.id))}">⚠ 整合 ${dg.length} 筆</button> <button class="pmk-notdupbtn" data-notdup="${esc(String(p.id))}">非重複</button> `:''}${pmkHasIgnoredDupV208(p)?`<button class="pmk-recheckbtn" data-recheck="${esc(String(p.id))}">重新檢查</button> `:''}${p.line_url?`<a class="rowbtn" href="${esc(p.line_url)}" target="_blank" rel="noopener noreferrer">來源 ↗</a> `:''}<button class="rowbtn" data-edit="${p.id}">編輯商品</button> <button class="rowbtn" data-toggle="${p.id}">${p.is_active?'下架':'上架'}</button> <button class="rowbtn danger" data-del="${p.id}">刪除</button></td></tr>`}).join(''):'<tr><td colspan="8" class="muted">目前沒有商品。</td></tr>';document.querySelectorAll('[data-save-sku]').forEach(b=>b.onclick=()=>saveSkuFromListV204(b.dataset.saveSku));document.querySelectorAll('[data-merge-dup]').forEach(b=>b.onclick=()=>pmkMergeDuplicateGroupV206(b.dataset.mergeDup));document.querySelectorAll('[data-notdup]').forEach(b=>b.onclick=()=>pmkMarkNotDuplicateV208(b.dataset.notdup));document.querySelectorAll('[data-recheck]').forEach(b=>b.onclick=()=>pmkRecheckDuplicateV208(b.dataset.recheck));document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>fill(products.find(p=>String(p.id)===b.dataset.edit)));document.querySelectorAll('[data-toggle]').forEach(b=>b.onclick=()=>toggle(b.dataset.toggle));document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>del(b.dataset.del))}
+function render(){rebuildProductCategoryFilter();const arr=filteredProducts();const dupGroups=pmkDuplicateGroupsV206();const dupCount=[...dupGroups.values()].reduce((n,g)=>n+g.length,0);$('count').textContent=arr.length+(dupCount?`｜⚠ 重複 ${dupCount} 筆`:'');$('rows').innerHTML=arr.length?arr.map(p=>{const sku=productPrimarySkuV204(p),st=productSkuStateV204(p),dg=pmkDuplicateGroupForV206(p);return `<tr${dg.length>1?' style="background:#fffdf4"':''}><td>${p.image_url?`<img class="thumb" src="${esc(p.image_url)}" onerror="this.style.visibility='hidden'">`:'—'}</td><td><div class="name">${esc(p.name)}</div><div class="muted">${esc(p.brand||'')} · ${esc(p.source_type||'manual')} · ${esc(p.external_id||'')}</div>${dg.length>1?`<div class="pmk-dupwarn">⚠ 疑似同商品 ${dg.length} 筆｜${esc(pmkDuplicateReasonLabelV207(dg)||'內容可能不同')}</div>${pmkHardSkuConflictGroupV568(dg)?`<div class="pmk-sku-hard">⛔ SKU ${esc(pmkHardSkuConflictGroupV568(dg))} 全站重複</div>`:''}`:''}${pmkHasIgnoredDupV208(p)?`<div class="pmk-ignorebadge">✓ 已忽略誤判</div>`:''}</td><td style="min-width:220px"><div style="display:flex;gap:6px;align-items:center"><input data-list-sku="${esc(String(p.id))}" value="${esc(sku)}" placeholder="待確認 SKU" style="min-width:130px;padding:7px 8px"><button class="rowbtn" type="button" data-save-sku="${esc(String(p.id))}">確認</button></div><div class="muted" style="margin-top:5px"><span class="badge ${st.cls}">${st.label}</span>${industrialSkuLooksWeakV204(sku)?' 尺寸碼不當 SKU':''}</div></td><td>NT$ ${Number(p.price||0).toLocaleString('zh-TW')}<div class="muted">庫存 ${Number(p.stock_qty||0)}${Number(p.stock_qty||0)<=Number(p.low_stock_qty??3)?' ⚠':''} · ${(Number(p.price||0)<200||p.sale_mode==='redeem_only')?'只兌換':'可折抵／付款'}</div></td><td>${esc(p.category||'')}<div class="muted">${festivalNames(p.festival_keys)}</div></td><td>${Number(p.sort_order||0)}</td><td><span class="badge ${p.is_active?'on':'off'}">${p.is_active?'上架':'下架'}</span></td><td>${dg.length>1?`<button class="pmk-dupbtn" data-merge-dup="${esc(String(p.id))}">⚠ 整合 ${dg.length} 筆</button> ${pmkHardSkuConflictGroupV568(dg)?'':`<button class="pmk-notdupbtn" data-notdup="${esc(String(p.id))}">非重複</button> `}`:''}${pmkHasIgnoredDupV208(p)?`<button class="pmk-recheckbtn" data-recheck="${esc(String(p.id))}">重新檢查</button> `:''}${p.line_url?`<a class="rowbtn" href="${esc(p.line_url)}" target="_blank" rel="noopener noreferrer">來源 ↗</a> `:''}<button class="rowbtn" data-edit="${p.id}">編輯商品</button> <button class="rowbtn" data-toggle="${p.id}">${p.is_active?'下架':'上架'}</button> <button class="rowbtn danger" data-del="${p.id}">刪除</button></td></tr>`}).join(''):'<tr><td colspan="8" class="muted">目前沒有商品。</td></tr>';document.querySelectorAll('[data-save-sku]').forEach(b=>b.onclick=()=>saveSkuFromListV204(b.dataset.saveSku));document.querySelectorAll('[data-merge-dup]').forEach(b=>b.onclick=()=>pmkMergeDuplicateGroupV206(b.dataset.mergeDup));document.querySelectorAll('[data-notdup]').forEach(b=>b.onclick=()=>pmkMarkNotDuplicateV208(b.dataset.notdup));document.querySelectorAll('[data-recheck]').forEach(b=>b.onclick=()=>pmkRecheckDuplicateV208(b.dataset.recheck));document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>fill(products.find(p=>String(p.id)===b.dataset.edit)));document.querySelectorAll('[data-toggle]').forEach(b=>b.onclick=()=>toggle(b.dataset.toggle));document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>del(b.dataset.del))}
 
 const BW_FLOWER12_DRAFTS=[{"external_id":"flower-fang-001","source_type":"partner","brand":"芳太美 花店","name":"香氛永生花束 x 水晶筆組","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["teachers_day","qixi","mother_day"],"sort_order":501,"is_active":false,"line_url":"https://www.pinkoi.com/product/PtN49rhS","image_url":""},{"external_id":"flower-fang-002","source_type":"partner","brand":"芳太美 花店","name":"霧光擴香花","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["teachers_day","mother_day"],"sort_order":502,"is_active":false,"line_url":"https://www.pinkoi.com/product/yXGVQHE4","image_url":""},{"external_id":"flower-fang-003","source_type":"partner","brand":"芳太美 花店","name":"永生花乾燥花 香氛花束（小型）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":503,"is_active":false,"line_url":"https://www.pinkoi.com/product/7ffLDMQC","image_url":""},{"external_id":"flower-fang-004","source_type":"partner","brand":"芳太美 花店","name":"針織花小花束","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":504,"is_active":false,"line_url":"https://www.pinkoi.com/product/SAAHfDKi","image_url":""},{"external_id":"flower-fang-005","source_type":"partner","brand":"芳太美 花店","name":"母親節 康乃馨花束 香皂花","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["mother_day"],"sort_order":505,"is_active":false,"line_url":"https://www.pinkoi.com/product/Uz2gmQpb","image_url":""},{"external_id":"flower-fang-006","source_type":"partner","brand":"芳太美 花店","name":"炭培奶茶香氛花束 永生花乾燥花","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"芳太美 花店","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":506,"is_active":false,"line_url":"https://www.pinkoi.com/product/bMidfmdt","image_url":""},{"external_id":"flower-ailsa-001","source_type":"partner","brand":"Ailsa Florist","name":"永生花玻璃盅（客製色系）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":511,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-002","source_type":"partner","brand":"Ailsa Florist","name":"客製乾燥花束","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","teachers_day","mother_day"],"sort_order":512,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-003","source_type":"partner","brand":"Ailsa Florist","name":"客製永生花束","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"ship","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":513,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-004","source_type":"partner","brand":"Ailsa Florist","name":"鮮花花束（客製）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"pickup","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":["qixi","mother_day"],"sort_order":514,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-005","source_type":"partner","brand":"Ailsa Florist","name":"開幕花禮（客製）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"service","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":[],"sort_order":515,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""},{"external_id":"flower-ailsa-006","source_type":"partner","brand":"Ailsa Florist","name":"新娘捧花（客製）","price":0,"category":"送禮花卉","sale_mode":"redeem_or_buy","fulfillment_type":"service","cost_price":0,"supplier":"Ailsa Florist 恆星不凋花＋乾燥花","stock_tracking_enabled":false,"low_stock_qty":0,"festival_keys":[],"sort_order":516,"is_active":false,"line_url":"https://www.facebook.com/ailsafloristflower?locale=zh_TW","image_url":""}];
 
@@ -3722,6 +3782,7 @@ async function saveWithStateV200(publish){
   let p=formData();
   p=pricingApplyProduct(p);
   p.is_active=!!publish;
+  if(!pmkRequireUniqueSkuV568(p,editingId||''))return;
   if(!p.name){alert('商品名稱必填');return}
   if(p.source_type==='line'&&!p.line_url){alert('LINE 商品請填來源網址');return}
   if(publish){
