@@ -1077,6 +1077,20 @@
         <div class="v547-image-actions">
           <button type="button" class="v547-link" id="chooseMainImageBtn">設定商品圖片</button>
           <button type="button" class="v547-link danger" id="removeMainImageBtn" style="display:none">移除商品圖片</button>
+          <button type="button" class="v547-link" id="pmkAiCleanSupplierLogoBtn" style="border-color:#0f766e;color:#0f766e">AI 清除供應商 Logo</button>
+        </div>
+        <div id="pmkAiCleanSupplierLogoPanel" style="display:none;margin-top:10px;padding:10px;border:1px solid #cbd5e1;border-radius:8px;background:#f8fafc">
+          <div style="font-weight:800;margin-bottom:7px">AI 清除供應商品牌｜先預覽，不會直接替換</div>
+          <div id="pmkAiCleanSupplierLogoStatus" class="muted" style="font-size:12px;margin-bottom:8px"></div>
+          <div id="pmkAiCleanSupplierLogoPreview" style="display:none;gap:10px;align-items:flex-start;flex-wrap:wrap">
+            <div><div class="muted" style="font-size:11px;margin-bottom:4px">原圖</div><img id="pmkAiCleanSupplierLogoOriginal" alt="原圖" style="width:145px;height:145px;object-fit:contain;border:1px solid #dcdcde;background:#fff"></div>
+            <div><div class="muted" style="font-size:11px;margin-bottom:4px">AI 新圖</div><img id="pmkAiCleanSupplierLogoResult" alt="AI 新圖" style="width:145px;height:145px;object-fit:contain;border:1px solid #dcdcde;background:#fff"></div>
+          </div>
+          <div id="pmkAiCleanSupplierLogoConfirmBar" style="display:none;gap:8px;margin-top:9px">
+            <button type="button" class="btn" id="pmkAiCleanSupplierLogoConfirm">確認替換主圖</button>
+            <button type="button" class="btn gray" id="pmkAiCleanSupplierLogoCancel">取消</button>
+          </div>
+          <div class="muted" style="font-size:11px;margin-top:7px">只處理目前主圖。AI 產生完成後必須按「確認替換主圖」才會改 image_url；SKU、價格、分類、SEO、圖庫、Variation 都不動。</div>
         </div>
         <input id="local_image" type="file" accept="image/jpeg,image/png,image/webp,image/gif" style="display:none">
         <input id="image_url" class="v547-raw" aria-hidden="true">
@@ -4540,4 +4554,117 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);else mount();
 })();
 </script>
+
+<script id="pmk-v011-ai-clean-supplier-logo">
+(function(){
+  let pending=null, original='';
+  const $x=id=>document.getElementById(id);
+
+  function authToken(){
+    try{
+      if(typeof pmkAdminToken==='function')return String(pmkAdminToken()||'');
+      return String(localStorage.getItem('pmk_session_v1')||'');
+    }catch(_){return ''}
+  }
+
+  async function getToken(){
+    const direct=authToken();
+    if(direct)return direct;
+    try{
+      if(globalThis.SB?.auth?.getSession){
+        const r=await SB.auth.getSession();
+        return String(r?.data?.session?.access_token||'');
+      }
+    }catch(_){}
+    return '';
+  }
+
+  function resetPanel(close){
+    pending=null; original='';
+    const pv=$x('pmkAiCleanSupplierLogoPreview');
+    const bar=$x('pmkAiCleanSupplierLogoConfirmBar');
+    const st=$x('pmkAiCleanSupplierLogoStatus');
+    if(pv)pv.style.display='none';
+    if(bar)bar.style.display='none';
+    if(st)st.textContent='';
+    if(close&&$x('pmkAiCleanSupplierLogoPanel'))$x('pmkAiCleanSupplierLogoPanel').style.display='none';
+  }
+
+  async function run(){
+    const src=String($x('image_url')?.value||'').trim();
+    if(!src)return alert('請先設定商品主圖');
+    if(!/^https?:\/\//i.test(src))return alert('目前主圖不是可讀取的圖片網址');
+
+    const btn=$x('pmkAiCleanSupplierLogoBtn');
+    const panel=$x('pmkAiCleanSupplierLogoPanel');
+    const st=$x('pmkAiCleanSupplierLogoStatus');
+    if(panel)panel.style.display='block';
+    if(btn){btn.disabled=true;btn.textContent='AI 處理中…'}
+    resetPanel(false);
+    original=src;
+    if(st)st.textContent='⏳ AI 正在建立去除供應商品牌的新圖；原圖現在不會被修改。';
+
+    try{
+      const token=await getToken();
+      if(!token)throw new Error('Admin 登入狀態失效');
+      const productId=String($x('external_id')?.value||globalThis.editingId||('product-'+Date.now())).trim();
+      const displayName=String($x('display_name')?.value||$x('name')?.value||'').trim();
+
+      const r=await fetch(HIKING_API_BASE+'/api/bw-product-variation-image-localize',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
+        body:JSON.stringify({
+          image_url:src,
+          original_image_url:src,
+          target_lang:'zh-TW',
+          mode:'brandify',
+          product_id:productId,
+          sku:'MAIN',
+          display_name
+        }),
+        cache:'no-store'
+      });
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok||j.ok===false||!j.image_url)throw new Error(j.message||j.error||('HTTP '+r.status));
+
+      pending=String(j.image_url||'').trim();
+      $x('pmkAiCleanSupplierLogoOriginal').src=original;
+      $x('pmkAiCleanSupplierLogoResult').src=pending;
+      $x('pmkAiCleanSupplierLogoPreview').style.display='flex';
+      $x('pmkAiCleanSupplierLogoConfirmBar').style.display='flex';
+      if(st)st.textContent='✅ AI 新圖已完成。先比對產品外型、規格文字與尺寸；確認正確後才按替換。';
+    }catch(e){
+      pending=null;
+      if(st)st.textContent='❌ '+String(e?.message||e);
+      alert('AI 清除供應商 Logo 失敗：'+String(e?.message||e));
+    }finally{
+      if(btn){btn.disabled=false;btn.textContent='AI 清除供應商 Logo'}
+    }
+  }
+
+  function confirmReplace(){
+    if(!pending)return;
+    const input=$x('image_url'); if(!input)return;
+    input.value=pending;
+    input.dispatchEvent(new Event('input',{bubbles:true}));
+    input.dispatchEvent(new Event('change',{bubbles:true}));
+    if(typeof renderMainImageV547==='function')renderMainImageV547();
+    if(typeof setStatus==='function')setStatus('✅ 已用 AI 新圖替換主圖；尚未儲存商品。原本 SKU、價格、分類、SEO、圖庫與 Variation 均未修改。');
+    resetPanel(true);
+  }
+
+  function mount(){
+    const b=$x('pmkAiCleanSupplierLogoBtn');
+    if(!b||b.dataset.bound==='1')return;
+    b.dataset.bound='1';
+    b.addEventListener('click',run);
+    $x('pmkAiCleanSupplierLogoConfirm')?.addEventListener('click',confirmReplace);
+    $x('pmkAiCleanSupplierLogoCancel')?.addEventListener('click',()=>resetPanel(true));
+  }
+
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);
+  else mount();
+})();
+</script>
+
 </body></html>
