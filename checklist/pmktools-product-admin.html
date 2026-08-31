@@ -2699,7 +2699,8 @@ function renderVariationEditorV54(){
   const box=$('variationEditor');if(!box)return;
   if($('product_type').value!=='variable'){box.innerHTML='<div class="muted" style="padding:16px">目前是簡單商品。</div>';return}
   if(!v54Variations.length){box.innerHTML='<div class="muted" style="padding:16px">尚未產生變化類型。先設定「屬性」，再按「產生規格組合」。</div>';return}
-  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="pmkRepairPriceBtn" style="background:#0f766e;color:#fff">修復價格</button><button type="button" class="btn" id="pmkRepairSkuBtn" style="background:#7c3aed;color:#fff">修復 SKU</button><button type="button" class="btn" id="pmkV13LogoBatchBtn" style="background:#0f766e;color:#fff">批次清 Logo</button><button type="button" class="btn gray" id="pmkV13LogoPauseBtn" style="display:none">暫停</button><button type="button" class="btn gray" id="pmkV13LogoResumeBtn" style="display:none">繼續</button><button type="button" class="btn gray" id="pmkV13LogoRestoreBtn" style="display:none">恢復原圖</button><span id="pmkV13LogoStatus" class="muted" style="margin-left:6px"></span><span class="v545-count">${v54Variations.length} 個變化類型</span><span id="pmkRepairStatus" class="muted" style="margin-left:8px"></span></div>`+
+  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="pmkRepairPriceBtn" style="background:#0f766e;color:#fff">修復價格</button><button type="button" class="btn" id="pmkRepairSkuBtn" style="background:#7c3aed;color:#fff">修復 SKU</button><button type="button" id="pmkV14LocalWhiteLogoBtn" class="btn" style="background:#475569;color:#fff">批次白貼 Logo</button>
+            <button type="button" class="btn" id="pmkV13LogoBatchBtn" style="background:#0f766e;color:#fff">批次清 Logo</button><button type="button" class="btn gray" id="pmkV13LogoPauseBtn" style="display:none">暫停</button><button type="button" class="btn gray" id="pmkV13LogoResumeBtn" style="display:none">繼續</button><button type="button" class="btn gray" id="pmkV13LogoRestoreBtn" style="display:none">恢復原圖</button><span id="pmkV13LogoStatus" class="muted" style="margin-left:6px"></span><span class="v545-count">${v54Variations.length} 個變化類型</span><span id="pmkRepairStatus" class="muted" style="margin-left:8px"></span></div>`+
   v54Variations.map((v,i)=>`<div class="v545-variation" data-vrow="${i}">
     <div class="v545-summary">
       <div class="v545-handle" title="排序">≡</div>
@@ -4832,6 +4833,107 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
     if(e.target?.id==='pmkV13LogoPauseBtn'){paused=true;paint();return}
     if(e.target?.id==='pmkV13LogoResumeBtn'){paused=false;paint();return}
     if(e.target?.id==='pmkV13LogoRestoreBtn'){restore();return}
+  },true);
+})();
+</script>
+
+
+<script id="pmk-v014-local-white-logo">
+(function(){
+  let pmkV14Running=false;
+
+  function pmkV14SetStatus(text){
+    const el=document.getElementById('pmkV13LogoStatus');
+    if(el) el.textContent=text;
+    if(typeof setStatus==='function') setStatus(text);
+  }
+
+  function pmkV14LoadImage(url){
+    return new Promise(function(resolve,reject){
+      const img=new Image();
+      img.crossOrigin='anonymous';
+      img.onload=function(){resolve(img);};
+      img.onerror=function(){reject(new Error('圖片來源不允許瀏覽器直接處理'));};
+      img.src=url;
+    });
+  }
+
+  async function pmkV14WhitePatch(url){
+    const img=await pmkV14LoadImage(url);
+    const w=img.naturalWidth||img.width;
+    const h=img.naturalHeight||img.height;
+    if(!w||!h) throw new Error('圖片尺寸讀取失敗');
+
+    const canvas=document.createElement('canvas');
+    canvas.width=w;
+    canvas.height=h;
+    const ctx=canvas.getContext('2d',{alpha:false});
+    ctx.fillStyle='#fff';
+    ctx.fillRect(0,0,w,h);
+    ctx.drawImage(img,0,0,w,h);
+
+    // BSKT logo: fixed upper-left white cover.
+    const patchW=Math.round(w*0.24);
+    const patchH=Math.round(h*0.11);
+    ctx.fillStyle='#fff';
+    ctx.fillRect(0,0,patchW,patchH);
+
+    return canvas.toDataURL('image/jpeg',0.96);
+  }
+
+  async function pmkV14BatchWhite(){
+    if(pmkV14Running) return;
+    if(typeof readVariationsV54==='function') readVariationsV54();
+    if(!Array.isArray(v54Variations)) return alert('找不到 Variation 資料');
+
+    const list=v54Variations.map(function(v,i){return {i:i,v:v};})
+      .filter(function(x){return String((x.v&&x.v.image_url)||'').trim();});
+
+    if(!list.length) return alert('目前沒有 Variation 圖片');
+
+    const msg='共 '+list.length+' 張 Variation 圖。\\n\\n'
+      +'將直接把每張圖片左上角約 24% × 11% 區域貼白。\\n'
+      +'不呼叫 OpenAI，不花 API 費用。\\n\\n'
+      +'完成後不自動儲存，請先抽查。\\n\\n開始？';
+    if(!confirm(msg)) return;
+
+    pmkV14Running=true;
+    let done=0, failed=0;
+    pmkV14SetStatus('0/'+list.length+'｜本機白貼處理中');
+
+    for(const item of list){
+      try{
+        const current=String(item.v.image_url||'').trim();
+        if(!current) throw new Error('無圖片');
+
+        const original=String(item.v.original_image_url||current).trim();
+        const patched=await pmkV14WhitePatch(current);
+
+        v54Variations[item.i]=Object.assign({},v54Variations[item.i],{
+          original_image_url:original,
+          image_url:patched,
+          image_locale:'local-white-logo'
+        });
+        done++;
+      }catch(err){
+        failed++;
+        console.warn('[PMK V1.4 local white logo]',item.i,err);
+      }
+
+      pmkV14SetStatus((done+failed)+'/'+list.length+'｜成功 '+done+'｜失敗 '+failed+'｜本機白貼');
+      if(typeof renderVariationEditorV54==='function') renderVariationEditorV54();
+      await new Promise(function(r){setTimeout(r,10);});
+    }
+
+    pmkV14Running=false;
+    pmkV14SetStatus(list.length+'/'+list.length+'｜成功 '+done+'｜失敗 '+failed+'｜完成・尚未儲存｜零 OpenAI 費用');
+  }
+
+  document.addEventListener('click',function(e){
+    if(e.target && e.target.id==='pmkV14LocalWhiteLogoBtn'){
+      e.preventDefault();
+      pmkV14BatchWhite();
+    }
   },true);
 })();
 </script>
