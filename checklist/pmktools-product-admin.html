@@ -2656,7 +2656,7 @@ function renderVariationEditorV54(){
   const box=$('variationEditor');if(!box)return;
   if($('product_type').value!=='variable'){box.innerHTML='<div class="muted" style="padding:16px">目前是簡單商品。</div>';return}
   if(!v54Variations.length){box.innerHTML='<div class="muted" style="padding:16px">尚未產生變化類型。先設定「屬性」，再按「產生規格組合」。</div>';return}
-  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="pmkRepairPriceBtn" style="background:#0f766e;color:#fff">修復價格</button><button type="button" class="btn" id="pmkRepairSkuBtn" style="background:#7c3aed;color:#fff">修復 SKU</button><span class="v545-count">${v54Variations.length} 個變化類型</span><span id="pmkRepairStatus" class="muted" style="margin-left:8px"></span></div>`+
+  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="pmkRepairPriceBtn" style="background:#0f766e;color:#fff">修復價格</button><button type="button" class="btn" id="pmkRepairSkuBtn" style="background:#7c3aed;color:#fff">修復 SKU</button><button type="button" class="btn" id="pmkV13LogoBatchBtn" style="background:#0f766e;color:#fff">批次清 Logo</button><button type="button" class="btn gray" id="pmkV13LogoPauseBtn" style="display:none">暫停</button><button type="button" class="btn gray" id="pmkV13LogoResumeBtn" style="display:none">繼續</button><button type="button" class="btn gray" id="pmkV13LogoRestoreBtn" style="display:none">恢復原圖</button><span id="pmkV13LogoStatus" class="muted" style="margin-left:6px"></span><span class="v545-count">${v54Variations.length} 個變化類型</span><span id="pmkRepairStatus" class="muted" style="margin-left:8px"></span></div>`+
   v54Variations.map((v,i)=>`<div class="v545-variation" data-vrow="${i}">
     <div class="v545-summary">
       <div class="v545-handle" title="排序">≡</div>
@@ -4555,7 +4555,7 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
 })();
 </script>
 
-<script id="pmk-v011-ai-clean-supplier-logo">
+<script id="pmk-v012-ai-clean-supplier-logo">
 (function(){
   let pending=null, original='';
   const $x=id=>document.getElementById(id);
@@ -4610,24 +4610,22 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
       const productId=String($x('external_id')?.value||globalThis.editingId||('product-'+Date.now())).trim();
       const displayName=String($x('display_name')?.value||$x('name')?.value||'').trim();
 
-      const r=await fetch(HIKING_API_BASE+'/api/bw-product-variation-image-localize',{
-        method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
-        body:JSON.stringify({
-          image_url:src,
-          original_image_url:src,
-          target_lang:'zh-TW',
-          mode:'brandify',
-          product_id:productId,
-          sku:'MAIN',
-          display_name
-        }),
-        cache:'no-store'
+      // V01.2: use the Admin's existing image-localization helper instead of
+      // calling the broken Worker brandify branch (base64Bytes is undefined there).
+      if(typeof localizeVariationImageV4!=='function')throw new Error('既有圖片 AI 處理功能不存在');
+      const cleaned=await localizeVariationImageV4(src,{
+        product_id:productId,
+        sku:'MAIN',
+        display_name,
+        mode:'brandify',
+        instruction:'只移除圖片中的供應商品牌 Logo／商標圖樣，保留商品本體、尺寸線、規格文字、表格、背景與構圖，不新增 PMKTOOLS Logo，不改任何尺寸或產品外型。'
       });
-      const j=await r.json().catch(()=>({}));
-      if(!r.ok||j.ok===false||!j.image_url)throw new Error(j.message||j.error||('HTTP '+r.status));
-
-      pending=String(j.image_url||'').trim();
+      const cleanedUrl=String(
+        (typeof cleaned==='string'?cleaned:
+          cleaned?.image_url||cleaned?.url||cleaned?.public_url||cleaned?.r2_url||'')
+      ).trim();
+      if(!cleanedUrl)throw new Error('AI 沒有回傳新圖片');
+      pending=cleanedUrl;
       $x('pmkAiCleanSupplierLogoOriginal').src=original;
       $x('pmkAiCleanSupplierLogoResult').src=pending;
       $x('pmkAiCleanSupplierLogoPreview').style.display='flex';
@@ -4664,6 +4662,38 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
 
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);
   else mount();
+})();
+</script>
+
+
+<script id="pmk-v013-variation-logo-batch">
+(function(){
+ let running=false,paused=false,originals=new Map(),done=0,failed=0,total=0;
+ const $b=id=>document.getElementById(id), wait=ms=>new Promise(r=>setTimeout(r,ms));
+ function paint(extra=''){
+   const s=$b('pmkV13LogoStatus');if(s)s.textContent=total?`${done+failed}/${total}｜成功 ${done}｜失敗 ${failed}${paused?'｜暫停':''}${extra?'｜'+extra:''}`:'';
+   const a=$b('pmkV13LogoBatchBtn'),p=$b('pmkV13LogoPauseBtn'),r=$b('pmkV13LogoResumeBtn'),o=$b('pmkV13LogoRestoreBtn');
+   if(a)a.disabled=running;if(p)p.style.display=running&&!paused?'inline-block':'none';if(r)r.style.display=running&&paused?'inline-block':'none';if(o)o.style.display=originals.size?'inline-block':'none';
+ }
+ async function one(v,i){
+   const src=String(v?.image_url||'').trim();if(!src)return false;if(!originals.has(i))originals.set(i,src);
+   if(typeof localizeVariationImageV4!=='function')throw new Error('既有圖片 AI 功能不存在');
+   const x=await localizeVariationImageV4(src,{product_id:String(document.getElementById('external_id')?.value||globalThis.editingId||'product'),sku:String(v?.sku||('VAR-'+(i+1))),display_name:String(v?.variation_name||''),mode:'brandify',instruction:'只移除供應商 Logo、品牌名稱、商標圖樣所在的小區域。除此之外整張圖保持原樣：不得修改刀具外型、尺寸線、尺寸數字、規格表、型號文字、背景構圖或顏色；不得新增 PMKTOOLS Logo。'});
+   const u=String(typeof x==='string'?x:(x?.image_url||x?.url||x?.public_url||x?.r2_url||'')).trim();if(!u)throw new Error('AI 沒有回傳新圖片');v.image_url=u;return true;
+ }
+ async function start(){
+   if(running)return;
+   if(typeof readVariationsV54==='function')readVariationsV54().forEach((v,i)=>{if(v54Variations[i])v54Variations[i]={...v54Variations[i],...v}});
+   const list=(globalThis.v54Variations||[]).map((v,i)=>({v,i})).filter(x=>String(x.v?.image_url||'').trim());
+   if(!list.length)return alert('目前 Variation 沒有規格圖片');
+   if(!confirm(`共有 ${list.length} 張 Variation 規格圖。\n逐張只清除供應商 Logo；成功才替換，失敗保留原圖。\nSKU、價格、庫存、屬性完全不修改。\n\n開始？`))return;
+   originals=new Map();done=0;failed=0;total=list.length;running=true;paused=false;paint();
+   for(const q of list){while(paused)await wait(300);try{await one(q.v,q.i);done++}catch(e){failed++;console.warn('[PMK V1.3]',q.i,e)}if(typeof renderVariationEditorV54==='function')renderVariationEditorV54();paint();await wait(350)}
+   running=false;paused=false;if(typeof renderVariationEditorV54==='function')renderVariationEditorV54();paint('完成・尚未儲存');
+   if(typeof setStatus==='function')setStatus(`✅ 規格圖清 Logo：成功 ${done}，失敗 ${failed}。尚未儲存，請檢查後再儲存商品。`);
+ }
+ function restore(){originals.forEach((u,i)=>{if(globalThis.v54Variations?.[i])globalThis.v54Variations[i].image_url=u});if(typeof renderVariationEditorV54==='function')renderVariationEditorV54();if(typeof setStatus==='function')setStatus('↩️ 已恢復本批 Variation 原圖；尚未儲存。')}
+ document.addEventListener('click',e=>{if(e.target?.id==='pmkV13LogoBatchBtn')start();if(e.target?.id==='pmkV13LogoPauseBtn'){paused=true;paint()}if(e.target?.id==='pmkV13LogoResumeBtn'){paused=false;paint()}if(e.target?.id==='pmkV13LogoRestoreBtn')restore()});
 })();
 </script>
 
