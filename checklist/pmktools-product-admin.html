@@ -2699,8 +2699,7 @@ function renderVariationEditorV54(){
   const box=$('variationEditor');if(!box)return;
   if($('product_type').value!=='variable'){box.innerHTML='<div class="muted" style="padding:16px">目前是簡單商品。</div>';return}
   if(!v54Variations.length){box.innerHTML='<div class="muted" style="padding:16px">尚未產生變化類型。先設定「屬性」，再按「產生規格組合」。</div>';return}
-  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="pmkRepairPriceBtn" style="background:#0f766e;color:#fff">修復價格</button><button type="button" class="btn" id="pmkRepairSkuBtn" style="background:#7c3aed;color:#fff">修復 SKU</button><button type="button" id="pmkV14LocalWhiteLogoBtn" class="btn" style="background:#475569;color:#fff">批次白貼 Logo</button>
-            <button type="button" class="btn" id="pmkV13LogoBatchBtn" style="background:#0f766e;color:#fff">批次清 Logo</button><button type="button" class="btn gray" id="pmkV13LogoPauseBtn" style="display:none">暫停</button><button type="button" class="btn gray" id="pmkV13LogoResumeBtn" style="display:none">繼續</button><button type="button" class="btn gray" id="pmkV13LogoRestoreBtn" style="display:none">恢復原圖</button><span id="pmkV13LogoStatus" class="muted" style="margin-left:6px"></span><span class="v545-count">${v54Variations.length} 個變化類型</span><span id="pmkRepairStatus" class="muted" style="margin-left:8px"></span></div>`+
+  box.innerHTML=`<div class="v545-toolbar"><button type="button" class="btn gray" id="v545ExpandAll">全部展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="pmkRepairPriceBtn" style="background:#0f766e;color:#fff">修復價格</button><button type="button" class="btn" id="pmkRepairSkuBtn" style="background:#7c3aed;color:#fff">修復 SKU</button><button type="button" id="pmkV14LocalWhiteLogoBtn" class="btn" style="background:#475569;color:#fff">批次白貼 Logo</button><button type="button" class="btn gray" id="pmkV13LogoPauseBtn" style="display:none">暫停</button><button type="button" class="btn gray" id="pmkV13LogoResumeBtn" style="display:none">繼續</button><button type="button" class="btn gray" id="pmkV13LogoRestoreBtn" style="display:none">恢復原圖</button><span id="pmkV13LogoStatus" class="muted" style="margin-left:6px"></span><span class="v545-count">${v54Variations.length} 個變化類型</span><span id="pmkRepairStatus" class="muted" style="margin-left:8px"></span></div>`+
   v54Variations.map((v,i)=>`<div class="v545-variation" data-vrow="${i}">
     <div class="v545-summary">
       <div class="v545-handle" title="排序">≡</div>
@@ -3746,12 +3745,51 @@ async function saveWithStateV200(publish){
     const err=taobaoPublishValidationV200(p);
     if(err){alert(err);setStatus('❌ '+err);return}
   }
-  setStatus(publish?'儲存並上架中…':'儲存草稿中…');
+
+  const draftBtn=$('saveDraftBtn');
+  const publishBtn=$('savePublishBtn');
+  const targetBtn=publish?publishBtn:draftBtn;
+  const oldDraft=draftBtn?.textContent||'儲存草稿';
+  const oldPublish=publishBtn?.textContent||'儲存並上架';
+
+  if(draftBtn)draftBtn.disabled=true;
+  if(publishBtn)publishBtn.disabled=true;
+  if(targetBtn){
+    targetBtn.textContent=publish?'⏳ 儲存並上架中…':'⏳ 儲存草稿中…';
+    targetBtn.style.minWidth=publish?'132px':'112px';
+  }
+  setStatus(publish?'⏳ 儲存並上架中，請稍候…':'⏳ 儲存草稿中，請稍候…');
+
   try{
     await productAdminPost('/api/bw-product-save',{id:editingId||'',product:p});
-    clearForm();await load();
+    if(targetBtn){
+      targetBtn.textContent=publish?'✅ 已上架':'✅ 已儲存';
+      targetBtn.style.boxShadow='0 0 0 3px rgba(34,197,94,.22)';
+    }
     setStatus(publish?'✅ 商品已儲存並上架':'✅ 商品草稿已儲存，尚未上架');
-  }catch(e){setStatus('❌ 儲存失敗：'+(e?.message||String(e)))}
+    await new Promise(r=>setTimeout(r,700));
+    clearForm();
+    await load();
+  }catch(e){
+    if(targetBtn){
+      targetBtn.textContent='❌ 儲存失敗';
+      targetBtn.style.boxShadow='0 0 0 3px rgba(220,38,38,.18)';
+    }
+    const msg=e?.message||String(e);
+    setStatus('❌ 儲存失敗：'+msg);
+    alert('儲存失敗：\n'+msg);
+    await new Promise(r=>setTimeout(r,1000));
+  }finally{
+    if(draftBtn){
+      draftBtn.disabled=false;
+      draftBtn.textContent=oldDraft;
+    }
+    if(publishBtn){
+      publishBtn.disabled=false;
+      publishBtn.textContent=oldPublish;
+    }
+    if(targetBtn)targetBtn.style.boxShadow='';
+  }
 }
 async function save(){return saveWithStateV200(false)}
 
@@ -4708,132 +4746,6 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
 
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',mount);
   else mount();
-})();
-</script>
-
-
-<script id="pmk-v013-variation-logo-batch">
-(function(){
-  let running=false, paused=false, done=0, failed=0, total=0;
-  const originals=new Map();
-  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-  const $b=id=>document.getElementById(id);
-
-  function paint(extra=''){
-    const s=$b('pmkV13LogoStatus');
-    if(s)s.textContent=total?`${done+failed}/${total}｜成功 ${done}｜失敗 ${failed}${paused?'｜已暫停':''}${extra?'｜'+extra:''}`:'';
-    const start=$b('pmkV13LogoBatchBtn');
-    const pause=$b('pmkV13LogoPauseBtn');
-    const resume=$b('pmkV13LogoResumeBtn');
-    const restore=$b('pmkV13LogoRestoreBtn');
-    if(start)start.disabled=running;
-    if(pause)pause.style.display=running&&!paused?'inline-block':'none';
-    if(resume)resume.style.display=running&&paused?'inline-block':'none';
-    if(restore)restore.style.display=originals.size?'inline-block':'none';
-  }
-
-  async function cleanOneBatch(i,token){
-    const v=v54Variations[i];
-    if(!v)throw new Error('找不到 Variation');
-    const current=String(v.image_url||'').trim();
-    if(!current)throw new Error('沒有規格圖片');
-
-    if(!originals.has(i))originals.set(i,current);
-    const original=String(v.original_image_url||current).trim();
-
-    let productId=String($('external_id')?.value||editingId||'').trim();
-    if(!productId){
-      productId='bw-'+Date.now().toString(36);
-      $('external_id').value=productId;
-    }
-
-    const sku=String(v.sku||'').trim();
-    const rawName=Object.values(v.attributes||{}).join(' / ');
-
-    const r=await fetch(HIKING_API_BASE+'/api/bw-product-variation-image-localize',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},
-      body:JSON.stringify({
-        image_url:current,
-        original_image_url:original,
-        target_lang:'zh-TW',
-        mode:'logo_clean',
-        product_id:productId,
-        sku,
-        display_name:rawName
-      }),
-      cache:'no-store'
-    });
-
-    const j=await r.json().catch(()=>({}));
-    if(!r.ok||j.ok===false||!j.image_url)throw new Error(j.message||j.error||('HTTP '+r.status));
-
-    v54Variations[i]={
-      ...v54Variations[i],
-      original_image_url:original,
-      image_url:String(j.image_url).trim(),
-      image_locale:'logo-clean'
-    };
-  }
-
-  async function start(){
-    if(running)return;
-
-    if(typeof readVariationsV54==='function')readVariationsV54();
-    const list=v54Variations.map((v,i)=>({i,v})).filter(x=>String(x.v?.image_url||'').trim());
-    if(!list.length)return alert('目前沒有可處理的 Variation 規格圖片');
-
-    if(!confirm(`共有 ${list.length} 張 Variation 規格圖。\n\n將逐張只清除 Logo／供應商品牌／水印，不翻譯文字。\n成功才替換；失敗保留原圖；完成後不自動儲存商品。\n\n開始批次？`))return;
-
-    const {data:{session}}=await SB.auth.getSession();
-    if(!session?.access_token)return alert('登入狀態失效');
-
-    originals.clear();
-    done=0; failed=0; total=list.length;
-    running=true; paused=false;
-    paint();
-
-    for(const item of list){
-      while(paused)await sleep(250);
-      try{
-        await cleanOneBatch(item.i,session.access_token);
-        done++;
-      }catch(e){
-        failed++;
-        console.warn('[PMK batch logo clean]',item.i,e);
-      }
-
-      if(typeof renderVariationEditorV54==='function')renderVariationEditorV54();
-      paint(`第 ${done+failed} 張完成`);
-
-      // Gentle gap between AI jobs; does not affect Collector/Taobao.
-      await sleep(500);
-    }
-
-    running=false; paused=false;
-    if(typeof renderVariationEditorV54==='function')renderVariationEditorV54();
-    paint('完成・尚未儲存');
-    if(typeof setStatus==='function'){
-      setStatus(`✅ 批次清 Logo 完成：成功 ${done}，失敗 ${failed}。尚未儲存商品，請抽查後再儲存。`);
-    }
-  }
-
-  function restore(){
-    if(!originals.size)return alert('本批沒有可恢復的原圖');
-    originals.forEach((url,i)=>{
-      if(v54Variations[i])v54Variations[i].image_url=url;
-    });
-    if(typeof renderVariationEditorV54==='function')renderVariationEditorV54();
-    paint('已恢復本批原圖');
-    if(typeof setStatus==='function')setStatus('↩️ 已恢復本批處理前的 Variation 圖；尚未儲存。');
-  }
-
-  document.addEventListener('click',e=>{
-    if(e.target?.id==='pmkV13LogoBatchBtn'){e.preventDefault();start();return}
-    if(e.target?.id==='pmkV13LogoPauseBtn'){paused=true;paint();return}
-    if(e.target?.id==='pmkV13LogoResumeBtn'){paused=false;paint();return}
-    if(e.target?.id==='pmkV13LogoRestoreBtn'){restore();return}
-  },true);
 })();
 </script>
 
