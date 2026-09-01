@@ -3709,8 +3709,66 @@ function renderAddonLibraryV558(){
 }
 function newAddonProductV558(){clearForm();if($('is_addon_product'))$('is_addon_product').checked=true;v49SwitchModule('products');wc548OpenTab('addons');setStatus('新增加購子項：填名稱、價格、圖片後儲存；此商品不會單獨出現在前台商品庫。')}
 async function load(){
-  setStatus('讀取 R2 商品主檔中…');
-  try{const r=await fetch(HIKING_API_BASE+'/api/bw-products',{cache:'no-store'});const j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false||!Array.isArray(j.products))throw new Error(j.message||j.error||('HTTP '+r.status));products=j.products;render();renderAddonLibraryV558();renderCategories();refreshCategorySelect();rebuildInventoryProducts();setStatus(`✅ R2 已讀取 ${products.length} 筆商品`)}catch(e){products=[];render();setStatus('❌ R2 商品讀取失敗：'+(e?.message||String(e)))}
+  const previousProducts=Array.isArray(products)?products.slice():[];
+  const hasPrevious=previousProducts.length>0;
+  setStatus(hasPrevious
+    ? `⏳ 重新讀取 R2 商品主檔中…目前保留 ${previousProducts.length} 筆`
+    : '⏳ 讀取 R2 商品主檔中…');
+
+  let lastError=null;
+
+  for(let attempt=1;attempt<=3;attempt++){
+    try{
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),12000);
+      let r;
+      try{
+        r=await fetch(HIKING_API_BASE+'/api/bw-products',{
+          cache:'no-store',
+          signal:controller.signal
+        });
+      }finally{
+        clearTimeout(timer);
+      }
+
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok||j.ok===false||!Array.isArray(j.products)){
+        throw new Error(j.message||j.error||('HTTP '+r.status));
+      }
+
+      products=j.products;
+      render();
+      renderAddonLibraryV558();
+      renderCategories();
+      refreshCategorySelect();
+      rebuildInventoryProducts();
+      setStatus(`✅ R2 已讀取 ${products.length} 筆商品${attempt>1?`（第 ${attempt} 次成功）`:''}`);
+      return;
+    }catch(e){
+      lastError=e;
+      if(attempt<3){
+        setStatus(
+          (hasPrevious
+            ? `⚠️ R2 第 ${attempt} 次讀取失敗，保留原 ${previousProducts.length} 筆；`
+            : `⚠️ R2 第 ${attempt} 次讀取失敗；`)
+          +` ${attempt===1?'1 秒':'2 秒'}後自動重試…`
+        );
+        await new Promise(r=>setTimeout(r,attempt===1?1000:2000));
+      }
+    }
+  }
+
+  if(hasPrevious){
+    products=previousProducts;
+    render();
+    renderAddonLibraryV558();
+    renderCategories();
+    refreshCategorySelect();
+    rebuildInventoryProducts();
+    setStatus(`⚠️ R2 暫時無法連線，已保留原本 ${products.length} 筆商品；請稍後按重新整理。錯誤：${lastError?.message||String(lastError)}`);
+  }else{
+    setStatus('❌ R2 商品讀取失敗（已自動重試 3 次）：'+(lastError?.message||String(lastError)));
+  }
 }
 // V57.0 SEQ ONLY: only duplicate PMKTOOLS SKUs inside the SAME product get -01, -02...
 // A SKU that appears only once is left exactly unchanged.
