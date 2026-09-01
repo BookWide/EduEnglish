@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PMKTOOLS V2.6.2｜專業切削刀具</title>
+<title>PMKTOOLS V2.6.5 FAST CARD｜專業切削刀具</title>
 <meta name="description" content="PMKTOOLS 專業切削刀具、車削、搪孔、銑削、鑽孔、切槽與刀片配件。">
 <style>
 :root{
@@ -449,6 +449,13 @@ body.pmk-spa-mode #pmkSpaFrame{
   #subchips .pmk-tax-group.active .subdetail-wrap{display:block!important}
 }
 </style>
+
+<style id="pmk-card-performance-v265">
+/* Card grid performance: off-screen cards do not participate in layout/paint until needed. */
+#grid .card{content-visibility:auto;contain:layout paint style;contain-intrinsic-size:320px 360px}
+#grid .pic img{decoding:async}
+@media (prefers-reduced-motion:reduce){.card,.pic,.product-photo-link .pic{transition:none!important}}
+</style>
 </head>
 <body>
 <header class="pmk-site-header" id="pmkSiteHeader">
@@ -566,7 +573,7 @@ let subdetail='全部';
 function youtubeId(url){const m=String(url||'').trim().match(/(?:youtube\.com\/(?:shorts\/|watch\?v=|embed\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/i);return m?m[1]:''}
 function placeholder(p){return `<div class="ph">${esc(p.category||'PMKTOOLS')}</div>`}
 function productMedia(p){
-  if(p.image)return `<img src="${esc(p.image)}" alt="${esc(p.name)}" loading="lazy" onerror="this.parentNode.innerHTML=placeholderById('${esc(p.id)}')">`;
+  if(p.image)return `<img src="${esc(p.image)}" alt="${esc(p.name)}" loading="lazy" decoding="async" fetchpriority="low" onerror="this.parentNode.innerHTML=placeholderById('${esc(p.id)}')">`;
   if(p.video){const y=youtubeId(p.video);return y?`<iframe src="https://www.youtube.com/embed/${esc(y)}?rel=0" loading="lazy"></iframe>`:`<video src="${esc(p.video)}" controls playsinline preload="metadata"></video>`}
   return placeholder(p);
 }
@@ -688,10 +695,7 @@ function render(){
   let arr=activeProducts().filter(p=>(cat==='全部'||p.category===cat)&&(cat!=='切削刀具'||subcat==='全部'||String(p.subcategory||'')===subcat)&&(cat!=='切削刀具'||subdetail==='全部'||String(p.subcategory_detail||'')===subdetail));
   if(query){
     const q=query.toLowerCase();
-    arr=arr.filter(p=>{
-      const hay=[p.name,p.brand,p.category,p.sku,productSku(p),...(Array.isArray(p.variations)?p.variations.flatMap(v=>[v?.sku,v?.variation_name]):[])].join(' ').toLowerCase();
-      return hay.includes(q);
-    });
+    arr=arr.filter(p=>(p._search||'').includes(q));
   }
   document.getElementById('grid').innerHTML=arr.length?arr.map(p=>{
     const sku=productSku(p);
@@ -729,7 +733,8 @@ function pmkMapProducts(products){
     active:p.is_active!==false,is_addon_product:p.is_addon_product===true,
     sale_mode:p.sale_mode||'auto',fulfillment_type:p.fulfillment_type||'',
     stock_qty:Number(p.stock_qty||0),stock_tracking_enabled:p.stock_tracking_enabled===true,
-    product_type:p.product_type||'simple',variations:Array.isArray(p.variations)?p.variations:[]
+    product_type:p.product_type||'simple',variations:Array.isArray(p.variations)?p.variations:[],
+    _search:[p.name,p.brand,p.category,p.sku,p.external_id,p.id,...(Array.isArray(p.variations)?p.variations.flatMap(v=>[v?.sku,v?.variation_name]):[])].join(' ').toLowerCase()
   }));
 }
 function pmkSaveProductsCache(products){
@@ -791,7 +796,7 @@ async function pmkRefreshMemberPrices(){
   if(PMK_PRICE_REFRESH_RUNNING||!PMK_FRONT_USER||!pmkFrontToken())return;
   PMK_PRICE_REFRESH_RUNNING=true;
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),12000);
+  const timer=setTimeout(()=>controller.abort(),8000);
   try{
     const r=await fetch(HIKING_API_BASE+'/api/pmk-products',{
       headers:pmkFrontHeaders(),cache:'no-store',signal:controller.signal
@@ -800,7 +805,7 @@ async function pmkRefreshMemberPrices(){
     if(!r.ok||j.ok===false||!Array.isArray(j.products))return;
     PMK_PRICE_HIDDEN=j.price_hidden===true || j.authenticated===false;
     all=pmkMapProducts(j.products);
-    buildProductDropdown();buildSubchips();render();
+    render();
   }catch(e){
     console.warn('[PMK member pricing] background refresh skipped',e);
   }finally{
@@ -821,63 +826,40 @@ function pmkScheduleProductsRecovery(){
   },15000);
 }
 async function showAdminIfAllowed(){
-  const login=document.getElementById('loginBtn');
-  const admin=document.getElementById('adminGiftBtn');
+  const login=document.getElementById('pmkUnifiedLogin');
+  const admin=document.getElementById('pmkUnifiedAdmin');
   const token=pmkFrontToken();
-
   if(admin)admin.style.display='none';
-
   if(!token){
     PMK_FRONT_USER=null;PMK_PRICE_HIDDEN=true;
-    if(login){
-      login.textContent='登入';
-      login.href='/pmktools-login.html';
-      login.title='PMKTOOLS Email 登入 / 註冊';
-    }
+    if(login){login.textContent='登入';login.href='/pmktools-login.html'}
     return null;
   }
-
+  const ctl=new AbortController();
+  const timer=setTimeout(()=>ctl.abort(),6000);
   try{
     const r=await fetch(HIKING_API_BASE+'/api/pmk-auth/me',{
-      headers:pmkFrontHeaders(),
-      cache:'no-store'
+      headers:pmkFrontHeaders(),cache:'no-store',signal:ctl.signal
     });
     const j=await r.json().catch(()=>({}));
-
     if(!r.ok||j.ok===false||!j.user){
-      localStorage.removeItem(PMK_AUTH_KEY);
+      if(r.status===401)localStorage.removeItem(PMK_AUTH_KEY);
       PMK_FRONT_USER=null;PMK_PRICE_HIDDEN=true;
-      if(login){
-        login.textContent='登入';
-        login.href='/pmktools-login.html';
-        login.title='PMKTOOLS Email 登入 / 註冊';
-      }
+      if(login){login.textContent='登入';login.href='/pmktools-login.html'}
       return null;
     }
-
     PMK_FRONT_USER=j.user;
     const account=String(j.user.email||j.user.account||'我的帳戶');
-    if(login){
-      login.textContent=account+'｜我的帳戶';
-      login.href='/pmktools-account.html';
-      login.title='進入我的 PMKTOOLS 帳戶';
-    }
-
-    if(admin && String(j.user.role||'').toLowerCase()==='admin'){
-      admin.style.display='inline-block';
-      admin.textContent='PMKTOOLS Admin';
-    }
+    if(login){login.textContent=account+'｜我的帳戶';login.href='/pmktools-account.html'}
+    if(admin&&String(j.user.role||'').toLowerCase()==='admin')admin.style.display='inline-block';
     return j.user;
   }catch(e){
-    console.warn('[PMKTOOLS D1 AUTH]',e);
-    PMK_FRONT_USER=null;PMK_PRICE_HIDDEN=true;
-    if(login){
-      login.textContent='登入';
-      login.href='/pmktools-login.html';
-    }
+    // 網路慢只略過身份刷新，不要阻塞商品卡，也不要誤刪登入。
+    console.warn('[PMK auth background]',e);
     return null;
-  }
+  }finally{clearTimeout(timer)}
 }
+
 function pmkApplySearchFromUrlV210(){
   const u=new URL(location.href);
   const q=String(u.searchParams.get('q')||'').trim();
@@ -954,13 +936,23 @@ function pmkFocusSiteSectionFromHash(){
 window.addEventListener('hashchange',pmkFocusSiteSectionFromHash);
 
 (async function init(){
+  // FAST BOOT：商品卡先出現。身份、分類、網站文字全部背景處理，不准互相等待。
+  const authPromise=showAdminIfAllowed();
+  const categoriesPromise=loadManagedCategories();
+  loadPmkSiteContent();
   try{
-    await showAdminIfAllowed();
-    await Promise.all([loadManagedCategories(),loadProducts(),loadPmkSiteContent()]);
+    await loadProducts();
     pmkApplySearchFromUrlV210();
     buildProductDropdown();buildSubchips();render();pmkFocusSiteSectionFromHash();
-    pmkRefreshMemberPrices();
-    if(query) setTimeout(()=>document.getElementById('products')?.scrollIntoView({behavior:'auto',block:'start'}),0);
+    if(query)setTimeout(()=>document.getElementById('products')?.scrollIntoView({behavior:'auto',block:'start'}),0);
+
+    categoriesPromise.then(()=>{buildProductDropdown();buildSubchips()}).catch(()=>{});
+    authPromise.then(user=>{
+      if(!user)return;
+      const run=()=>pmkRefreshMemberPrices();
+      if('requestIdleCallback' in window)requestIdleCallback(run,{timeout:2500});
+      else setTimeout(run,900);
+    }).catch(()=>{});
   }catch(e){
     console.warn('[PMK products init]',e);
     document.getElementById('grid').innerHTML='<div class="empty">商品資料暫時無法連線，系統正在自動重試，請稍後再試。</div>';
@@ -1019,22 +1011,7 @@ window.addEventListener('hashchange',pmkFocusSiteSectionFromHash);
 <!-- /PMKTOOLS：LINE 浮動按鈕＋QR Code -->
 
 
-<script id="pmk-onebar-auth-v243">
-(async()=>{
- const API='https://pmktools-api.pmktools.workers.dev',KEY='pmk_session_v1';
- const login=document.getElementById('pmkUnifiedLogin'),admin=document.getElementById('pmkUnifiedAdmin');
- const token=localStorage.getItem(KEY)||'';
- if(!token)return;
- try{
-  const r=await fetch(API+'/api/pmk-auth/me',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok||!j.ok||!j.user){localStorage.removeItem(KEY);return}
-  const who=String(j.user.email||j.user.account||'我的帳戶');
-  if(login){login.textContent=who+'｜我的帳戶';login.href='/pmktools-account.html'}
-  if(admin&&String(j.user.role||'').toLowerCase()==='admin')admin.style.display='inline-block';
- }catch(_){}
-})();
-</script>
+<!-- pmk-onebar-auth removed: unified background auth above -->
 <script id="pmk-stable-shell-controller-v283">
 (function(){
  const ROUTES={about:'/pmktools-about.html',news:'/pmktools-news.html',video:'/pmktools-video.html',catalog:'/pmktools-catalog.html',contact:'/pmktools-contact.html'};
