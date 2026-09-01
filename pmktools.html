@@ -716,34 +716,12 @@ async function loadManagedCategories(){
     if(r.ok&&j.ok!==false&&Array.isArray(j.categories))managedCategories=j.categories;
   }catch(_){}
 }
-const PMK_CATALOG_CACHE_KEY='pmktools_catalog_cache_v1';
-async function pmkFetchJsonRetry(url,options={},attempts=3){
-  let last=null;
-  for(let i=0;i<attempts;i++){
-    try{
-      const r=await fetch(url,{...options,cache:'no-store'});
-      const text=await r.text();let j={};try{j=text?JSON.parse(text):{}}catch(_){throw new Error(text||('HTTP '+r.status))}
-      if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));
-      return j;
-    }catch(e){last=e;if(i<attempts-1)await new Promise(res=>setTimeout(res,300*(i+1)))}
-  }
-  throw last||new Error('Failed to fetch');
-}
-async function loadProducts(){
-  let j=null;
-  try{
-    j=await pmkFetchJsonRetry(HIKING_API_BASE+'/api/pmk-products',{headers:pmkFrontHeaders()},3);
-    if(!Array.isArray(j.products))throw new Error('PRODUCTS_INVALID');
-    try{localStorage.setItem(PMK_CATALOG_CACHE_KEY,JSON.stringify({saved_at:Date.now(),price_hidden:j.price_hidden===true||j.authenticated===false,products:j.products}))}catch(_){}
-  }catch(e){
-    try{
-      const c=JSON.parse(localStorage.getItem(PMK_CATALOG_CACHE_KEY)||'null');
-      if(c&&Array.isArray(c.products)&&c.products.length){j={products:c.products,price_hidden:c.price_hidden===true,authenticated:!c.price_hidden};}
-    }catch(_){}
-    if(!j)throw e;
-  }
-  PMK_PRICE_HIDDEN=j.price_hidden===true || j.authenticated===false;
-  all=j.products.filter(p=>p.is_active!==false).map(p=>({
+const PMK_PRODUCTS_CACHE_KEY='pmk_products_cache_v1';
+const PMK_PRODUCTS_CACHE_MAX_AGE=7*24*60*60*1000;
+let PMK_PRODUCTS_RECOVERY_TIMER=0;
+
+function pmkMapProducts(products){
+  return products.filter(p=>p&&p.is_active!==false).map(p=>({
     id:String(p.external_id||p.id),dbid:String(p.id),brand:p.brand||'',name:p.name||'',
     sku:p.sku||'',price:Number(p.price||0),category:p.category||'未分類',subcategory:p.subcategory||'',subcategory_detail:p.subcategory_detail||'',
     image:p.image_url||'',video:p.video_url||'',gallery:Array.isArray(p.gallery_urls)?p.gallery_urls:[],
@@ -752,6 +730,73 @@ async function loadProducts(){
     stock_qty:Number(p.stock_qty||0),stock_tracking_enabled:p.stock_tracking_enabled===true,
     product_type:p.product_type||'simple',variations:Array.isArray(p.variations)?p.variations:[]
   }));
+}
+function pmkSaveProductsCache(j){
+  try{
+    localStorage.setItem(PMK_PRODUCTS_CACHE_KEY,JSON.stringify({
+      saved_at:Date.now(),
+      price_hidden:j.price_hidden===true,
+      authenticated:j.authenticated===true,
+      products:j.products
+    }));
+  }catch(_){}
+}
+function pmkReadProductsCache(){
+  try{
+    const c=JSON.parse(localStorage.getItem(PMK_PRODUCTS_CACHE_KEY)||'null');
+    if(!c||!Array.isArray(c.products)||!c.products.length)return null;
+    if(!Number(c.saved_at)||Date.now()-Number(c.saved_at)>PMK_PRODUCTS_CACHE_MAX_AGE)return null;
+    return c;
+  }catch(_){return null}
+}
+function pmkWait(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
+async function pmkFetchProductsOnce(timeoutMs=6000){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try{
+    const r=await fetch(HIKING_API_BASE+'/api/pmk-products',{
+      headers:pmkFrontHeaders(),cache:'no-store',signal:controller.signal
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false||!Array.isArray(j.products))throw new Error(j.message||j.error||('HTTP '+r.status));
+    return j;
+  }finally{clearTimeout(timer)}
+}
+async function loadProducts(){
+  let lastError=null;
+  const delays=[0,350,900];
+  for(let attempt=0;attempt<delays.length;attempt++){
+    if(delays[attempt])await pmkWait(delays[attempt]);
+    try{
+      const j=await pmkFetchProductsOnce();
+      PMK_PRICE_HIDDEN=j.price_hidden===true || j.authenticated===false;
+      all=pmkMapProducts(j.products);
+      pmkSaveProductsCache(j);
+      return {source:'api'};
+    }catch(e){
+      lastError=e;
+      console.warn('[PMK products] attempt '+(attempt+1)+' failed',e);
+    }
+  }
+
+  const cached=pmkReadProductsCache();
+  if(cached){
+    PMK_PRICE_HIDDEN=!PMK_FRONT_USER || cached.price_hidden===true;
+    all=pmkMapProducts(cached.products);
+    console.warn('[PMK products] API unavailable; using cached products.');
+    return {source:'cache'};
+  }
+  throw lastError||new Error('PRODUCTS_UNAVAILABLE');
+}
+function pmkScheduleProductsRecovery(){
+  if(PMK_PRODUCTS_RECOVERY_TIMER)return;
+  PMK_PRODUCTS_RECOVERY_TIMER=setTimeout(async()=>{
+    PMK_PRODUCTS_RECOVERY_TIMER=0;
+    try{
+      await loadProducts();
+      buildProductDropdown();buildSubchips();render();
+    }catch(_){/* 保留友善錯誤畫面，不把瀏覽器錯誤直接顯示給客戶 */}
+  },15000);
 }
 async function showAdminIfAllowed(){
   const login=document.getElementById('loginBtn');
@@ -894,7 +939,9 @@ window.addEventListener('hashchange',pmkFocusSiteSectionFromHash);
     buildProductDropdown();buildSubchips();render();pmkFocusSiteSectionFromHash();
     if(query) setTimeout(()=>document.getElementById('products')?.scrollIntoView({behavior:'auto',block:'start'}),0);
   }catch(e){
-    document.getElementById('grid').innerHTML=`<div class="empty">商品資料讀取失敗：${esc(e?.message||e)}</div>`;
+    console.warn('[PMK products init]',e);
+    document.getElementById('grid').innerHTML='<div class="empty">商品資料暫時無法連線，系統正在自動重試，請稍後再試。</div>';
+    pmkScheduleProductsRecovery();
   }
 })();
 </script>
