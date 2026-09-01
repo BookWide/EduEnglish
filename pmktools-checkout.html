@@ -297,9 +297,11 @@ function serverPricedGroups(input){
   }));
 }
 
-async function refreshPreview(){
- const v=await api('/api/pmk-cart-checkout-preview',{groups:serverPricedGroups(groups),...currentShippingPayload()});
+async function refreshPreview(payloadExtra=null){
+ const body={groups:serverPricedGroups(groups),...(payloadExtra===null?currentShippingPayload():payloadExtra)};
+ const v=await api('/api/pmk-cart-checkout-preview',body);
  paint(v);
+ return v;
 }
 async function api(path,body){const r=await fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},body:JSON.stringify(body),cache:'no-store'}),t=await r.text();let j={};try{j=JSON.parse(t)}catch(_){throw new Error(t||('HTTP '+r.status))}if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));return j}
 function renderItems(cart){
@@ -342,9 +344,12 @@ function renderLocalCartImmediately(){
 }
 function paint(v){
   preview=v;ensurePaymentSummary();
-  // Worker preview is the authoritative D1 customer snapshot. Persist it before any UI reads customer fields.
-  if(v?.customer?.customer_id){
-    localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(v.customer));
+  // Worker preview is the authoritative D1 customer snapshot. Never let another account's cached customer leak into checkout.
+  if(v && Object.prototype.hasOwnProperty.call(v,'customer')){
+    localStorage.removeItem(ERP_CUSTOMER_KEY);
+    localStorage.removeItem('pmktools_customer_v1');
+    localStorage.removeItem('pmktools_quote_customer_v1');
+    if(v?.customer?.customer_id)localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(v.customer));
   }
   const displayCart=previewCartForDisplay(v);
   // Never erase an already-rendered order detail table just because Worker returns totals only.
@@ -354,7 +359,6 @@ function paint(v){
 async function boot(){
   groups=getGroups();
   if(!groups.length)return error('購物車是空的');
-  // Order detail belongs to the cart, not to the pricing preview response. Render it first.
   renderLocalCartImmediately();
 
   const token=String(localStorage.getItem(PMK_AUTH_KEY)||'').trim();
@@ -362,49 +366,58 @@ async function boot(){
     setText('loginState','尚未登入');
     return error('請先登入 PMKTOOLS 後再進行結帳。');
   }
-  try{
+
+  // FAST BOOT: auth identity and authoritative D1 checkout preview run in parallel.
+  // The first preview intentionally sends groups only, so stale localStorage customer/shipping
+  // data from a previous account can never affect the new account's price/payment/customer.
+  session={access_token:token,user:{}};
+  const authPromise=(async()=>{
     const ar=await fetch(API+'/api/pmk-auth/me',{headers:{'Authorization':'Bearer '+token},cache:'no-store'});
     const aj=await ar.json().catch(()=>({}));
-    if(!ar.ok||!aj.ok){
+    if(!ar.ok||!aj.ok)throw new Error(aj.message||aj.error||('HTTP '+ar.status));
+    return aj.user||{};
+  })();
+  const previewPromise=api('/api/pmk-cart-checkout-preview',{groups:serverPricedGroups(groups)});
+
+  const [authResult,previewResult]=await Promise.allSettled([authPromise,previewPromise]);
+  if(previewResult.status!=='fulfilled'){
+    if(authResult.status==='rejected' && /401|AUTH_REQUIRED|登入|token/i.test(String(authResult.reason?.message||authResult.reason||''))){
       localStorage.removeItem(PMK_AUTH_KEY);
       setText('loginState','登入已失效');
       return error('PMKTOOLS 登入已失效，請重新登入。');
     }
-    session={access_token:token,user:aj.user||{}};
-  }catch(e){
-    setText('loginState','登入檢查失敗');
-    return error('PMKTOOLS 登入檢查失敗：'+String(e?.message||e));
+    return error('結帳預覽失敗：'+String(previewResult.reason?.message||previewResult.reason));
   }
 
-  setText('loginState',session.user.account||session.user.email||'已登入');
-  setText('erpAccount',session.user.account||session.user.email||'已登入');
-
-  const accountKey=String(session.user.id||session.user.account||session.user.email||'').trim().toLowerCase();
-  const previousKey=String(localStorage.getItem(PMK_ACCOUNT_SCOPE_KEY)||'').trim().toLowerCase();
-  if(previousKey && accountKey && previousKey!==accountKey){
-    clearCheckoutAccountScope();
-  }
-  if(accountKey)localStorage.setItem(PMK_ACCOUNT_SCOPE_KEY,accountKey);
-
-  // Customer uses its D1-linked CRM record. Admin may use the customer explicitly selected in cart.
-  // A normal credit-card account without a CRM link is still allowed to continue at STANDARD price;
-  // the Worker decides payment mode and pricing, never localStorage.
-  const remote=await loadCurrentCrmCustomer();
-  const role=String(session.user.role||'').toLowerCase();
-  if(remote?.customer_id){
-    localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(remote));
-  }else if(role!=='admin'){
-    localStorage.removeItem(ERP_CUSTOMER_KEY);
+  let accountChanged=false;
+  if(authResult.status==='fulfilled'){
+    session.user=authResult.value||{};
+    const who=session.user.account||session.user.email||'已登入';
+    setText('loginState',who);setText('erpAccount',who);
+    const accountKey=String(session.user.id||session.user.account||session.user.email||'').trim().toLowerCase();
+    const previousKey=String(localStorage.getItem(PMK_ACCOUNT_SCOPE_KEY)||'').trim().toLowerCase();
+    accountChanged=!!(previousKey&&accountKey&&previousKey!==accountKey);
+    if(accountChanged)clearCheckoutAccountScope();
+    if(accountKey)localStorage.setItem(PMK_ACCOUNT_SCOPE_KEY,accountKey);
+  }else{
+    // Preview itself is authenticated, so a slow /auth/me must not block checkout.
+    setText('loginState','已登入');setText('erpAccount','已登入');
   }
 
   shippingState=readShippingState();
+  paint(previewResult.value);
 
-  try{
-    await refreshPreview();
-  }catch(e){
-    error('結帳預覽失敗：'+String(e.message||e));
+  // Admin may deliberately carry a selected ERP customer from cart. Only Admin gets
+  // a second preview, and only when this is not an account switch. Normal customers
+  // always finish boot with the single authoritative preview above.
+  if(!accountChanged && String(session.user?.role||'').toLowerCase()==='admin'){
+    const selected=readErpCustomer();
+    if(selected?.customer_id){
+      try{await refreshPreview(currentShippingPayload())}catch(e){console.warn('[PMK admin selected customer preview]',e)}
+    }
   }
 }
+
 
 const PMK_ORDER_REQUEST_KEY='pmktools_checkout_request_v1';
 function checkoutRequestId(){
