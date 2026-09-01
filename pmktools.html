@@ -716,9 +716,10 @@ async function loadManagedCategories(){
     if(r.ok&&j.ok!==false&&Array.isArray(j.categories))managedCategories=j.categories;
   }catch(_){}
 }
-const PMK_PRODUCTS_CACHE_KEY='pmk_products_cache_v1';
+const PMK_PRODUCTS_CACHE_KEY='pmk_products_cache_v2';
 const PMK_PRODUCTS_CACHE_MAX_AGE=7*24*60*60*1000;
 let PMK_PRODUCTS_RECOVERY_TIMER=0;
+let PMK_PRICE_REFRESH_RUNNING=false;
 
 function pmkMapProducts(products){
   return products.filter(p=>p&&p.is_active!==false).map(p=>({
@@ -731,14 +732,9 @@ function pmkMapProducts(products){
     product_type:p.product_type||'simple',variations:Array.isArray(p.variations)?p.variations:[]
   }));
 }
-function pmkSaveProductsCache(j){
+function pmkSaveProductsCache(products){
   try{
-    localStorage.setItem(PMK_PRODUCTS_CACHE_KEY,JSON.stringify({
-      saved_at:Date.now(),
-      price_hidden:j.price_hidden===true,
-      authenticated:j.authenticated===true,
-      products:j.products
-    }));
+    localStorage.setItem(PMK_PRODUCTS_CACHE_KEY,JSON.stringify({saved_at:Date.now(),products}));
   }catch(_){}
 }
 function pmkReadProductsCache(){
@@ -750,44 +746,69 @@ function pmkReadProductsCache(){
   }catch(_){return null}
 }
 function pmkWait(ms){return new Promise(resolve=>setTimeout(resolve,ms))}
-async function pmkFetchProductsOnce(timeoutMs=6000){
+
+// 商品總覽唯一主路線：直接讀 R2 商品主檔，不綁 D1 session / 客戶價格流程。
+async function pmkFetchPublicProductsOnce(timeoutMs=10000){
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),timeoutMs);
   try{
-    const r=await fetch(HIKING_API_BASE+'/api/pmk-products',{
-      headers:pmkFrontHeaders(),cache:'no-store',signal:controller.signal
-    });
+    const r=await fetch(HIKING_API_BASE+'/api/bw-products',{cache:'no-store',signal:controller.signal});
     const j=await r.json().catch(()=>({}));
     if(!r.ok||j.ok===false||!Array.isArray(j.products))throw new Error(j.message||j.error||('HTTP '+r.status));
-    return j;
+    return j.products;
   }finally{clearTimeout(timer)}
 }
+
 async function loadProducts(){
   let lastError=null;
-  const delays=[0,350,900];
+  const delays=[0,500,1200];
   for(let attempt=0;attempt<delays.length;attempt++){
     if(delays[attempt])await pmkWait(delays[attempt]);
     try{
-      const j=await pmkFetchProductsOnce();
-      PMK_PRICE_HIDDEN=j.price_hidden===true || j.authenticated===false;
-      all=pmkMapProducts(j.products);
-      pmkSaveProductsCache(j);
-      return {source:'api'};
+      const products=await pmkFetchPublicProductsOnce();
+      PMK_PRICE_HIDDEN=true;
+      all=pmkMapProducts(products);
+      pmkSaveProductsCache(products);
+      return {source:'bw-products'};
     }catch(e){
       lastError=e;
-      console.warn('[PMK products] attempt '+(attempt+1)+' failed',e);
+      console.warn('[PMK public products] attempt '+(attempt+1)+' failed',e);
     }
   }
 
   const cached=pmkReadProductsCache();
   if(cached){
-    PMK_PRICE_HIDDEN=!PMK_FRONT_USER || cached.price_hidden===true;
+    PMK_PRICE_HIDDEN=true;
     all=pmkMapProducts(cached.products);
-    console.warn('[PMK products] API unavailable; using cached products.');
+    console.warn('[PMK public products] API unavailable; using cached products.');
     return {source:'cache'};
   }
   throw lastError||new Error('PRODUCTS_UNAVAILABLE');
 }
+
+// 登入會員價格改成背景補上：失敗只影響價格，不准拖垮商品列表。
+async function pmkRefreshMemberPrices(){
+  if(PMK_PRICE_REFRESH_RUNNING||!PMK_FRONT_USER||!pmkFrontToken())return;
+  PMK_PRICE_REFRESH_RUNNING=true;
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),12000);
+  try{
+    const r=await fetch(HIKING_API_BASE+'/api/pmk-products',{
+      headers:pmkFrontHeaders(),cache:'no-store',signal:controller.signal
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false||!Array.isArray(j.products))return;
+    PMK_PRICE_HIDDEN=j.price_hidden===true || j.authenticated===false;
+    all=pmkMapProducts(j.products);
+    buildProductDropdown();buildSubchips();render();
+  }catch(e){
+    console.warn('[PMK member pricing] background refresh skipped',e);
+  }finally{
+    clearTimeout(timer);
+    PMK_PRICE_REFRESH_RUNNING=false;
+  }
+}
+
 function pmkScheduleProductsRecovery(){
   if(PMK_PRODUCTS_RECOVERY_TIMER)return;
   PMK_PRODUCTS_RECOVERY_TIMER=setTimeout(async()=>{
@@ -795,7 +816,8 @@ function pmkScheduleProductsRecovery(){
     try{
       await loadProducts();
       buildProductDropdown();buildSubchips();render();
-    }catch(_){/* 保留友善錯誤畫面，不把瀏覽器錯誤直接顯示給客戶 */}
+      pmkRefreshMemberPrices();
+    }catch(_){/* 保留友善錯誤畫面 */}
   },15000);
 }
 async function showAdminIfAllowed(){
@@ -937,6 +959,7 @@ window.addEventListener('hashchange',pmkFocusSiteSectionFromHash);
     await Promise.all([loadManagedCategories(),loadProducts(),loadPmkSiteContent()]);
     pmkApplySearchFromUrlV210();
     buildProductDropdown();buildSubchips();render();pmkFocusSiteSectionFromHash();
+    pmkRefreshMemberPrices();
     if(query) setTimeout(()=>document.getElementById('products')?.scrollIntoView({behavior:'auto',block:'start'}),0);
   }catch(e){
     console.warn('[PMK products init]',e);
