@@ -1,7 +1,7 @@
 <!doctype html><html lang="zh-Hant"><head>
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
-<meta http-equiv="Expires" content="0"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>聯鑽訂購確認單｜PMKTOOLS V4.3.2 TAX LABEL CLEAN</title>
+<meta http-equiv="Expires" content="0"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>聯鑽訂購確認單｜PMKTOOLS V4.3.6 ADMIN CUSTOMER PAYMENT SYNC</title>
 
 <style>
 :root{--ink:#172033;--muted:#64748b;--line:#dfe5ec;--bg:#f5f7fa;--navy:#123f6b;--green:#0f766e;--soft:#f8fafc}
@@ -224,7 +224,7 @@ function renderErpMeta(customerOverride=null){
   setText('erpOrderNo',q.doc_no?('報價 '+q.doc_no+' / 付款建立時產生'):'付款建立時產生');
   const methods=preview?.available_shipping_methods||[];const method=methods.find(m=>m.code===p.shipping_method)||preview?.selected_shipping_method;setText('confirmMethod',method?.label||p.shipping_method||'—');
 }
-const P=new URL(location.href).searchParams,mode=P.get('mode')||'single';let session=null,preview=null,groups=[],shippingState={},paymentMode='card',monthlyAllowed=false;
+const P=new URL(location.href).searchParams,mode=P.get('mode')||'single';let session=null,preview=null,groups=[],shippingState={},paymentMode='card',monthlyAllowed=false,adminSelectedCustomer=null;
 function currentPaymentMode(){return paymentMode==='monthly'?'monthly':'card'}
 function customerAllowsMonthly(c,serverAllowed){
   if(serverAllowed===true)return true;
@@ -382,12 +382,28 @@ function renderLocalCartImmediately(){
 }
 function paint(v){
   preview=v;ensurePaymentSummary();
-  // Worker preview is the authoritative D1 customer snapshot. Never let another account's cached customer leak into checkout.
+  // Normal customer: Worker D1 customer is authoritative.
+  // Admin quotation mode: preserve the customer explicitly selected in Cart until
+  // the second Admin preview returns that selected customer's authoritative D1 record.
   if(v && Object.prototype.hasOwnProperty.call(v,'customer')){
-    localStorage.removeItem(ERP_CUSTOMER_KEY);
-    localStorage.removeItem('pmktools_customer_v1');
-    localStorage.removeItem('pmktools_quote_customer_v1');
-    if(v?.customer?.customer_id)localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(v.customer));
+    const isAdmin=String(session?.user?.role||'').toLowerCase()==='admin';
+    const keepSelected=isAdmin&&adminSelectedCustomer?.customer_id;
+    if(!keepSelected){
+      localStorage.removeItem(ERP_CUSTOMER_KEY);
+      localStorage.removeItem('pmktools_customer_v1');
+      localStorage.removeItem('pmktools_quote_customer_v1');
+      if(v?.customer?.customer_id)localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(v.customer));
+    }else{
+      const selectedId=String(adminSelectedCustomer.customer_id||adminSelectedCustomer.customer_code||'').trim().toUpperCase();
+      const returnedId=String(v?.customer?.customer_id||v?.customer?.customer_code||'').trim().toUpperCase();
+      // Once Worker confirms the selected customer, replace the snapshot with D1 authoritative data.
+      if(returnedId && returnedId===selectedId){
+        localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(v.customer));
+        adminSelectedCustomer=v.customer;
+      }else{
+        localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(adminSelectedCustomer));
+      }
+    }
   }
   const displayCart=previewCartForDisplay(v);
   // Never erase an already-rendered order detail table just because Worker returns totals only.
@@ -452,15 +468,29 @@ async function boot(){
   }
 
   shippingState=readShippingState();
+
+  // Capture Cart-selected customer BEFORE paint() can apply the Admin account's own default customer.
+  if(!accountChanged && String(session.user?.role||'').toLowerCase()==='admin'){
+    const carried=readErpCustomer();
+    if(carried?.customer_id)adminSelectedCustomer={...carried};
+  }
+
   paint(previewResult.value);
 
   // Admin may deliberately carry a selected ERP customer from cart. Only Admin gets
   // a second preview, and only when this is not an account switch. Normal customers
   // always finish boot with the single authoritative preview above.
   if(!accountChanged && String(session.user?.role||'').toLowerCase()==='admin'){
-    const selected=readErpCustomer();
+    const selected=adminSelectedCustomer||readErpCustomer();
     if(selected?.customer_id){
-      try{await refreshPreview(currentShippingPayload())}catch(e){console.warn('[PMK admin selected customer preview]',e)}
+      localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(selected));
+      try{
+        await refreshPreview({
+          ...currentShippingPayload(),
+          erp_customer_id:selected.customer_id||selected.customer_code||'',
+          erp_customer_snapshot:selected
+        });
+      }catch(e){console.warn('[PMK admin selected customer preview]',e)}
     }
   }
 }
