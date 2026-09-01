@@ -406,12 +406,24 @@ async function boot(){
   }
 }
 
-async function syncErpSalesOrder(pmkOrder,cartPreview){
-  const c=readErpCustomer(),q=readErpQuote();if(!c.customer_id)return null;
-  const lines=[],pg=cartPreview?.cart?.groups||[];
-  pg.forEach((g,gi)=>{const srcg=groups[gi]||{};const add=(l,src)=>{if(!l)return;const qty=Math.max(1,Number(l.quantity||src?.quantity||1)),unit=Number(l.unit_price??l.price??0);lines.push({sku:erpSku(l,src||{}),customer_sku:'',name:String(l.name||src?.name||'商品'),qty,unit:'PCS',list_price:unit,discount:0,unit_price:unit,delivery_date:''})};add(g.parent,srcg.parent);(g.children||[]).forEach((l,ci)=>add(l,(srcg.children||[])[ci]))});
-  const doc={type:'sales-order',doc_no:'',date:new Date().toISOString().slice(0,10),customer_id:c.customer_id,customer_name:c.customer_name||'',customer_po:c.customer_po||'',valid_until:new Date().toISOString().slice(0,10),currency:c.currency||'TWD',exchange_rate:1,tax_rate:5,payment_terms:c.payment_terms||'',shipping_method:currentShippingPayload().shipping_method||'',salesperson:'RAYMOND',status:'draft',source_quote:q.doc_no||q.quote_no||'',note:`PMKTOOLS 訂單 ${pmkOrder?.order_no||pmkOrder?.order_id||''}｜PAYUNi 待付款`,customer_snapshot:c,lines};
-  const r=await fetch(ERP_API+'/api/erp-sales-save',{method:'POST',credentials:'include',cache:'no-store',headers:{'Content-Type':'application/json'},body:JSON.stringify({type:'sales-order',doc})}),t=await r.text();let j={};try{j=JSON.parse(t)}catch(_){throw new Error('ERP 銷售訂單回傳不是 JSON')}if(!r.ok||j.ok===false)throw new Error(j.error||j.message||('HTTP '+r.status));localStorage.setItem('pmktools_erp_sales_order_v1',JSON.stringify(j.doc||{}));return j.doc||null;
+const PMK_ORDER_REQUEST_KEY='pmktools_checkout_request_v1';
+function checkoutRequestId(){
+ let id=String(sessionStorage.getItem(PMK_ORDER_REQUEST_KEY)||'').trim();
+ if(!id){id=(globalThis.crypto?.randomUUID?crypto.randomUUID():(Date.now()+'-'+Math.random().toString(36).slice(2)));sessionStorage.setItem(PMK_ORDER_REQUEST_KEY,id)}
+ return id;
+}
+async function createOrderSafe(payload){
+ const body={...payload,client_request_id:checkoutRequestId()};
+ let last=null;
+ for(let attempt=0;attempt<3;attempt++){
+  try{return await api('/api/pmk-cart-checkout-create',body)}catch(e){
+   last=e;
+   const msg=String(e?.message||e||'');
+   if(!/Failed to fetch|NetworkError|Load failed|network/i.test(msg))throw e;
+   if(attempt<2)await new Promise(r=>setTimeout(r,500*(attempt+1)));
+  }
+ }
+ throw last||new Error('訂單建立連線失敗');
 }
 
 $('pay').onclick=async()=>{
@@ -425,10 +437,10 @@ $('pay').onclick=async()=>{
   await saveProfileAddressIfNeeded();const c=readErpCustomer(),q=readErpQuote();
   const payload={groups:serverPricedGroups(groups),...currentShippingPayload(),erp_customer_id:c.customer_id||'',erp_customer_snapshot:c,erp_quote_no:q.doc_no||q.quote_no||''};
   localStorage.setItem('pmktools_shipping_v1',JSON.stringify(Object.assign(readShippingState(),currentShippingPayload(),{method:currentShippingPayload().shipping_method})));
-  const o=await api('/api/pmk-cart-checkout-create',payload);localStorage.setItem('pmktools_pending_order',String(o.order_id||''));setText('erpOrderNo',o.order_no||o.order_id||'已建立');
-  try{const so=await syncErpSalesOrder(o,preview);if(so?.doc_no)setText('erpOrderNo',(o.order_no||o.order_id||'')+' / ERP '+so.doc_no)}catch(e){console.warn('ERP 銷售訂單同步失敗',e)}
+  const o=await createOrderSafe(payload);localStorage.setItem('pmktools_pending_order',String(o.order_id||''));setText('erpOrderNo',o.order_no||o.order_id||'已建立');
+  sessionStorage.removeItem(PMK_ORDER_REQUEST_KEY);
   const ok=$('ok');if(ok){ok.style.display='block';ok.textContent=`訂單已建立：${o.order_no||o.order_id||''}｜付款條件：${terms||'月結'}｜狀態：待出貨/帳款`}localStorage.removeItem(CART_KEY);sessionStorage.removeItem('pmktools_direct_group');$('pay').style.display='none';return
- }catch(e){error(String(e.message||e));$('pay').disabled=false}
+ }catch(e){const m=String(e?.message||e||'');error(/Failed to fetch|NetworkError|Load failed|network/i.test(m)?'訂單建立連線失敗，系統已自動重試且不會重複建單；請稍後再按一次。':m);$('pay').disabled=false}
 };
 boot();
 </script></body></html>
