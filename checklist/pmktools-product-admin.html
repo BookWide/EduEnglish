@@ -2799,7 +2799,8 @@ function addManualVariationV20(){
     image_url:'',
     original_image_url:'',
     image_locale:'',
-    is_active:true
+    is_active:false,
+    _manual_draft:true
   });
 
   renderVariationEditorV54();
@@ -2841,17 +2842,18 @@ function readVariationsV54(){
   return v54Variations.map((v,i)=>{
     const sourcePrice=Math.max(0,Number(document.querySelector(`[data-vsourceprice="${i}"]`)?.value||v.source_price||0));
     const entered=Math.max(0,Number(document.querySelector(`[data-vprice="${i}"]`)?.value||v.price||0));
+    const attrs={...(v.attributes||{})};
+    document.querySelectorAll(`[data-vattr="${i}"]`).forEach(sel=>{
+      const name=String(sel.dataset.attrName||'').trim();
+      if(name)attrs[name]=String(sel.value||'').trim();
+    });
+    const enteredSku=asciiSkuV33(document.querySelector(`[data-vsku="${i}"]`)?.value||v.sku||'');
+    const productTitle=String($('name')?.value||'').trim();
     return {
       ...v,
-      variation_name:(()=>{
-        // V3.4.1：Variation 品名一律跟隨「商品名稱」。
-        // 後台改商品名稱後按儲存，即回存成：商品名稱/SKU。
-        // 不再使用 Collector 原本抓到的中文 variation_name 覆蓋商品名稱。
-        const productTitle=String($('name')?.value||'').trim();
-        const enteredSku=asciiSkuV33(document.querySelector(`[data-vsku="${i}"]`)?.value||v.sku||'');
-        return enteredSku?`${productTitle||'商品'}/${enteredSku}`:(productTitle||'商品');
-      })(),
-      sku:asciiSkuV33(document.querySelector(`[data-vsku="${i}"]`)?.value||v.sku||''),
+      attributes:attrs,
+      variation_name:enteredSku?`${productTitle||'商品'}/${enteredSku}`:(productTitle||'商品'),
+      sku:enteredSku,
       source_sku_id:String(document.querySelector(`[data-vsourcesku="${i}"]`)?.value||v.source_sku_id||'').trim(),
       source_price:sourcePrice,
       source_currency:String(v.source_currency||'CNY'),
@@ -2863,6 +2865,19 @@ function readVariationsV54(){
       is_active:String(document.querySelector(`[data-vactive="${i}"]`)?.value||'true')==='true'
     };
   })
+}
+function pmkVariationIsCompleteV21(v){
+  if(!v)return false;
+  const sku=asciiSkuV33(v.sku||'');
+  const attrs=Object.values(v.attributes||{}).map(x=>String(x||'').trim()).filter(Boolean);
+  return !!sku && attrs.length>0;
+}
+function pmkCleanVariationsForSaveV21(p){
+  if(!p||!Array.isArray(p.variations))return p;
+  const before=p.variations.length;
+  p.variations=p.variations.filter(pmkVariationIsCompleteV21);
+  p._variation_drafts_skipped=Math.max(0,before-p.variations.length);
+  return p;
 }
 
 function syncVariationNamesFromProductV341(){
@@ -3831,6 +3846,9 @@ function pmkSequenceDuplicateVariationSkusV570(p){
 async function saveWithStateV200(publish){
   $('is_active').value=publish?'true':'false';
   let p=formData();
+  p=pmkCleanVariationsForSaveV21(p);
+  const skippedDrafts=Number(p._variation_drafts_skipped||0);
+  delete p._variation_drafts_skipped;
   p=pmkSequenceDuplicateVariationSkusV570(p);
   p=pricingApplyProduct(p);
   p.is_active=!!publish;
@@ -3844,7 +3862,7 @@ async function saveWithStateV200(publish){
   try{
     await productAdminPost('/api/bw-product-save',{id:editingId||'',product:p});
     clearForm();await load();
-    setStatus(publish?'✅ 商品已儲存並上架':'✅ 商品草稿已儲存，尚未上架');
+    setStatus((publish?'✅ 商品已儲存並上架':'✅ 商品草稿已儲存，尚未上架')+(skippedDrafts?`｜略過 ${skippedDrafts} 筆未完成手動款式`:''));
   }catch(e){setStatus('❌ 儲存失敗：'+(e?.message||String(e)))}
 }
 async function save(){return saveWithStateV200(false)}
