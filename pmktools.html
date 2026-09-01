@@ -657,6 +657,12 @@ function selectSubcategory(name,scroll){
   cat='切削刀具';
   subcat=name||'全部';
   subdetail='全部';
+  const u=new URL(location.href);
+  u.searchParams.set('page','products');
+  u.searchParams.set('cat','切削刀具');
+  if(subcat!=='全部')u.searchParams.set('subcat',subcat);else u.searchParams.delete('subcat');
+  u.searchParams.delete('subdetail');
+  history.replaceState(history.state||{},'',u.pathname+u.search+u.hash);
   document.getElementById('productHeading').textContent=subcat==='全部'?'切削刀具':subcat;
   document.getElementById('productSub').textContent=subcat==='全部'?'請從左側選擇切削刀具分項。':`顯示「${subcat}」上架商品`;
   buildSubchips();
@@ -666,6 +672,12 @@ function selectSubcategory(name,scroll){
 function selectSubdetail(name,scroll){
   cat='切削刀具';
   subdetail=name||'全部';
+  const u=new URL(location.href);
+  u.searchParams.set('page','products');
+  u.searchParams.set('cat','切削刀具');
+  if(subcat!=='全部')u.searchParams.set('subcat',subcat);else u.searchParams.delete('subcat');
+  if(subdetail!=='全部')u.searchParams.set('subdetail',subdetail);else u.searchParams.delete('subdetail');
+  history.replaceState(history.state||{},'',u.pathname+u.search+u.hash);
   document.getElementById('productHeading').textContent=subdetail==='全部'?subcat:subdetail;
   document.getElementById('productSub').textContent=subdetail==='全部'?`顯示「${subcat}」上架商品`:`顯示「${subcat} › ${subdetail}」上架商品`;
   buildSubchips();render();
@@ -689,7 +701,21 @@ function frontProductName(p){
   return String(p.front_name||p.name||'').trim();
 }
 function render(){
-  let arr=activeProducts().filter(p=>(cat==='全部'||p.category===cat)&&(cat!=='切削刀具'||subcat==='全部'||String(p.subcategory||'')===subcat)&&(cat!=='切削刀具'||subdetail==='全部'||String(p.subcategory_detail||'')===subdetail));
+  const active=activeProducts();
+  let arr=active.filter(p=>(cat==='全部'||p.category===cat)&&(cat!=='切削刀具'||subcat==='全部'||String(p.subcategory||'')===subcat)&&(cat!=='切削刀具'||subdetail==='全部'||String(p.subcategory_detail||'')===subdetail));
+
+  // V2.8.5: old Admin records may have category=切削刀具 but no subcategory yet.
+  // Do not let those products disappear completely when a left-side subcategory is selected.
+  // Fallback is deliberately limited to blank legacy taxonomy records only.
+  if(!arr.length && cat==='切削刀具' && subcat!=='全部'){
+    const legacy=active.filter(p=>p.category==='切削刀具'&&!String(p.subcategory||'').trim());
+    if(legacy.length){
+      arr=legacy;
+      const sub=document.getElementById('productSub');
+      if(sub)sub.textContent=`「${subcat}」尚無已分類商品；先顯示 ${legacy.length} 筆舊版未分類切削刀具。`;
+    }
+  }
+
   if(query){
     const q=query.toLowerCase();
     arr=arr.filter(p=>{
@@ -721,21 +747,36 @@ async function loadManagedCategories(){
   }catch(_){}
 }
 async function loadProducts(){
-  const r=await fetch(HIKING_API_BASE+'/api/pmk-products',{headers:pmkFrontHeaders(),cache:'no-store'});
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok||j.ok===false||!Array.isArray(j.products))throw new Error(j.message||j.error||('HTTP '+r.status));
-  PMK_PRICE_HIDDEN=j.price_hidden===true || j.authenticated===false;
-  all=j.products.filter(p=>p.is_active!==false).map(p=>({
-    id:String(p.external_id||p.id),dbid:String(p.id),brand:p.brand||'',name:p.name||'',
-    front_name:p.front_title||p.front_name||p.short_title||p.display_name||p.frontend_title||'',
-    seo_title:p.seo_title||'',seo_keywords:p.seo_keywords||p.seo_keyword||'',
-    sku:p.sku||'',price:Number(p.price||0),category:p.category||'未分類',subcategory:p.subcategory||'',subcategory_detail:p.subcategory_detail||'',
-    image:p.image_url||'',video:p.video_url||'',gallery:Array.isArray(p.gallery_urls)?p.gallery_urls:[],
-    active:p.is_active!==false,is_addon_product:p.is_addon_product===true,
-    sale_mode:p.sale_mode||'auto',fulfillment_type:p.fulfillment_type||'',
-    stock_qty:Number(p.stock_qty||0),stock_tracking_enabled:p.stock_tracking_enabled===true,
-    product_type:p.product_type||'simple',variations:Array.isArray(p.variations)?p.variations:[]
-  }));
+  let lastError=null;
+  for(let attempt=1;attempt<=3;attempt++){
+    try{
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),12000);
+      let r;
+      try{
+        r=await fetch(HIKING_API_BASE+'/api/pmk-products',{headers:pmkFrontHeaders(),cache:'no-store',signal:controller.signal});
+      }finally{clearTimeout(timer)}
+      const j=await r.json().catch(()=>({}));
+      if(!r.ok||j.ok===false||!Array.isArray(j.products))throw new Error(j.message||j.error||('HTTP '+r.status));
+      PMK_PRICE_HIDDEN=j.price_hidden===true || j.authenticated===false;
+      all=j.products.filter(p=>p.is_active!==false).map(p=>({
+        id:String(p.external_id||p.id),dbid:String(p.id),brand:p.brand||'',name:p.name||'',
+        front_name:p.front_title||p.front_name||p.short_title||p.display_name||p.frontend_title||'',
+        seo_title:p.seo_title||'',seo_keywords:p.seo_keywords||p.seo_keyword||'',
+        sku:p.sku||'',price:Number(p.price||0),category:p.category||'未分類',subcategory:p.subcategory||'',subcategory_detail:p.subcategory_detail||'',
+        image:p.image_url||'',video:p.video_url||'',gallery:Array.isArray(p.gallery_urls)?p.gallery_urls:[],
+        active:p.is_active!==false,is_addon_product:p.is_addon_product===true,
+        sale_mode:p.sale_mode||'auto',fulfillment_type:p.fulfillment_type||'',
+        stock_qty:Number(p.stock_qty||0),stock_tracking_enabled:p.stock_tracking_enabled===true,
+        product_type:p.product_type||'simple',variations:Array.isArray(p.variations)?p.variations:[]
+      }));
+      return;
+    }catch(e){
+      lastError=e;
+      if(attempt<3)await new Promise(r=>setTimeout(r,attempt===1?700:1500));
+    }
+  }
+  throw lastError||new Error('商品 API 無回應');
 }
 async function showAdminIfAllowed(){
   const login=document.getElementById('loginBtn');
