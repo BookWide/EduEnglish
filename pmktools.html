@@ -716,10 +716,32 @@ async function loadManagedCategories(){
     if(r.ok&&j.ok!==false&&Array.isArray(j.categories))managedCategories=j.categories;
   }catch(_){}
 }
+const PMK_CATALOG_CACHE_KEY='pmktools_catalog_cache_v1';
+async function pmkFetchJsonRetry(url,options={},attempts=3){
+  let last=null;
+  for(let i=0;i<attempts;i++){
+    try{
+      const r=await fetch(url,{...options,cache:'no-store'});
+      const text=await r.text();let j={};try{j=text?JSON.parse(text):{}}catch(_){throw new Error(text||('HTTP '+r.status))}
+      if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));
+      return j;
+    }catch(e){last=e;if(i<attempts-1)await new Promise(res=>setTimeout(res,300*(i+1)))}
+  }
+  throw last||new Error('Failed to fetch');
+}
 async function loadProducts(){
-  const r=await fetch(HIKING_API_BASE+'/api/pmk-products',{headers:pmkFrontHeaders(),cache:'no-store'});
-  const j=await r.json().catch(()=>({}));
-  if(!r.ok||j.ok===false||!Array.isArray(j.products))throw new Error(j.message||j.error||('HTTP '+r.status));
+  let j=null;
+  try{
+    j=await pmkFetchJsonRetry(HIKING_API_BASE+'/api/pmk-products',{headers:pmkFrontHeaders()},3);
+    if(!Array.isArray(j.products))throw new Error('PRODUCTS_INVALID');
+    try{localStorage.setItem(PMK_CATALOG_CACHE_KEY,JSON.stringify({saved_at:Date.now(),price_hidden:j.price_hidden===true||j.authenticated===false,products:j.products}))}catch(_){}
+  }catch(e){
+    try{
+      const c=JSON.parse(localStorage.getItem(PMK_CATALOG_CACHE_KEY)||'null');
+      if(c&&Array.isArray(c.products)&&c.products.length){j={products:c.products,price_hidden:c.price_hidden===true,authenticated:!c.price_hidden};}
+    }catch(_){}
+    if(!j)throw e;
+  }
   PMK_PRICE_HIDDEN=j.price_hidden===true || j.authenticated===false;
   all=j.products.filter(p=>p.is_active!==false).map(p=>({
     id:String(p.external_id||p.id),dbid:String(p.id),brand:p.brand||'',name:p.name||'',
