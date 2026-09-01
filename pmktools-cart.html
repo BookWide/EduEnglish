@@ -1,7 +1,7 @@
 <!doctype html><html lang="zh-Hant"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<title>聯鑽購物車／ERP報價單 V2.6.3 TOTAL FIX｜PMKTOOLS</title>
+<title>聯鑽購物車／ERP報價單 V2.6.4 ADMIN QUOTE CUSTOMER SELECT｜PMKTOOLS</title>
 <style>
 :root{--ink:#182235;--muted:#718096;--line:#e6e9ee;--bg:#f7f8fa;--navy:#123f6b;--orange:#ff5a1f;--soft:#fff7f2}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif}
@@ -323,6 +323,16 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
 }
 </style>
 
+
+<style id="pmk-admin-quote-customer-selector-v264">
+@media(min-width:851px){
+  body.pmk-admin-quote #qCustomerKey{max-width:260px}
+}
+@media(max-width:850px){
+  #qAdminCustomerSelect{max-width:none!important;min-width:0!important;flex:1 1 48%!important}
+}
+</style>
+
 </head><body>
 <div class="wrap">
   <div class="top"><a class="back" href="/pmktools.html">← 返回商品庫</a></div>
@@ -338,7 +348,14 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
     </div>
   </div>
   <div class="quoteMeta">
-    <label class="cq-hide"><span>客戶代號 / 統一編號</span><div style="display:flex;width:100%"><input id="qCustomerKey" placeholder="輸入客戶代號或統一編號後按 Enter" style="flex:1;border:0;padding:9px"></div><select id="qCustomerId" style="display:none"><option value=""></option></select></label>
+    <label class="cq-hide"><span>客戶代號 / 統一編號</span>
+<div style="display:flex;width:100%;gap:6px;align-items:center">
+  <input id="qCustomerKey" placeholder="輸入客戶代號或統一編號後按 Enter" style="flex:1;min-width:0;border:0;padding:9px">
+  <select id="qAdminCustomerSelect" title="Admin 代客報價：選擇其他客戶" style="display:none;max-width:320px;min-width:210px;height:34px;border:1px solid #cfd7e2;border-radius:7px;background:#fff;padding:0 8px">
+    <option value="">選擇其他客戶…</option>
+  </select>
+</div>
+<select id="qCustomerId" style="display:none"><option value=""></option></select></label>
     <label class="cq-show"><span>客戶名稱</span><input id="qCustomer" placeholder="公司名稱"></label>
     <label class="cq-show"><span>聯絡人</span><input id="qContact" placeholder="聯絡人"></label>
     <label class="cq-show"><span>報價單編號</span><input id="qQuoteNo" readonly></label>
@@ -430,6 +447,65 @@ function pmkSetAdminQuoteTools(isAdmin){
   const mobileTools=$('mToggleTools');
   if(mobileTools)mobileTools.style.display=isAdmin?'flex':'none';
 }
+
+let PMK_ADMIN_QUOTE_CUSTOMERS=[];
+function pmkNormalizeAdminQuoteCustomer(c={}){
+  const code=String(c.customer_code||c.customer_id||c.key||'').trim();
+  return {
+    ...c,
+    key:code,
+    customer_id:code,
+    customer_code:code,
+    name:String(c.name||c.customer_name||'').trim(),
+    billing_address:String(c.billing_address||c.address||'').trim(),
+    shipping_address:String(c.shipping_address||c.address||'').trim()
+  };
+}
+async function pmkLoadAdminQuoteCustomers(){
+  const sel=$('qAdminCustomerSelect');
+  if(!sel)return;
+  const role=String(PMK_D1_USER?.role||'').toLowerCase();
+  if(role!=='admin'){sel.style.display='none';return}
+  sel.style.display='block';
+  sel.disabled=true;
+  sel.innerHTML='<option value="">讀取客戶中…</option>';
+  try{
+    const r=await fetch(ERP_API+'/api/pmk-admin/customers',{
+      headers:{Authorization:'Bearer '+pmkD1Token()},
+      cache:'no-store'
+    });
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false)throw new Error(j.error||j.message||('HTTP '+r.status));
+    PMK_ADMIN_QUOTE_CUSTOMERS=(Array.isArray(j.rows)?j.rows:[]).map(pmkNormalizeAdminQuoteCustomer);
+    const current=String($('qCustomerKey')?.value||'').trim().toUpperCase();
+    sel.innerHTML='<option value="">選擇其他客戶…</option>'+PMK_ADMIN_QUOTE_CUSTOMERS.map((c,i)=>{
+      const code=String(c.customer_code||'').trim();
+      const name=String(c.name||'未命名客戶').trim();
+      const email=String(c.login_emails||'').trim();
+      return `<option value="${i}" ${current&&code.toUpperCase()===current?'selected':''}>${esc(name)}｜${esc(code)}${email?'｜'+esc(email):''}</option>`;
+    }).join('');
+    sel.disabled=false;
+  }catch(e){
+    sel.innerHTML='<option value="">客戶清單讀取失敗</option>';
+    sel.disabled=false;
+    console.warn('[Admin quote customer list]',e);
+  }
+}
+function pmkSelectAdminQuoteCustomer(){
+  const sel=$('qAdminCustomerSelect');
+  const idx=Number(sel?.value);
+  if(!sel||sel.value===''||!Number.isInteger(idx)||!PMK_ADMIN_QUOTE_CUSTOMERS[idx])return;
+  const c=PMK_ADMIN_QUOTE_CUSTOMERS[idx];
+  pmkFrontApplyCustomer(c);
+  if($('qCustomerKey'))$('qCustomerKey').value=c.customer_code||c.customer_id||'';
+  if($('qCustomerId'))$('qCustomerId').value=c.customer_code||c.customer_id||'';
+  if($('qPaymentTerm'))$('qPaymentTerm').value=c.payment_terms||'信用卡';
+  if($('qShippingNote'))$('qShippingNote').value=c.delivery||'一般配送';
+  saveQuote();
+  pmkRefreshCustomerIdentity();
+  if(typeof updateCustomerQuoteSummary==='function')updateCustomerQuoteSummary();
+}
+
 function pmkCurrentCustomerLabel(){const code=String($('qCustomerKey')?.value||'').trim(),name=String($('qCustomer')?.value||'').trim();return name?(name+(code?'（'+code+'）':'')):(code||'未指定')}
 function pmkRefreshCustomerIdentity(){if(!PMK_D1_USER)return;const account=String(PMK_D1_USER.account||PMK_D1_USER.email||'').trim()||'已登入';const role=String(PMK_D1_USER.role||'').toLowerCase();pmkSetIdentityText('登入帳號：'+account+(role==='admin'?'（Admin）':''),(role==='admin'?'帶入客戶：':'客戶：')+pmkCurrentCustomerLabel())}
 function pmkClearAccountScopedState(){
@@ -465,7 +541,7 @@ async function pmkLoadD1Identity(){
     if(!r.ok||!j?.user){localStorage.removeItem(PMK_D1_SESSION_KEY);PMK_D1_USER=null;pmkSetAdminQuoteTools(false);pmkSetIdentityText('登入帳號：登入已失效','客戶：未指定');return null}
     const u=PMK_D1_USER=j.user;
     const role=String(u.role||'').toLowerCase();
-    pmkSetAdminQuoteTools(role==='admin');
+    pmkSetAdminQuoteTools(role==='admin');document.body.classList.toggle('pmk-admin-quote',role==='admin');
     const account=String(u.account||u.email||'').trim()||'已登入';
     const accountKey=String(u.id||u.account||u.email||'').trim().toLowerCase();
     const previousKey=String(localStorage.getItem(PMK_ACCOUNT_SCOPE_KEY)||'').trim().toLowerCase();
@@ -491,6 +567,7 @@ async function pmkLoadD1Identity(){
         if($('qPaymentTerm'))$('qPaymentTerm').value='信用卡';
       }
       if($('qCustomerKey')){$('qCustomerKey').readOnly=true;$('qCustomerKey').title='客戶帳號只能使用自己 D1 綁定的客戶資料'}
+      if($('qAdminCustomerSelect'))$('qAdminCustomerSelect').style.display='none';
       if($('qCustomerKeyBtn')){$('qCustomerKeyBtn').disabled=true;$('qCustomerKeyBtn').style.opacity='.45';$('qCustomerKeyBtn').title='客戶帳號不可切換其他客戶'}
       const label=c?.name||u.customer_name||'信用卡帳號（未綁 CRM）';
       const code=String(c?.customer_id||c?.customer_code||u.customer_code||'').trim();
@@ -510,8 +587,9 @@ async function pmkLoadD1Identity(){
         localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(c));
         saveQuote();
       }
-      if($('qCustomerKey')){$('qCustomerKey').readOnly=false;$('qCustomerKey').title='Admin 可指定代客報價客戶'}
+      if($('qCustomerKey')){$('qCustomerKey').readOnly=false;$('qCustomerKey').disabled=false;$('qCustomerKey').title='Admin 可指定代客報價客戶'}
       if($('qCustomerKeyBtn')){$('qCustomerKeyBtn').disabled=false;$('qCustomerKeyBtn').style.opacity='';$('qCustomerKeyBtn').title=''}
+      await pmkLoadAdminQuoteCustomers();
       const adminCustomerLabel=c?.name||c?.customer_name||pmkCurrentCustomerLabel();
       const adminCustomerCode=String(c?.customer_code||c?.customer_id||'').trim();
       pmkSetIdentityText('登入帳號：'+account+'（Admin）','帶入客戶：'+adminCustomerLabel+(adminCustomerCode?'（'+adminCustomerCode+'）':''));
@@ -767,12 +845,10 @@ function render(){
   const tax=Math.round(total*0.05),grand=total+tax;
   $('total').textContent=fmt(total);$('checkout').disabled=false;updateCustomerQuoteSummary()
 }
-
 // pmkQuoteSummaryInputSync
 document.addEventListener('input',e=>{
   if(e.target?.id==='qPaymentTerm'||e.target?.id==='qShippingNote')updateCustomerQuoteSummary();
 });
-
 document.addEventListener('click',e=>{
   const b=e.target.closest('[data-act]');if(!b)return;
   const gi=Number(b.dataset.gi),ci=Number(b.dataset.ci),kind=b.dataset.kind,act=b.dataset.act;
@@ -1040,6 +1116,7 @@ if(typeof ExcelJS==='undefined'){
 
 document.querySelectorAll('.quoteMeta input,.quoteTerms input').forEach(el=>el.addEventListener('input',saveQuote));
 if($('qCustomerKey'))$('qCustomerKey').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();applyCustomerKey()}};
+if($('qAdminCustomerSelect'))$('qAdminCustomerSelect').onchange=pmkSelectAdminQuoteCustomer;
 if($('frontCustomerHistory'))$('frontCustomerHistory').onclick=renderFrontHistory;
 if($('frontHistoryClose'))$('frontHistoryClose').onclick=()=>{$('frontHistoryPanel').style.display='none'};
 
