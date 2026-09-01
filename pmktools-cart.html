@@ -1142,11 +1142,25 @@ async function pmkLoadD1Identity(){
       const code=String(c?.customer_id||c?.customer_code||u.customer_code||'').trim();
       pmkSetIdentityText('登入帳號：'+account,'客戶：'+label+(code?'（'+code+'）':''));
     }else if(role==='admin'){
-      // Admin 身份與報價客戶徹底分離：每次進購物車先清除上次殘留客戶，只有本頁主動『套用』後才帶入。
-      pmkClearAdminStaleCustomer();
+      // Admin 若 D1 帳號本身已綁 CRM 客戶，進購物車就自動帶入該客戶完整資料。
+      // 只有確定沒有綁定客戶時，才保留手動指定客戶模式；不再每次進頁面先清空。
+      let c=null;
+      try{
+        const cr=await fetch(ERP_API+'/api/pmk-current-customer',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+        const cj=await cr.json().catch(()=>({}));
+        if(cr.ok&&cj.ok!==false&&cj.customer)c=cj.customer;
+      }catch(_){c=null}
+      if(c?.customer_id){
+        pmkFrontApplyCustomer(c);
+        if($('qPaymentTerm'))$('qPaymentTerm').value=String(c.payment_terms||u.payment_terms||$('qPaymentTerm')?.value||'依雙方約定');
+        localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(c));
+        saveQuote();
+      }
       if($('qCustomerKey')){$('qCustomerKey').readOnly=false;$('qCustomerKey').title='Admin 可指定代客報價客戶'}
       if($('qCustomerKeyBtn')){$('qCustomerKeyBtn').disabled=false;$('qCustomerKeyBtn').style.opacity='';$('qCustomerKeyBtn').title=''}
-      pmkSetIdentityText('登入帳號：'+account+'（Admin）','帶入客戶：'+pmkCurrentCustomerLabel());
+      const adminCustomerLabel=c?.name||c?.customer_name||pmkCurrentCustomerLabel();
+      const adminCustomerCode=String(c?.customer_code||c?.customer_id||'').trim();
+      pmkSetIdentityText('登入帳號：'+account+'（Admin）','帶入客戶：'+adminCustomerLabel+(adminCustomerCode?'（'+adminCustomerCode+'）':''));
     }else{
       pmkSetIdentityText('登入帳號：'+account,'客戶：'+pmkCurrentCustomerLabel());
     }
@@ -1547,12 +1561,19 @@ if(typeof ExcelJS==='undefined'){
     const amount=q*price;
     subtotal+=amount;
     const spec=specText(l);
+    const productName=String(l?.name||'商品').trim();
+    let excelSpec=String(spec||'').trim();
+    // variation_name 有些資料已經包含商品中文名稱；Excel 再拼一次 name 會重複一整排中文。
+    // 匯出時只移除「與商品名稱相同的前綴」，規格 / 型號仍完整保留。
+    if(productName && excelSpec.startsWith(productName)){
+      excelSpec=excelSpec.slice(productName.length).replace(/^[\s\/|｜,，:：;；\-–—]+/,'').trim();
+    }
 
     // A: image placeholder; B:H: ERP data.
     const values=[
       '',
       lineSku(l),
-      spec?`${l?.name||'商品'}\n${spec}`:(l?.name||'商品'),
+      excelSpec?`${productName}\n${excelSpec}`:productName,
       q,'PCS',price,amount,'V'
     ];
     values.forEach((v,i)=>{
