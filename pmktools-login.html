@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-<title>PMKTOOLS 登入 / 註冊</title>
+<title>PMKTOOLS 登入 / 註冊｜SINGLE SESSION ROUTE</title>
 <style>
 :root{--pmk:#7b171d;--pmk2:#9d2028;--ink:#172033;--muted:#64748b;--line:#dfe5ec;--bg:#f4f6f8;--ok:#166534;--bad:#b91c1c}
 *{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#f1f4f7,#fff);font-family:system-ui,-apple-system,"Noto Sans TC","Microsoft JhengHei",sans-serif;color:var(--ink)}
@@ -106,7 +106,19 @@ function setMsg(id,text,type='err'){const el=$(id);el.textContent=text;el.classN
 function clearMsg(id){const el=$(id);el.textContent='';el.className='msg'}
 function show(name){views.forEach(v=>{$('view'+v).classList.toggle('active',v===name)});['Login','Register','Forgot'].forEach(v=>$('tab'+v).classList.toggle('active',v===name));document.querySelector('.tabs').classList.toggle('hidden',name==='Reset'||name==='Verify')}
 function nextUrl(){const n=new URL(location.href).searchParams.get('next');return n&&n.startsWith('/')?n:'/pmktools.html'}
-async function post(path,body){const r=await fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{}),cache:'no-store'});const t=await r.text();let j={};try{j=JSON.parse(t)}catch(_){j={message:t}}if(!r.ok||j.ok===false){const e=new Error(j.message||j.error||('HTTP '+r.status));e.code=j.error||'';throw e}return j}
+async function post(path,body){
+  const ctl=new AbortController();
+  const timer=setTimeout(()=>ctl.abort(),12000);
+  try{
+    const r=await fetch(API+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{}),cache:'no-store',signal:ctl.signal});
+    const t=await r.text();let j={};try{j=JSON.parse(t)}catch(_){j={message:t}}
+    if(!r.ok||j.ok===false){const e=new Error(j.message||j.error||('HTTP '+r.status));e.code=j.error||'';e.status=r.status;throw e}
+    return j;
+  }catch(e){
+    if(e?.name==='AbortError')throw new Error('登入伺服器回應較慢，請再按一次登入。');
+    throw e;
+  }finally{clearTimeout(timer)}
+}
 async function login(){clearMsg('loginMsg');const email=$('loginEmail').value.trim().toLowerCase(),password=$('loginPassword').value;if(!validEmail(email))return setMsg('loginMsg','請輸入正確 Email。');if(!password)return setMsg('loginMsg','請輸入密碼。');const b=$('loginBtn');b.disabled=true;b.textContent='登入中…';try{const j=await post('/api/pmk-auth/login',{email,account:email,password});if(!j.token)throw new Error('登入成功但沒有收到 Session Token');localStorage.setItem(KEY,j.token);setMsg('loginMsg','登入成功，正在進入 PMKTOOLS…','ok');location.href=nextUrl()}catch(e){if(e.code==='EMAIL_NOT_VERIFIED')setMsg('loginMsg','此 Email 尚未完成驗證，請先查看驗證信。');else setMsg('loginMsg',e.message||'登入失敗')}finally{b.disabled=false;b.textContent='登入 PMKTOOLS'}}
 async function register(){
   clearMsg('registerMsg');
@@ -140,7 +152,22 @@ async function forgot(){clearMsg('forgotMsg');const email=$('forgotEmail').value
 async function resetPassword(){clearMsg('resetMsg');const token=new URL(location.href).searchParams.get('reset_token')||'',p1=$('resetPassword').value,p2=$('resetPassword2').value;if(!token)return setMsg('resetMsg','缺少密碼重設 Token。');if(p1.length<8)return setMsg('resetMsg','密碼至少 8 碼。');if(p1!==p2)return setMsg('resetMsg','兩次密碼不一致。');const b=$('resetBtn');b.disabled=true;b.textContent='更新中…';try{await post('/api/pmk-auth/reset-password',{token,password:p1});setMsg('resetMsg','密碼已更新，請重新登入。','ok');setTimeout(()=>{history.replaceState({},document.title,'/pmktools-login.html');show('Login')},900)}catch(e){setMsg('resetMsg',e.message||'密碼更新失敗')}finally{b.disabled=false;b.textContent='更新密碼'}}
 async function verifyEmail(){const token=new URL(location.href).searchParams.get('verify_token')||'';show('Verify');if(!token)return setMsg('verifyMsg','缺少 Email 驗證 Token。');try{await post('/api/pmk-auth/verify-email',{token});setMsg('verifyMsg','Email 驗證完成。現在可以登入。','ok');setTimeout(()=>{history.replaceState({},document.title,'/pmktools-login.html');show('Login')},900)}catch(e){setMsg('verifyMsg',e.message||'Email 驗證失敗')}}
 $('tabLogin').onclick=()=>show('Login');$('tabRegister').onclick=()=>show('Register');$('tabForgot').onclick=()=>show('Forgot');$('loginBtn').onclick=login;$('registerBtn').onclick=register;$('forgotBtn').onclick=forgot;$('resetBtn').onclick=resetPassword;$('loginPassword').onkeydown=e=>{if(e.key==='Enter')login()};$('regPassword2').onkeydown=e=>{if(e.key==='Enter')register()};$('forgotEmail').onkeydown=e=>{if(e.key==='Enter')forgot()};
-(async()=>{const qs=new URLSearchParams(location.search);if(qs.get('verify_token'))return verifyEmail();if(qs.get('reset_token'))return show('Reset');const token=localStorage.getItem(KEY)||'';if(token){try{const r=await fetch(API+'/api/pmk-auth/me',{headers:{Authorization:'Bearer '+token},cache:'no-store'});if(r.ok)return location.href=nextUrl()}catch(_){ }localStorage.removeItem(KEY)}})();
+(async()=>{
+  const qs=new URLSearchParams(location.search);
+  if(qs.get('verify_token'))return verifyEmail();
+  if(qs.get('reset_token'))return show('Reset');
+  const token=localStorage.getItem(KEY)||'';
+  if(!token)return;
+  const ctl=new AbortController();
+  const timer=setTimeout(()=>ctl.abort(),6000);
+  try{
+    const r=await fetch(API+'/api/pmk-auth/me',{headers:{Authorization:'Bearer '+token},cache:'no-store',signal:ctl.signal});
+    if(r.ok)return location.replace(nextUrl());
+    if(r.status===401||r.status===403)localStorage.removeItem(KEY);
+  }catch(_){
+    // 網路/Worker 暫時失敗：保留既有 session，不准把客戶誤登出。
+  }finally{clearTimeout(timer)}
+})();
 </script>
 </body>
 </html>
