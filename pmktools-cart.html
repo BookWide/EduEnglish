@@ -778,7 +778,6 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
 </style>
 
 <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
-<script src="https://unpkg.com/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
 <style id="pmk-cart-taobao-compact-v250">
 .mCartFoldbar,.mCartSku{display:none}
 
@@ -938,7 +937,7 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
     <label><span>業務電話</span><input id="qAgentPhone" value="+886 4 24623591"></label>
   </div>
 </div>
-<div class="quoteToolbar"><button id="printQuote" class="quoteBtn ghost">Excel 報價單</button><button id="saveFrontCustomer" class="quoteBtn ghost" type="button">儲存客戶資料</button><button id="frontCustomerHistory" class="quoteBtn ghost" type="button">交易紀錄</button><span id="erpCustomerState" class="erpCustomerState">PMKTOOLS 工業客戶 CRM｜目前不連 ERP</span></div>
+<div class="quoteToolbar"><button id="previewQuote" class="quoteBtn ghost" type="button">預覽報價單</button><button id="printQuote" class="quoteBtn ghost">Excel 報價單</button><button id="saveFrontCustomer" class="quoteBtn ghost" type="button">儲存客戶資料</button><button id="frontCustomerHistory" class="quoteBtn ghost" type="button">交易紀錄</button><span id="erpCustomerState" class="erpCustomerState">PMKTOOLS 工業客戶 CRM｜目前不連 ERP</span></div>
 <div id="pmkIdentityBar" style="margin:0 0 10px;padding:10px 12px;border:1px solid #dbe3ec;border-radius:10px;background:#f8fafc;display:flex;gap:18px;align-items:center;flex-wrap:wrap;font-size:14px"><b id="pmkLoginIdentity">登入帳號：檢查中…</b><span id="pmkCustomerIdentity">客戶：檢查中…</span></div>
 <div id="frontHistoryPanel" style="display:none;margin:10px 0 12px;border:1px solid #dbe3ec;border-radius:12px;background:#fff;overflow:hidden">
   <div style="padding:10px 12px;font-weight:900;background:#f8fafc;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center">
@@ -979,13 +978,29 @@ body.quote-preview .card{border-radius:0}body.quote-preview .quoteHead{border-ra
   <button id="checkout" class="checkout">前往結帳</button>
 </div></div>
 <script>
+// PMKTOOLS CORE D1 V5.0 — D1 account is authoritative; localStorage is only a cart/UI cache.
 const CART_KEY='pmktools_cart_v1',QUOTE_KEY='pmktools_quote_customer_v1',ERP_CUSTOMER_KEY='pmktools_erp_customer_v1',ERP_QUOTE_KEY='pmktools_erp_quote_v1',ERP_API='https://pmktools-api.pmktools.workers.dev',$=id=>document.getElementById(id),fmt=n=>'NT$ '+Number(n||0).toLocaleString('zh-TW');let ERP_CUSTOMERS=[];
 const PMK_D1_SESSION_KEY='pmk_session_v1';
+const PMK_ACCOUNT_SCOPE_KEY='pmktools_active_account_v1';
 let PMK_D1_USER=null;
 function pmkD1Token(){return localStorage.getItem(PMK_D1_SESSION_KEY)||''}
 function pmkSetIdentityText(loginText,customerText){if($('pmkLoginIdentity'))$('pmkLoginIdentity').textContent=loginText;if($('pmkCustomerIdentity'))$('pmkCustomerIdentity').textContent=customerText}
 function pmkCurrentCustomerLabel(){const code=String($('qCustomerKey')?.value||'').trim(),name=String($('qCustomer')?.value||'').trim();return name?(name+(code?'（'+code+'）':'')):(code||'未指定')}
 function pmkRefreshCustomerIdentity(){if(!PMK_D1_USER)return;const account=String(PMK_D1_USER.account||PMK_D1_USER.email||'').trim()||'已登入';const role=String(PMK_D1_USER.role||'').toLowerCase();pmkSetIdentityText('登入帳號：'+account+(role==='admin'?'（Admin）':''),(role==='admin'?'帶入客戶：':'客戶：')+pmkCurrentCustomerLabel())}
+function pmkClearAccountScopedState(){
+  localStorage.removeItem(ERP_CUSTOMER_KEY);
+  localStorage.removeItem('pmktools_customer_v1');
+  localStorage.removeItem('pmktools_shipping_v1');
+  localStorage.removeItem('pmktools_pending_order');
+  const clearIds=['qCustomerKey','qCustomerId','qCustomer','qContact','qTaxId','qPhone','qRefNo','qFax','qDepot','qBillAddress','qShipAddress'];
+  clearIds.forEach(id=>{if($(id))$(id).value=''});
+  if($('qPaymentTerm'))$('qPaymentTerm').value='依雙方約定';
+  let q={};try{q=JSON.parse(localStorage.getItem(QUOTE_KEY)||'{}')||{}}catch(_){}
+  clearIds.forEach(id=>delete q[id]);
+  delete q.customer; delete q.customer_snapshot; delete q.erp_customer_id;
+  q.qPaymentTerm='依雙方約定';
+  localStorage.setItem(QUOTE_KEY,JSON.stringify(q));
+}
 function pmkClearAdminStaleCustomer(){
   localStorage.removeItem(ERP_CUSTOMER_KEY);
   const clearIds=['qCustomerKey','qCustomerId','qCustomer','qContact','qTaxId','qPhone','qRefNo','qFax','qDepot','qBillAddress','qShipAddress'];
@@ -1006,20 +1021,34 @@ async function pmkLoadD1Identity(){
     const u=PMK_D1_USER=j.user;
     const role=String(u.role||'').toLowerCase();
     const account=String(u.account||u.email||'').trim()||'已登入';
+    const accountKey=String(u.id||u.account||u.email||'').trim().toLowerCase();
+    const previousKey=String(localStorage.getItem(PMK_ACCOUNT_SCOPE_KEY)||'').trim().toLowerCase();
+    if(previousKey && accountKey && previousKey!==accountKey){
+      pmkClearAccountScopedState();
+    }
+    if(accountKey)localStorage.setItem(PMK_ACCOUNT_SCOPE_KEY,accountKey);
     if(role==='customer'){
-      const code=String(u.customer_code||u.account||'').trim().toUpperCase();
-      let c=pmkFrontFindCustomer(code);
-      if(c){pmkFrontApplyCustomer(c)}else{
-        if($('qCustomerKey'))$('qCustomerKey').value=code;
-        if($('qCustomerId'))$('qCustomerId').value=String(u.customer_id||code);
-        if($('qCustomer'))$('qCustomer').value=String(u.customer_name||'');
-        if($('qPaymentTerm')&&u.payment_terms)$('qPaymentTerm').value=String(u.payment_terms);
-        localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify({customer_id:String(u.customer_id||code),key:code,name:String(u.customer_name||''),customer_name:String(u.customer_name||''),payment_terms:String(u.payment_terms||''),price_group_code:String(u.price_group_code||'')}));
+      // D1 is authoritative. Never fabricate a CRM customer_id from the login account.
+      let c=null;
+      try{
+        const cr=await fetch(ERP_API+'/api/pmk-current-customer',{headers:{Authorization:'Bearer '+token},cache:'no-store'});
+        const cj=await cr.json().catch(()=>({}));
+        if(cr.ok&&cj.ok!==false&&cj.customer)c=cj.customer;
+      }catch(_){c=null}
+      if(c?.customer_id){
+        pmkFrontApplyCustomer(c);
+        if($('qPaymentTerm'))$('qPaymentTerm').value=String(c.payment_terms||u.payment_terms||'信用卡');
+        localStorage.setItem(ERP_CUSTOMER_KEY,JSON.stringify(c));
         saveQuote();
+      }else{
+        pmkClearAccountScopedState();
+        if($('qPaymentTerm'))$('qPaymentTerm').value='信用卡';
       }
-      if($('qCustomerKey')){$('qCustomerKey').readOnly=true;$('qCustomerKey').title='客戶帳號登入後固定使用自己的客戶代號'}
+      if($('qCustomerKey')){$('qCustomerKey').readOnly=true;$('qCustomerKey').title='客戶帳號只能使用自己 D1 綁定的客戶資料'}
       if($('qCustomerKeyBtn')){$('qCustomerKeyBtn').disabled=true;$('qCustomerKeyBtn').style.opacity='.45';$('qCustomerKeyBtn').title='客戶帳號不可切換其他客戶'}
-      pmkSetIdentityText('登入帳號：'+account,'客戶：'+(u.customer_name||$('qCustomer')?.value||code)+'（'+code+'）');
+      const label=c?.name||u.customer_name||'信用卡帳號（未綁 CRM）';
+      const code=String(c?.customer_id||c?.customer_code||u.customer_code||'').trim();
+      pmkSetIdentityText('登入帳號：'+account,'客戶：'+label+(code?'（'+code+'）':''));
     }else if(role==='admin'){
       // Admin 身份與報價客戶徹底分離：每次進購物車先清除上次殘留客戶，只有本頁主動『套用』後才帶入。
       pmkClearAdminStaleCustomer();
@@ -1146,48 +1175,24 @@ function applyErpCustomer(c,force=true){
   saveQuote();
 }
 
-const PMK_SUPABASE_URL='https://jeajrwpmrgczimmrflxo.supabase.co';
-const PMK_SUPABASE_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXAiLCJyZWYiOiJqZWFqcnB3bXJnY3ppbW1yZmx4byIsInJvbGUiOiJhbm9uIiwiaWF0IjoxNzYwNzE4OTM5LCJleHAiOjIwNzYyOTQ5Mzl9.3iFXdHH0JEuk177_R4TGFJmOxYK9V8XctON6rDe7-Do';
-const PMK_SB=(window.supabase?window.supabase.createClient(PMK_SUPABASE_URL,PMK_SUPABASE_KEY):null);
-
 async function renderFrontHistory(){
   const panel=$('frontHistoryPanel'),rowsEl=$('frontHistoryRows'),meta=$('frontHistoryMeta');
-  if(!panel||!rowsEl)return;
-  panel.style.display='block';
+  if(!panel||!rowsEl)return;panel.style.display='block';
   rowsEl.innerHTML='<tr><td colspan="5" style="padding:18px;text-align:center;color:#64748b">讀取中…</td></tr>';
-
-  if(!PMK_SB){
-    rowsEl.innerHTML='<tr><td colspan="5" style="padding:18px;text-align:center;color:#b91c1c">無法啟動交易查詢。</td></tr>';
-    return;
-  }
-
-  const {data:{session}}=await PMK_SB.auth.getSession();
-  if(!session){
-    rowsEl.innerHTML='<tr><td colspan="5" style="padding:18px;text-align:center;color:#64748b">請先登入後查閱交易紀錄。</td></tr>';
-    return;
-  }
-
-  const {data,error}=await PMK_SB.from('line_gift_orders')
-    .select('*')
-    .eq('user_id',session.user.id)
-    .eq('status','sent')
-    .order('created_at',{ascending:false})
-    .limit(100);
-
-  if(error){
-    rowsEl.innerHTML=`<tr><td colspan="5" style="padding:18px;text-align:center;color:#b91c1c">${esc(error.message||'讀取失敗')}</td></tr>`;
-    return;
-  }
-
-  const rows=data||[];
-  if(meta)meta.textContent=`${$('qCustomer').value||'目前登入帳號'}｜已完成 ${rows.length} 筆`;
-  rowsEl.innerHTML=rows.map(o=>`<tr style="border-top:1px solid #eef2f7">
-    <td style="padding:9px">${new Date(o.fulfilled_at||o.updated_at||o.created_at).toLocaleString('zh-TW',{hour12:false})}</td>
-    <td style="padding:9px"><b>${esc(o.order_no||String(o.id||'').slice(0,12))}</b></td>
-    <td style="padding:9px">${esc(o.product_name||'')}</td>
-    <td style="padding:9px;text-align:right"><b>NT$ ${Number(o.cash_amount||0).toLocaleString('zh-TW')}</b></td>
-    <td style="padding:9px">${esc(o.tracking_no||'已完成')}</td>
-  </tr>`).join('')||'<tr><td colspan="5" style="padding:18px;text-align:center;color:#64748b">目前沒有已出貨交易紀錄。</td></tr>';
+  const token=pmkD1Token();if(!token){rowsEl.innerHTML='<tr><td colspan="5" style="padding:18px;text-align:center;color:#64748b">請先登入後查閱交易紀錄。</td></tr>';return}
+  try{
+    const r=await fetch(ERP_API+'/api/pmk-account/orders',{headers:{Authorization:'Bearer '+token},cache:'no-store'}),j=await r.json().catch(()=>({}));
+    if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));
+    const rows=Array.isArray(j.rows)?j.rows:[];
+    if(meta)meta.textContent=`${PMK_D1_USER?.account||PMK_D1_USER?.email||'目前登入帳號'}｜${rows.length} 筆`;
+    rowsEl.innerHTML=rows.map(o=>`<tr style="border-top:1px solid #eef2f7">
+      <td style="padding:9px">${esc(new Date(o.created_at||Date.now()).toLocaleString('zh-TW',{hour12:false}))}</td>
+      <td style="padding:9px"><b>${esc(o.order_no||String(o.id||'').slice(0,12))}</b></td>
+      <td style="padding:9px">${esc(o.customer_name||o.recipient_name||'PMKTOOLS 訂單')}</td>
+      <td style="padding:9px;text-align:right"><b>NT$ ${Number(o.total_amount||0).toLocaleString('zh-TW')}</b></td>
+      <td style="padding:9px">${esc(o.status||'confirmed')}</td>
+    </tr>`).join('')||'<tr><td colspan="5" style="padding:18px;text-align:center;color:#64748b">目前沒有交易紀錄。</td></tr>';
+  }catch(e){rowsEl.innerHTML=`<tr><td colspan="5" style="padding:18px;text-align:center;color:#b91c1c">${esc(e.message||'讀取失敗')}</td></tr>`}
 }
 
 async function loadErpCustomers(){
@@ -1557,6 +1562,17 @@ if($('qCustomerKey'))$('qCustomerKey').onkeydown=e=>{if(e.key==='Enter'){e.preve
 if($('saveFrontCustomer'))$('saveFrontCustomer').onclick=()=>pmkSaveFrontCustomer();
 if($('frontCustomerHistory'))$('frontCustomerHistory').onclick=renderFrontHistory;
 if($('frontHistoryClose'))$('frontHistoryClose').onclick=()=>{$('frontHistoryPanel').style.display='none'};
+
+if($('previewQuote'))$('previewQuote').onclick=()=>{
+  saveQuote();
+  const u=new URL(location.href);
+  u.searchParams.set('quote_preview','1');
+  window.open(u.toString(),'_blank','noopener');
+};
+if(new URL(location.href).searchParams.get('quote_preview')==='1'){
+  document.body.classList.add('quote-preview');
+  document.title='聯鑽企業有限公司｜報價單預覽';
+}
 
 $('printQuote').onclick=()=>exportQuotationExcel();
 loadQuote();
