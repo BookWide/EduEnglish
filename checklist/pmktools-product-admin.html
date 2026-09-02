@@ -2,7 +2,7 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>V58.3｜PMKTOOLS ERP 進銷存匯入＋Base64 防污染｜BookWide</title>
+<title>V58.4｜PMKTOOLS ERP HTML 智慧辨識匯入＋Base64 防污染｜BookWide</title>
 <style>
 :root{--nav:#0f1b31;--blue:#2563eb;--green:#06c755;--red:#dc2626;--ink:#14213d;--muted:#64748b;--line:#e5e7eb;--bg:#f5f7fb;--card:#fff}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",Arial,sans-serif}a{text-decoration:none;color:inherit}.top{background:var(--nav);color:#fff}.topin{max-width:1280px;margin:auto;padding:14px 18px;display:flex;align-items:center;gap:10px}.brand{font-weight:950;font-size:22px;margin-right:auto}.btn,.linkbtn{border:0;border-radius:12px;padding:10px 14px;font-weight:900;cursor:pointer}.linkbtn{border:1px solid rgba(255,255,255,.25)}.btn{background:var(--blue);color:#fff}.btn.green{background:var(--green)}.btn.gray{background:#fff;color:#334155;border:1px solid var(--line)}.btn.red{background:#fff;color:var(--red);border:1px solid #fecaca}.wrap{max-width:1280px;margin:auto;padding:22px 16px 50px}.head{display:flex;justify-content:space-between;gap:12px;align-items:end;margin-bottom:14px}.head h1{margin:0;font-size:28px}.head p{margin:5px 0 0;color:var(--muted)}.status{background:#fff;border:1px solid var(--line);border-radius:14px;padding:11px 13px;margin-bottom:14px;color:#475569}.panel{background:#fff;border:1px solid var(--line);border-radius:18px;padding:16px;margin-bottom:16px}.formgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.field{display:flex;flex-direction:column;gap:5px}.field.w2{grid-column:span 2}.field.w4{grid-column:1/-1}.field label{font-size:12px;color:var(--muted);font-weight:800}.field input,.field select{width:100%;border:1px solid var(--line);border-radius:11px;padding:10px 11px;font-size:14px;background:#fff}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.tools{display:flex;gap:8px;justify-content:space-between;align-items:center;margin-bottom:10px}.tools input{max-width:420px;width:100%;border:1px solid var(--line);border-radius:11px;padding:10px 12px}.tablewrap{overflow:auto;border:1px solid var(--line);border-radius:14px}table{width:100%;border-collapse:collapse;min-width:960px}th,td{padding:9px 10px;border-bottom:1px solid var(--line);font-size:13px;text-align:left;vertical-align:middle}th{background:#f8fafc;color:#334155;position:sticky;top:0}.thumb{width:58px;height:58px;border-radius:10px;object-fit:cover;background:#eef2f7}.name{font-weight:900;max-width:300px}.muted{color:var(--muted)}.badge{display:inline-flex;padding:4px 8px;border-radius:999px;font-size:11px;font-weight:900}.badge.on{background:#dcfce7;color:#166534}.badge.off{background:#f1f5f9;color:#64748b}.rowbtn{border:1px solid var(--line);background:#fff;border-radius:9px;padding:6px 9px;font-weight:800;cursor:pointer}.rowbtn.danger{color:var(--red);border-color:#fecaca}.gate{max-width:660px;margin:70px auto;background:#fff;border:1px solid var(--line);border-radius:20px;padding:28px;text-align:center}.gate h2{margin-top:0}@media(max-width:860px){.formgrid{grid-template-columns:1fr 1fr}.field.w2{grid-column:span 2}}@media(max-width:520px){.formgrid{grid-template-columns:1fr}.field.w2,.field.w4{grid-column:1}.head{display:block}.tools{display:block}.tools input{margin-bottom:8px}.topin{padding:10px}.brand{font-size:17px}.linkbtn{padding:8px 9px;font-size:12px}}
@@ -653,7 +653,7 @@
   <div class="v49-page-title">
     <div>
       <h1>ERP 商品進銷存匯入</h1>
-      <p>舊 ERP 商品資訊 HTML / ZIP：同一 Master SKU 匯入銷貨、進貨、供應商、平均成本與庫存。商品前台主檔 products.json 不動。</p>
+      <p>舊 ERP HTML / ZIP：自動辨認「客戶銷貨交易表」或「商品資訊頁」。銷貨表逐 SKU 匯入；商品資訊頁匯入進貨、供應商、平均成本與庫存。products.json 不動。</p>
     </div>
   </div>
 
@@ -5044,7 +5044,63 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
     return {qty,unit};
   }
 
-  function parseProductTradeHtml(text,name=''){
+  function parseCustomerSalesHtml(text,name=''){
+    const doc=new DOMParser().parseFromString(String(text||''),'text/html');
+    const customerLink=doc.querySelector('a#i_trans_peer_null_ignore[href*="/P_Customer/"]');
+    if(!customerLink)throw new Error('CUSTOMER_SALES_HEADER_NOT_FOUND');
+    const party=splitParty(customerLink.textContent);
+    const customerCode=party.code,customerName=party.name;
+    const rows=[...doc.querySelectorAll('table.jr tr')];
+    const docsBySku=new Map();
+    let currentDate='',currentOrder='';
+
+    for(const tr of rows){
+      const cells=[...tr.querySelectorAll(':scope > td')];
+      if(!cells.length)continue;
+
+      const orderAnchor=tr.querySelector('a#t[href*="/SaInvoice/"]');
+      if(orderAnchor){
+        currentOrder=invoiceNoFromHref(orderAnchor.getAttribute('href'),'sale')||String(orderAnchor.textContent||'').trim();
+        currentDate=isoDate(cells[0]?.textContent||'');
+        continue;
+      }
+
+      const item=tr.querySelector('a#t\\.shippingDetails\\.item, a[id="t.shippingDetails.item"]');
+      if(!item||!currentOrder||!currentDate)continue;
+      const href=decodeURIComponent(String(item.getAttribute('href')||''));
+      const skuFromHref=(href.match(/\/Things\/Items\/Items\/(?:[^/]+\/)*(.*)$/i)?.[1]||'').trim();
+      const itemText=String(item.textContent||'').replace(/\s+/g,' ').trim();
+      let sku=skuFromHref || itemText.split(/\s+/)[0];
+      let productName=itemText;
+      if(sku && itemText.startsWith(sku)) productName=itemText.slice(sku.length).trim();
+
+      const qty=num(cells[3]?.textContent);
+      const unit=String(cells[4]?.querySelector('[id="t.shippingDetails.unit"]')?.textContent||cells[4]?.textContent||'PCS').replace(/\s+/g,'').trim()||'PCS';
+      const currencyRaw=String(cells[5]?.querySelector('[id="t.shippingDetails.docOwner.currency"]')?.textContent||'').trim().toUpperCase();
+      const currency=currencyRaw==='NTD'?'TWD':(currencyRaw||'TWD');
+      const unitPrice=num(cells[6]?.textContent);
+      const lineTotal=num(cells[7]?.textContent);
+
+      if(!sku)continue;
+      if(!docsBySku.has(sku)){
+        docsBySku.set(sku,{
+          source_file:name,
+          source_type:'customer_sales',
+          product:{sku,product_name:productName,avg_unit_cost:0,avg_cost_currency:'TWD'},
+          sales:[],purchases:[],inventory:[]
+        });
+      }
+      docsBySku.get(sku).sales.push({
+        order_no:currentOrder,transaction_date:currentDate,currency,unit_price:unitPrice,
+        discount_pct:0,quantity:qty,unit,customer_code:customerCode,customer_name:customerName,
+        line_total:lineTotal
+      });
+    }
+    if(!docsBySku.size)throw new Error('CUSTOMER_SALES_ITEMS_NOT_FOUND');
+    return [...docsBySku.values()];
+  }
+
+  function parseSingleProductTradeHtml(text,name=''){
     const doc=new DOMParser().parseFromString(String(text||''),'text/html');
     const sku=String(doc.querySelector('input[name="i_inv_item"]')?.value||'').trim();
     if(!sku)throw new Error('SKU_NOT_FOUND');
@@ -5056,8 +5112,8 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
     let avgUnitCost=0;
     const avgTable=tableByTitle(doc,'平均單位成本');
     if(avgTable){
-      const m=String(avgTable.textContent||'').match(/平均單位成本[:：]?\s*([0-9,.]+)/);
-      if(m)avgUnitCost=num(m[1]);
+      const mm=String(avgTable.textContent||'').match(/平均單位成本[:：]?\s*([0-9,.]+)/);
+      if(mm)avgUnitCost=num(mm[1]);
     }
 
     const sales=[];
@@ -5071,12 +5127,12 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
         const orderNo=invoiceNoFromHref(a?.getAttribute('href'),'sale');
         if(!date||!orderNo)continue;
         const qu=tdQtyUnit(cells[3]);
-        const party=splitParty(cells[4].textContent);
+        const p=splitParty(cells[4].textContent);
         const unitPrice=num(cells[1].textContent);
         sales.push({
           order_no:orderNo,transaction_date:date,currency:tdCurrency(cells[1])||'TWD',
           unit_price:unitPrice,discount_pct:num(cells[2].textContent),quantity:qu.qty,unit:qu.unit,
-          customer_code:party.code,customer_name:party.name,gross_profit:num(cells[5].textContent),
+          customer_code:p.code,customer_name:p.name,gross_profit:num(cells[5].textContent),
           gross_margin_pct:num(cells[6].textContent),line_total:qu.qty*unitPrice
         });
       }
@@ -5093,12 +5149,12 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
         const purchaseNo=invoiceNoFromHref(a?.getAttribute('href'),'buy');
         if(!date||!purchaseNo)continue;
         const qu=tdQtyUnit(cells[3]);
-        const party=splitParty(cells[4].textContent);
+        const p=splitParty(cells[4].textContent);
         const unitPrice=num(cells[1].textContent);
         purchases.push({
           purchase_no:purchaseNo,transaction_date:date,currency:tdCurrency(cells[1]),
           unit_price:unitPrice,discount_pct:num(cells[2].textContent),quantity:qu.qty,unit:qu.unit,
-          supplier_code:party.code,supplier_name:party.name,line_total:qu.qty*unitPrice
+          supplier_code:p.code,supplier_name:p.name,line_total:qu.qty*unitPrice
         });
       }
     }
@@ -5112,7 +5168,7 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
         const depotText=String(cells[0].textContent||'').replace(/\s+/g,' ').trim();
         const dm=depotText.match(/^(\S+)\s*(.*)$/);
         const quantity=num(cells[1].textContent);
-        if(!depotText||!Number.isFinite(quantity))continue;
+        if(!depotText)continue;
         const unit=String(cells[1].textContent||'').match(/\b([A-Za-z]+)\b/)?.[1]?.toUpperCase()||'PCS';
         inventory.push({
           depot_code:dm?.[1]||'',depot_name:dm?.[2]||'',quantity,unit,
@@ -5121,11 +5177,20 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
       }
     }
 
-    return {
+    return [{
       source_file:name,
+      source_type:'product_trade',
       product:{sku,product_name:productName,avg_unit_cost:avgUnitCost,avg_cost_currency:'TWD'},
       sales,purchases,inventory
-    };
+    }];
+  }
+
+  function parseProductTradeHtml(text,name=''){
+    const doc=new DOMParser().parseFromString(String(text||''),'text/html');
+    const bodyText=String(doc.body?.textContent||'');
+    if(bodyText.includes('客戶銷貨交易表')) return parseCustomerSalesHtml(text,name);
+    if(doc.querySelector('input[name="i_inv_item"]')) return parseSingleProductTradeHtml(text,name);
+    throw new Error('UNSUPPORTED_ERP_HTML');
   }
 
   async function loadJsZip(){
@@ -5187,7 +5252,7 @@ $('subcategory_detail')?.addEventListener('change',()=>{const path=$('pmkTaxonom
       try{
         const files=await readTradeFiles(f),errs=[];
         for(const x of files){
-          try{tradeDocs.push(parseProductTradeHtml(x.text,x.name))}
+          try{tradeDocs.push(...parseProductTradeHtml(x.text,x.name))}
           catch(e){errs.push(`${x.name}: ${String(e?.message||e)}`)}
         }
         render();
