@@ -2858,9 +2858,9 @@ function renderVariationEditorV54(){
           <div class="v545-field" style="grid-column:1/-1">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0 2px;padding-top:10px;border-top:1px solid #dcdcde">
               <div style="font-weight:900;color:#1d2327">刀片技術資料｜切削三要素＋PMKNSH</div>
-              <button type="button" class="button" data-vtech-tgf32="${i}" style="white-space:nowrap">自動推導 TGF32 技術資料</button>
+              <button type="button" class="button" data-vtech-auto="${i}" style="white-space:nowrap">自動推導技術資料</button>
             </div>
-            <div style="margin-top:5px;font-size:11px;color:#646970">只在「刀片和材質」分類顯示；數值會同步到前台技術資料。原廠資料優先；資料不足時才用同系列/尺寸推導，推導值會保留來源與信心度。</div>
+            <div style="margin-top:5px;font-size:11px;color:#646970">只在「刀片和材質」分類顯示；原廠資料優先。缺資料時會先用同一商品／同系列相鄰尺寸推導；若該系列有內建參考表再使用參考表。推導值會標記來源與信心度。</div>
           </div>
           <div class="v545-field"><label>技術資料來源</label><select data-vtech-source="${i}">
             <option value="manual" ${pmkTechSourceTypeV35(v)==='manual'?'selected':''}>手動</option>
@@ -3008,7 +3008,7 @@ function buildVariationsV54(){
 }
 
 function pmkTgf32WidthV33(sku){
-  const s=String(sku||'').normalize('NFKC').toUpperCase().replace(/\s+/g,'');
+  const s=String(sku||'').toUpperCase().replace(/\s+/g,'');
   let m=s.match(/TGF32(?:R\/L|L\/R|[RL])?[-_]?([0-9]{3})(?!\d)/);
   if(m)return Number(m[1])/100;
   m=s.match(/TGF32(?:R\/L|L\/R|[RL])?[-_]?([0-9]+(?:\.[0-9]+)?)/);
@@ -3076,7 +3076,7 @@ function pmkTgf32CalcV33(sku){
     grade:'Carbide+TiN',
     geometry:'平口',
     use:'精加工',
-    pmknsh:{P:4,M:4,K:1,N:1,S:0,H:0},
+    pmknsh:{P:4,M:3,K:2,N:1,S:0,H:0},
     source:'TGF32_SUPPLIER_TABLE_V34'
   };
 }
@@ -3099,12 +3099,144 @@ function pmkSetPmkIfZeroV33(i,k,val){
   el.dispatchEvent(new Event('change',{bubbles:true}));
   return true;
 }
-function pmkApplyTgf32TechV32(i){
-  const draft=v54Variations?.[i]||{};
-  const sku=pmkTechVariationSkuV40({
-    ...draft,
-    sku:String(document.querySelector(`[data-vsku="${i}"]`)?.value||draft.sku||'').trim()
+
+function pmkTechNumericV313(v){
+  const n=Number(v);return Number.isFinite(n)&&n>0?n:null;
+}
+function pmkTechWidthGenericV313(v){
+  const t=v?.technical_params||{};
+  const direct=[
+    t.width,t.groove_width,t.cutting_width,v?.width,v?.groove_width,v?.cutting_width
+  ].map(pmkTechNumericV313).find(Boolean);
+  if(direct)return direct;
+
+  const text=[
+    v?.name,v?.label,v?.title,v?.spec,v?.description,v?.sku
+  ].filter(Boolean).join(' ').toUpperCase();
+
+  let m=text.match(/(?:槽寬|槽宽|GROOVE\s*WIDTH|WIDTH|W)\s*[:：=]?\s*(\d+(?:\.\d+)?)/i);
+  if(m){const n=Number(m[1]);if(Number.isFinite(n)&&n>0&&n<100)return n}
+
+  // Known compact width encoding such as TGF32R055 => 0.55 mm.
+  m=text.match(/TGF32(?:R\/L|L\/R|[RL])?[-_]?(\d{3})(?!\d)/i);
+  if(m)return Number(m[1])/100;
+
+  return null;
+}
+function pmkTechPointV313(v){
+  const t=v?.technical_params||{};
+  const width=pmkTechWidthGenericV313(v);
+  if(!Number.isFinite(width))return null;
+  const row={
+    width,
+    ap:pmkTechNumericV313(t.ap),
+    apMin:pmkTechNumericV313(t.ap_min),
+    apMax:pmkTechNumericV313(t.ap_max),
+    feed:pmkTechNumericV313(t.feed),
+    feedMin:pmkTechNumericV313(t.feed_min),
+    feedMax:pmkTechNumericV313(t.feed_max),
+    vc:pmkTechNumericV313(t.vc),
+    vcMin:pmkTechNumericV313(t.vc_min),
+    vcMax:pmkTechNumericV313(t.vc_max),
+    re:pmkTechNumericV313(t.re),
+    grade:String(t.grade||'').trim(),
+    geometry:String(t.geometry||'').trim(),
+    use:String(t.use||'').trim(),
+    pmknsh:{...(t.pmknsh||{})}
+  };
+  const hasNum=['ap','apMin','apMax','feed','feedMin','feedMax','vc','vcMin','vcMax','re'].some(k=>row[k]);
+  return hasNum?row:null;
+}
+function pmkTechInterpV313(target,lo,hi){
+  const ratio=lo.width===hi.width?0:(target-lo.width)/(hi.width-lo.width);
+  const lerp=(a,b,d=3)=>{
+    a=pmkTechNumericV313(a);b=pmkTechNumericV313(b);
+    if(a&&b)return Number((a+(b-a)*ratio).toFixed(d));
+    return a||b||null;
+  };
+  const nearest=Math.abs(target-lo.width)<=Math.abs(hi.width-target)?lo:hi;
+  return {
+    width:target,
+    ap:lerp(lo.ap,hi.ap,3),apMax:lerp(lo.apMax,hi.apMax,3),
+    feed:lerp(lo.feed,hi.feed,4),feedMin:lerp(lo.feedMin,hi.feedMin,4),feedMax:lerp(lo.feedMax,hi.feedMax,4),
+    vc:lerp(lo.vc,hi.vc,1),vcMin:lerp(lo.vcMin,hi.vcMin,1),vcMax:lerp(lo.vcMax,hi.vcMax,1),
+    re:lerp(lo.re,hi.re,3),
+    grade:nearest.grade,geometry:nearest.geometry,use:nearest.use,
+    pmknsh:{...(nearest.pmknsh||{})},
+    source:'SIBLING_INTERPOLATION'
+  };
+}
+function pmkTechSiblingInferV313(i){
+  const target=variationDrafts?.[i];
+  const width=pmkTechWidthGenericV313(target);
+  if(!target||!Number.isFinite(width))return null;
+
+  const pts=(variationDrafts||[])
+    .map((v,vi)=>vi===i?null:pmkTechPointV313(v))
+    .filter(Boolean)
+    .sort((a,b)=>a.width-b.width);
+  if(!pts.length)return null;
+
+  const exact=pts.find(p=>Math.abs(p.width-width)<1e-9);
+  if(exact)return {...exact,width,source:'SIBLING_EXACT'};
+
+  const lower=[...pts].reverse().find(p=>p.width<width);
+  const upper=pts.find(p=>p.width>width);
+  if(lower&&upper)return pmkTechInterpV313(width,lower,upper);
+
+  // Only one side available: use nearest sibling as reference, not cross-product guessing.
+  const nearest=pts.reduce((a,b)=>Math.abs(a.width-width)<=Math.abs(b.width-width)?a:b);
+  return {...nearest,width,source:'SIBLING_NEAREST'};
+}
+function pmkTechUniversalCalcV313(i){
+  const v=variationDrafts?.[i]||{};
+  const sku=String(document.querySelector(`[data-vsku="${i}"]`)?.value||v.sku||'').trim().toUpperCase();
+
+  // 1. Universal: same product / same family sibling technical data.
+  const sibling=pmkTechSiblingInferV313(i);
+  if(sibling)return {...sibling,sku,confidence:sibling.source==='SIBLING_INTERPOLATION'?80:85};
+
+  // 2. Registered family reference tables. TGF32 remains only one provider, not the whole engine.
+  const tgf=pmkTgf32CalcV33(sku);
+  if(tgf)return {...tgf,sku,confidence:80};
+
+  return null;
+}
+function pmkApplyUniversalTechV313(i){
+  const v=variationDrafts?.[i]||{};
+  const sku=String(document.querySelector(`[data-vsku="${i}"]`)?.value||v.sku||'').trim().toUpperCase();
+  const calc=pmkTechUniversalCalcV313(i);
+  if(!calc){
+    alert('這個規格目前沒有可推導來源。請先匯入同一商品／同系列至少一筆原廠技術資料，再按自動推導。');
+    return;
+  }
+
+  let n=0;
+  [
+    ['ap',calc.ap],['apmax',calc.apMax],['re',calc.re],
+    ['feed',calc.feed],['fmin',calc.feedMin],['fmax',calc.feedMax],
+    ['vc',calc.vc],['vcmin',calc.vcMin],['vcmax',calc.vcMax],
+    ['grade',calc.grade],['geometry',calc.geometry],['use',calc.use]
+  ].forEach(([k,val])=>{if(pmkSetIfBlankV33(`[data-vtech-${k}="${i}"]`,val))n++;});
+
+  ['P','M','K','N','S','H'].forEach(k=>{
+    if(pmkSetPmkIfZeroV33(i,k,calc.pmknsh?.[k]))n++;
   });
+
+  const srcSel=document.querySelector(`[data-vtech-source="${i}"]`);
+  if(srcSel&&(!srcSel.value||srcSel.value==='manual'))srcSel.value='inferred';
+  pmkSetIfBlankV33(`[data-vtech-confidence="${i}"]`,String(calc.confidence||80));
+
+  const w=pmkTechWidthGenericV313(v);
+  alert(
+    `${sku||'此規格'}${Number.isFinite(w)?`｜尺寸 ${w} mm`:''}\n`+
+    `已自動補 ${n} 個空白欄位。\n`+
+    `來源：${String(calc.source||'REFERENCE').replaceAll('_',' ')}\n`+
+    `原本手動／原廠已填資料不覆蓋。`
+  );
+}
+function pmkApplyTgf32TechV32(i){
+  const sku=String(document.querySelector(`[data-vsku="${i}"]`)?.value||variationDrafts?.[i]?.sku||'').trim().toUpperCase();
   const calc=pmkTgf32CalcV33(sku);
   if(!calc){alert('無法從這個型號讀取 TGF32 寬度；可辨識的 0.30～3.00 mm 規格會自動由鄰近資料推導。');return}
 
@@ -3132,17 +3264,14 @@ function pmkApplyTgf32TechV32(i){
   alert(
     `TGF32 ${sku}｜寬 ${calc.width.toFixed(2)} mm\n`+
     `ap ${calc.ap} mm｜fn ${calc.feed} (${calc.feedMin}～${calc.feedMax}) mm/rev｜Vc ${calc.vc} (${calc.vcMin}～${calc.vcMax}) m/min\n`+
-    `PMKNSH P4 M4 K1 N1（S/H=0）\n`+
+    `PMKNSH P4 M3 K2 N1（S/H=0）\n`+
     `已補 ${n} 個空白/0 欄位；你已手動填的非空白資料不覆蓋。`
   );
 }
 function pmkApplyAllTgf32TechV32(){
   let count=0,skuCount=0;
-  (v54Variations||[]).forEach((v,i)=>{
-    const sku=pmkTechVariationSkuV40({
-      ...v,
-      sku:String(document.querySelector(`[data-vsku="${i}"]`)?.value||v?.sku||'').trim()
-    });
+  (variationDrafts||[]).forEach((v,i)=>{
+    const sku=String(document.querySelector(`[data-vsku="${i}"]`)?.value||v?.sku||'').trim().toUpperCase();
     const calc=pmkTgf32CalcV33(sku);
     if(!calc)return;
     skuCount++;
@@ -3197,30 +3326,14 @@ function pmkTechRangeV34(v){
   return m?[Number(m[1]),Number(m[2])]:null;
 }
 function pmkTechFamilyFromSkuV34(sku){
-  const s=String(sku||'').normalize('NFKC').trim().toUpperCase().replace(/\s+/g,'');
-  if(/TGF32/.test(s))return 'TGF32';
+  const s=String(sku||'').trim().toUpperCase();
   const m=s.match(/^([A-Z]+(?:\d+)?)[RL]?\d{3}$/);
   return m?m[1]:s.replace(/[RL]?\d{3}$/,'');
 }
 function pmkTechWidthFromSkuV34(sku){
-  const s=String(sku||'').normalize('NFKC').trim().toUpperCase().replace(/\s+/g,'');
-  if(/TGF32/.test(s))return pmkTgf32WidthV33(s);
+  const s=String(sku||'').trim().toUpperCase();
   const m=s.match(/([RL]?)(\d{3})$/);
   return m?Number(m[2])/100:null;
-}
-function pmkTechVariationSkuV40(v){
-  const candidates=[
-    v?.sku,v?.source_sku_id,v?.image_model_code,v?.variation_name,
-    ...Object.values(v?.attributes||{})
-  ];
-  for(const raw of candidates){
-    const s=String(raw||'').normalize('NFKC').trim().toUpperCase();
-    if(!s)continue;
-    const compact=s.replace(/\s+/g,'');
-    const m=compact.match(/TGF32(?:R\/L|L\/R|[RL])?[-_]?(?:0?\.\d+|\d{3})(?!\d)/);
-    if(m&&Number.isFinite(pmkTgf32WidthV33(m[0])))return m[0];
-  }
-  return String(v?.sku||'').normalize('NFKC').trim().toUpperCase();
 }
 function pmkTechFamilyNormalizeV39(v){
   let s=String(v||'').trim().toUpperCase().replace(/\s+/g,'');
@@ -3346,7 +3459,7 @@ function pmkTechBuildPlanV34(){
   const plan=[];
   (products||[]).forEach((p,pi)=>{
     (Array.isArray(p.variations)?p.variations:[]).forEach((v,vi)=>{
-      const sku=pmkTechVariationSkuV40(v);if(!sku)return;
+      const sku=String(v?.sku||'').trim().toUpperCase();if(!sku)return;
       const res=pmkTechResolveV34(sku,rows);if(!res)return;
       plan.push({pi,vi,product_id:p.id,product_name:p.name,sku,...res,row:pmkTechFinalizeV34(res.row)});
     });
@@ -6013,10 +6126,10 @@ setTimeout(()=>{pmkLoadDrafts('customer').catch(()=>{});pmkLoadDrafts('supplier'
 ['category','subcategory'].forEach(id=>document.getElementById(id)?.addEventListener('change',()=>setTimeout(()=>renderVariationEditorV54(),0)));
 
 document.addEventListener('click',function(e){
-  const b=e.target.closest?.('[data-vtech-tgf32]');
+  const b=e.target.closest?.('[data-vtech-auto]');
   if(!b)return;
   e.preventDefault();e.stopPropagation();
-  pmkApplyTgf32TechV32(Number(b.dataset.vtechTgf32));
+  pmkApplyUniversalTechV313(Number(b.dataset.vtechAuto));
 });
 
 </script>
