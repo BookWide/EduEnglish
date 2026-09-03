@@ -2858,7 +2858,7 @@ function renderVariationEditorV54(){
           <div class="v545-field" style="grid-column:1/-1">
             <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0 2px;padding-top:10px;border-top:1px solid #dcdcde">
               <div style="font-weight:900;color:#1d2327">刀片技術資料｜切削三要素＋PMKNSH</div>
-              <button type="button" class="button" data-vtech-tgf32="${i}" style="white-space:nowrap">系統計算 TGF32 技術資料</button>
+              <button type="button" class="button" data-vtech-tgf32="${i}" style="white-space:nowrap">自動推導 TGF32 技術資料</button>
             </div>
             <div style="margin-top:5px;font-size:11px;color:#646970">只在「刀片和材質」分類顯示；數值會同步到前台技術資料。原廠資料優先；資料不足時才用同系列/尺寸推導，推導值會保留來源與信心度。</div>
           </div>
@@ -3011,16 +3011,43 @@ function pmkTgf32WidthV33(sku){
   const m=String(sku||'').toUpperCase().match(/TGF32[RL]?(\d{3})/);
   return m?Number(m[1])/100:null;
 }
-function pmkTgf32DepthReV33(width){
-  if(!Number.isFinite(width))return null;
-  // V3.4：依使用者提供的原廠/實務加工表，不再用舊值或平方根推 ap。
-  if(width>=0.30&&width<=0.40)return {ap:1.0,re:0.05,feedMin:0.01,feedMax:0.04,vcMin:50,vcMax:120};
-  if(width>=0.50&&width<=0.70)return {ap:1.4,re:0.05,feedMin:0.01,feedMax:0.04,vcMin:50,vcMax:120};
-  if(width>=0.75&&width<=0.95)return {ap:2.1,re:0.10,feedMin:0.02,feedMax:0.06,vcMin:50,vcMax:120};
-  if(width>=1.00&&width<=1.45)return {ap:2.5,re:0.10,feedMin:0.02,feedMax:0.06,vcMin:50,vcMax:120};
-  if(width>=1.50&&width<=2.45)return {ap:2.7,re:0.10,feedMin:0.03,feedMax:0.08,vcMin:50,vcMax:120};
-  if(width>=2.50&&width<=3.00)return {ap:3.1,re:0.15,feedMin:0.03,feedMax:0.08,vcMin:50,vcMax:120};
-  return null;
+function pmkTgf32DepthReV33(width){  const w=Number(width);
+  if(!Number.isFinite(w)||w<0.30||w>3.00)return null;
+
+  // 原廠參考表的已知節點；缺的寬度用左右鄰近節點線性推導，不留空排。
+  const nodes=[
+    {w:0.30,ap:1.0,re:0.05,feedMin:0.01,feedMax:0.04,vcMin:50,vcMax:120},
+    {w:0.40,ap:1.0,re:0.05,feedMin:0.01,feedMax:0.04,vcMin:50,vcMax:120},
+    {w:0.50,ap:1.4,re:0.05,feedMin:0.01,feedMax:0.04,vcMin:50,vcMax:120},
+    {w:0.70,ap:1.4,re:0.05,feedMin:0.01,feedMax:0.04,vcMin:50,vcMax:120},
+    {w:0.75,ap:2.1,re:0.10,feedMin:0.02,feedMax:0.06,vcMin:50,vcMax:120},
+    {w:0.95,ap:2.1,re:0.10,feedMin:0.02,feedMax:0.06,vcMin:50,vcMax:120},
+    {w:1.00,ap:2.5,re:0.10,feedMin:0.02,feedMax:0.06,vcMin:50,vcMax:120},
+    {w:1.45,ap:2.5,re:0.10,feedMin:0.02,feedMax:0.06,vcMin:50,vcMax:120},
+    {w:1.50,ap:2.7,re:0.10,feedMin:0.03,feedMax:0.08,vcMin:50,vcMax:120},
+    {w:2.45,ap:2.7,re:0.10,feedMin:0.03,feedMax:0.08,vcMin:50,vcMax:120},
+    {w:2.50,ap:3.1,re:0.15,feedMin:0.03,feedMax:0.08,vcMin:50,vcMax:120},
+    {w:3.00,ap:3.1,re:0.15,feedMin:0.03,feedMax:0.08,vcMin:50,vcMax:120}
+  ];
+  const exact=nodes.find(n=>Math.abs(n.w-w)<1e-9);
+  if(exact)return {...exact,inferred:false};
+
+  let lo=nodes[0],hi=nodes[nodes.length-1];
+  for(let i=0;i<nodes.length-1;i++){
+    if(w>nodes[i].w&&w<nodes[i+1].w){lo=nodes[i];hi=nodes[i+1];break}
+  }
+  const t=(w-lo.w)/(hi.w-lo.w);
+  const lerp=(a,b,d)=>Number((a+(b-a)*t).toFixed(d));
+  return {
+    w,
+    ap:lerp(lo.ap,hi.ap,2),
+    re:lerp(lo.re,hi.re,2),
+    feedMin:lerp(lo.feedMin,hi.feedMin,3),
+    feedMax:lerp(lo.feedMax,hi.feedMax,3),
+    vcMin:lerp(lo.vcMin,hi.vcMin,0),
+    vcMax:lerp(lo.vcMax,hi.vcMax,0),
+    inferred:true
+  };
 }
 function pmkRoundV33(n,d=3){
   const p=10**d; return Math.round((Number(n)+Number.EPSILON)*p)/p;
@@ -3071,7 +3098,7 @@ function pmkSetPmkIfZeroV33(i,k,val){
 function pmkApplyTgf32TechV32(i){
   const sku=String(document.querySelector(`[data-vsku="${i}"]`)?.value||variationDrafts?.[i]?.sku||'').trim().toUpperCase();
   const calc=pmkTgf32CalcV33(sku);
-  if(!calc){alert('這個規格不是可計算的 TGF32 系列，或寬度不在目前 0.30～3.00 mm 規格表。');return}
+  if(!calc){alert('無法從這個型號讀取 TGF32 寬度；可辨識的 0.30～3.00 mm 規格會自動由鄰近資料推導。');return}
 
   let n=0;
   [
@@ -3188,7 +3215,15 @@ function pmkTechNormalizeRowV34(raw){
     vc_min:pmkTechNumV34(x.vc_min)??vr?.[0]??null,
     vc_max:pmkTechNumV34(x.vc_max)??vr?.[1]??null,
     grade:String(x.grade||'').trim(),geometry:String(x.geometry||'').trim(),use:String(x.use||'').trim(),
-    pmknsh:Object.fromEntries(['P','M','K','N','S','H'].map(k=>[k,pmkTechNumV34(x[k])]))
+    pmknsh:Object.fromEntries(['P','M','K','N','S','H'].map(k=>[k,pmkTechNumV34(x[k])])),
+    material_params:Object.fromEntries(['P','M','K','N','S','H'].map(k=>{
+      const src=(raw?.material_params?.[k]&&typeof raw.material_params[k]==='object')?raw.material_params[k]:{};
+      const clean={};
+      ['feed','feed_min','feed_max','vc','vc_min','vc_max'].forEach(f=>{
+        const n=pmkTechNumV34(src[f]); if(n!==null)clean[f]=n;
+      });
+      return [k,clean];
+    }))
   };
 }
 function pmkTechParseDelimitedV34(text){
@@ -3290,9 +3325,18 @@ function pmkTechMergeParamsV34(old,row,overwrite=false,meta={}){
     if(overwrite||blank)out[dst]=String(val);
   });
   ['P','M','K','N','S','H'].forEach(k=>{
-    const val=row.pmknsh?.[k];if(val===null||val===undefined||!Number.isFinite(Number(val)))return;
-    const cur=Number(out.pmknsh?.[k]||0);
-    if(overwrite||cur===0)out.pmknsh[k]=Number(val);
+    const val=row.pmknsh?.[k];if(val!==null&&val!==undefined&&Number.isFinite(Number(val))){
+      const cur=Number(out.pmknsh?.[k]||0);
+      if(overwrite||cur===0)out.pmknsh[k]=Number(val);
+    }
+    out.material_params=out.material_params||{};
+    out.material_params[k]={...(out.material_params[k]||{})};
+    const src=row.material_params?.[k]||{};
+    ['feed','feed_min','feed_max','vc','vc_min','vc_max'].forEach(f=>{
+      const val2=src[f]; if(val2===null||val2===undefined||val2==='')return;
+      const blank=out.material_params[k][f]===null||out.material_params[k][f]===undefined||String(out.material_params[k][f]).trim()==='';
+      if(overwrite||blank)out.material_params[k][f]=String(val2);
+    });
   });
   out.source_meta={type:(Number(meta.confidence||0)>=95?'factory':'inferred'),label:meta.mode||'',confidence:Number(meta.confidence||0),imported_at:new Date().toISOString()};
   return out;
@@ -3322,42 +3366,102 @@ async function pmkTechApplyBatchV34(){
   }catch(e){alert('批量寫入失敗：'+String(e?.message||e));setStatus('❌ 技術資料批量失敗：'+String(e?.message||e))}
   finally{if(btn){btn.disabled=false;btn.textContent='確認批量寫入後台'}}
 }
+let pmkTechAiReadyV36=false;
+let pmkTechAiSourceV36=null;
+
+async function pmkTechAnalyzeFileV36(){
+  const file=document.getElementById('pmkTechFileV36')?.files?.[0];
+  if(!file)return alert('請先選一張原廠照片或 PDF。');
+  const btn=document.getElementById('pmkTechAnalyzeV36');
+  const status=document.getElementById('pmkTechAiStatusV36');
+  pmkTechAiReadyV36=false;pmkTechBatchRowsV34=[];pmkTechBatchPlanV34=[];
+  const apply=document.getElementById('pmkTechBatchApplyV34');if(apply)apply.disabled=true;
+  if(btn){btn.disabled=true;btn.textContent='AI 辨識中…'}
+  if(status)status.textContent='正在讀取原廠資料，尚未寫入後台…';
+  try{
+    const fd=new FormData();fd.append('file',file,file.name);
+    const j=await productAdminPostFormV36('/api/pmk-tech-params-ai',fd);
+    pmkTechBatchRowsV34=(Array.isArray(j.rows)?j.rows:[]).map(pmkTechNormalizeRowV34).filter(r=>r.sku||r.family);
+    pmkTechAiSourceV36={name:file.name,summary:j.source_summary||'',model:j.model||''};
+    if(!pmkTechBatchRowsV34.length)throw new Error('照片/PDF 有讀到，但沒有辨識出可用的 SKU 或系列參數');
+    pmkTechRenderPreviewV34();
+    pmkTechAiReadyV36=true;
+    if(apply)apply.disabled=pmkTechBatchPlanV34.length===0;
+    if(status)status.textContent=`✅ AI 已辨識：${pmkTechBatchRowsV34.length} 筆來源資料。請先檢查下方預覽，再決定是否寫入。`;
+  }catch(e){
+    if(status)status.textContent='❌ '+String(e?.message||e);
+    const box=document.getElementById('pmkTechBatchPreviewV34');if(box)box.innerHTML='<div class="muted">沒有可寫入資料。</div>';
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='AI 辨識照片 / PDF'}
+  }
+}
+
+function pmkTechPreviewFileV36(file){
+  const box=document.getElementById('pmkTechSourcePreviewV36');if(!box)return;
+  box.innerHTML='';
+  if(!file)return;
+  if(/^image\//i.test(file.type)){
+    const img=document.createElement('img');
+    img.src=URL.createObjectURL(file);
+    img.style.cssText='display:block;max-width:100%;max-height:260px;object-fit:contain;border-radius:8px;margin:auto';
+    box.appendChild(img);
+  }else{
+    box.innerHTML=`<div style="padding:18px;text-align:center"><b>PDF</b><br>${pmkTechEscV34(file.name)}<br><span class="muted">${Math.round(file.size/1024).toLocaleString()} KB</span></div>`;
+  }
+}
+
+async function pmkTechApplyBatchV36(){
+  if(!pmkTechAiReadyV36)return alert('請先完成 AI 辨識與預覽，不能拿舊資料或範例直接寫入。');
+  return pmkTechApplyBatchV34();
+}
+
 function pmkTechOpenBatchV34(){
   let m=document.getElementById('pmkTechBatchModalV34');
   if(!m){
     m=document.createElement('div');m.id='pmkTechBatchModalV34';
     m.style.cssText='position:fixed;inset:0;z-index:999999;background:rgba(15,23,42,.72);display:flex;align-items:center;justify-content:center;padding:20px';
-    m.innerHTML=`<div style="width:min(1180px,96vw);max-height:92vh;overflow:auto;background:#fff;border-radius:12px;padding:18px;box-shadow:0 20px 70px rgba(0,0,0,.35)">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px"><h2 style="margin:0">原廠加工參數｜批量匯入＋有限資料推導</h2><button type="button" id="pmkTechBatchCloseV34" class="btn gray">關閉</button></div>
-      <p class="muted">可上傳 CSV / TSV / JSON，或直接從 Excel 複製貼上。系統先預覽，不會直接寫入。匹配順序：精確 SKU → 同系列寬度區間 → 兩個鄰近區間線性推導。</p>
-      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><input type="file" id="pmkTechBatchFileV34" accept=".csv,.tsv,.txt,.json,text/csv,text/plain,application/json"><button type="button" class="btn gray" id="pmkTechTemplateV34">填入 TGF32 範例</button><label style="margin-left:auto"><input type="checkbox" id="pmkTechBatchOverwriteV34"> 覆蓋既有技術數據</label></div>
-      <textarea id="pmkTechBatchTextV34" style="width:100%;height:180px;margin-top:10px;font:12px/1.45 ui-monospace,Consolas,monospace" placeholder="family,width_min,width_max,ap,re,vc_min,vc_max,feed_min,feed_max,grade,geometry,use,P,M,K,N,S,H"></textarea>
-      <div style="display:flex;align-items:center;gap:10px;margin:10px 0"><button type="button" class="btn" id="pmkTechBatchParseV34">解析＋預覽</button><b id="pmkTechBatchSummaryV34"></b><button type="button" class="btn" id="pmkTechBatchApplyV34" style="margin-left:auto;background:#166534;color:#fff">確認批量寫入後台</button></div>
-      <div id="pmkTechBatchPreviewV34" style="max-height:390px;overflow:auto;border:1px solid #dbe2ea;border-radius:8px;padding:8px"></div>
-      <div class="muted" style="margin-top:8px">推導值會標示信心度並寫入 source_meta；Grade / Geometry / PMKNSH 不會跨不同來源亂推，只有來源資料明確或兩側一致才繼承。</div>
+    m.innerHTML=`<div style="width:min(1120px,96vw);max-height:92vh;overflow:auto;background:#fff;border-radius:12px;padding:18px;box-shadow:0 20px 70px rgba(0,0,0,.35)">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+        <h2 style="margin:0">原廠加工參數匯入 <span style="font-size:12px;color:#64748b">V3.8</span></h2>
+        <button type="button" id="pmkTechBatchCloseV34" class="btn gray">關閉</button>
+      </div>
+      <div style="margin:8px 0 14px;color:#64748b">上傳刀盒照片、規格標籤或原廠 PDF。AI 先辨識並預覽；你確認後才會寫入後台。</div>
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <input type="file" id="pmkTechFileV36" accept="image/jpeg,image/png,image/webp,.pdf,application/pdf">
+        <button type="button" class="btn" id="pmkTechAnalyzeV36" style="background:#2563eb;color:#fff">AI 辨識照片 / PDF</button>
+        <label style="margin-left:auto"><input type="checkbox" id="pmkTechBatchOverwriteV34"> 覆蓋既有技術數據</label>
+      </div>
+      <div id="pmkTechSourcePreviewV36" style="margin-top:12px;min-height:72px;border:1px dashed #cbd5e1;border-radius:8px;background:#f8fafc;display:flex;align-items:center;justify-content:center"><span class="muted">尚未選擇檔案</span></div>
+      <div id="pmkTechAiStatusV36" style="margin:10px 0;font-weight:800;color:#475569">尚未辨識，不能寫入。</div>
+      <div style="display:flex;align-items:center;gap:10px;margin:10px 0">
+        <b id="pmkTechBatchSummaryV34">來源 0 列｜匹配 0 SKU</b>
+        <button type="button" class="btn" id="pmkTechBatchApplyV34" disabled style="margin-left:auto;background:#166534;color:#fff">確認寫入後台</button>
+      </div>
+      <div id="pmkTechBatchPreviewV34" style="max-height:420px;overflow:auto;border:1px solid #dbe2ea;border-radius:8px;padding:8px"><div class="muted">AI 辨識後才會出現參數預覽。</div></div>
+      <div class="muted" style="margin-top:8px">原廠有數據就直接採用；缺少的欄位保持空白。只有同系列且有足夠鄰近資料時才標示「推導」，不冒充原廠值。</div>
     </div>`;
     document.body.appendChild(m);
     m.querySelector('#pmkTechBatchCloseV34').onclick=()=>m.style.display='none';
     m.addEventListener('click',e=>{if(e.target===m)m.style.display='none'});
-    m.querySelector('#pmkTechBatchFileV34').onchange=async e=>{
-      const f=e.target.files?.[0];if(!f)return;
-      m.querySelector('#pmkTechBatchTextV34').value=await f.text();
+    m.querySelector('#pmkTechFileV36').onchange=e=>{
+      const f=e.target.files?.[0]||null;
+      pmkTechAiReadyV36=false;pmkTechBatchRowsV34=[];pmkTechBatchPlanV34=[];pmkTechAiSourceV36=null;
+      m.querySelector('#pmkTechBatchApplyV34').disabled=true;
+      m.querySelector('#pmkTechBatchSummaryV34').textContent='來源 0 列｜匹配 0 SKU';
+      m.querySelector('#pmkTechBatchPreviewV34').innerHTML='<div class="muted">請按「AI 辨識照片 / PDF」。</div>';
+      m.querySelector('#pmkTechAiStatusV36').textContent='已選擇新檔案，尚未辨識，不能寫入。';
+      pmkTechPreviewFileV36(f);
     };
-    m.querySelector('#pmkTechTemplateV34').onclick=()=>{
-      m.querySelector('#pmkTechBatchTextV34').value=`family,width_min,width_max,ap,re,vc_min,vc_max,feed_min,feed_max,grade,geometry,use,P,M,K,N,S,H
-TGF32,0.30,0.40,1.0,0.05,50,120,0.01,0.04,Carbide+TiN,平口,精加工,4,3,2,1,0,0
-TGF32,0.50,0.70,1.4,0.05,50,120,0.01,0.04,Carbide+TiN,平口,精加工,4,3,2,1,0,0
-TGF32,0.75,0.95,2.1,0.10,50,120,0.02,0.06,Carbide+TiN,平口,精加工,4,3,2,1,0,0
-TGF32,1.00,1.45,2.5,0.10,50,120,0.02,0.06,Carbide+TiN,平口,精加工,4,3,2,1,0,0
-TGF32,1.50,2.45,2.7,0.10,50,120,0.03,0.08,Carbide+TiN,平口,精加工,4,3,2,1,0,0
-TGF32,2.50,3.00,3.1,0.15,50,120,0.03,0.08,Carbide+TiN,平口,精加工,4,3,2,1,0,0`;
-    };
-    m.querySelector('#pmkTechBatchParseV34').onclick=()=>{
-      pmkTechBatchRowsV34=pmkTechParseInputV34(m.querySelector('#pmkTechBatchTextV34').value);
-      pmkTechRenderPreviewV34();
-    };
-    m.querySelector('#pmkTechBatchApplyV34').onclick=pmkTechApplyBatchV34;
+    m.querySelector('#pmkTechAnalyzeV36').onclick=pmkTechAnalyzeFileV36;
+    m.querySelector('#pmkTechBatchApplyV34').onclick=pmkTechApplyBatchV36;
   }
+  pmkTechAiReadyV36=false;pmkTechBatchRowsV34=[];pmkTechBatchPlanV34=[];pmkTechAiSourceV36=null;
+  m.querySelector('#pmkTechBatchApplyV34').disabled=true;
+  m.querySelector('#pmkTechBatchSummaryV34').textContent='來源 0 列｜匹配 0 SKU';
+  m.querySelector('#pmkTechBatchPreviewV34').innerHTML='<div class="muted">AI 辨識後才會出現參數預覽。</div>';
+  m.querySelector('#pmkTechAiStatusV36').textContent='尚未辨識，不能寫入。';
+  const fi=m.querySelector('#pmkTechFileV36');if(fi)fi.value='';
+  m.querySelector('#pmkTechSourcePreviewV36').innerHTML='<span class="muted">尚未選擇檔案</span>';
   m.style.display='flex';
 }
 
@@ -4300,6 +4404,15 @@ async function productAdminPost(path,body){
   const {data:{session},error}=await SB.auth.getSession();if(error)throw error;if(!session?.access_token)throw new Error('登入狀態失效');
   const r=await fetch(HIKING_API_BASE+path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session.access_token},body:JSON.stringify(body||{}),cache:'no-store'});
   const j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));return j;
+}
+
+async function productAdminPostFormV36(path,form){
+  const {data:{session},error}=await SB.auth.getSession();
+  if(error)throw error;if(!session?.access_token)throw new Error('登入狀態失效');
+  const r=await fetch(HIKING_API_BASE+path,{method:'POST',headers:{'Authorization':'Bearer '+session.access_token},body:form,cache:'no-store'});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok||j.ok===false)throw new Error(j.message||j.error||('HTTP '+r.status));
+  return j;
 }
 async function productAdminGet(path){
   const {data:{session},error}=await SB.auth.getSession();
