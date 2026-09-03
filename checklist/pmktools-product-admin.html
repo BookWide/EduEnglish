@@ -3139,19 +3139,85 @@ function pmkTechWebSetV3282(i,key,val){
   if(!el)return 0;
   el.value=String(val);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return 1;
 }
+
+/* V3.28.9：AI 搜尋回填不再相信舊的畫面 index。
+   搜尋開始時鎖定 variation id / source_sku_id / SKU；
+   搜尋完成後重新定位目前那一列，且 SKU 必須仍完全相同。 */
+function pmkTechWebNormSkuV3289(v){
+  return String(v||'').trim().toUpperCase();
+}
+function pmkTechWebTargetV3289(i){
+  const v=variationDrafts?.[i]||{};
+  return {
+    id:String(v.id||'').trim(),
+    source_sku_id:String(document.querySelector(`[data-vsourcesku="${i}"]`)?.value||v.source_sku_id||'').trim(),
+    sku:pmkTechWebNormSkuV3289(document.querySelector(`[data-vsku="${i}"]`)?.value||v.sku||''),
+    name:String(document.querySelector(`[data-vname="${i}"]`)?.value||v.variation_name||'').trim()
+  };
+}
+function pmkTechWebFindIndexV3289(target){
+  const list=Array.isArray(variationDrafts)?variationDrafts:[];
+  let idx=-1;
+
+  // 先用真正 variation id，避免排序/重畫面後 index 漂移。
+  if(target.id){
+    idx=list.findIndex(v=>String(v?.id||'').trim()===target.id);
+  }
+  // 淘寶/供應商 source SKU ID 次之。
+  if(idx<0&&target.source_sku_id){
+    idx=list.findIndex(v=>String(v?.source_sku_id||'').trim()===target.source_sku_id);
+  }
+  // 最後才用 SKU；必須 exact match。
+  if(idx<0&&target.sku){
+    const hits=[];
+    list.forEach((v,n)=>{
+      const live=pmkTechWebNormSkuV3289(document.querySelector(`[data-vsku="${n}"]`)?.value||v?.sku||'');
+      if(live===target.sku)hits.push(n);
+    });
+    if(hits.length===1)idx=hits[0];
+  }
+  if(idx<0)return -1;
+
+  // 即使 id 找到了，也再次確認「目前畫面 SKU」仍是原本搜尋的 SKU。
+  const liveSku=pmkTechWebNormSkuV3289(
+    document.querySelector(`[data-vsku="${idx}"]`)?.value||list[idx]?.sku||''
+  );
+  return liveSku===target.sku?idx:-1;
+}
+function pmkTechWebSourceTextV3289(s){
+  if(typeof s==='string')return s;
+  if(!s||typeof s!=='object')return '';
+  return [s.title,s.url].filter(Boolean).join('｜');
+}
 async function pmkSearchWebTechV3282(i,btn){
-  const sku=String(document.querySelector(`[data-vsku="${i}"]`)?.value||variationDrafts?.[i]?.sku||'').trim();
-  const name=String(document.querySelector(`[data-vname="${i}"]`)?.value||variationDrafts?.[i]?.variation_name||'').trim();
+  const target=pmkTechWebTargetV3289(i);
+  const sku=target.sku;
+  const name=target.name;
   if(!sku)return alert('這個規格沒有 SKU，無法搜尋。');
+
   const old=btn?.textContent||'AI 網路搜尋技術資料';
-  if(btn){btn.disabled=true;btn.textContent='AI 正在查網路…'}
+  if(btn){btn.disabled=true;btn.textContent=`AI 正在查 ${sku}…`}
   try{
     const j=await productAdminPost('/api/pmk-tech-web-search',{sku,name});
+
+    // API 回來的 SKU 也必須等於剛才鎖定的 SKU。
+    const returnedSku=pmkTechWebNormSkuV3289(j?.sku||sku);
+    if(returnedSku!==sku){
+      return alert(`停止回填：搜尋回傳 SKU ${returnedSku||'空白'}，但你按下的是 ${sku}。`);
+    }
+
+    // 重新找目前畫面中的同一個 variation，不再使用舊 i。
+    const liveI=pmkTechWebFindIndexV3289(target);
+    if(liveI<0){
+      return alert(`停止回填：${sku} 搜尋期間規格位置或 SKU 已改變。\n為避免資料寫錯規格，本次結果沒有寫入。`);
+    }
+
     const d=j?.data||{};
-    const ev=Array.isArray(d.evidence)?d.evidence:[];
     const sources=Array.isArray(j?.sources)?j.sources:[];
+    const sourceLines=sources.slice(0,6).map(pmkTechWebSourceTextV3289).filter(Boolean);
     const lines=[
-      `SKU：${sku}`,
+      `鎖定規格：${sku}`,
+      `目前位置：第 ${liveI+1} 筆（搜尋開始時第 ${i+1} 筆）`,
       `來源等級：${d.source_type||'reference'}｜信心度：${d.confidence??0}%`,
       d.summary?`摘要：${d.summary}`:'',
       '',
@@ -3160,43 +3226,50 @@ async function pmkSearchWebTechV3282(i,btn){
       `Vc：${d.vc??'-'}　範圍 ${d.vc_min??'-'}～${d.vc_max??'-'}`,
       `hex：${d.hex??'-'}　Grade：${d.grade||'-'}　Geometry：${d.geometry||'-'}　RE：${d.re??'-'}`,
       '',
-      sources.length?`找到來源：\n${sources.slice(0,6).join('\n')}`:'沒有回傳可核對網址。',
+      sourceLines.length?`找到來源：\n${sourceLines.join('\n')}`:'沒有回傳可核對網址。',
       '',
-      '按「確定」才把找到的資料填入目前規格；取消不修改。'
+      `按「確定」只會填入 ${sku} 這一筆；取消不修改。`
     ].filter(x=>x!==null).join('\n');
     if(!confirm(lines))return;
 
+    // 使用重新定位後的 liveI 回填。
     let n=0;
     [['ap',d.ap],['apmin',d.ap_min],['apmax',d.ap_max],['feed',d.feed],['fmin',d.feed_min],['fmax',d.feed_max],
      ['vc',d.vc],['vcmin',d.vc_min],['vcmax',d.vc_max],['hex',d.hex],['grade',d.grade],['geometry',d.geometry],['use',d.use],['re',d.re]]
-     .forEach(([k,v])=>n+=pmkTechWebSetV3282(i,k,v));
+     .forEach(([k,v])=>n+=pmkTechWebSetV3282(liveI,k,v));
 
-    const src=document.querySelector(`[data-vtech-source="${i}"]`);
+    const src=document.querySelector(`[data-vtech-source="${liveI}"]`);
     if(src)src.value=['factory','reference','inferred'].includes(d.source_type)?d.source_type:'reference';
-    pmkTechWebSetV3282(i,'confidence',Number(d.confidence||0));
+    pmkTechWebSetV3282(liveI,'confidence',Number(d.confidence||0));
 
     if(d.pmknsh&&typeof d.pmknsh==='object'){
       ['P','M','K','N','S','H'].forEach(k=>{
-        const el=document.querySelector(`[data-vtech-pmk="${k}"][data-vtech-i="${i}"]`);
+        const el=document.querySelector(`[data-vtech-pmk="${k}"][data-vtech-i="${liveI}"]`);
         if(el&&d.pmknsh[k]!==undefined){el.value=String(Number(d.pmknsh[k]||0));n++}
       });
     }
 
-    // material_params fields: reuse existing controls if present.
     if(d.material_params&&typeof d.material_params==='object'){
       for(const k of ['P','M','K','N','S','H']){
         const mp=d.material_params[k]||{};
         for(const [field,val] of Object.entries(mp)){
-          const el=document.querySelector(`[data-vtech-mat="${k}"][data-vtech-mat-field="${field}"][data-vtech-i="${i}"]`);
+          const el=document.querySelector(`[data-vtech-mat="${k}"][data-vtech-mat-field="${field}"][data-vtech-i="${liveI}"]`);
           if(el&&val!==null&&val!==undefined&&val!==''){el.value=String(val);n++}
         }
       }
     }
-    alert(`已填入 ${n} 個欄位。\n請檢查後再按「更新商品」正式儲存。`);
+
+    // 最後再驗一次，避免 confirm 期間使用者又改了 SKU。
+    const finalSku=pmkTechWebNormSkuV3289(document.querySelector(`[data-vsku="${liveI}"]`)?.value||variationDrafts?.[liveI]?.sku||'');
+    if(finalSku!==sku){
+      alert(`警告：${sku} 回填後偵測到 SKU 已改成 ${finalSku||'空白'}，請不要儲存並重新整理頁面。`);
+      return;
+    }
+    alert(`已鎖定並填入 ${sku}：${n} 個欄位。\n請檢查後再按「更新商品」正式儲存。`);
   }catch(e){
     alert('AI 網路搜尋失敗：'+String(e?.message||e));
   }finally{
-    if(btn){btn.disabled=false;btn.textContent=old}
+    if(btn&&btn.isConnected){btn.disabled=false;btn.textContent=old}
   }
 }
 function pmkApplyTgf32TechV32(i){
