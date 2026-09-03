@@ -1032,12 +1032,47 @@ function pmkPrintTechLabelV291(){
   const avg=(a,b)=>{a=n(a);b=n(b);return a&&b?(a+b)/2:(a||b||null)};
   const fmt=(x,d=3)=>String(Number(Number(x).toFixed(d)));
 
-  function tgfWidth(s){
-    const m=String(s||'').toUpperCase().replace(/\s+/g,'').match(/TGF32(?:R\/L|L\/R|[RL])?[-_]?([0-9]{3})(?!\d)/);
+  function widthOf(v){
+    const tt=v?.technical_params||{};
+    const direct=[tt.width,tt.groove_width,tt.cutting_width,v?.width,v?.groove_width,v?.cutting_width]
+      .map(n).find(Boolean);
+    if(direct)return direct;
+    const text=[v?.name,v?.label,v?.title,v?.spec,v?.description,v?.sku].filter(Boolean).join(' ').toUpperCase();
+    let m=text.match(/(?:槽寬|槽宽|GROOVE\s*WIDTH|WIDTH|W)\s*[:：=]?\s*(\d+(?:\.\d+)?)/i);
+    if(m){const x=Number(m[1]);if(Number.isFinite(x)&&x>0&&x<100)return x}
+    m=text.match(/TGF32(?:R\/L|L\/R|[RL])?[-_]?(\d{3})(?!\d)/i);
     return m?Number(m[1])/100:null;
   }
-  function tgfSpec(w){
-    if(!Number.isFinite(w)||w<.30||w>3)return null;
+  function pointOf(x){
+    const tt=x?.technical_params||{},w=widthOf(x);
+    if(!Number.isFinite(w))return null;
+    const r={w,
+      ap:n(tt.ap),ap1:n(tt.ap_min),ap2:n(tt.ap_max),
+      f:n(tt.feed),f1:n(tt.feed_min),f2:n(tt.feed_max),
+      vc:n(tt.vc),v1:n(tt.vc_min),v2:n(tt.vc_max)
+    };
+    return Object.values(r).some((q,k)=>k&&q)?r:null;
+  }
+  function siblingSpec(target){
+    const w=widthOf(target);if(!Number.isFinite(w))return null;
+    const pts=(P?.variations||[]).filter(x=>x!==target).map(pointOf).filter(Boolean).sort((a,b)=>a.w-b.w);
+    if(!pts.length)return null;
+    const ex=pts.find(p=>Math.abs(p.w-w)<1e-9);if(ex)return ex;
+    const lo=[...pts].reverse().find(p=>p.w<w),hi=pts.find(p=>p.w>w);
+    if(!lo&&!hi)return null;
+    if(!lo||!hi)return lo||hi;
+    const q=(w-lo.w)/(hi.w-lo.w),L=(a,b)=>{
+      a=n(a);b=n(b);if(a&&b)return a+(b-a)*q;return a||b||null;
+    };
+    return {w,
+      ap:L(lo.ap,hi.ap),ap1:L(lo.ap1,hi.ap1),ap2:L(lo.ap2,hi.ap2),
+      f:L(lo.f,hi.f),f1:L(lo.f1,hi.f1),f2:L(lo.f2,hi.f2),
+      vc:L(lo.vc,hi.vc),v1:L(lo.v1,hi.v1),v2:L(lo.v2,hi.v2)
+    };
+  }
+  function tgfFallback(s){
+    const m=String(s||'').toUpperCase().replace(/\s+/g,'').match(/TGF32(?:R\/L|L\/R|[RL])?[-_]?(\d{3})(?!\d)/);
+    const w=m?Number(m[1])/100:null;if(!Number.isFinite(w)||w<.30||w>3)return null;
     const a=[
       {w:.30,ap:1,f1:.01,f2:.04,v1:50,v2:120},{w:.40,ap:1,f1:.01,f2:.04,v1:50,v2:120},
       {w:.50,ap:1.4,f1:.01,f2:.04,v1:50,v2:120},{w:.70,ap:1.4,f1:.01,f2:.04,v1:50,v2:120},
@@ -1046,15 +1081,13 @@ function pmkPrintTechLabelV291(){
       {w:1.5,ap:2.7,f1:.03,f2:.08,v1:50,v2:120},{w:2.45,ap:2.7,f1:.03,f2:.08,v1:50,v2:120},
       {w:2.5,ap:3.1,f1:.03,f2:.08,v1:50,v2:120},{w:3,ap:3.1,f1:.03,f2:.08,v1:50,v2:120}
     ];
-    let lo=a[0],hi=a[a.length-1];
-    const ex=a.find(q=>Math.abs(q.w-w)<1e-9); if(ex)lo=hi=ex;
-    else for(let i=0;i<a.length-1;i++)if(w>a[i].w&&w<a[i+1].w){lo=a[i];hi=a[i+1];break}
+    let lo=a[0],hi=a[a.length-1],ex=a.find(x=>Math.abs(x.w-w)<1e-9);
+    if(ex)lo=hi=ex;else for(let i=0;i<a.length-1;i++)if(w>a[i].w&&w<a[i+1].w){lo=a[i];hi=a[i+1];break}
     const q=lo.w===hi.w?0:(w-lo.w)/(hi.w-lo.w),L=(x,y)=>x+(y-x)*q;
-    return {ap:L(lo.ap,hi.ap),f1:L(lo.f1,hi.f1),f2:L(lo.f2,hi.f2),v1:L(lo.v1,hi.v1),v2:L(lo.v2,hi.v2)};
+    return {w,ap:L(lo.ap,hi.ap),f1:L(lo.f1,hi.f1),f2:L(lo.f2,hi.f2),v1:L(lo.v1,hi.v1),v2:L(lo.v2,hi.v2)};
   }
-
-  const sp=tgfSpec(tgfWidth(sku));
-  // 優先：後台實值/範圍；缺少才套 TGF32 規格。
+  const sp=siblingSpec(v)||tgfFallback(sku);
+  // 優先：後台實值/範圍；缺少時先用同商品相鄰規格，TGF32 才使用內建參考表。
   const ap=n(t.ap)||avg(t.ap_min,t.ap_max)||sp?.ap||null;
   const ap1=n(t.ap_min),ap2=n(t.ap_max);
   const f1=n(t.feed_min)||sp?.f1||null, f2=n(t.feed_max)||sp?.f2||null;
