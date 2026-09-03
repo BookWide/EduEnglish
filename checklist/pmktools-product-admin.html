@@ -2860,7 +2860,7 @@ function renderVariationEditorV54(){
               <div style="font-weight:900;color:#1d2327">刀片技術資料｜切削三要素＋PMKNSH</div>
               <button type="button" class="button" data-vtech-auto="${i}" style="white-space:nowrap">自動推導技術資料</button>
             </div>
-            <div style="margin-top:5px;font-size:11px;color:#646970">只在「刀片和材質」分類顯示；原廠資料優先。缺資料時會先用同一商品／同系列相鄰尺寸推導；若該系列有內建參考表再使用參考表。推導值會標記來源與信心度。</div>
+            <div style="margin-top:5px;font-size:11px;color:#646970">只在「刀片和材質」分類顯示；原廠資料優先。整系列都沒資料時，可先手填第 1／2 筆作基準，再用「自動推導技術資料」補其他規格；已有值不會被推導覆蓋。</div>
           </div>
           <div class="v545-field"><label>技術資料來源</label><select data-vtech-source="${i}">
             <option value="manual" ${pmkTechSourceTypeV35(v)==='manual'?'selected':''}>手動</option>
@@ -3304,6 +3304,8 @@ function pmkTechNormKeyV34(k){
     'sku':'sku','刀片型號':'sku','型号':'sku','型號':'sku',
     '寬度最小':'width_min','宽度最小':'width_min','width_min':'width_min','min_width':'width_min',
     '寬度最大':'width_max','宽度最大':'width_max','width_max':'width_max','max_width':'width_max',
+    '寬度':'width','宽度':'width','槽寬':'width','槽宽':'width','切寬':'width','切宽':'width',
+    'groove_width':'width','cutting_width':'width','width':'width','w':'width',
     '實際最大切深推薦':'ap','最大切深':'ap','切深':'ap','ap':'ap',
     '刀尖圓弧':'re','刀尖圆弧':'re','刀尖半徑':'re','re':'re',
     '不銹鋼、鋼件推薦線速度':'vc_range','不锈钢、钢件推荐线速度':'vc_range','vc':'vc','vc_min':'vc_min','vc_max':'vc_max',
@@ -3325,31 +3327,54 @@ function pmkTechRangeV34(v){
   const m=s.match(/(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)/);
   return m?[Number(m[1]),Number(m[2])]:null;
 }
+function pmkTechSkuNormV314(v){
+  return String(v||'').trim().toUpperCase()
+    .replace(/[‐‑‒–—－]/g,'-')
+    .replace(/\s+/g,'')
+    .replace(/_+/g,'-')
+    .replace(/-+/g,'-');
+}
 function pmkTechFamilyFromSkuV34(sku){
-  const s=String(sku||'').trim().toUpperCase();
-  const m=s.match(/^([A-Z]+(?:\d+)?)[RL]?\d{3}$/);
-  return m?m[1]:s.replace(/[RL]?\d{3}$/,'');
-}
-function pmkTechWidthFromSkuV34(sku){
-  const s=String(sku||'').trim().toUpperCase();
-  const m=s.match(/([RL]?)(\d{3})$/);
-  return m?Number(m[2])/100:null;
-}
-function pmkTechFamilyNormalizeV39(v){
-  let s=String(v||'').trim().toUpperCase().replace(/\s+/g,'');
+  const s=pmkTechSkuNormV314(sku);
   if(!s)return '';
-  if(/^TGF32(?:R\/L|L\/R|[RL])?(?:[-_:]?[\d.]+(?:[-~～—–至][\d.]+)?)?$/.test(s))return 'TGF32';
-  s=s.replace(/(?:R\/L|L\/R)$/,'').replace(/[RL]?[\d]{3}$/,'');
+  // TGF32 compact width encoding remains supported.
+  const t=s.match(/^(TGF32)(?:R\/L|L\/R|[RL])?\d{3}(?:-.+)?$/);
+  if(t)return t[1];
+
+  // For ordinary supplier models, only strip a trailing variation/grade suffix.
+  // Example VNF050RD6-DMC-11 -> VNF050RD6-DMC.
+  const parts=s.split('-').filter(Boolean);
+  if(parts.length>=2){
+    const tail=parts[parts.length-1];
+    if(/^(?:\d{1,3}|[A-Z]\d{1,3}|\d{1,3}[A-Z])$/.test(tail))return parts.slice(0,-1).join('-');
+  }
   return s;
 }
+function pmkTechWidthFromSkuV34(sku){
+  const s=pmkTechSkuNormV314(sku);
+  let m=s.match(/TGF32(?:R\/L|L\/R|[RL])?(\d{3})(?!\d)/);
+  if(m)return Number(m[1])/100;
+  // Generic SKUs do not guess width from arbitrary digits.
+  return null;
+}
+function pmkTechFamilyNormalizeV39(v){
+  return pmkTechFamilyFromSkuV34(v);
+}
 function pmkTechExtractFamilyRangeV39(rawSku,rawFamily){
-  const sku=String(rawSku||'').trim().toUpperCase();
-  const fam=String(rawFamily||'').trim().toUpperCase();
+  const sku=pmkTechSkuNormV314(rawSku);
+  const fam=pmkTechSkuNormV314(rawFamily);
   const joined=(fam+' '+sku).trim();
-  const family=/TGF32/i.test(joined)?'TGF32':pmkTechFamilyNormalizeV39(fam||pmkTechFamilyFromSkuV34(sku));
+  const family=pmkTechFamilyFromSkuV34(fam||sku);
   let range=null;
-  const tgf=joined.match(/TGF32(?:R\/L|L\/R|[RL])?[^0-9]*([0-9]+(?:\.[0-9]+)?)\s*[-~～—–至]\s*([0-9]+(?:\.[0-9]+)?)/i);
-  if(tgf)range=[Number(tgf[1]),Number(tgf[2])];
+
+  // Generic explicit range written next to model/family.
+  let m=joined.match(/(?:^|[^0-9])([0-9]+(?:\.[0-9]+)?)\s*[-~～—–至]\s*([0-9]+(?:\.[0-9]+)?)(?:$|[^0-9])/);
+  if(m)range=[Number(m[1]),Number(m[2])];
+
+  // TGF32 family labels like TGF32R/L 0.3-0.4.
+  const t=joined.match(/TGF32(?:R\/L|L\/R|[RL])?[^0-9]*([0-9]+(?:\.[0-9]+)?)\s*[-~～—–至]\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if(t)range=[Number(t[1]),Number(t[2])];
+
   return {family,range};
 }
 function pmkTechNormalizeRowV34(raw){
@@ -3362,6 +3387,8 @@ function pmkTechNormalizeRowV34(raw){
   const sku=isRangeLabel?'':skuRaw;
   const family=extra.family;
   let widthMin=pmkTechNumV34(x.width_min),widthMax=pmkTechNumV34(x.width_max);
+  const width=pmkTechNumV34(x.width);
+  if(width!==null){widthMin=widthMin??width;widthMax=widthMax??width}
   if(isRangeLabel){widthMin=widthMin??extra.range[0];widthMax=widthMax??extra.range[1]}
   if((widthMin===null||widthMax===null)&&sku){
     const w=pmkTechWidthFromSkuV34(sku); if(w!==null){widthMin=widthMin??w;widthMax=widthMax??w}
@@ -3423,27 +3450,56 @@ function pmkTechInterpolateV34(a,b,w,key){
   if(!Number.isFinite(xa)||!Number.isFinite(xb)||xa===xb||!Number.isFinite(ya)||!Number.isFinite(yb))return null;
   const t=(w-xa)/(xb-xa); return pmkRoundV33(ya+(yb-ya)*t,3);
 }
+function pmkTechModelPrefixMatchV314(target,source){
+  const t=pmkTechSkuNormV314(target),s=pmkTechSkuNormV314(source);
+  if(!t||!s)return false;
+  if(t===s)return true;
+  // Supplier table often omits the final colour/grade/pack suffix.
+  // VNF050RD6-DMC -> VNF050RD6-DMC-11
+  return t.startsWith(s+'-') || t.startsWith(s+'/');
+}
 function pmkTechResolveV34(sku,rows){
-  sku=String(sku||'').trim().toUpperCase();
-  const family=pmkTechFamilyNormalizeV39(pmkTechFamilyFromSkuV34(sku)),w=pmkTechWidthFromSkuV34(sku);
-  const exact=rows.find(r=>r.sku&&r.sku===sku);
+  sku=pmkTechSkuNormV314(sku);
+  const family=pmkTechFamilyFromSkuV34(sku),w=pmkTechWidthFromSkuV34(sku);
+
+  const exact=rows.find(r=>r.sku&&pmkTechSkuNormV314(r.sku)===sku);
   if(exact)return {row:exact,mode:'原廠SKU',confidence:100};
 
-  const same=rows.filter(r=>r.family===family);
+  const prefix=rows
+    .filter(r=>r.sku&&pmkTechModelPrefixMatchV314(sku,r.sku))
+    .sort((a,b)=>pmkTechSkuNormV314(b.sku).length-pmkTechSkuNormV314(a.sku).length)[0];
+  if(prefix)return {row:prefix,mode:'原廠型號',confidence:98};
+
+  // Same normalized family/model.
+  const same=rows.filter(r=>{
+    const rf=pmkTechFamilyFromSkuV34(r.family||r.sku);
+    return rf && family && rf===family;
+  });
+
   if(Number.isFinite(w)){
     const range=same.find(r=>Number.isFinite(r.width_min)&&Number.isFinite(r.width_max)&&w>=r.width_min&&w<=r.width_max);
-    if(range)return {row:range,mode:'原廠區間',confidence:95};
+    if(range)return {row:range,mode:'原廠尺寸',confidence:95};
+  }
 
+  // If the source row contains one exact width and target model shares the same base,
+  // accept it even when width cannot be decoded from the target SKU.
+  const base=pmkTechFamilyFromSkuV34(sku);
+  const modelRow=rows.find(r=>{
+    const rs=pmkTechSkuNormV314(r.sku);
+    return rs && pmkTechFamilyFromSkuV34(rs)===base;
+  });
+  if(modelRow)return {row:modelRow,mode:'原廠系列',confidence:95};
+
+  if(Number.isFinite(w)){
     const withCenter=same.filter(r=>Number.isFinite(pmkTechRowCenterV34(r))).sort((a,b)=>pmkTechRowCenterV34(a)-pmkTechRowCenterV34(b));
     let lo=null,hi=null;
     for(const r of withCenter){const c=pmkTechRowCenterV34(r);if(c<=w)lo=r;if(c>=w&&!hi)hi=r}
     if(lo&&hi&&lo!==hi){
       const row={family,sku,width_min:w,width_max:w};
       ['ap','re','feed','feed_min','feed_max','vc','vc_min','vc_max'].forEach(k=>row[k]=pmkTechInterpolateV34(lo,hi,w,k));
-      // 類別欄位只有兩邊一致才繼承，PMKNSH 也只在兩邊一致時繼承。
       ['grade','geometry','use'].forEach(k=>row[k]=(lo[k]&&lo[k]===hi[k])?lo[k]:'');
       row.pmknsh=Object.fromEntries(['P','M','K','N','S','H'].map(k=>[k,(lo.pmknsh?.[k]!==null&&lo.pmknsh?.[k]===hi.pmknsh?.[k])?lo.pmknsh[k]:null]));
-      return {row,mode:'區間推導',confidence:75};
+      return {row,mode:'同系列推導',confidence:80};
     }
   }
   return null;
@@ -3472,9 +3528,9 @@ function pmkTechRenderPreviewV34(){
   const plan=pmkTechBuildPlanV34();
   const direct=plan.filter(x=>x.confidence>=95).length,infer=plan.length-direct;
   document.getElementById('pmkTechBatchSummaryV34').textContent=`來源 ${pmkTechBatchRowsV34.length} 列｜匹配 ${plan.length} SKU｜原廠匹配 ${direct}｜推導 ${infer}`;
-  box.innerHTML=plan.length?`<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th>SKU</th><th>方式</th><th>信心</th><th>ap</th><th>RE</th><th>fn</th><th>fn範圍</th><th>Vc</th><th>Vc範圍</th></tr></thead><tbody>${
-    plan.slice(0,200).map(x=>`<tr><td>${pmkTechEscV34(x.sku)}</td><td>${x.mode}</td><td>${x.confidence}%</td><td>${x.row.ap??''}</td><td>${x.row.re??''}</td><td>${x.row.feed??''}</td><td>${x.row.feed_min??''}～${x.row.feed_max??''}</td><td>${x.row.vc??''}</td><td>${x.row.vc_min??''}～${x.row.vc_max??''}</td></tr>`).join('')
-  }</tbody></table>`:'<div class="muted">沒有任何 SKU 可匹配。TGF32R/L＋寬度區間會自動展開；若仍為 0，請檢查目前商品是否真的有 TGF32 規格 SKU。</div>';
+  box.innerHTML=plan.length?`<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th>後台 SKU</th><th>來源型號</th><th>方式</th><th>信心</th><th>ap</th><th>RE</th><th>fn</th><th>fn範圍</th><th>Vc</th><th>Vc範圍</th></tr></thead><tbody>${
+    plan.slice(0,200).map(x=>`<tr><td>${pmkTechEscV34(x.sku)}</td><td>${pmkTechEscV34(x.row.sku||x.row.family||'')}</td><td>${x.mode}</td><td>${x.confidence}%</td><td>${x.row.ap??''}</td><td>${x.row.re??''}</td><td>${x.row.feed??''}</td><td>${x.row.feed_min??''}～${x.row.feed_max??''}</td><td>${x.row.vc??''}</td><td>${x.row.vc_min??''}～${x.row.vc_max??''}</td></tr>`).join('')
+  }</tbody></table>`:'<div class="muted">沒有任何 SKU 可匹配。系統支援：完整 SKU、來源型號前綴、同系列型號、明確尺寸/寬度。請檢查來源表格的型號是否與目前商品 SKU 對得上。</div>';
 }
 function pmkTechMergeParamsV34(old,row,overwrite=false,meta={}){
   old=(old&&typeof old==='object')?old:{};
@@ -3583,7 +3639,7 @@ function pmkTechOpenBatchV34(){
     m.style.cssText='position:fixed;inset:0;z-index:999999;background:rgba(15,23,42,.72);display:flex;align-items:center;justify-content:center;padding:20px';
     m.innerHTML=`<div style="width:min(1120px,96vw);max-height:92vh;overflow:auto;background:#fff;border-radius:12px;padding:18px;box-shadow:0 20px 70px rgba(0,0,0,.35)">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
-        <h2 style="margin:0">原廠加工參數匯入 <span style="font-size:12px;color:#64748b">V3.8</span></h2>
+        <h2 style="margin:0">原廠加工參數匯入 <span style="font-size:12px;color:#64748b">V3.14 UNIVERSAL</span></h2>
         <button type="button" id="pmkTechBatchCloseV34" class="btn gray">關閉</button>
       </div>
       <div style="margin:8px 0 14px;color:#64748b">上傳刀盒照片、規格標籤或原廠 PDF。AI 先辨識並預覽；你確認後才會寫入後台。</div>
@@ -3599,7 +3655,7 @@ function pmkTechOpenBatchV34(){
         <button type="button" class="btn" id="pmkTechBatchApplyV34" disabled style="margin-left:auto;background:#166534;color:#fff">確認寫入後台</button>
       </div>
       <div id="pmkTechBatchPreviewV34" style="max-height:420px;overflow:auto;border:1px solid #dbe2ea;border-radius:8px;padding:8px"><div class="muted">AI 辨識後才會出現參數預覽。</div></div>
-      <div class="muted" style="margin-top:8px">原廠有數據就直接採用；缺少的欄位保持空白。只有同系列且有足夠鄰近資料時才標示「推導」，不冒充原廠值。</div>
+      <div class="muted" style="margin-top:8px">完整 SKU 或來源型號能直接匹配就採原廠資料；同系列有兩筆以上尺寸資料時可推導其餘規格。手填／原廠已存在的值預設不覆蓋。</div>
     </div>`;
     document.body.appendChild(m);
     m.querySelector('#pmkTechBatchCloseV34').onclick=()=>m.style.display='none';
