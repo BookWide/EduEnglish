@@ -3344,7 +3344,10 @@ function pmkTechNormKeyV34(k){
     '系列':'family','family':'family','刀片系列':'family',
     'sku':'sku','刀片型號':'sku','型号':'sku','型號':'sku',
     '寬度最小':'width_min','宽度最小':'width_min','width_min':'width_min','min_width':'width_min',
+    '直徑最小':'width_min','直径最小':'width_min','diameter_min':'width_min','dia_min':'width_min',
     '寬度最大':'width_max','宽度最大':'width_max','width_max':'width_max','max_width':'width_max',
+    '直徑最大':'width_max','直径最大':'width_max','diameter_max':'width_max','dia_max':'width_max',
+    '規格型號':'sku','规格型号':'sku','規格':'sku','规格':'sku',
     '實際最大切深推薦':'ap','最大切深':'ap','切深':'ap','ap':'ap',
     '刀尖圓弧':'re','刀尖圆弧':'re','刀尖半徑':'re','re':'re',
     '不銹鋼、鋼件推薦線速度':'vc_range','不锈钢、钢件推荐线速度':'vc_range','vc':'vc','vc_min':'vc_min','vc_max':'vc_max',
@@ -3393,17 +3396,89 @@ function pmkTechExtractFamilyRangeV39(rawSku,rawFamily){
   if(tgf)range=[Number(tgf[1]),Number(tgf[2])];
   return {family,range};
 }
+
+function pmkTechGenericRangeFromLabelV3297(label){
+  const s=String(label||'').trim().toUpperCase().replace(/[～~至—–]/g,'-');
+  if(!s)return null;
+  let m=s.match(/\bCD\s*([0-9]{3})\s*-\s*([0-9]{3})\b/);
+  if(m)return [Number(m[1])/10,Number(m[2])/10];
+  m=s.match(/(?:Ø|Φ|DIA(?:METER)?|D)\s*([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)/i);
+  if(m)return [Number(m[1]),Number(m[2])];
+  return null;
+}
+function pmkTechRowHasRangeV3297(r){
+  return Number.isFinite(Number(r?.width_min))&&Number.isFinite(Number(r?.width_max));
+}
+function pmkTechVariationTextV3297(v,sku){
+  const parts=[sku,v?.variation_name,v?.name,v?.title,v?.model,v?.size,v?.spec,v?.规格,v?.規格];
+  const attrs=v?.attributes||v?.attrs||v?.options;
+  if(attrs&&typeof attrs==='object')Object.entries(attrs).forEach(([k,val])=>parts.push(k,val));
+  return parts.filter(Boolean).join(' ');
+}
+function pmkTechSizeCandidatesV3297(v,sku,rows){
+  const text=pmkTechVariationTextV3297(v,sku).toUpperCase().replace(/,/g,'.');
+  const out=[];
+  const push=(n,why)=>{
+    n=Number(n); if(!Number.isFinite(n)||n<=0||n>1000)return;
+    if(!out.some(x=>Math.abs(x.n-n)<1e-9))out.push({n,why});
+  };
+  [...text.matchAll(/(?:Ø|Φ|DIA(?:METER)?|直徑|直径)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)/gi)].forEach(m=>push(m[1],'明確直徑'));
+  [...text.matchAll(/\bD\s*([0-9]+(?:\.[0-9]+)?)/g)].forEach(m=>push(m[1],'D尺寸'));
+  [...text.matchAll(/(?<![A-Z])([0-9]+(?:\.[0-9]+)?)(?![A-Z])/g)].map(m=>Number(m[1])).forEach(n=>{
+    push(n,'規格數字');
+    if(n>=100)push(n/10,'規格數字÷10');
+    if(n>=100)push(n/100,'規格數字÷100');
+  });
+  const tw=pmkTechWidthFromSkuV34(sku); if(Number.isFinite(tw))push(tw,'SKU寬度');
+  const ranges=(rows||[]).filter(pmkTechRowHasRangeV3297);
+  out.sort((a,b)=>{
+    const ah=ranges.some(r=>a.n>=Number(r.width_min)&&a.n<=Number(r.width_max))?1:0;
+    const bh=ranges.some(r=>b.n>=Number(r.width_min)&&b.n<=Number(r.width_max))?1:0;
+    return bh-ah;
+  });
+  return out;
+}
+function pmkTechMergeMatchedRowsV3297(matches,sku,w){
+  if(!matches.length)return null;
+  const first=matches[0];
+  const row={...first,sku,width_min:w,width_max:w,pmknsh:{...(first.pmknsh||{})},material_params:{}};
+  ['P','M','K','N','S','H'].forEach(mat=>{
+    row.pmknsh[mat]=Math.max(...matches.map(r=>Number(r.pmknsh?.[mat]||0)));
+    const vals={};
+    ['feed','feed_min','feed_max','vc','vc_min','vc_max'].forEach(f=>{
+      const nums=matches.map(r=>Number(r.material_params?.[mat]?.[f])).filter(Number.isFinite);
+      if(nums.length){
+        if(f.endsWith('_min'))vals[f]=Math.min(...nums);
+        else if(f.endsWith('_max'))vals[f]=Math.max(...nums);
+        else vals[f]=nums.reduce((a,b)=>a+b,0)/nums.length;
+      }
+    });
+    row.material_params[mat]=vals;
+  });
+  ['feed_min','vc_min'].forEach(f=>{
+    const nums=matches.map(r=>Number(r[f])).filter(Number.isFinite);
+    if(nums.length)row[f]=Math.min(...nums);
+  });
+  ['feed_max','vc_max'].forEach(f=>{
+    const nums=matches.map(r=>Number(r[f])).filter(Number.isFinite);
+    if(nums.length)row[f]=Math.max(...nums);
+  });
+  return row;
+}
+
 function pmkTechNormalizeRowV34(raw){
   const x={};
   Object.entries(raw||{}).forEach(([k,v])=>x[pmkTechNormKeyV34(k)]=v);
   const vr=pmkTechRangeV34(x.vc_range),fr=pmkTechRangeV34(x.feed_range);
   const skuRaw=String(x.sku||'').trim().toUpperCase();
   const extra=pmkTechExtractFamilyRangeV39(skuRaw,x.family);
-  const isRangeLabel=Array.isArray(extra.range);
+  const genericRange=pmkTechGenericRangeFromLabelV3297(skuRaw||x.family);
+  const parsedRange=Array.isArray(extra.range)?extra.range:genericRange;
+  const isRangeLabel=Array.isArray(parsedRange);
   const sku=isRangeLabel?'':skuRaw;
-  const family=extra.family;
+  const family=Array.isArray(extra.range)?extra.family:String(x.family||'').trim().toUpperCase();
   let widthMin=pmkTechNumV34(x.width_min),widthMax=pmkTechNumV34(x.width_max);
-  if(isRangeLabel){widthMin=widthMin??extra.range[0];widthMax=widthMax??extra.range[1]}
+  if(isRangeLabel){widthMin=widthMin??parsedRange[0];widthMax=widthMax??parsedRange[1]}
   if((widthMin===null||widthMax===null)&&sku){
     const w=pmkTechWidthFromSkuV34(sku); if(w!==null){widthMin=widthMin??w;widthMax=widthMax??w}
   }
@@ -3451,10 +3526,10 @@ function pmkTechParseInputV34(text){
   try{
     if(s.startsWith('[')||s.startsWith('{')){
       const j=JSON.parse(s),rows=Array.isArray(j)?j:(Array.isArray(j.rows)?j.rows:[]);
-      return rows.map(pmkTechNormalizeRowV34).filter(r=>r.sku||r.family);
+      return rows.map(pmkTechNormalizeRowV34).filter(r=>r.sku||r.family||pmkTechRowHasRangeV3297(r));
     }
   }catch(_){}
-  return pmkTechParseDelimitedV34(s).map(pmkTechNormalizeRowV34).filter(r=>r.sku||r.family);
+  return pmkTechParseDelimitedV34(s).map(pmkTechNormalizeRowV34).filter(r=>r.sku||r.family||pmkTechRowHasRangeV3297(r));
 }
 function pmkTechRowCenterV34(r){
   if(Number.isFinite(r.width_min)&&Number.isFinite(r.width_max))return (r.width_min+r.width_max)/2;
@@ -3466,9 +3541,9 @@ function pmkTechInterpolateV34(a,b,w,key){
   if(!Number.isFinite(xa)||!Number.isFinite(xb)||xa===xb||!Number.isFinite(ya)||!Number.isFinite(yb))return null;
   const t=(w-xa)/(xb-xa); return pmkRoundV33(ya+(yb-ya)*t,3);
 }
-function pmkTechResolveV34(sku,rows){
+function pmkTechResolveV34(sku,rows,v){
   sku=String(sku||'').trim().toUpperCase();
-  const family=pmkTechFamilyNormalizeV39(pmkTechFamilyFromSkuV34(sku)),w=pmkTechWidthFromSkuV34(sku);
+  const family=pmkTechFamilyNormalizeV39(pmkTechFamilyFromSkuV34(sku));
   const exact=rows.find(r=>r.sku&&r.sku===sku);
   if(exact){
     const c=Number.isFinite(Number(exact.confidence))?Number(exact.confidence):100;
@@ -3476,21 +3551,31 @@ function pmkTechResolveV34(sku,rows){
     return {row:exact,mode:st==='factory'?'原廠SKU':(st==='reference'?'參考SKU':'AI代表SKU'),confidence:c,source_type:st};
   }
 
-  const same=rows.filter(r=>r.family===family);
-  if(Number.isFinite(w)){
-    const range=same.find(r=>Number.isFinite(r.width_min)&&Number.isFinite(r.width_max)&&w>=r.width_min&&w<=r.width_max);
-    if(range){
-      const c=Number.isFinite(Number(range.confidence))?Number(range.confidence):95;
-      return {row:range,mode:range.source_type==='factory'?'原廠區間':'參考區間',confidence:c,source_type:range.source_type||'reference'};
+  const candidates=pmkTechSizeCandidatesV3297(v,sku,rows);
+  for(const c of candidates){
+    const matches=rows.filter(r=>{
+      if(!pmkTechRowHasRangeV3297(r))return false;
+      const rf=pmkTechFamilyNormalizeV39(r.family||'');
+      if(rf && family && rf!==family)return false;
+      return c.n>=Number(r.width_min)&&c.n<=Number(r.width_max);
+    });
+    if(matches.length){
+      const merged=pmkTechMergeMatchedRowsV3297(matches,sku,c.n);
+      const factory=matches.every(r=>(r.source_type||'factory')==='factory');
+      const conf=Math.min(...matches.map(r=>Number.isFinite(Number(r.confidence))?Number(r.confidence):(factory?98:92)));
+      return {row:merged,mode:factory?'原廠尺寸區間':'尺寸區間',confidence:conf,source_type:factory?'factory':'reference'};
     }
+  }
 
+  const w=pmkTechWidthFromSkuV34(sku);
+  const same=rows.filter(r=>pmkTechFamilyNormalizeV39(r.family||'')===family && family);
+  if(Number.isFinite(w)){
     const withCenter=same.filter(r=>Number.isFinite(pmkTechRowCenterV34(r))).sort((a,b)=>pmkTechRowCenterV34(a)-pmkTechRowCenterV34(b));
     let lo=null,hi=null;
-    for(const r of withCenter){const c=pmkTechRowCenterV34(r);if(c<=w)lo=r;if(c>=w&&!hi)hi=r}
+    for(const r of withCenter){const cc=pmkTechRowCenterV34(r);if(cc<=w)lo=r;if(cc>=w&&!hi)hi=r}
     if(lo&&hi&&lo!==hi){
       const row={family,sku,width_min:w,width_max:w};
       ['ap','re','feed','feed_min','feed_max','vc','vc_min','vc_max'].forEach(k=>row[k]=pmkTechInterpolateV34(lo,hi,w,k));
-      // 類別欄位只有兩邊一致才繼承，PMKNSH 也只在兩邊一致時繼承。
       ['grade','geometry','use'].forEach(k=>row[k]=(lo[k]&&lo[k]===hi[k])?lo[k]:'');
       row.pmknsh=Object.fromEntries(['P','M','K','N','S','H'].map(k=>[k,(lo.pmknsh?.[k]!==null&&lo.pmknsh?.[k]===hi.pmknsh?.[k])?lo.pmknsh[k]:null]));
       row.material_params={};
@@ -3503,7 +3588,7 @@ function pmkTechResolveV34(sku,rows){
             row.material_params[mat][f]=pmkRoundV33(av+(bv-av)*((w-xa)/(xb-xa)),3);
         });
       });
-      return {row,mode:'區間推導',confidence:75,source_type:'inferred'};
+      return {row,mode:'同系列推導',confidence:75,source_type:'inferred'};
     }
     if(withCenter.length){
       const near=[...withCenter].sort((a,b)=>Math.abs(pmkTechRowCenterV34(a)-w)-Math.abs(pmkTechRowCenterV34(b)-w))[0];
@@ -3527,7 +3612,7 @@ function pmkTechBuildPlanV34(){
   (Array.isArray(p?.variations)?p.variations:[]).forEach((v,vi)=>{
     if(!pmkTechBatchIsInsertV3291(p,v))return;
     const sku=String(v?.sku||'').trim().toUpperCase();if(!sku)return;
-    const res=pmkTechResolveV34(sku,rows);if(!res)return;
+    const res=pmkTechResolveV34(sku,rows,v);if(!res)return;
     plan.push({pi,vi,product_id:p.id,product_name:p.name,sku,...res,row:pmkTechFinalizeV34(res.row)});
   });
   pmkTechBatchPlanV34=plan;return plan;
@@ -3540,7 +3625,7 @@ function pmkTechRenderPreviewV34(){
   document.getElementById('pmkTechBatchSummaryV34').textContent=`來源 ${pmkTechBatchRowsV34.length} 列｜匹配 ${plan.length} SKU｜原廠匹配 ${direct}｜推導 ${infer}`;
   box.innerHTML=plan.length?`<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr><th>SKU</th><th>方式</th><th>信心</th><th>ap</th><th>RE</th><th>fn</th><th>fn範圍</th><th>Vc</th><th>Vc範圍</th></tr></thead><tbody>${
     plan.slice(0,200).map(x=>`<tr><td>${pmkTechEscV34(x.sku)}</td><td>${x.mode}</td><td>${x.confidence}%</td><td>${x.row.ap??''}</td><td>${x.row.re??''}</td><td>${x.row.feed??''}</td><td>${x.row.feed_min??''}～${x.row.feed_max??''}</td><td>${x.row.vc??''}</td><td>${x.row.vc_min??''}～${x.row.vc_max??''}</td></tr>`).join('')
-  }</tbody></table>`:'<div class="muted">沒有任何 SKU 可匹配。TGF32R/L＋寬度區間會自動展開；若仍為 0，請檢查目前商品是否真的有 TGF32 規格 SKU。</div>';
+  }</tbody></table>`:'<div class="muted">目前來源表格尚未能對到本商品規格。系統會用完整 SKU、直徑/寬度區間（含 CD100–129、Ø、DIA）及同系列規格自動匹配；若仍為 0，請檢查 variation 名稱/SKU 是否含尺寸。</div>';
 }
 function pmkTechMergeParamsV34(old,row,overwrite=false,meta={}){
   old=(old&&typeof old==='object')?old:{};
@@ -3632,7 +3717,7 @@ async function pmkTechAnalyzeFileV36(){
   try{
     const fd=new FormData();fd.append('file',file,file.name);
     const j=await productAdminPostFormV36('/api/pmk-tech-params-ai',fd);
-    pmkTechBatchRowsV34=(Array.isArray(j.rows)?j.rows:[]).map(pmkTechNormalizeRowV34).filter(r=>r.sku||r.family);
+    pmkTechBatchRowsV34=(Array.isArray(j.rows)?j.rows:[]).map(pmkTechNormalizeRowV34).filter(r=>r.sku||r.family||pmkTechRowHasRangeV3297(r));
     pmkTechAiSourceV36={name:file.name,summary:j.source_summary||'',model:j.model||''};
     if(!pmkTechBatchRowsV34.length)throw new Error('照片/PDF 有讀到，但沒有辨識出可用的 SKU 或系列參數');
     pmkTechRenderPreviewV34();
@@ -3783,7 +3868,7 @@ function pmkTechOpenBatchV34(){
     m.style.cssText='position:fixed;inset:0;z-index:999999;background:rgba(15,23,42,.72);display:flex;align-items:center;justify-content:center;padding:20px';
     m.innerHTML=`<div style="width:min(1120px,96vw);max-height:92vh;overflow:auto;background:#fff;border-radius:12px;padding:18px;box-shadow:0 20px 70px rgba(0,0,0,.35)">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
-        <h2 style="margin:0">原廠加工參數匯入 <span style="font-size:12px;color:#64748b">V3.9</span></h2>
+        <h2 style="margin:0">原廠加工參數匯入 <span style="font-size:12px;color:#64748b">V3.10</span></h2>
         <button type="button" id="pmkTechBatchCloseV34" class="btn gray">關閉</button>
       </div>
       <div style="margin:8px 0 14px;color:#64748b">可上傳刀盒照片、規格標籤、原廠 PDF，也可在商品介紹框直接 Ctrl+V 貼切削參數截圖。AI 先辨識並預覽；你確認後才會寫入後台。</div>
