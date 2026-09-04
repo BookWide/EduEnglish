@@ -2820,23 +2820,33 @@ function pmkTechSourceConfidenceV35(v){
 
 
 
-function pmkVariationIsInsertV327(v){
+function pmkVariationKindAutoV330(v,p){
   const manual=String(v?.product_kind||'').trim().toLowerCase();
-  if(manual==='insert'||manual==='刀片'||manual.includes('ezp'))return true;
-  if(manual==='toolholder'||manual==='cutter'||manual==='other'||manual==='刀桿'||manual==='刀杆'||manual.includes('lbx'))return false;
+  if(manual==='insert'||manual==='刀片'||manual.includes('ezp'))return 'insert';
+  if(manual==='toolholder'||manual==='cutter'||manual==='刀桿'||manual==='刀杆'||manual.includes('lbx'))return 'toolholder';
+  if(manual==='other')return 'other';
 
-  // 混合大類不能只看父商品分類：先辨識「目前這一筆規格」。
-  // 皇冠鑽刀片、一般明確刀片名稱、HCD SKU 都直接視為刀片。
+  // V3.30：每一筆 Variation 自己判斷。混合商品不再先看父商品大分類。
   const attrText=Object.values(v?.attributes||{}).join(' ');
-  const rowText=[v?.variation_name,v?.sku,attrText].filter(Boolean).join(' ').replace(/\s+/g,' ').trim();
-  if(/皇冠鑽\s*刀片|刀片\s*直徑|\bHCD\s*\d/i.test(rowText))return true;
+  const factory=v?.technical_params?.factory_specs||{};
+  const factoryText=Object.values(factory).filter(x=>x!==undefined&&x!==null).join(' ');
+  const rowText=[v?.variation_name,v?.sku,attrText,factoryText].filter(Boolean).join(' ').replace(/\s+/g,' ').trim();
 
-  // 明確刀桿／刀具規格先排除，避免混合商品誤判。
-  if(/下面是刀[桿杆]系列|\bJCD\b|\b\d+D\s*刀徑範圍|刀[桿杆]|鑽[桿杆]/i.test(rowText))return false;
+  // 刀片：HCD、EZP、明確刀片文字、刀片直徑／規格。
+  if(/\bHCD\s*\d|\bEZP\b|皇冠鑽\s*刀片|刀片\s*(?:直徑|规格|規格|尺寸|型號)|(?:^|[\s/])刀片(?:[\s/]|$)/i.test(rowText))return 'insert';
 
-  // 沒有規格級線索時，才回退到原本的大分類判斷。
-  return pmkIsInsertProductV29();
+  // 刀桿：JCD、LBX、刀徑範圍、倍徑 3D/5D/8D/10D、明確刀桿／鑽桿文字。
+  if(/\bJCD\b|\bLBX\b|刀徑\s*範圍|下面是刀[桿杆]系列|刀[桿杆]|鑽[桿杆]|(?:^|[\s/*-])(?:3D|5D|8D|10D)(?:[\s/*-]|$)/i.test(rowText))return 'toolholder';
+
+  // 完全沒有規格級線索才允許回退父商品分類。
+  const cat=String(p?.category||document.getElementById('category')?.value||'').trim();
+  const sub=String(p?.subcategory||document.getElementById('subcategory')?.value||'').trim();
+  const det=String(p?.subcategory_detail||document.getElementById('subcategory_detail')?.value||'').trim();
+  if(cat==='切削刀具'&&(sub==='刀片和材質'||det.includes('刀片')))return 'insert';
+  return 'toolholder';
 }
+function pmkVariationIsInsertV327(v){return pmkVariationKindAutoV330(v)==='insert';}
+
 function renderVariationEditorV54(){
   const box=$('variationEditor');
   if(!box)return;
@@ -2876,8 +2886,8 @@ function renderVariationEditorV54(){
           <input class="v545-image-url" data-vlocale="${i}" value="${esc(v.image_locale||'')}">
         </div>
         <div class="v545-fields">
-          <div class="v545-field"><label>規格名稱（手動分類｜存檔不覆蓋）</label><input data-vname="${i}" value="${esc(v.variation_name||Object.values(v.attributes||{}).join(' / ')||'')}" placeholder="例如 刀桿/S25Q-SVNFR16 或 刀片/VNF050RD6-DMC-11"></div><div class="v545-field"><label>標籤類型（V3.28｜刀片立即顯示切削參數）</label><select data-vkind="${i}">
-<option value="" ${!v.product_kind?'selected':''}>自動（依規格名稱／大分類）</option>
+          <div class="v545-field"><label>規格名稱（手動分類｜存檔不覆蓋）</label><input data-vname="${i}" value="${esc(v.variation_name||Object.values(v.attributes||{}).join(' / ')||'')}" placeholder="例如 刀桿/S25Q-SVNFR16 或 刀片/VNF050RD6-DMC-11"></div><div class="v545-field"><label>標籤類型（規格級自動辨識）</label><select data-vkind="${i}">
+<option value="" ${!v.product_kind?'selected':''}>自動辨識：刀片 / 刀桿</option>
 <option value="insert" ${v.product_kind==='insert'?'selected':''}>刀片 → EZP</option>
 <option value="toolholder" ${v.product_kind==='toolholder'?'selected':''}>刀桿 / 刀具 → LBX</option>
 <option value="other" ${v.product_kind==='other'?'selected':''}>其他 → LBX</option>
@@ -3852,13 +3862,7 @@ let pmkTechWebBatchRunningV3291=false;
 let pmkTechWebBatchStopFlagV3291=false;
 
 function pmkTechBatchIsInsertV3291(p,v){
-  const kind=String(v?.product_kind||'').trim().toLowerCase();
-  if(kind==='insert'||kind==='刀片'||kind.includes('ezp'))return true;
-  if(kind==='toolholder'||kind==='cutter'||kind==='other'||kind.includes('lbx'))return false;
-  const vn=String(v?.variation_name||'');
-  if(vn.includes('刀片'))return true;
-  const cat=String(p?.category||''),sub=String(p?.subcategory||''),det=String(p?.subcategory_detail||'');
-  return cat==='切削刀具'&&(sub==='刀片和材質'||det.includes('刀片'));
+  return pmkVariationKindAutoV330(v,p)==='insert';
 }
 function pmkTechBatchExistingRowV3291(p,v){
   const sku=String(v?.sku||'').trim().toUpperCase();if(!sku)return null;
