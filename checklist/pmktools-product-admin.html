@@ -531,7 +531,7 @@
 <section class="v49-page" id="v49-customers" data-page="customers">
   <div class="v49-page-title">
     <div>
-      <h1>客戶 <small style="font-size:12px;color:#64748b">V3.3 EMAIL / COMPANY CRM</small></h1>
+      <h1>客戶 <small style="font-size:12px;color:#64748b">V5.4 COMPANY CONTACTS / BUSINESS CARD AI</small></h1>
       <p>客戶資料由前台註冊／我的帳戶建立；Admin 只負責客戶等級、ERP 客戶代號與付款條件。</p>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn green" id="pmkImportLianzuanCustomers" type="button">載入聯鑽客戶草稿 63 家</button><button class="btn gray" <button class="btn gray" id="reloadCustomers">重新整理</button></div>
@@ -604,6 +604,16 @@
         <div class="field" style="grid-column:1/-1"><label>送貨地址</label><input id="pmkCrmShippingAddress"></div>
         <div class="field" style="grid-column:1/-1"><label>備註</label><input id="pmkCrmNotes"></div>
       </div>
+      <div style="margin-top:12px;border-top:1px solid #dbe3ec;padding-top:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div><b>名片／公司聯絡人</b><div class="muted" style="margin-top:3px">可貼上名片圖片或選擇照片；AI 辨識後直接記錄到這家公司。</div></div>
+          <div style="display:flex;gap:7px;flex-wrap:wrap"><input id="pmkBusinessCardFile" type="file" accept="image/jpeg,image/png,image/webp" style="display:none"><button class="btn gray" id="pmkBusinessCardChoose" type="button">＋ 名片照片</button></div>
+        </div>
+        <div id="pmkBusinessCardPaste" tabindex="0" style="margin-top:8px;border:2px dashed #cbd5e1;border-radius:10px;padding:12px;text-align:center;background:#fff;cursor:text">Ctrl+V 直接貼上名片圖片</div>
+        <div id="pmkBusinessCardStatus" class="muted" style="margin-top:6px"></div>
+        <div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>姓名／職稱</th><th>電話／手機</th><th>Email／LINE</th><th>地址</th><th>來源</th><th>操作</th></tr></thead><tbody id="pmkCrmContactRows"><tr><td colspan="6" class="muted">尚未載入聯絡人</td></tr></tbody></table></div>
+      </div>
+
       <div style="display:flex;gap:8px;margin-top:10px">
         <button class="btn green" id="pmkCrmSave" type="button">儲存客戶資料</button>
         <button class="btn gray" id="pmkCrmCancel" type="button">取消</button>
@@ -1899,7 +1909,36 @@ function pmkCrmOpen(c){
   $('pmkCrmBillingAddress').value=c.billing_address||c.address||'';
   $('pmkCrmShippingAddress').value=c.shipping_address||c.address||'';
   $('pmkCrmNotes').value=c.notes||'';
+  pmkLoadCustomerContacts(String(c.id||''));
   setTimeout(()=>$('pmkCrmName')?.focus(),40);
+}
+
+let pmkCrmContacts=[];
+function pmkContactEsc(v){return esc(String(v||''))}
+async function pmkLoadCustomerContacts(customerId){
+  const tb=$('pmkCrmContactRows');if(!tb)return;
+  if(!customerId){tb.innerHTML='<tr><td colspan="6" class="muted">請先選擇公司</td></tr>';return}
+  try{
+    const j=await productAdminGet('/api/pmk-admin/customer-contacts?customer_id='+encodeURIComponent(customerId));pmkCrmContacts=Array.isArray(j.rows)?j.rows:[];
+    tb.innerHTML=pmkCrmContacts.length?pmkCrmContacts.map(x=>`<tr><td><b>${pmkContactEsc(x.name||'未辨識姓名')}</b><br><span class="muted">${pmkContactEsc([x.department,x.title].filter(Boolean).join(' / '))}</span></td><td>${pmkContactEsc(x.phone)}<br>${pmkContactEsc(x.mobile)}</td><td>${pmkContactEsc(x.email)}<br>${x.line_id?'LINE '+pmkContactEsc(x.line_id):''}</td><td>${pmkContactEsc(x.address)}</td><td>${x.source==='business_card_ai'?'名片 AI':'手動'}</td><td><button class="rowbtn" data-pmk-contact-del="${pmkContactEsc(x.id)}">刪除</button></td></tr>`).join(''):'<tr><td colspan="6" class="muted">尚無聯絡人；可直接貼上名片。</td></tr>';
+    tb.querySelectorAll('[data-pmk-contact-del]').forEach(b=>b.onclick=async()=>{if(!confirm('刪除此聯絡人？'))return;try{await productAdminPost('/api/pmk-admin/customer-contact-delete',{id:b.dataset.pmkContactDel});await pmkLoadCustomerContacts(customerId)}catch(e){alert(String(e?.message||e))}});
+  }catch(e){tb.innerHTML='<tr><td colspan="6" class="muted">聯絡人讀取失敗：'+pmkContactEsc(e?.message||e)+'</td></tr>'}
+}
+async function pmkBusinessCardRecognize(file){
+  const customerId=String($('pmkCrmId')?.value||'').trim();if(!customerId)return alert('請先打開一家公司，再貼名片');
+  if(!file||!String(file.type||'').startsWith('image/'))return alert('請貼上 JPG / PNG / WEBP 名片圖片');
+  const st=$('pmkBusinessCardStatus');if(st)st.textContent='AI 正在辨識名片並寫入聯絡人…';
+  try{
+    const f=new FormData();f.append('customer_id',customerId);f.append('file',file,file.name||'business-card.png');
+    const j=await productAdminPostFormV36('/api/pmk-admin/business-card-ai',f);const c=j.contact||{};
+    if(st)st.textContent='✅ 已記錄：'+(c.name||'未辨識姓名')+(c.title?'／'+c.title:'');await pmkLoadCustomerContacts(customerId);
+  }catch(e){if(st)st.textContent='❌ '+String(e?.message||e);alert('名片辨識失敗：'+String(e?.message||e))}
+}
+function pmkInitBusinessCardV54(){
+  const choose=$('pmkBusinessCardChoose'),inp=$('pmkBusinessCardFile'),zone=$('pmkBusinessCardPaste');
+  if(choose&&inp)choose.onclick=()=>inp.click();
+  if(inp)inp.onchange=()=>{const f=inp.files?.[0];if(f)pmkBusinessCardRecognize(f);inp.value=''};
+  if(zone){zone.addEventListener('click',()=>zone.focus());zone.addEventListener('paste',e=>{const items=[...(e.clipboardData?.items||[])];const it=items.find(x=>String(x.type||'').startsWith('image/'));if(!it)return;const f=it.getAsFile();if(f){e.preventDefault();pmkBusinessCardRecognize(f)}})}
 }
 function pmkCrmClose(){$('pmkCrmEditor').style.display='none';$('pmkCrmId').value='';}
 async function pmkCrmSave(){
@@ -6041,7 +6080,7 @@ if($('seoAutoBtn'))$('seoAutoBtn').onclick=()=>seoAutoFillV574(true);['seo_title
 document.querySelectorAll('.wc548-tab').forEach(b=>b.onclick=()=>wc548OpenTab(b.dataset.wctab));
 
 if($('sku_rule_system'))$('sku_rule_system').onchange=()=>refreshSkuRuleFamilyV1('');refreshSkuRuleFamilyV1('');
-$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;if($('aiTechFromClipboardBtn'))$('aiTechFromClipboardBtn').onclick=pmkTechAnalyzeClipboardV3296;if($('aiTechFromClipboardPreviewBtn'))$('aiTechFromClipboardPreviewBtn').onclick=pmkTechAnalyzeClipboardV3296;if($('detail_description'))$('detail_description').addEventListener('paste',handleDetailPasteV5);if($('aiProductPasteClearBtn'))$('aiProductPasteClearBtn').onclick=()=>{aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();};$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=()=>{pmk577TaxFilter={category:String($('productCategoryFilter').value||''),subcategory:'',detail:''};render()};$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;if($('customerHistoryClose'))$('customerHistoryClose').onclick=()=>{$('customerHistoryDetail').style.display='none'};if($('clearOldCustomerView'))$('clearOldCustomerView').onclick=()=>{localStorage.removeItem('pmktools_customer_transactions_v1');loadCustomers();};if($('pmkCrmQ'))$('pmkCrmQ').oninput=renderPmkCrm;if($('pmkCrmSave'))$('pmkCrmSave').onclick=pmkCrmSave;if($('pmkCrmCancel'))$('pmkCrmCancel').onclick=pmkCrmClose;if($('pmkSupplierNew'))$('pmkSupplierNew').onclick=()=>pmkSupplierOpen({});if($('pmkSupplierSave'))$('pmkSupplierSave').onclick=pmkSupplierSave;if($('pmkSupplierCancel'))$('pmkSupplierCancel').onclick=pmkSupplierClose;if($('pmkSupplierQ'))$('pmkSupplierQ').oninput=renderSuppliers;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
+$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;if($('aiTechFromClipboardBtn'))$('aiTechFromClipboardBtn').onclick=pmkTechAnalyzeClipboardV3296;if($('aiTechFromClipboardPreviewBtn'))$('aiTechFromClipboardPreviewBtn').onclick=pmkTechAnalyzeClipboardV3296;if($('detail_description'))$('detail_description').addEventListener('paste',handleDetailPasteV5);if($('aiProductPasteClearBtn'))$('aiProductPasteClearBtn').onclick=()=>{aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();};$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=()=>{pmk577TaxFilter={category:String($('productCategoryFilter').value||''),subcategory:'',detail:''};render()};$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;if($('customerHistoryClose'))$('customerHistoryClose').onclick=()=>{$('customerHistoryDetail').style.display='none'};if($('clearOldCustomerView'))$('clearOldCustomerView').onclick=()=>{localStorage.removeItem('pmktools_customer_transactions_v1');loadCustomers();};if($('pmkCrmQ'))$('pmkCrmQ').oninput=renderPmkCrm;if($('pmkCrmSave'))$('pmkCrmSave').onclick=pmkCrmSave;if($('pmkCrmCancel'))$('pmkCrmCancel').onclick=pmkCrmClose;pmkInitBusinessCardV54();if($('pmkSupplierNew'))$('pmkSupplierNew').onclick=()=>pmkSupplierOpen({});if($('pmkSupplierSave'))$('pmkSupplierSave').onclick=pmkSupplierSave;if($('pmkSupplierCancel'))$('pmkSupplierCancel').onclick=pmkSupplierClose;if($('pmkSupplierQ'))$('pmkSupplierQ').oninput=renderSuppliers;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
 $('seedFlower12').onclick=seedFlowerPartner12;
 $('reloadCategories').onclick=loadCategories;$('catSaveBtn').onclick=saveCategory;$('catCancelBtn').onclick=resetCategoryEditor;initCollapsibles();initV49Layout();if($('savePricingRules'))$('savePricingRules').onclick=savePricingRulesV1;
 if($('addPricingCategoryRule'))$('addPricingCategoryRule').onclick=addPricingCategoryRuleV1;
