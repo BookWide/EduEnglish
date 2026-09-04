@@ -3232,13 +3232,27 @@ function pmkCrownHolder3DBySize(size){
   const n=Number(size),d=Math.round(n);if(!Number.isFinite(n)||Math.abs(n-d)>0.051)return null;
   return PMK_CROWN_HOLDER_3D_TABLE.find(r=>r.D===d)||null;
 }
+function pmkCrownVariantText(v){
+  return [v?.variation_name,...Object.values(v?.attributes||{}),v?.sku]
+    .filter(Boolean).join(' ').replace(/\s+/g,' ').trim().toUpperCase();
+}
+/* 皇冠鑽：先由規格標籤文字判斷「刀桿 / 刀片」，再寫回 product_kind。
+   只接受明確標籤，不以單純直徑猜種類。 */
+function pmkCrownInferKindFromLabel(v){
+  const text=pmkCrownVariantText(v);
+  if(!text)return '';
+  if(/皇冠鑽\s*刀片|刀片\s*直徑|\bHCD\s*\d/i.test(text))return 'insert';
+  if(/皇冠鑽\s*刀[桿杆]|鑽\s*刀[桿杆]|鑽桿|鑽杆|\bJCD\s*[- ]?C\d/i.test(text))return 'toolholder';
+  return '';
+}
 function pmkCrownLabelKind(v){
+  const inferred=pmkCrownInferKindFromLabel(v);
+  if(inferred)return inferred;
   const k=String(v?.product_kind||'').trim().toLowerCase();
   if(k==='insert'||k==='刀片')return 'insert';
   if(k==='toolholder'||k==='刀桿'||k==='刀杆')return 'toolholder';
   return '';
 }
-function pmkCrownVariantText(v){return [v?.variation_name,...Object.values(v?.attributes||{})].filter(Boolean).join(' ').toUpperCase()}
 function pmkCrownInsertSku(v,size){
   const n=Number(size);if(!Number.isFinite(n))return '';
   const text=pmkCrownVariantText(v);const m=text.match(/\b(P\d{1,3})\b/i);const suffix=m?'-'+m[1].toUpperCase():'';
@@ -3266,15 +3280,19 @@ function pmkCrownPCombined(row,v,size){
 function pmkTechLearn3Recommend(){
   if(!Array.isArray(v54Variations)||!v54Variations.length)return alert('目前沒有可補齊的規格。');
   v54Variations=readVariationsV54();
-  if(!confirm('將嚴格依「標籤類型」補皇冠鑽資料：\n\n刀桿 / 刀具 → 只補 JCD 刀桿 SKU + 刀桿尺寸資料\n刀片 → 補 HCD 刀片 SKU + HCD 幾何 + CD100–320 切削參數\n未選標籤／其他 → 完全跳過\n\n來源 SKU、價格、庫存、圖片、上下架不動。'))return;
+  if(!confirm('將先依「規格標籤文字」對齊皇冠鑽種類，再補資料：\n\n皇冠鑽刀片直徑 / HCD → 自動設為「刀片 → EZP」\n皇冠鑽刀桿 / JCD → 自動設為「刀桿 / 刀具 → LBX」\n再補對應 SKU；只有刀片補 HCD 幾何 + CD100–320 切削參數\n無明確刀桿/刀片標籤才跳過\n\n來源 SKU、價格、庫存、圖片、上下架不動。'))return;
 
   let holderRows=0,insertRows=0,skipped=0,skuChanged=0,cutMatched=0,insertMatched=0,holderMatched=0,changedRows=0,changedFields=0;
   const next=v54Variations.map(v=>{
-    const kind=pmkCrownLabelKind(v);if(!kind){skipped++;return v}
-    const size=pmkTechLearn3Size(v);if(!Number.isFinite(size)){skipped++;return v}
-    const oldT=v.technical_params||{};
+    const inferredKind=pmkCrownInferKindFromLabel(v);
+    const kind=inferredKind||pmkCrownLabelKind(v);
+    if(!kind){skipped++;return v}
+    // 先把標籤真正寫回資料；後面的 SKU / 技術資料只認這個已對齊種類。
+    const baseV=(String(v.product_kind||'')===kind)?v:{...v,product_kind:kind};
+    const size=pmkTechLearn3Size(baseV);if(!Number.isFinite(size)){skipped++;return baseV}
+    const oldT=baseV.technical_params||{};
     const t={...oldT,pmknsh:{...(oldT.pmknsh||{})},material_params:{...(oldT.material_params||{})},factory_specs:{...(oldT.factory_specs||{})}};
-    let rowChanges=0,nextSku=String(v.sku||'');
+    let rowChanges=(baseV!==v?1:0),nextSku=String(baseV.sku||'');
     const setTop=(key,val)=>{if(val===undefined||val===null||val==='')return;if(String(t[key]??'')!==String(val)){rowChanges++;changedFields++;t[key]=String(val)}};
     const setSpec=(key,val)=>{if(val===undefined||val===null||val==='')return;if(String(t.factory_specs[key]??'')!==String(val)){rowChanges++;changedFields++;t.factory_specs[key]=String(val)}};
 
@@ -3291,12 +3309,12 @@ function pmkTechLearn3Recommend(){
     }else if(kind==='insert'){
       insertRows++;
       const geom=pmkCrownInsertGeometry(size),cut=pmkCrownFactoryRow(size);
-      const generated=pmkCrownInsertSku(v,size);if(generated&&generated!==asciiSkuV33(nextSku)){nextSku=generated;skuChanged++;rowChanges++;changedFields++}
+      const generated=pmkCrownInsertSku(baseV,size);if(generated&&generated!==asciiSkuV33(nextSku)){nextSku=generated;skuChanged++;rowChanges++;changedFields++}
       setSpec('data_kind','insert');
       if(geom){insertMatched++;setSpec('insert_spec',geom.spec);setSpec('insert_d_mm',geom.d);setSpec('point_angle_deg',geom.angle)}
       if(cut){
         cutMatched++;
-        const mats={P:pmkCrownPCombined(cut,v,size),M:pmkCrownMat(cut,'m',v,size),H:pmkCrownMat(cut,'h',v,size)};
+        const mats={P:pmkCrownPCombined(cut,baseV,size),M:pmkCrownMat(cut,'m',baseV,size),H:pmkCrownMat(cut,'h',baseV,size)};
         for(const k of ['P','M','H']){
           const cur={...(t.material_params[k]||{})},src=mats[k]||{};
           for(const f of ['feed','feed_min','feed_max','vc','vc_min','vc_max']){
@@ -3310,13 +3328,13 @@ function pmkTechLearn3Recommend(){
       if(geom||cut)t.source_meta={...(oldT.source_meta||{}),type:'factory',confidence:'100',label:'皇冠鑽 HCD/CD 刀片原廠表',factory_range:cut?.code||'',updated_at:new Date().toISOString()};
     }
     if(rowChanges)changedRows++;
-    return {...v,sku:nextSku,sku_manual_locked:true,technical_params:t};
+    return {...baseV,product_kind:kind,sku:nextSku,sku_manual_locked:true,technical_params:t};
   });
 
   v54Variations=next;renderVariationEditorV54();
   const msg=`✓ 標籤對齊完成：刀桿 ${holderRows} 組／刀片 ${insertRows} 組／跳過 ${skipped} 組；SKU 更新 ${skuChanged} 組；JCD ${holderMatched}／HCD ${insertMatched}／切削參數 ${cutMatched}。`;
   setStatus(msg);
-  alert(`${msg}\n\n實際更新 ${changedRows} 組／${changedFields} 欄。\n刀桿不會寫入刀片切削參數；未選標籤不處理。\n請抽查後按「更新商品」正式儲存。`);
+  alert(`${msg}\n\n實際更新 ${changedRows} 組／${changedFields} 欄。\n刀桿不會寫入刀片切削參數；無法從規格標籤判斷者才跳過。\n請抽查後按「更新商品」正式儲存。`);
 }
 function pmkSetPmkIfZeroV33(i,k,val){
   const el=document.querySelector(`[data-vtech-pmk="${k}"][data-vtech-i="${i}"]`);
