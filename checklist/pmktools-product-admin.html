@@ -3681,24 +3681,61 @@ function pmkTechImportApplyV1(payload){
   const incoming=Array.isArray(payload.rows)?payload.rows:[];if(!incoming.length)throw new Error('交換檔沒有 rows 資料');
   const current=readVariationsV54(),byKey=new Map(),bySource=new Map(),bySku=new Map();
   current.forEach((v,i)=>{const key=pmkTechExchangeMatchKey(v);if(key&&!byKey.has(key))byKey.set(key,i);const src=pmkTechExchangeText(v.source_sku_id).toUpperCase();if(src&&!bySource.has(src))bySource.set(src,i);const sku=pmkTechExchangeText(v.sku).toUpperCase();if(sku&&!bySku.has(sku))bySku.set(sku,i);});
-  let matched=0,changedRows=0,changedFields=0,missed=[];const next=current.map(v=>({...v,attributes:{...(v.attributes||{})},technical_params:pmkTechExchangeClone(v.technical_params||{})}));
+  let matched=0,created=0,changedRows=0,changedFields=0,missed=[];
+  const next=current.map(v=>({...v,attributes:{...(v.attributes||{})},technical_params:pmkTechExchangeClone(v.technical_params||{})}));
+  const allowCreate=String(payload.import_mode||'')==='create_missing_variations';
   for(const row of incoming){
     const key=pmkTechExchangeText(row.match_key),src=pmkTechExchangeText(row.source_sku_id).toUpperCase(),sku=pmkTechExchangeText(row.sku).toUpperCase();
     let i=key&&byKey.has(key)?byKey.get(key):(src&&bySource.has(src)?bySource.get(src):(sku&&bySku.has(sku)?bySku.get(sku):-1));
-    if(i<0){missed.push(pmkTechExchangeText(row.sku||row.source_sku_id||row.match_key||'?'));continue}matched++;
+    if(i<0&&allowCreate&&sku){
+      const attrs=row.attributes&&typeof row.attributes==='object'?pmkTechExchangeClone(row.attributes):{顏色分類:pmkTechExchangeText(row.variation_name||row.sku)};
+      const nv={
+        id:'tech-'+Date.now().toString(36)+'-'+String(created+1),
+        attributes:attrs,
+        variation_name:pmkTechExchangeText(row.variation_name)||pmkTechExchangeText(row.sku),
+        variation_name_manual_locked:true,
+        sku:asciiSkuV33(row.sku),
+        sku_manual_locked:true,
+        source_sku_id:'',
+        source_price:0,
+        price:Number($('price')?.value||0),
+        sale_price:0,
+        stock_tracking_enabled:false,
+        stock_qty:0,
+        image_url:'',
+        original_image_url:'',
+        image_locale:'',
+        is_active:true,
+        technical_params:row.technical_params&&typeof row.technical_params==='object'?pmkTechExchangeClone(row.technical_params):{},
+        _manual_draft:false
+      };
+      next.push(nv);i=next.length-1;created++;
+      if(sku)bySku.set(sku,i);
+      const nk=pmkTechExchangeMatchKey(nv);if(nk&&!byKey.has(nk))byKey.set(nk,i);
+    }
+    if(i<0){missed.push(pmkTechExchangeText(row.sku||row.source_sku_id||row.match_key||'?'));continue}
+    matched++;
     const before=next[i],after={...before};let rowChanges=0;
     const nextSku=asciiSkuV33(row.sku);if(nextSku&&nextSku!==asciiSkuV33(before.sku)){after.sku=nextSku;after.sku_manual_locked=true;rowChanges++;changedFields++;}
     const nextName=pmkTechExchangeText(row.variation_name);if(nextName&&nextName!==pmkTechExchangeText(before.variation_name)){after.variation_name=nextName;after.variation_name_manual_locked=true;rowChanges++;changedFields++;}
+    if(row.attributes&&typeof row.attributes==='object'&&created){
+      after.attributes=pmkTechExchangeClone(row.attributes);
+    }
     if(row.technical_params&&typeof row.technical_params==='object'){
-      const oldJson=JSON.stringify(before.technical_params||{}),newTech=pmkTechExchangeClone(row.technical_params||{}),newJson=JSON.stringify(newTech);if(oldJson!==newJson){after.technical_params=newTech;rowChanges++;changedFields++;}
+      const oldJson=JSON.stringify(before.technical_params||{}),newTech=pmkTechExchangeClone(row.technical_params||{}),newJson=JSON.stringify(newTech);
+      if(oldJson!==newJson){after.technical_params=newTech;rowChanges++;changedFields++;}
     }
     if(rowChanges){next[i]=after;changedRows++;}
   }
   if(!matched)throw new Error('沒有任何 SKU 能與目前商品匹配，未套用資料');
   const warning=missed.length?`\n另有 ${missed.length} 組無法匹配，會略過。`:'';
-  if(!confirm(`交換檔共 ${incoming.length} 組；匹配 ${matched} 組，將修改 ${changedRows} 組。\n\n只允許匯入：SKU、規格名稱、技術參數。\n價格／庫存／圖片／來源 SKU 不會修改。${warning}\n\n確定套用到目前編輯畫面？`))return {cancelled:true};
-  v54Variations=next;renderVariationEditorV54();setStatus(`✓ 技術資料已匯入：匹配 ${matched} 組，更新 ${changedRows} 組；${missed.length} 組略過。SKU 已套入目前 Variation；按「更新商品」時會再依皇冠鑽刀桿規則校正 JCD SKU 後正式寫入。`);
-  alert(`匯入完成。\n匹配：${matched} 組\n更新：${changedRows} 組\n略過：${missed.length} 組\n\n價格／庫存／圖片／來源 SKU 均未修改。\n請抽查後再按「更新商品」正式儲存。`);return {matched,changedRows,changedFields,missed};
+  const createNote=created?`\n將新增 ${created} 個 Variation；匯入後目前共 ${next.length} 個。`:'';
+  if(!confirm(`交換檔共 ${incoming.length} 組；匹配/建立 ${matched} 組；將修改 ${changedRows} 組。${createNote}\n\n只允許匯入：SKU、規格名稱、技術參數；建立新 Variation 時會帶入交換檔 attributes。\n價格／庫存／圖片／既有來源 SKU 不會修改。${warning}\n\n確定套用到目前編輯畫面？`))return {cancelled:true};
+  $('product_type').value='variable';
+  v54Variations=next;renderVariationEditorV54();
+  setStatus(`✓ 技術資料已匯入：匹配/建立 ${matched} 組，新增 ${created} 組，更新 ${changedRows} 組；目前共 ${v54Variations.length} 個 Variation。按「更新商品」正式儲存。`);
+  alert(`匯入完成。\n匹配/建立：${matched} 組\n新增 Variation：${created} 組\n更新：${changedRows} 組\n目前總數：${v54Variations.length} 組\n略過：${missed.length} 組\n\n請抽查後按「更新商品」正式儲存。`);
+  return {matched,created,changedRows,changedFields,missed};
 }
 function pmkTechImportPickV1(){
   const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.style.display='none';document.body.appendChild(input);
