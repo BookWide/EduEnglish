@@ -1361,16 +1361,16 @@ function pricingApplyProduct(p){
       const cny=Math.max(0,Number(v.source_price||0));
       if(!(cny>0))return v;
 
-      const variationMult=Math.max(.01,Number(v.price_multiplier||1));
-      const next=Math.round(pricingPublicFromCny(cny,cat,rules,pid)*variationMult);
+      const manual=Math.max(0,Number(v.price||0));
+      const next=manual>0?manual:pricingPublicFromCny(cny,cat,rules,pid);
 
-      // 價格規則的結果就是正式「定價」；本筆 Variation 可直接加倍率。
-      // 不再讓舊 sale_price 蓋回舊價。
+      // CNY×10 / 價格規則只負責沒有手動定價時的預設值。
+      // 已直接輸入的 Variation 定價永遠優先，不被自動規則覆蓋。
       return {
         ...v,
         price:next,
         sale_price:0,
-        pricing_auto:true,
+        pricing_auto:!(manual>0),
         pricing_applied_price:next
       };
     });
@@ -2718,8 +2718,7 @@ function renderVariationEditorV54(){
 </select></div>
           <div class="v545-field"><label>SKU（前台主要識別）</label><input data-vsku="${i}" maxlength="32" value="${esc(v.sku||'')}" placeholder="例如 PENTA24N050"></div><div class="v545-field"><label>來源 SKU</label><input data-vsourcesku="${i}" value="${esc(v.source_sku_id||'')}" placeholder="淘寶／供應商 SKU ID"></div><div class="v545-field"><label>來源價 (CNY，可手動修正)</label><input type="number" min="0" step="0.01" data-vsourceprice="${i}" value="${Number(v.source_price||0)}"></div>
           <div class="v545-field"><label>狀態</label><select data-vactive="${i}"><option value="true" ${v.is_active!==false?'selected':''}>啟用</option><option value="false" ${v.is_active===false?'selected':''}>停用</option></select></div>
-          <div class="v545-field"><label>定價倍率（CNY × 10 後）</label><input type="number" min="0.01" step="0.01" data-vpricemult="${i}" value="${Math.max(0.01,Number(v.price_multiplier||1)).toFixed(2)}"></div>
-          <div class="v545-field"><label>定價 (NT$＝CNY × 10 × 倍率)</label><input type="number" min="0" step="1" data-vprice="${i}" value="${Number(v.price||0)}"></div>
+          <div class="v545-field"><label>定價 (NT$，CNY × 10 僅預設)</label><input type="number" min="0" step="1" data-vprice="${i}" value="${Number(v.price||0)}"></div>
           <div class="v545-field"><label>折扣價 (NT$)</label><input type="number" min="0" step="1" data-vsale="${i}" value="${Number(v.sale_price||0)}"></div>
           <div class="v545-field"><label>庫存數量</label><input type="number" min="0" step="1" data-vstock="${i}" value="${Number(v.stock_qty||0)}"></div>
           <div class="v545-field"><label>庫存管理</label><div class="v545-checks"><label><input type="checkbox" data-vmanage="${i}" ${v.stock_tracking_enabled!==false?'checked':''}> 管理庫存</label></div></div>
@@ -2828,20 +2827,11 @@ function renderVariationEditorV54(){
   box.querySelectorAll('[data-vsourceprice]').forEach(inp=>inp.oninput=()=>{
     const i=Number(inp.dataset.vsourceprice);
     const cny=Math.max(0,Number(inp.value||0));
-    const mult=Math.max(.01,Number(box.querySelector(`[data-vpricemult="${i}"]`)?.value||v54Variations[i]?.price_multiplier||1));
     const priceEl=box.querySelector(`[data-vprice="${i}"]`);
-    const base=pricingPublicFromCny(cny,$('category')?.value||'',pricingRules(),currentEditId||$('external_id')?.value||'');
-    if(priceEl)priceEl.value=String(Math.round(base*mult));
-    if(v54Variations[i]){v54Variations[i].source_price=cny;v54Variations[i].price_multiplier=mult;}
-  });
-  box.querySelectorAll('[data-vpricemult]').forEach(inp=>inp.oninput=()=>{
-    const i=Number(inp.dataset.vpricemult);
-    const mult=Math.max(.01,Number(inp.value||1));
-    const cny=Math.max(0,Number(box.querySelector(`[data-vsourceprice="${i}"]`)?.value||v54Variations[i]?.source_price||0));
-    const base=pricingPublicFromCny(cny,$('category')?.value||'',pricingRules(),currentEditId||$('external_id')?.value||'');
-    const priceEl=box.querySelector(`[data-vprice="${i}"]`);
-    if(priceEl)priceEl.value=String(Math.round(base*mult));
-    if(v54Variations[i]){v54Variations[i].price_multiplier=mult;v54Variations[i].price=Math.round(base*mult);}
+    const current=Math.max(0,Number(priceEl?.value||v54Variations[i]?.price||0));
+    // CNY×10 只在尚未有定價時提供預設；手動價格永不被來源價覆蓋。
+    if(priceEl && !(current>0)) priceEl.value=String(Math.round(cny*10));
+    if(v54Variations[i])v54Variations[i].source_price=cny;
   });
   box.querySelectorAll('[data-vai-tw]').forEach(btn=>btn.onclick=()=>localizeVariationImageV4(Number(btn.dataset.vaiTw),'zh-TW'));
   box.querySelectorAll('[data-vai-en]').forEach(btn=>btn.onclick=()=>localizeVariationImageV4(Number(btn.dataset.vaiEn),'en'));
@@ -3673,7 +3663,6 @@ function readVariationsV54(){
   return v54Variations.map((v,i)=>{
     if(!rendered.has(i))return v;
     const sourcePrice=Math.max(0,Number(document.querySelector(`[data-vsourceprice="${i}"]`)?.value||v.source_price||0));
-    const priceMultiplier=Math.max(.01,Number(document.querySelector(`[data-vpricemult="${i}"]`)?.value||v.price_multiplier||1));
     const entered=Math.max(0,Number(document.querySelector(`[data-vprice="${i}"]`)?.value||v.price||0));
     const attrs={...(v.attributes||{})};
     document.querySelectorAll(`[data-vattr="${i}"]`).forEach(sel=>{
@@ -3694,8 +3683,7 @@ function readVariationsV54(){
       source_sku_id:String(document.querySelector(`[data-vsourcesku="${i}"]`)?.value||v.source_sku_id||'').trim(),
       source_price:sourcePrice,
       source_currency:String(v.source_currency||'CNY'),
-      price_multiplier:priceMultiplier,
-      price:entered>0?entered:Math.round(pricingPublicFromCny(sourcePrice,$('category')?.value||'',pricingRules(),currentEditId||$('external_id')?.value||'')*priceMultiplier),
+      price:entered>0?entered:Math.round(sourcePrice*10),
       sale_price:Math.max(0,Number(document.querySelector(`[data-vsale="${i}"]`)?.value||v.sale_price||0)),
       stock_tracking_enabled:document.querySelector(`[data-vmanage="${i}"]`)?.checked!==false,
       stock_qty:Math.max(0,Number(document.querySelector(`[data-vstock="${i}"]`)?.value||v.stock_qty||0)),
@@ -5580,9 +5568,9 @@ function applyCollectorRepairResultV1(r){
   for(const x of plan){
     const v=v54Variations[x.i];
     if(r.mode==='price'){
-      const n=x.newValue,mult=Math.max(.01,Number(v.price_multiplier||document.querySelector(`[data-vpricemult="${x.i}"]`)?.value||1)),nt=Math.round(pricingPublicFromCny(n,$('category')?.value||'',pricingRules(),currentEditId||$('external_id')?.value||'')*mult);
-      v.source_price=n;v.source_currency='CNY';v.price_multiplier=mult;v.price=nt;v.price_repaired_at=new Date().toISOString();v.price_source='collector-live-repair';
-      const sp=document.querySelector(`[data-vsourceprice="${x.i}"]`),pm=document.querySelector(`[data-vpricemult="${x.i}"]`),pp=document.querySelector(`[data-vprice="${x.i}"]`);if(sp)sp.value=String(n);if(pm)pm.value=mult.toFixed(2);if(pp)pp.value=String(nt);
+      const n=x.newValue,currentPrice=Math.max(0,Number(v.price||document.querySelector(`[data-vprice="${x.i}"]`)?.value||0)),nt=currentPrice>0?currentPrice:Math.round(n*10);
+      v.source_price=n;v.source_currency='CNY';v.price=nt;v.price_repaired_at=new Date().toISOString();v.price_source='collector-live-repair';
+      const sp=document.querySelector(`[data-vsourceprice="${x.i}"]`),pp=document.querySelector(`[data-vprice="${x.i}"]`);if(sp)sp.value=String(n);if(pp&&!(Number(pp.value)>0))pp.value=String(nt);
     }else{
       v.sku=x.newValue;v.sku_source='variation-image-repair';v.sku_repaired_at=new Date().toISOString();
       const se=document.querySelector(`[data-vsku="${x.i}"]`);if(se)se.value=x.newValue;
