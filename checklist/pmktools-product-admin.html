@@ -1361,16 +1361,16 @@ function pricingApplyProduct(p){
       const cny=Math.max(0,Number(v.source_price||0));
       if(!(cny>0))return v;
 
-      const manual=Math.max(0,Number(v.price||0));
-      const next=manual>0?manual:pricingPublicFromCny(cny,cat,rules,pid);
+      const next=pricingPublicFromCny(cny,cat,rules,pid);
+      const manualSale=Math.max(0,Number(v.sale_price||0));
 
-      // CNY×10 / 價格規則只負責沒有手動定價時的預設值。
-      // 已直接輸入的 Variation 定價永遠優先，不被自動規則覆蓋。
+      // price 是系統基礎價；sale_price 是人工售價。
+      // 前台既有 variationPrice() 會優先 sale_price，沒有才使用 price。
       return {
         ...v,
         price:next,
-        sale_price:0,
-        pricing_auto:!(manual>0),
+        sale_price:manualSale,
+        pricing_auto:true,
         pricing_applied_price:next
       };
     });
@@ -2718,8 +2718,8 @@ function renderVariationEditorV54(){
 </select></div>
           <div class="v545-field"><label>SKU（前台主要識別）</label><input data-vsku="${i}" maxlength="32" value="${esc(v.sku||'')}" placeholder="例如 PENTA24N050"></div><div class="v545-field"><label>來源 SKU</label><input data-vsourcesku="${i}" value="${esc(v.source_sku_id||'')}" placeholder="淘寶／供應商 SKU ID"></div><div class="v545-field"><label>來源價 (CNY，可手動修正)</label><input type="number" min="0" step="0.01" data-vsourceprice="${i}" value="${Number(v.source_price||0)}"></div>
           <div class="v545-field"><label>狀態</label><select data-vactive="${i}"><option value="true" ${v.is_active!==false?'selected':''}>啟用</option><option value="false" ${v.is_active===false?'selected':''}>停用</option></select></div>
-          <div class="v545-field"><label>定價 (NT$，CNY × 10 僅預設)</label><input type="number" min="0" step="1" data-vprice="${i}" value="${Number(v.price||0)}"></div>
-          <div class="v545-field"><label>折扣價 (NT$)</label><input type="number" min="0" step="1" data-vsale="${i}" value="${Number(v.sale_price||0)}"></div>
+          <div class="v545-field"><label>基礎價 (NT$，系統計算／唯讀)</label><input type="number" min="0" step="1" data-vprice="${i}" value="${Number(v.price||0)}" readonly style="background:#f1f5f9;color:#64748b"></div>
+          <div class="v545-field"><label>售價 (NT$，前台顯示；0＝使用基礎價)</label><input type="number" min="0" step="1" data-vsale="${i}" value="${Number(v.sale_price||0)}"></div>
           <div class="v545-field"><label>庫存數量</label><input type="number" min="0" step="1" data-vstock="${i}" value="${Number(v.stock_qty||0)}"></div>
           <div class="v545-field"><label>庫存管理</label><div class="v545-checks"><label><input type="checkbox" data-vmanage="${i}" ${v.stock_tracking_enabled!==false?'checked':''}> 管理庫存</label></div></div>
           ${pmkVariationIsInsertV327(v)?`
@@ -2828,10 +2828,10 @@ function renderVariationEditorV54(){
     const i=Number(inp.dataset.vsourceprice);
     const cny=Math.max(0,Number(inp.value||0));
     const priceEl=box.querySelector(`[data-vprice="${i}"]`);
-    const current=Math.max(0,Number(priceEl?.value||v54Variations[i]?.price||0));
-    // CNY×10 只在尚未有定價時提供預設；手動價格永不被來源價覆蓋。
-    if(priceEl && !(current>0)) priceEl.value=String(Math.round(cny*10));
-    if(v54Variations[i])v54Variations[i].source_price=cny;
+    const base=pricingPublicFromCny(cny,$('category')?.value||'',pricingRules(),currentEditId||$('external_id')?.value||'');
+    // 基礎價是系統計算值；人工售價 data-vsale 完全不碰。
+    if(priceEl)priceEl.value=String(base);
+    if(v54Variations[i]){v54Variations[i].source_price=cny;v54Variations[i].price=base;}
   });
   box.querySelectorAll('[data-vai-tw]').forEach(btn=>btn.onclick=()=>localizeVariationImageV4(Number(btn.dataset.vaiTw),'zh-TW'));
   box.querySelectorAll('[data-vai-en]').forEach(btn=>btn.onclick=()=>localizeVariationImageV4(Number(btn.dataset.vaiEn),'en'));
@@ -3663,7 +3663,7 @@ function readVariationsV54(){
   return v54Variations.map((v,i)=>{
     if(!rendered.has(i))return v;
     const sourcePrice=Math.max(0,Number(document.querySelector(`[data-vsourceprice="${i}"]`)?.value||v.source_price||0));
-    const entered=Math.max(0,Number(document.querySelector(`[data-vprice="${i}"]`)?.value||v.price||0));
+    const basePrice=pricingPublicFromCny(sourcePrice,$('category')?.value||'',pricingRules(),currentEditId||$('external_id')?.value||'');
     const attrs={...(v.attributes||{})};
     document.querySelectorAll(`[data-vattr="${i}"]`).forEach(sel=>{
       const name=String(sel.dataset.attrName||'').trim();
@@ -3683,7 +3683,7 @@ function readVariationsV54(){
       source_sku_id:String(document.querySelector(`[data-vsourcesku="${i}"]`)?.value||v.source_sku_id||'').trim(),
       source_price:sourcePrice,
       source_currency:String(v.source_currency||'CNY'),
-      price:entered>0?entered:Math.round(sourcePrice*10),
+      price:basePrice,
       sale_price:Math.max(0,Number(document.querySelector(`[data-vsale="${i}"]`)?.value||v.sale_price||0)),
       stock_tracking_enabled:document.querySelector(`[data-vmanage="${i}"]`)?.checked!==false,
       stock_qty:Math.max(0,Number(document.querySelector(`[data-vstock="${i}"]`)?.value||v.stock_qty||0)),
@@ -3819,7 +3819,12 @@ function pmkTechImportApplyV1(payload){
         sku_manual_locked:true,
         source_sku_id:pmkTechExchangeText(row.source_sku_id)||old?.source_sku_id||'',
         source_price:Number(row.source_price||0)>0?Number(row.source_price):Number(old?.source_price||0),
-        price:Number(row.price||0)>0?Number(row.price):Number(old?.price||0)||Number($('price')?.value||0),
+        price:pricingPublicFromCny(
+          Number(row.source_price||0)>0?Number(row.source_price):Number(old?.source_price||0),
+          $('category')?.value||'',
+          pricingRules(),
+          currentEditId||$('external_id')?.value||''
+        ),
         sale_price:old?.sale_price||0,
         stock_tracking_enabled:!!old?.stock_tracking_enabled,
         stock_qty:Number(old?.stock_qty||0),
@@ -3832,7 +3837,7 @@ function pmkTechImportApplyV1(payload){
       };
     });
 
-    if(!confirm(`交換檔共 ${incoming.length} 組。\n\n將直接以交換檔型號清單重建目前 Variation：\n目前 ${current.length} 組 → 匯入後 ${next.length} 組。\n\n型號會直接寫入「顏色分類」，並同步商品屬性清單，不再出現舊 7 個值或「任意 顏色分類」。\n既有能匹配的價格／庫存／圖片／來源 SKU 會保留；新增規格若無專圖，依支撐板尺寸＋材質繼承最接近的既有規格圖。\n\n確定套用到目前編輯畫面？`))return {cancelled:true};
+    if(!confirm(`交換檔共 ${incoming.length} 組。\n\n將直接以交換檔型號清單重建目前 Variation：\n目前 ${current.length} 組 → 匯入後 ${next.length} 組。\n\n型號會直接寫入「顏色分類」，並同步商品屬性清單，不再出現舊 7 個值或「任意 顏色分類」。\n既有能匹配的人工售價／庫存／圖片／來源 SKU 會保留；基礎價依來源價重新計算；新增規格若無專圖，依支撐板尺寸＋材質繼承最接近的既有規格圖。\n\n確定套用到目前編輯畫面？`))return {cancelled:true};
 
     // 先同步商品屬性值，再畫 Variation；否則下拉仍只會顯示舊的 7 個值。
     const attrOrder=[],attrValues=new Map();
@@ -5568,9 +5573,9 @@ function applyCollectorRepairResultV1(r){
   for(const x of plan){
     const v=v54Variations[x.i];
     if(r.mode==='price'){
-      const n=x.newValue,currentPrice=Math.max(0,Number(v.price||document.querySelector(`[data-vprice="${x.i}"]`)?.value||0)),nt=currentPrice>0?currentPrice:Math.round(n*10);
+      const n=x.newValue,nt=pricingPublicFromCny(n,$('category')?.value||'',pricingRules(),currentEditId||$('external_id')?.value||'');
       v.source_price=n;v.source_currency='CNY';v.price=nt;v.price_repaired_at=new Date().toISOString();v.price_source='collector-live-repair';
-      const sp=document.querySelector(`[data-vsourceprice="${x.i}"]`),pp=document.querySelector(`[data-vprice="${x.i}"]`);if(sp)sp.value=String(n);if(pp&&!(Number(pp.value)>0))pp.value=String(nt);
+      const sp=document.querySelector(`[data-vsourceprice="${x.i}"]`),pp=document.querySelector(`[data-vprice="${x.i}"]`);if(sp)sp.value=String(n);if(pp)pp.value=String(nt);
     }else{
       v.sku=x.newValue;v.sku_source='variation-image-repair';v.sku_repaired_at=new Date().toISOString();
       const se=document.querySelector(`[data-vsku="${x.i}"]`);if(se)se.value=x.newValue;
