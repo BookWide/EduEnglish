@@ -1526,7 +1526,7 @@ async function savePricingRulesV1(){
     btn.style.cursor='wait';
   }
   if(st){
-    st.textContent='⏳ 將價格規則送到 Worker；Worker 只讀 R2 一次、寫 R2 一次…';
+    st.textContent='⏳ 同步一般客戶 / VIP / 經銷商到 D1，並重算 R2 商品公開價…';
     st.style.color='#475569';
     st.style.fontWeight='700';
   }
@@ -1535,8 +1535,22 @@ async function savePricingRulesV1(){
     const rules=pricingReadForm();
     localStorage.setItem(PMK_PRICING_RULES_KEY,JSON.stringify(rules));
 
-    // 核心修正：不再 73 筆商品逐筆 /api/bw-product-save。
-    // 由 Worker 在 R2 master 內一次重算、一次寫回。
+    // 客戶等級價格不是商品定價的一部分：同步到 D1 pmk_price_groups。
+    // Worker /api/pmk-product 與結帳本來就會依實際登入客戶的 price_group_code 套用這裡的倍率。
+    // CRM 使用 STANDARD / VIP / DEALER 大寫代碼，因此這裡統一轉大寫，避免大小寫造成查不到倍率。
+    for(const tier of (rules.tiers||[])){
+      const code=String(tier.code||'').trim().toUpperCase();
+      if(!code)continue;
+      await productAdminPost('/api/pmk-admin/price-groups',{
+        code,
+        name:String(tier.name||code).trim()||code,
+        multiplier:Math.max(.01,Number(tier.multiplier||1)),
+        active:true
+      });
+    }
+
+    // 商品公開定價仍只做 CNY × 來源倍率 × 全站/分類/單品倍率。
+    // 客戶等級倍率不寫死進商品價，由 Worker 依登入客戶即時計算。
     const j=await productAdminPost('/api/pmk-pricing-apply',{rules});
 
     if(btn)btn.textContent='重新讀取 R2…';
