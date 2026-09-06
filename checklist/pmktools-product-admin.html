@@ -3731,15 +3731,60 @@ function pmkTechImportApplyV1(payload){
 
   if(String(payload.import_mode||'')==='replace_variations_from_exchange'){
     const current=readVariationsV54();
-    const bySource=new Map(),bySku=new Map();
+    const bySource=new Map(),sourceCount=new Map(),bySku=new Map();
     current.forEach(v=>{
-      const src=pmkTechExchangeText(v.source_sku_id).toUpperCase();if(src&&!bySource.has(src))bySource.set(src,v);
+      const src=pmkTechExchangeText(v.source_sku_id).toUpperCase();
+      if(src){sourceCount.set(src,(sourceCount.get(src)||0)+1);if(!bySource.has(src))bySource.set(src,v);}
       const sku=pmkTechExchangeText(v.sku).toUpperCase();if(sku&&!bySku.has(sku))bySku.set(sku,v);
     });
 
+    // 只在既有 TECH_DATA replace importer 內補規格圖繼承。
+    const supportDims=v=>{
+      const tp=v?.technical_params||{};
+      const num=x=>{const n=Number(x);return Number.isFinite(n)&&n>0?n:0};
+      let w=num(tp.support_plate_width_b_mm||tp.support_plate_width_w1_mm||tp.support_plate_W1_mm);
+      let t=num(tp.support_plate_thickness_s_mm||tp.support_plate_S_mm);
+      let l=num(tp.support_plate_length_l_mm||tp.support_plate_length_insl_mm||tp.support_plate_INSL_mm);
+      if(!(w&&t&&l)){
+        const raw=String(tp.support_plate_dimension_b_s_l_mm||tp.geometry||v?.sku||v?.variation_name||'');
+        const m=raw.match(/(\d+(?:\.\d+)?)\s*[*x×-]\s*(\d+(?:\.\d+)?)\s*[*x×-]\s*(\d+(?:\.\d+)?)/i);
+        if(m){w=Number(m[1]);t=Number(m[2]);l=Number(m[3]);}
+      }
+      if(!(w&&t&&l)){
+        const key=String(v?.sku||v?.variation_name||Object.values(v?.attributes||{}).join(' ')).toUpperCase();
+        const known=[
+          [/800[- ]?06A?/,6,3,18],[/800[- ]?07A?/,7,3.5,20],[/800[- ]?08A?/,8,4.5,25],
+          [/800[- ]?10A?/,10,4.5,30],[/800[- ]?12A?/,12,5.5,35],
+          [/800[- ]?14A?/,14,7,35],[/800[- ]?20A?/,20,8.5,50]
+        ];
+        const k=known.find(x=>x[0].test(key));if(k){w=k[1];t=k[2];l=k[3];}
+      }
+      const mat=String(tp.support_plate_material||tp.material||tp.material_label||tp.grade||'');
+      return {w,t,l,mat};
+    };
+    const imageRefs=current.filter(v=>String(v?.image_url||'').trim()).map(v=>({v,d:supportDims(v)}));
+    const inheritImage=row=>{
+      if(!imageRefs.length)return null;
+      const d=supportDims(row);
+      if(!(d.w&&d.t&&d.l))return imageRefs[0].v;
+      let best=null,bestScore=Infinity;
+      for(const r of imageRefs){
+        if(!(r.d.w&&r.d.t&&r.d.l))continue;
+        let score=
+          Math.pow((d.w-r.d.w)/Math.max(1,r.d.w),2)+
+          Math.pow((d.t-r.d.t)/Math.max(1,r.d.t),2)+
+          Math.pow((d.l-r.d.l)/Math.max(1,r.d.l),2);
+        if(d.mat&&r.d.mat&&d.mat!==r.d.mat)score+=0.35;
+        if(score<bestScore){bestScore=score;best=r.v;}
+      }
+      return best||imageRefs[0].v;
+    };
+
     const next=incoming.map((row,n)=>{
       const src=pmkTechExchangeText(row.source_sku_id).toUpperCase(),sku=pmkTechExchangeText(row.sku).toUpperCase();
-      const old=(src&&bySource.get(src))||(sku&&bySku.get(sku))||null;
+      // SKU 優先；共用來源碼（例如 PV001）不拿來強制配同一筆。
+      const old=(sku&&bySku.get(sku))||(src&&sourceCount.get(src)===1&&bySource.get(src))||null;
+      const imageOld=old&&String(old.image_url||'').trim()?old:inheritImage(row);
       return {
         ...(old||{}),
         id:old?.id||('tech-'+Date.now().toString(36)+'-'+String(n+1)),
@@ -3748,22 +3793,22 @@ function pmkTechImportApplyV1(payload){
         variation_name_manual_locked:true,
         sku:asciiSkuV33(row.sku),
         sku_manual_locked:true,
-        source_sku_id:old?.source_sku_id||'',
-        source_price:old?.source_price||0,
-        price:old?.price||Number($('price')?.value||0),
+        source_sku_id:pmkTechExchangeText(row.source_sku_id)||old?.source_sku_id||'',
+        source_price:Number(row.source_price||0)>0?Number(row.source_price):Number(old?.source_price||0),
+        price:Number(row.price||0)>0?Number(row.price):Number(old?.price||0)||Number($('price')?.value||0),
         sale_price:old?.sale_price||0,
         stock_tracking_enabled:!!old?.stock_tracking_enabled,
         stock_qty:Number(old?.stock_qty||0),
-        image_url:old?.image_url||'',
-        original_image_url:old?.original_image_url||'',
-        image_locale:old?.image_locale||'',
+        image_url:old?.image_url||imageOld?.image_url||'',
+        original_image_url:old?.original_image_url||imageOld?.original_image_url||imageOld?.image_url||'',
+        image_locale:old?.image_locale||imageOld?.image_locale||'',
         is_active:old?old.is_active!==false:true,
         technical_params:row.technical_params&&typeof row.technical_params==='object'?pmkTechExchangeClone(row.technical_params):{},
         _manual_draft:false
       };
     });
 
-    if(!confirm(`交換檔共 ${incoming.length} 組。\n\n將直接以交換檔型號清單重建目前 Variation：\n目前 ${current.length} 組 → 匯入後 ${next.length} 組。\n\n型號會直接寫入「顏色分類」，並同步商品屬性清單，不再出現舊 7 個值或「任意 顏色分類」。\n既有能匹配的價格／庫存／圖片／來源 SKU 會保留。\n\n確定套用到目前編輯畫面？`))return {cancelled:true};
+    if(!confirm(`交換檔共 ${incoming.length} 組。\n\n將直接以交換檔型號清單重建目前 Variation：\n目前 ${current.length} 組 → 匯入後 ${next.length} 組。\n\n型號會直接寫入「顏色分類」，並同步商品屬性清單，不再出現舊 7 個值或「任意 顏色分類」。\n既有能匹配的價格／庫存／圖片／來源 SKU 會保留；新增規格若無專圖，依支撐板尺寸＋材質繼承最接近的既有規格圖。\n\n確定套用到目前編輯畫面？`))return {cancelled:true};
 
     // 先同步商品屬性值，再畫 Variation；否則下拉仍只會顯示舊的 7 個值。
     const attrOrder=[],attrValues=new Map();
