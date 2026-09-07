@@ -81,6 +81,19 @@ function scholarshipCoins(r){
   const n = Number(r.coins || r.coins_added || 50);
   return Number.isFinite(n) && n > 0 ? n : 50;
 }
+
+function scholarshipDurationValue(r){
+  const open = (r && r.open_response && typeof r.open_response === 'object') ? r.open_response : {};
+  if(open.scholarship_permanent===true) return 'permanent';
+  const n = Number(open.scholarship_days || r?.days || 30);
+  return [30,90,180,365].includes(n) ? String(n) : '30';
+}
+function scholarshipDurationSelect(r){
+  if(!isScholarship(r) || !['pending','approved'].includes(String(r.status||''))) return '';
+  const v=scholarshipDurationValue(r);
+  const opts=[['30','30 天'],['90','90 天'],['180','180 天'],['365','365 天'],['permanent','永久']];
+  return `<div class="box" style="margin-top:12px;max-width:360px"><div class="k">助學有效期限</div><select id="scholar-duration-${r.id}" style="margin-top:7px;width:100%">${opts.map(([value,label])=>`<option value="${value}" ${v===value?'selected':''}>${label}</option>`).join('')}</select><div class="small" style="margin-top:6px">以審核通過時選擇的期限建立／同步助學資格。</div></div>`;
+}
 async function getFreshAccessToken(){
   // 不直接相信舊 getSession() 快取；先確認目前 user，再刷新 session。
   const { data:userData, error:userError } = await sb.auth.getUser();
@@ -157,8 +170,10 @@ function render(rows){
       <div class="small"><b>客戶備註：</b>${(r.customer_note||'無').replaceAll('<','&lt;')}</div>
       <div class="small"><b>後台備註：</b>${(r.admin_note||'無').replaceAll('<','&lt;')}</div>
       ${r.open_response ? `<div class="small"><b>開通回應：</b><span class="mono">${JSON.stringify(r.open_response)}</span></div>`:''}
+      ${scholarshipDurationSelect(r)}
       <div class="actions">
         ${r.status==='pending' ? `<button class="btn ok" onclick="approveReq('${r.id}')">${approveText(r)}</button><button class="btn bad" onclick="rejectReq('${r.id}')">退回</button>` : ''}
+        ${r.status==='approved' && isScholarship(r) ? `<button class="btn primary" onclick="resyncScholarship('${r.id}')">重同步助學期限</button>` : ''}
       </div>
     </div>`).join('');
 }
@@ -186,12 +201,14 @@ async function approveReq(id){
 
     // 核心：前端只送 approve；真正寫入 subscription_requests / orders / profiles / coin_transactions
     // 全部交給 Supabase Edge Function subscription-request，用 service role 執行。
+    const duration = scholar ? String(document.getElementById(`scholar-duration-${id}`)?.value || '30') : '';
     const j = await call('approve', {
       requestId:id,
       adminNote:note,
       scholarship:scholar,
       coins:scholarshipCoins(r),
-      expireDays:30
+      expireDays: duration==='permanent' ? null : Number(duration||30),
+      permanent: duration==='permanent'
     });
 
     $('result').textContent = '✅ 開通完成\n\nEdge Function 回應：\n' + JSON.stringify(j,null,2);
@@ -199,6 +216,25 @@ async function approveReq(id){
   }
   catch(e){ $('result').textContent='❌ 開通失敗：'+(e.message||e); }
 }
+async function resyncScholarship(id){
+  const r = (currentRows || []).find(x => String(x.id) === String(id)) || {};
+  if(!isScholarship(r)) return;
+  const duration = String(document.getElementById(`scholar-duration-${id}`)?.value || '30');
+  const label = duration==='permanent' ? '永久' : `${duration} 天`;
+  if(!confirm(`確認把這筆已開通助學資格重同步為「${label}」？\n此動作不會再加 50 金幣。`)) return;
+  try{
+    $('result').textContent='助學期限重同步中…';
+    const j = await call('resync-scholarship', {
+      requestId:id,
+      adminNote:`助學期限重同步：${label}`,
+      expireDays: duration==='permanent' ? null : Number(duration||30),
+      permanent: duration==='permanent'
+    });
+    $('result').textContent='✅ 助學期限已重同步（未重複加幣）\n\nEdge Function 回應：\n'+JSON.stringify(j,null,2);
+    await load();
+  }catch(e){ $('result').textContent='❌ 助學期限重同步失敗：'+(e.message||e); }
+}
+
 async function rejectReq(id){
   const r = (currentRows || []).find(x => String(x.id) === String(id)) || {};
   const note = prompt('退回原因', isScholarship(r) ? '助學申請資料不足' : '付款資料不足或尚未入帳');
