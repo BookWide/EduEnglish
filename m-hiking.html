@@ -1480,7 +1480,7 @@ body.card-pick-active .sticker-maker-btn{background:#f2a51a!important;color:#111
         <div class="line-auto-action-row line-auto-secondary-flow">
           <div class="line-auto-action-item">
             <button class="btn secondary" onclick="lineAutoRun(true)"><span class="line-auto-step">4</span>立即發送 LINE</button>
-            <button class="btn manual-send-btn" id="lineManualCopyBtn" type="button" onclick="lineAutoAdminTestSend(this)"><span class="line-auto-step">4A</span>測試 LINE</button>
+            <button class="btn manual-send-btn" id="lineManualCopyBtn" type="button" onclick="lineAutoOneClickManualSend(this)"><span class="line-auto-step">4A</span>手動 LINE</button>
             <div class="line-auto-button-note">今天臨時補寄或測試使用，不影響每日排程。</div>
             <div id="lineManualOneClickStatus" class="small" style="margin-top:6px;font-weight:900"></div>
           </div>
@@ -1498,7 +1498,7 @@ body.card-pick-active .sticker-maker-btn{background:#f2a51a!important;color:#111
         <div class="manual-send-guide">
           <b>使用順序：</b>
           <span>① 先產生今日日安圖</span>
-          <span>② 4A「測試 LINE」只供 Admin 指定 1 人測試；不影響每日排程</span>
+          <span>② 直接按上方「4A 一鍵複製／分享 LINE」</span>
           <span>③ 手機：維持 V35.5，一次分享「日安圖＋每日學習文字」</span>
           <span>④ PC：接受兩步驟，先貼日安圖，再貼完整排課文字</span>
         </div>
@@ -7303,22 +7303,20 @@ async function lineAutoCopyManualImage(){
   }
 }
 
-
-async function lineAutoAdminTestSend(button){
+async function lineAutoOneClickManualSend(button){
   const ids=lineAutoSelectedIds();
   if(ids.length!==1){
-    alert('4A 測試 LINE 一次只能勾選 1 位會員，避免浪費 LINE 額度。');
+    alert('4A 測試一次只能勾選 1 位 LINE 會員。');
     return;
   }
   const old=button?.innerHTML||'';
   if(button){button.disabled=true;button.innerHTML='<span class="line-auto-step">4A</span>測試中…';}
   try{
-    // 與正式發送相同來源：先同步節氣 Launch mapping，再把本次特殊日 payload 直接送 /run。
     try{
       await solarLoadLaunchMapping();
       solarApplyLaunchMappingToLibraries();
     }catch(mapError){
-      console.warn('4A 測試：24 節氣 Player mapping 讀取失敗',mapError);
+      console.warn('4A 測試：節氣 Player mapping 讀取失敗',mapError);
     }
 
     await dailyEnglishSave(true);
@@ -7327,15 +7325,12 @@ async function lineAutoAdminTestSend(button){
     const testDate=document.getElementById('laDailySpecialDate')?.value||lineAutoTodayTaipei();
     const special=dailySpecialResolved(testDate);
     if(special.kind==='solar' && !/^https:\/\//i.test(String(special.player_url||''))){
-      throw new Error(`「${special.name||'節氣'}」Player 尚未同步；停止測試，避免送出殘缺卡。`);
+      throw new Error(`「${special.name||'節氣'}」Player 尚未同步；停止測試。`);
     }
 
-    if(!confirm(`確定測試發送給目前勾選的 1 位 LINE 會員？\n\n此測試會真的使用 1 則 LINE 訊息額度，但不寫入每日 dedupe、不推進 LINE Day，也不影響今天 Cron。`)){
-      return;
-    }
+    if(!confirm('確定測試發送給目前勾選的 1 位會員？\n\n這會使用 1 則 LINE 額度，但不寫每日 dedupe、不推進 LINE Day、不影響 Cron。'))return;
 
     const specialPayload=dailySpecialPayload(testDate);
-    lineAutoShow('正在執行 4A Admin 測試 LINE…');
     const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({
       send:true,
       force:true,
@@ -7350,71 +7345,13 @@ async function lineAutoAdminTestSend(button){
       throw new Error(detail||'Worker 沒有回報成功發送');
     }
 
-    lineAutoShow(`✅ 4A 測試成功 ${d.sent_count||0} 位；未寫入每日 dedupe／未推進 LINE Day／不影響 Cron。`);
-    alert('✅ 4A 測試 LINE 已送出。\n\n這次不計入 BookWide 每日自動送達紀錄；正式排程仍維持每天最多 1 次。');
+    lineAutoShow(`✅ 4A 測試成功 ${d.sent_count||0} 位；不影響每日排程。`);
+    alert('✅ 測試 LINE 已送出。\n未寫每日 dedupe、未推進 LINE Day、未影響 Cron。');
     return d;
   }catch(e){
     console.error(e);
     lineAutoShow('❌ 4A 測試失敗：'+(e?.message||String(e)));
-    alert('4A 測試 LINE 失敗：'+(e?.message||String(e)));
-  }finally{
-    if(button){button.disabled=false;button.innerHTML=old;}
-  }
-}
-window.lineAutoAdminTestSend=lineAutoAdminTestSend;
-
-async function lineAutoOneClickManualSend(button){
-  const old=button?.innerHTML||'';
-  if(button){button.disabled=true;button.innerHTML='<span class="line-auto-step">4A</span>整理中…';}
-  lineManualStatus('正在整理今日日安＋每日學習…');
-
-  try{
-    const data=await lineAutoManualPrepare();
-    if(!data.image_url && !(greetingMakerState?.blob instanceof Blob)){
-      const panel=document.getElementById('lineManualCopyPanel');
-      if(panel)panel.open=true;
-      lineManualStatus('請先按「① 產生今天日安圖」，再按 4A。','error');
-      panel?.scrollIntoView({behavior:'smooth',block:'center'});
-      return;
-    }
-
-    const imageBlob=await lineManualImageBlob();
-
-    // V40：手機完整保留 V35.5 分享方式，不改 payload。
-    if(lineAutoManualIsMobile() && imageBlob && typeof navigator.share==='function'){
-      const file=new File([imageBlob],`BookWide-${lineAutoTodayTaipei()}.png`,{type:'image/png'});
-      const shareData={text:data.text,files:[file]};
-      if(!navigator.canShare || navigator.canShare({files:[file]})){
-        try{
-          await navigator.share(shareData);
-          lineManualStatus('✅ 已叫出分享選單；選 LINE 即可帶入日安圖＋每日學習。','ok');
-          return;
-        }catch(e){
-          if(e?.name==='AbortError'){
-            lineManualStatus('已取消分享；也可再按 4A 或用下方分開複製。');
-            return;
-          }
-          console.warn('Web Share failed; fallback manual panel',e);
-        }
-      }
-    }
-
-    // V40 PC：不再嘗試「圖片＋文字」同一 ClipboardItem。
-    // 接受兩次貼上：先複製圖片，再複製完整排課文字。
-    const panel=document.getElementById('lineManualCopyPanel');
-    if(panel)panel.open=true;
-
-    const copied=await lineAutoCopyManualImage();
-    if(copied){
-      lineManualStatus('✅ PC 第一步完成：日安圖已複製。到 LINE Ctrl+V；第二步回來按「複製完整排課文字」。','ok');
-    }else{
-      lineManualStatus('PC 第一步：請用「開啟日安圖」另存／拖到 LINE；第二步再按「複製完整排課文字」。');
-    }
-    panel?.scrollIntoView({behavior:'smooth',block:'center'});
-  }catch(e){
-    console.error(e);
-    lineManualStatus('手動發送整理失敗：'+(e?.message||String(e)),'error');
-    alert('手動發送整理失敗：'+(e?.message||String(e)));
+    alert('4A 測試失敗：'+(e?.message||String(e)));
   }finally{
     if(button){button.disabled=false;button.innerHTML=old;}
   }
@@ -7833,7 +7770,7 @@ async function dailyEnglishSetSchedule(enabled){
   return lineAutoSetEnabled(enabled);
 }
 
-window.BOOKWIDE_MHIKING_VERSION='V40.8_ADMIN_TEST_SEND';
+window.BOOKWIDE_MHIKING_VERSION='V40.7_DIRECT_SPECIAL_PLAYER';
 setTimeout(birthdayAdminInitButtonState,0);
 /* v26.1 birthday actions */
 function v261BirthdayPreview(){const url=String(document.getElementById('laBirthdayCardImage')?.value||'').trim();
