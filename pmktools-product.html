@@ -1192,14 +1192,32 @@ function pmkRenderTechV291(){
     <div class="pmk-tech-note-v291">切削參數為建議起始值，實際加工請依工件材質、機台剛性、冷卻方式與刀具狀況調整。</div>`;
   $('pmkTechPrintV291').disabled=false;
 }
+function pmkSplitSkuGradeV332(rawSku,v=null){
+  const raw=String(rawSku||'').normalize('NFKC').trim().replace(/\s+/g,' ');
+  const explicit=String(
+    v?.technical_params?.grade_code||
+    v?.grade_code||
+    ''
+  ).trim();
+  if(explicit)return {skuModel:raw.replace(new RegExp('\\s+'+explicit.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'$','i'),'').trim(),gradeCode:explicit};
+  const m=raw.match(/^(.*\S)\s+([A-Z0-9][A-Z0-9.+_-]{1,15})$/i);
+  if(!m)return {skuModel:raw,gradeCode:''};
+  // 只在前段看起來確實是刀片型號時才拆，避免一般 SKU 被誤切。
+  if(!/[A-Z].*\d|\d.*[A-Z]|R424\.9-|TPMT|800-/i.test(m[1]))return {skuModel:raw,gradeCode:''};
+  return {skuModel:m[1].trim(),gradeCode:m[2].trim()};
+}
+
 function pmkPrintTechLabelV291(){
   const vars=(P?.variations||[]).filter(x=>x&&x.is_active!==false);
   const urlSku=String(new URL(location.href).searchParams.get('product')||'').trim();
   let v=selectedVariation||vars.find(x=>String(x?.sku||x?.id||'').trim()===urlSku)||vars[0]||P;
   if(!v){alert('目前沒有可匯出的商品規格。');return}
   const t=v?.technical_params||{};
-  const sku=String(v?.sku||v?.id||P?.sku||urlSku||'').trim().toUpperCase();
-  if(!sku){alert('目前規格沒有 SKU，無法產生標籤。');return}
+  const rawSku=String(v?.sku||v?.id||P?.sku||urlSku||'').trim().toUpperCase();
+  if(!rawSku){alert('目前規格沒有 SKU，無法產生標籤。');return}
+  const skuParts=pmkSplitSkuGradeV332(rawSku,v);
+  const sku=skuParts.skuModel;
+  const gradeCode=skuParts.gradeCode;
 
   // V3.29：前台直接跟隨目前 variation 的 product_kind；URL/選中規格/標籤三者同步。
   if(pmkIsToolholderV317(P)){
@@ -1258,7 +1276,7 @@ function pmkPrintTechLabelV291(){
   // 固定版面：Workpice / PMKNSH / Element / Vc / Fn / Doc。
   const lines=['Workpice: '];
   if(uses)lines.push(uses);
-  if(material)lines.push('Element:  '+material);
+  if(material)lines.push('Substrate:  '+material);
   if(vc)lines.push('Vc: '+fmt(vc)+'m/min'+range(v1,v2));
   if(fn)lines.push('Fn: '+fmt(fn)+'mm/r'+range(f1,f2));
   if(ap)lines.push('Doc:'+fmt(ap)+(ap1&&ap2?range(ap1,ap2):'')+' mm');
@@ -1285,17 +1303,13 @@ function pmkPrintTechLabelV291(){
     const o=new Uint8Array(len);o.fill(32);o.set(b);return o;
   };
 
-  // V3.31.1：Grade 有值就印在 SKU 下一行，如 H10 / BU810；固定保留行尾 CRLF。
-  // Grade 空白時第二行保持空白；不拿 Geometry 或其他欄位冒充刀片材質。
-  const gradeText=String(grade||'').trim();
-  // V3.31.1：固定槽位一定保留最後 CRLF。
-  // 之前 BU810 比範本 H10 長 2 字，直接截斷會把尾端 CRLF 切掉，
-  // QLabel 因此看不到 SKU 下方的 Grade。
-  const skuBytes=enc.encode(sku),gradeBytes=enc.encode(gradeText);
+  // V3.32：直式規格物件 = 型號第一行 + Grade代號第二行。
+  // 例如：TPMT16T312R-22 / 1025。Substrate 則另外印在技術文字區。
+  const skuBytes=enc.encode(sku),gradeBytes=enc.encode(gradeCode);
   const fixedTail=4; // 第一個 CRLF + 最後一個 CRLF
   let padCount=oldSkuGrade.length-skuBytes.length-gradeBytes.length-fixedTail;
   if(padCount<1)padCount=1;
-  let safeGrade=gradeText;
+  let safeGrade=gradeCode;
   while(enc.encode(sku+'\r\n'+' '.repeat(padCount)+safeGrade+'\r\n').length>oldSkuGrade.length && safeGrade.length){
     safeGrade=safeGrade.slice(0,-1);
   }
@@ -1476,7 +1490,13 @@ function pmkDeepHoleRangeV1(v){
   return String(t.drill_diameter_range_mm||'').trim();
 }
 function pmkDeepHoleSkuV1(v,i){
-  return String(v?.sku||v?.id||variationName(v,i)||'').trim();
+  const raw=String(v?.sku||v?.id||variationName(v,i)||'').trim();
+  return pmkSplitSkuGradeV332(raw,v).skuModel;
+}
+function pmkDeepHoleGradeCodeV332(v,i){
+  const raw=String(v?.sku||v?.id||variationName(v,i)||'').trim();
+  const x=pmkSplitSkuGradeV332(raw,v);
+  return x.gradeCode||String(v?.technical_params?.grade_code||v?.grade_code||'').trim()||'—';
 }
 function pmkIsDeepHoleCatalogV1(vars){
   if(!Array.isArray(vars)||vars.length<4)return false;
@@ -1565,7 +1585,7 @@ function pmkRenderDeepHoleCatalogSectionV3(title,rows){
         return `<tr class="deepHoleRow" role="button" tabindex="0" data-var-i="${i}" ${selectedVariation===v?'data-preselected="1"':''}>
           <td class="deepHoleSize">${esc(String(pmkDeepHoleSizeV1(v)))}</td>
           <td class="deepHoleSku">${esc(pmkDeepHoleSkuV1(v,i))}</td>
-          <td class="deepHoleGrade">${esc(String(v?.technical_params?.grade||v?.grade||'—'))}</td>
+          <td class="deepHoleGrade">${esc(pmkDeepHoleGradeCodeV332(v,i))}</td>
           ${mats.map(k=>`<td class="mat ${matHasData[k]?'':'is-empty'}">${pmkDeepHoleMatMarkV3(v,k)}</td>`).join('')}
           <td class="dim">${esc(d.ic||'—')}</td><td class="dim">${esc(d.iw||'—')}</td>
           <td class="dim">${esc(d.l||'—')}</td><td class="dim">${esc(d.s||'—')}</td><td class="dim">${esc(d.re||'—')}</td>
