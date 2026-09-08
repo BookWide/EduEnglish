@@ -3332,16 +3332,29 @@ function pmkAccessorySelectV598(role,i,ref,opts){
   </select>`;
 }
 
-function pmkAccessoryCandidateSelectV601(i,role,n,candidate,opts){
-  const ref=pmk80020ResolveRuleRefV600(candidate,opts,role)||{product_id:'',variation_id:'',sku:candidate.sku||'',qty:role==='plate'?2:1,min_dc:candidate.min,max_dc:candidate.max};
+function pmk80020SavedSplitRefV603(v,role,candidate,n){
+  const rows=v?.technical_params?.accessory_links_v2?.[role];
+  if(!Array.isArray(rows)||!rows.length)return null;
+  const min=Number(candidate?.min),max=Number(candidate?.max);
+  let hit=rows.find(x=>Number(x?.min_dc)===min&&Number(x?.max_dc)===max);
+  if(!hit)hit=rows[n];
+  if(!hit)return null;
+  return {product_id:String(hit.product_id||''),variation_id:String(hit.variation_id||''),sku:String(hit.sku||''),qty:Math.max(1,Number(hit.qty||1)),min_dc:min,max_dc:max};
+}
+function pmkAccessoryCandidateSelectV601(i,role,n,candidate,opts,v){
+  // 已人工更正過的 accessory_links_v2 優先；沒有才套 TECH_DATA 自動規則。
+  const saved=pmk80020SavedSplitRefV603(v,role,candidate,n);
+  const ref=(saved&&saved.sku)?pmkResolveLegacyAccessoryV599(saved,opts):
+    (pmk80020ResolveRuleRefV600(candidate,opts,role)||{product_id:'',variation_id:'',sku:candidate.sku||'',qty:role==='plate'?2:1,min_dc:candidate.min,max_dc:candidate.max});
   const selectedKey=String(ref.product_id||'')+'|'+String(ref.variation_id||'');
   const rows=opts.map(x=>{
     const key=String(x.product_id)+'|'+String(x.variation_id||'');
     return `<option value="${esc(key)}" data-sku="${esc(x.sku)}" ${key===selectedKey?'selected':''}>${esc(x.label)}</option>`;
   }).join('');
+  const initialSku=String(ref.sku||candidate.sku||'').trim();
   return `<div style="display:grid;grid-template-columns:145px minmax(170px,.55fr) minmax(0,1fr);gap:7px;align-items:center;margin:5px 0">
     <span style="font-weight:900">${Number(candidate.min).toFixed(2)}–${Number(candidate.max).toFixed(2)}</span>
-    <input type="search" data-vacc-split-search="${role}" data-vacc-split-search-index="${i}" data-vacc-split-search-n="${n}" placeholder="KEY SKU 搜尋" autocomplete="off" style="width:100%;min-width:0">
+    <div style="min-width:0"><input type="search" data-vacc-split-search="${role}" data-vacc-split-search-index="${i}" data-vacc-split-search-n="${n}" value="${esc(initialSku)}" placeholder="貼上正確 SKU 後自動更正" autocomplete="off" style="width:100%;min-width:0"><div data-vacc-split-msg="${role}|${i}|${n}" style="font-size:10px;line-height:1.2;min-height:12px;margin-top:2px;color:#64748b"></div></div>
     <select data-vacc-split="${role}" data-vacc-split-index="${i}" data-vacc-split-n="${n}" data-min="${candidate.min}" data-max="${candidate.max}" data-default-sku="${esc(candidate.sku)}">
       <option value="">— 未指定 —</option>${rows}
     </select>
@@ -3353,43 +3366,60 @@ function pmkWireSplitAccessorySearchV602(box){
     const i=String(inp.dataset.vaccSplitSearchIndex||'');
     const n=String(inp.dataset.vaccSplitSearchN||'');
     const sel=box.querySelector(`[data-vacc-split="${role}"][data-vacc-split-index="${i}"][data-vacc-split-n="${n}"]`);
+    const msg=box.querySelector(`[data-vacc-split-msg="${role}|${i}|${n}"]`);
     if(!sel)return;
-    const norm=v=>String(v||'').normalize('NFKC').trim().toUpperCase().replace(/\s+/g,' ');
+    // SKU 比對忽略空白、-、/、. 等符號，避免資料庫與型錄 SKU 格式不同造成找不到。
+    const skuNorm=v=>pmkAccessorySkuNormV599(v);
+    const textNorm=v=>String(v||'').normalize('NFKC').trim().toUpperCase();
+    const setMsg=(text,ok)=>{if(msg){msg.textContent=text||'';msg.style.color=ok===true?'#15803d':ok===false?'#b91c1c':'#64748b';}};
     const apply=opt=>{
-      if(!opt)return;
+      if(!opt||!opt.value)return false;
       sel.value=opt.value;
       inp.value=String(opt.dataset.sku||'').trim();
+      [...sel.options].forEach(o=>o.hidden=false);
+      setMsg('✓ 已更正為 '+inp.value,true);
       sel.dispatchEvent(new Event('change',{bubbles:true}));
+      return true;
     };
     const search=()=>{
-      const q=norm(inp.value);
+      const raw=String(inp.value||'').trim();
+      const q=skuNorm(raw);
       let first=null,exact=null,count=0;
       [...sel.options].forEach((opt,idx)=>{
         if(idx===0){opt.hidden=false;return;}
-        const sku=norm(opt.dataset.sku||'');
-        const text=norm(opt.textContent||'');
-        const hit=!q||sku.includes(q)||text.includes(q);
+        const sku=skuNorm(opt.dataset.sku||'');
+        const text=textNorm(opt.textContent||'');
+        const hit=!q||sku===q||sku.includes(q)||q.includes(sku)||text.includes(textNorm(raw));
         opt.hidden=!hit;
-        if(hit){count++;if(!first)first=opt;if(sku===q)exact=opt;}
+        if(hit){count++;if(!first)first=opt;if(sku&&sku===q)exact=opt;}
       });
-      if(q&&(exact||count===1))apply(exact||first);
+      if(!q){setMsg('',null);return null;}
+      if(exact){apply(exact);return exact;}
+      if(count===1){apply(first);return first;}
+      if(count===0){setMsg('找不到此 SKU，原選擇不變',false);return null;}
+      setMsg(`找到 ${count} 筆，請補完整 SKU`,null);
+      return null;
     };
     inp.oninput=search;
+    inp.onpaste=()=>setTimeout(search,0);
     inp.onkeydown=e=>{
       if(e.key==='Enter'){
-        e.preventDefault();search();
-        const visible=[...sel.options].find((o,idx)=>idx>0&&!o.hidden);
-        if(visible)apply(visible);
+        e.preventDefault();
+        const matched=search();
+        if(!matched){
+          const visible=[...sel.options].filter((o,idx)=>idx>0&&!o.hidden);
+          if(visible.length===1)apply(visible[0]);
+        }
       }else if(e.key==='Escape'){
-        inp.value='';search();
+        inp.value='';[...sel.options].forEach(o=>o.hidden=false);setMsg('',null);
       }
     };
     sel.onchange=()=>{
       const opt=sel.selectedOptions?.[0];
-      if(opt&&sel.value)inp.value=String(opt.dataset.sku||'').trim();
+      if(opt&&sel.value){inp.value=String(opt.dataset.sku||'').trim();setMsg('✓ 已選 '+inp.value,true);}
     };
     const selected=sel.selectedOptions?.[0];
-    if(selected&&sel.value)inp.value=String(selected.dataset.sku||'').trim();
+    if(selected&&selected.value){inp.value=String(selected.dataset.sku||'').trim();setMsg('目前：'+inp.value,null);}
   });
 }
 
@@ -3400,7 +3430,7 @@ function pmk80020SplitEditorV601(v,i,opts){
     if(!cs.length)return '';
     return `<div style="display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px;align-items:start;padding:7px 0;border-top:1px dashed #bbf7d0">
       <b>${names[role]}</b>
-      <div>${cs.map((c,n)=>pmkAccessoryCandidateSelectV601(i,role,n,c,opts)).join('')}${role==='plate'?`<div style="margin-top:5px">數量 <input data-vacc-plateqty="${i}" type="number" min="1" max="99" value="${Math.max(1,Number(v?.technical_params?.support_plate_qty||2))}" style="width:58px"></div>`:''}</div>
+      <div>${cs.map((c,n)=>pmkAccessoryCandidateSelectV601(i,role,n,c,opts,v)).join('')}${role==='plate'?`<div style="margin-top:5px">數量 <input data-vacc-plateqty="${i}" type="number" min="1" max="99" value="${Math.max(1,Number(v?.technical_params?.support_plate_qty||2))}" style="width:58px"></div>`:''}</div>
     </div>`;
   }).join('');
 }
@@ -3411,7 +3441,9 @@ function pmkReadAccessoryLinksV2V601(i,v){
     if(!out[role])return;
     const [product_id='',variation_id='']=val.split('|');
     const opt=el.selectedOptions?.[0];
-    const sku=String(opt?.dataset?.sku||el.dataset.defaultSku||'').trim();
+    const searchInp=document.querySelector(`[data-vacc-split-search="${role}"][data-vacc-split-search-index="${i}"][data-vacc-split-search-n="${el.dataset.vaccSplitN||''}"]`);
+    const typedSku=String(searchInp?.value||'').trim();
+    const sku=String(opt?.dataset?.sku||typedSku||el.dataset.defaultSku||'').trim();
     out[role].push({
       product_id,variation_id,sku,
       min_dc:Number(el.dataset.min),max_dc:Number(el.dataset.max),
