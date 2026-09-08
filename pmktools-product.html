@@ -1272,15 +1272,16 @@ function pmkPrintTechLabelV291(){
   let v=selectedVariation||vars.find(x=>String(x?.sku||x?.id||'').trim()===urlSku)||vars[0]||P;
   if(!v){alert('目前沒有可匯出的商品規格。');return}
   const t=v?.technical_params||{};
-  const needsOrderDc=!!pmkOrderInputCfgV596()&&/DXX[.]XX/i.test(String(v?.sku||''));
-  if(needsOrderDc&&pmkOrderDiameterV603()===null){
+  const orderState=pmkBuildOrderStateV61();
+  const needsOrderDc=orderState.needsDc;
+  if(needsOrderDc&&!orderState.dcValid){
     const cfg=pmkOrderInputCfgV596(),rg=pmkOrderRangeV596(v,cfg);
     alert(rg?`請先輸入訂購鑽頭直徑 Dc（${rg[0]} ～ ${rg[1]} ${cfg.unit||''}），再下載標籤。`:'請先輸入有效的訂購鑽頭直徑 Dc，再下載標籤。');
     $('pmkOrderDimensionV596')?.scrollIntoView({behavior:'smooth',block:'center'});
     $('pmkOrderDimensionV596')?.focus();
     return;
   }
-  const rawSku=String(needsOrderDc?pmkOrderSkuV603(v):(v?.sku||v?.id||P?.sku||urlSku||'')).trim().toUpperCase();
+  const rawSku=String(needsOrderDc?orderState.orderSku:(v?.sku||v?.id||P?.sku||urlSku||'')).trim().toUpperCase();
   if(!rawSku){alert('目前規格沒有 SKU，無法產生標籤。');return}
   const skuParts=pmkSplitSkuGradeV332(rawSku,v);
   const sku=skuParts.skuModel;
@@ -1682,6 +1683,8 @@ function pmkTplAccessoryRoleV602(col){
   if(/intermediate_insert/.test(src))return 'middle';
   if(/peripheral_insert/.test(src))return 'peripheral';
   if(/support_plate/.test(src)&&!/qty/.test(src))return 'plate';
+  if(/screw/.test(src)&&!/qty/.test(src))return 'screw';
+  if(/wrench/.test(src)&&!/qty/.test(src))return 'wrench';
   return '';
 }
 function pmkTplAccessorySplitTextV602(v,col){
@@ -1915,7 +1918,42 @@ function refreshDirectVariation(){
   pmkRenderStageOverlaysV595()
 }
 function qty(){return Math.max(1,Math.min(99,Math.floor(Number($('qty').value)||1)))}
-function lineFor(p,quantity=1,variation=null,opts={}){const baseSku=(p?.sku_manual_locked===true&&String(p?.sku||'').trim())?String(p.sku).trim():String(variation?.sku||p.sku||'').trim();const publicSku=(p===P&&variation&&pmkOrderInputCfgV596())?pmkOrderSkuV603(variation):baseSku;const note=(p===P&&variation)?pmkOrderNoteV596():'';const selectedOpts={...(opts||{})};if(note)selectedOpts['訂貨註記']=note;return {product_id:p.id,name:p.name,image_url:variation?.image_url||p.image_url||'',quantity,variation_id:variation?.id||'',sku:publicSku,variation_name:variation?variationName(variation,0):'',selected_options:selectedOpts,order_note:note||'',unit_price:variation?variationPrice(variation,p):positivePrice(p?.price,p?.sale_price)}}
+
+function pmkAccessoryRoleMetaV61(role){
+  const map={
+    center:{label:'中心刀片',default_qty:1},
+    middle:{label:'中間刀片',default_qty:1},
+    peripheral:{label:'周邊刀片',default_qty:1},
+    plate:{label:'支撐板',default_qty:2},
+    screw:{label:'螺絲',default_qty:1},
+    wrench:{label:'扳手',default_qty:1}
+  };
+  return map[role]||{label:String(role||'配件'),default_qty:1};
+}
+function pmkBuildOrderStateV61(){
+  const v=selectedVariation||null,cfg=pmkOrderInputCfgV596(),dc=pmkOrderDiameterV603();
+  const range=v&&cfg?pmkOrderRangeV596(v,cfg):null;
+  const needsDc=!!(v&&cfg&&/DXX[.]XX/i.test(String(v.sku||'')));
+  const dcValid=!needsDc||(dc!==null&&(!range||(dc>=range[0]&&dc<=range[1])));
+  const baseSku=String(v?.sku||P?.sku||'').trim();
+  const orderSku=needsDc&&dcValid?pmkOrderSkuV603(v):baseSku;
+  let canBuy=!!v||P?.product_type!=='variable',stockText='可訂購';
+  if(v?.stock_tracking_enabled!==false){
+    const q=Number(v?.stock_qty||0);
+    canBuy=q>0||needsDc;
+    stockText=q>0?`現貨 ${q}`:(needsDc?'接單訂製／可訂購':'此型號缺貨');
+  }
+  if(needsDc&&!dcValid)canBuy=false;
+  return {variation:v,cfg,needsDc,dc,range,dcValid,orderSku,canBuy,stockText};
+}
+function lineFor(p,quantity=1,variation=null,opts={}){
+  const baseSku=(p?.sku_manual_locked===true&&String(p?.sku||'').trim())?String(p.sku).trim():String(variation?.sku||p.sku||'').trim();
+  const state=(p===P&&variation===selectedVariation)?pmkBuildOrderStateV61():null;
+  const publicSku=state?.orderSku||baseSku;
+  const note=(state?.needsDc&&state.dcValid)?`訂購鑽頭直徑：${Number(state.dc).toFixed(Number(state.cfg?.decimals??2))} ${state.cfg?.unit||''}；訂貨 SKU：${publicSku}`:'';
+  const selectedOpts={...(opts||{})};if(note)selectedOpts['訂貨註記']=note;
+  return {product_id:p.id,name:p.name,image_url:variation?.image_url||p.image_url||'',quantity,variation_id:variation?.id||'',sku:publicSku,variation_name:variation?variationName(variation,0):'',selected_options:selectedOpts,order_note:note||'',unit_price:variation?variationPrice(variation,p):positivePrice(p?.price,p?.sale_price)}
+}
 
 function pmkNormalizeSkuV597(v){return String(v||'').normalize('NFKC').trim().toUpperCase().replace(/\s+/g,' ')}
 function pmkFindAccessoryRefV598(ref){
@@ -2054,14 +2092,14 @@ function pmkDcValueV600(){
 }
 function pmkRuleRefV600(role,r){
   if(!r)return null;
-  return {role,sku:r.sku,qty:role==='plate'?2:1,min_dc:r.min,max_dc:r.max,key:`${role}_${r.min}_${r.max}_${r.sku}`};
+  return {role,sku:r.sku,qty:pmkAccessoryRoleMetaV61(role).default_qty,min_dc:r.min,max_dc:r.max,key:`${role}_${r.min}_${r.max}_${r.sku}`};
 }
 function pmk80020DefsV600(){
   const dc=pmkDcValueV600();if(dc===null||!selectedVariation)return [];
-  const labels={center:'中心刀片',middle:'中間刀片',peripheral:'周邊刀片',plate:'支撐板'},out=[];
+  const labels={center:'中心刀片',middle:'中間刀片',peripheral:'周邊刀片',plate:'支撐板',screw:'螺絲',wrench:'扳手'},out=[];
   const t=selectedVariation.technical_params||{};
   const saved=t.accessory_links_v2&&typeof t.accessory_links_v2==='object'?t.accessory_links_v2:null;
-  for(const role of ['center','middle','peripheral','plate']){
+  for(const role of ['center','middle','peripheral','plate','screw','wrench']){
     let candidates=Array.isArray(saved?.[role])?saved[role]:[];
     if(!candidates.length){
       const key=pmk80020RangeKeyV601(selectedVariation);
@@ -2087,7 +2125,7 @@ function pmkVariationAccessoryDefsV597(){
   const t=selectedVariation.technical_params||{},links=t.accessory_links&&typeof t.accessory_links==='object'?t.accessory_links:null;
   if(links){
     return [
-      ['center','中心刀片'],['middle','中間刀片'],['peripheral','周邊刀片'],['plate','支撐板']
+      ['center','中心刀片'],['middle','中間刀片'],['peripheral','周邊刀片'],['plate','支撐板'],['screw','螺絲'],['wrench','扳手']
     ].map(([role,label])=>{
       const x=links[role];if(!x||!x.product_id)return null;
       return {role,label,ref:x,sku:String(x.sku||''),qty:Math.max(1,Number(x.qty||1)),key:role+'_'+String(x.product_id)+'_'+String(x.variation_id||'')};
@@ -2101,6 +2139,8 @@ function pmkVariationAccessoryDefsV597(){
   add('middle','中間刀片',t.intermediate_insert_options?.length?t.intermediate_insert_options:t.intermediate_insert,1);
   add('peripheral','周邊刀片',t.peripheral_insert_options?.length?t.peripheral_insert_options:t.peripheral_insert,1);
   add('plate','支撐板',t.support_plate_options?.length?t.support_plate_options:t.support_plate,t.support_plate_qty||1);
+  add('screw','螺絲',t.screw_options?.length?t.screw_options:t.screw,t.screw_qty||1);
+  add('wrench','扳手',t.wrench_options?.length?t.wrench_options:t.wrench,t.wrench_qty||1);
   return out;
 }
 function pmkRenderVariationAccessoriesV597(){
@@ -2154,12 +2194,12 @@ function currentGroup(){
 }
 function addCurrentToCart(go=false){
   if(!requirePmkLogin())return;
-  if(pmkOrderInputCfgV596()&&pmkOrderNoteV596()===null){const cfg=pmkOrderInputCfgV596(),rg=pmkOrderRangeV596(selectedVariation,cfg);alert(rg?`請先在「訂購鑽頭直徑 Dc」輸入 ${rg[0]} ～ ${rg[1]} ${cfg.unit||''} 內的實際尺寸。`:'請先輸入有效的訂購鑽頭直徑 Dc。');$('pmkOrderDimensionV596')?.scrollIntoView({behavior:'smooth',block:'center'});$('pmkOrderDimensionV596')?.focus();return}
+  {const st=pmkBuildOrderStateV61();if(st.needsDc&&!st.dcValid){alert(st.range?`請先在「訂購鑽頭直徑 Dc」輸入 ${st.range[0]} ～ ${st.range[1]} ${st.cfg?.unit||''} 內的實際尺寸。`:'請先輸入有效的訂購鑽頭直徑 Dc。');$('pmkOrderDimensionV596')?.scrollIntoView({behavior:'smooth',block:'center'});$('pmkOrderDimensionV596')?.focus();return}}
   const a=cart(),g=currentGroup();a.push(g);saveCart(a);toast(`已加入購物車：1 主商品＋${g.children.length} 子項`);if(go)location.href='/pmktools-cart.html'
 }
 function directBuy(){
   if(!requirePmkLogin())return;
-  if(pmkOrderInputCfgV596()&&pmkOrderNoteV596()===null){const cfg=pmkOrderInputCfgV596(),rg=pmkOrderRangeV596(selectedVariation,cfg);alert(rg?`請先在「訂購鑽頭直徑 Dc」輸入 ${rg[0]} ～ ${rg[1]} ${cfg.unit||''} 內的實際尺寸。`:'請先輸入有效的訂購鑽頭直徑 Dc。');$('pmkOrderDimensionV596')?.scrollIntoView({behavior:'smooth',block:'center'});$('pmkOrderDimensionV596')?.focus();return}
+  {const st=pmkBuildOrderStateV61();if(st.needsDc&&!st.dcValid){alert(st.range?`請先在「訂購鑽頭直徑 Dc」輸入 ${st.range[0]} ～ ${st.range[1]} ${st.cfg?.unit||''} 內的實際尺寸。`:'請先輸入有效的訂購鑽頭直徑 Dc。');$('pmkOrderDimensionV596')?.scrollIntoView({behavior:'smooth',block:'center'});$('pmkOrderDimensionV596')?.focus();return}}
   const g=currentGroup();sessionStorage.setItem('pmktools_direct_group',JSON.stringify([g]));location.href='/pmktools-checkout.html?mode=cart&direct=1'
 }
 
