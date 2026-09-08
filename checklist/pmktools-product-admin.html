@@ -826,7 +826,7 @@
             <div class="field" style="min-width:230px;margin:0"><label>商品模板</label>
               <select id="pmkProductTemplate"><option value="">— 不套模板 —</option><option value="deep_hole_insert">424.10 深孔鑽刀片</option><option value="coro42410_holder">424.10 深孔鑽頭</option><option value="coro800_insert">800 深孔鑽刀片</option><option value="coro80020_holder">800.20 深孔鑽頭</option><option value="deep_hole_tube">深孔鑽管</option></select>
             </div>
-            <button type="button" class="btn gray" id="pmkApplyProductTemplate">套用模板</button><button type="button" class="btn" id="pmkCreateBlankTemplate">從模板新增</button>
+            <button type="button" class="btn gray" id="pmkApplyProductTemplate">套用到現有款式</button><button type="button" class="btn" id="pmkCreateBlankTemplate">建立新商品模板</button>
             <span id="pmkTemplateStatus" class="muted" style="font-size:12px">模板只整理欄位；不覆蓋 SKU、價格、圖片、庫存與已填技術資料。</span>
           </div>
           <div class="field"><label>商品屬性（每行：名稱|選項1,選項2）</label><textarea id="attributes_text" rows="5" placeholder="款式|紅蕾絲玫瑰,調香師玫瑰&#10;尺寸|S,M,L"></textarea></div>
@@ -2716,12 +2716,58 @@ function pmkCreateBlankTemplateV591(){
 function pmkApplyProductTemplateV590(){
   const key=String($('pmkProductTemplate')?.value||''),tpl=PMK_PRODUCT_TEMPLATES_V590[key];
   if(!tpl)return setStatus('請先選商品模板');
+
+  // 深孔鑽管：有既有 Variation 時，模板直接套到原款式，不再要求重新「產生款式」。
+  if(key==='deep_hole_tube' && Array.isArray(v54Variations) && v54Variations.length){
+    try{ if(typeof readVariationsV54==='function') v54Variations=readVariationsV54(); }catch(_e){}
+    const oldAttrs=attributesV54();
+    const dcValues=[]; const modelValues=[];
+    v54Variations.forEach(v=>{
+      const a={...(v.attributes||{})},t={...(v.technical_params||{})};
+      const dc=String(a['Dc直徑範圍']||a['直徑範圍 Dc']||a['刃徑']||t.drill_diameter_range_mm||Object.values(a).find(x=>/^\s*\d+(?:\.\d+)?\s*[-~～至]\s*\d+(?:\.\d+)?\s*$/.test(String(x)))||'').trim();
+      const sku=String(v.sku||'').trim();
+      const model=String(a['鑽管型號']||t.tube_model||(/^420\.5-/i.test(sku)?sku:'')).trim();
+      const customRaw=String(a['指定長度']||'').trim();
+      const custom=(customRaw==='不可指定'||customRaw==='不可選填')?'不可選填':'可選填';
+      const next={};
+      if(dc)next['Dc直徑範圍']=dc;
+      if(model)next['鑽管型號']=model;
+      next['標準長度mm']=String(a['標準長度mm']||t.standard_length_mm||'2600');
+      next['指定長度']=custom;
+      // 保留非舊 Dc/指定欄位，避免破壞已存在的其他資料。
+      Object.entries(a).forEach(([k,val])=>{if(!['Dc直徑範圍','直徑範圍 Dc','刃徑','鑽管型號','標準長度mm','標準長度','指定長度'].includes(k))next[k]=val});
+      v.attributes=next;
+      v.technical_params={...t,drill_diameter_range_mm:dc||t.drill_diameter_range_mm||'',tube_model:model||t.tube_model||'',standard_length_mm:Number(next['標準長度mm']||2600),custom_length_enabled:custom!=='不可選填'};
+      if(dc)dcValues.push(dc); if(model)modelValues.push(model);
+    });
+    const lines=[];
+    const dcs=pmkTemplateUniqV590(dcValues); if(dcs.length)lines.push(`Dc直徑範圍|${dcs.join(',')}`);
+    const models=pmkTemplateUniqV590(modelValues); if(models.length)lines.push(`鑽管型號|${models.join(',')}`);
+    lines.push('標準長度mm|2600','指定長度|可選填,不可選填');
+    oldAttrs.filter(x=>!['Dc直徑範圍','直徑範圍 Dc','刃徑','鑽管型號','標準長度mm','標準長度','指定長度'].includes(x.name)).forEach(x=>lines.push(`${x.name}|${x.values.join(',')}`));
+    $('attributes_text').value=lines.join('\n');
+    v54VariationPage=0; renderVariationEditorV54();
+    if($('pmkTemplateStatus'))$('pmkTemplateStatus').textContent=`已套用「深孔鑽管」到現有 ${v54Variations.length} 個款式：Dc 保留、標準長度=2600、指定長度=可選填；不新增、不刪除 Variation。鑽管型號直接填各款 SKU。`;
+    setStatus(`✅ 深孔鑽管模板已套用到現有 ${v54Variations.length} 個款式；不必再按「產生款式」。`);
+    pmkRefreshTemplateActionsV594();
+    return;
+  }
+
   const existing=attributesV54(),map=new Map(existing.map(a=>[String(a.name),pmkTemplateUniqV590(a.values)])),inferred=pmkTemplateInferV590(key);
   tpl.fields.forEach(name=>map.set(name,pmkTemplateUniqV590([...(map.get(name)||[]),...(tpl.fixed?.[name]||[]),...(inferred[name]||[])])));
   const ordered=[...tpl.fields,...existing.map(a=>a.name).filter(n=>!tpl.fields.includes(n))];
   $('attributes_text').value=ordered.map(name=>{const vals=map.get(name)||[];return vals.length?`${name}|${vals.join(',')}`:''}).filter(Boolean).join('\n');
   if($('pmkTemplateStatus'))$('pmkTemplateStatus').textContent=`已套用「${tpl.name}」：只補欄位/選項；缺資料可留空後續補。`;
   setStatus(`✅ 已套用商品模板：${tpl.name}（非破壞式）`);
+}
+
+function pmkRefreshTemplateActionsV594(){
+  const key=String($('pmkProductTemplate')?.value||'');
+  const hasVars=Array.isArray(v54Variations)&&v54Variations.length>0;
+  const apply=$('pmkApplyProductTemplate'),create=$('pmkCreateBlankTemplate');
+  if(apply)apply.textContent=hasVars?'套用到現有款式':'套用模板';
+  if(create){create.textContent='建立新商品模板';create.style.display=(key==='deep_hole_tube'&&hasVars)?'none':'';}
+  if(key==='deep_hole_tube'&&hasVars&&$('pmkTemplateStatus'))$('pmkTemplateStatus').textContent=`已有 ${v54Variations.length} 個 Variation：按「套用到現有款式」即可；不需再按「產生款式」。`;
 }
 
 function attributesV54(){return linesV54('attributes_text').map((line,i)=>{const k=line.indexOf('|');if(k<1)return null;const name=line.slice(0,k).trim(),values=[...new Set(line.slice(k+1).split(',').map(x=>x.trim()).filter(Boolean))];return name&&values.length?{id:'attr-'+(i+1),name,variation:true,visible:true,values}:null}).filter(Boolean)}
@@ -3238,6 +3284,7 @@ function pmkReadAccessoryLinksV598(i,v){
 
 function renderVariationEditorV54(){
   const box=$('variationEditor');
+  setTimeout(()=>{try{pmkRefreshTemplateActionsV594()}catch(_e){}},0);
   if(!box)return;
   if($('product_type').value!=='variable'){box.innerHTML='<div class="muted" style="padding:16px">目前是簡單商品。</div>';return}
   if(!v54Variations.length){
@@ -6384,7 +6431,7 @@ if($('seoAutoBtn'))$('seoAutoBtn').onclick=()=>seoAutoFillV574(true);['seo_title
 document.querySelectorAll('.wc548-tab').forEach(b=>b.onclick=()=>wc548OpenTab(b.dataset.wctab));
 
 if($('sku_rule_system'))$('sku_rule_system').onchange=()=>refreshSkuRuleFamilyV1('');refreshSkuRuleFamilyV1('');
-$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;if($('aiTechFromClipboardBtn'))$('aiTechFromClipboardBtn').onclick=pmkTechAnalyzeClipboardV3296;if($('detail_description'))$('detail_description_editor').addEventListener('paste',handleDetailPasteV5);$('detail_description_editor').addEventListener('input',pmkSyncDetailEditorV1);if($('pmkApplyProductTemplate'))$('pmkApplyProductTemplate').onclick=pmkApplyProductTemplateV590;if($('pmkCreateBlankTemplate'))$('pmkCreateBlankTemplate').onclick=pmkCreateBlankTemplateV591;$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=()=>{pmk577TaxFilter={category:String($('productCategoryFilter').value||''),subcategory:'',detail:''};render()};$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;if($('customerHistoryClose'))$('customerHistoryClose').onclick=()=>{$('customerHistoryDetail').style.display='none'};if($('clearOldCustomerView'))$('clearOldCustomerView').onclick=()=>{localStorage.removeItem('pmktools_customer_transactions_v1');loadCustomers();};if($('pmkCrmQ'))$('pmkCrmQ').oninput=renderPmkCrm;if($('pmkCrmSave'))$('pmkCrmSave').onclick=pmkCrmSave;if($('pmkCrmCancel'))$('pmkCrmCancel').onclick=pmkCrmClose;pmkInitBusinessCardV54();if($('pmkSupplierNew'))$('pmkSupplierNew').onclick=()=>pmkSupplierOpen({});if($('pmkSupplierSave'))$('pmkSupplierSave').onclick=pmkSupplierSave;if($('pmkSupplierCancel'))$('pmkSupplierCancel').onclick=pmkSupplierClose;if($('pmkSupplierQ'))$('pmkSupplierQ').oninput=renderSuppliers;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
+$('saveDraftBtn').onclick=()=>saveWithStateV200(false);$('savePublishBtn').onclick=()=>saveWithStateV200(true);if($('newAddonBtn'))$('newAddonBtn').onclick=newAddonProductV558;if($('addonLibraryQ'))$('addonLibraryQ').oninput=renderAddonLibraryV558;$('addonSearch').oninput=renderAddonPickerV557;if($('addShippingMethodBtn'))$('addShippingMethodBtn').onclick=addShippingMethodV563;if($('fulfillment_type'))$('fulfillment_type').onchange=renderShippingMethodsV563;if($('line_url_shadow'))$('line_url_shadow').oninput=()=>{if($('line_url'))$('line_url').value=$('line_url_shadow').value};if($('line_url'))$('line_url').oninput=()=>{if($('line_url_shadow'))$('line_url_shadow').value=$('line_url').value};if($('aiProductIntroBtn'))$('aiProductIntroBtn').onclick=generateProductIntroV5;if($('aiTechFromClipboardBtn'))$('aiTechFromClipboardBtn').onclick=pmkTechAnalyzeClipboardV3296;if($('detail_description'))$('detail_description_editor').addEventListener('paste',handleDetailPasteV5);$('detail_description_editor').addEventListener('input',pmkSyncDetailEditorV1);if($('pmkApplyProductTemplate'))$('pmkApplyProductTemplate').onclick=pmkApplyProductTemplateV590;if($('pmkCreateBlankTemplate'))$('pmkCreateBlankTemplate').onclick=pmkCreateBlankTemplateV591;if($('pmkProductTemplate'))$('pmkProductTemplate').onchange=pmkRefreshTemplateActionsV594;$('buildVariationsBtn').onclick=buildVariationsV54;$('gallery_urls').oninput=galleryPreviewV54;$('product_type').onchange=syncProductTypeV544;$('chooseMainImageBtn').onclick=()=>$('local_image').click();$('local_image').onchange=uploadLocalGiftImage;$('removeMainImageBtn').onclick=removeMainImageV547;$('chooseVideoBtn').onclick=()=>$('local_video').click();$('local_video').onchange=uploadProductVideoV552;$('applyVideoUrlBtn').onclick=applyVideoUrlV553;$('video_url').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();applyVideoUrlV553()}});$('removeVideoBtn').onclick=removeVideoV552;$('chooseGalleryBtn').onclick=()=>$('gallery_files').click();$('gallery_files').onchange=uploadGalleryV54;$('importBtn').onclick=importLineProduct;$('fillMissingBtn').onclick=fillMissingImages;$('clearBtn').onclick=clearForm;$('deriveBtn').onclick=derive;$('price').oninput=()=>{if(Number($('price').value||0)>0&&Number($('price').value||0)<200)$('sale_mode').value='redeem_only'};$('q').oninput=render;$('productCategoryFilter').onchange=()=>{pmk577TaxFilter={category:String($('productCategoryFilter').value||''),subcategory:'',detail:''};render()};$('productStatusFilter').onchange=render;$('reloadOrders').onclick=loadOrders;$('orderStatusFilter').onchange=loadOrders;$('orderQ').oninput=loadOrders;$('invPostBtn').onclick=postInventory;$('reloadCustomers').onclick=loadCustomers;$('customerQ').oninput=loadCustomers;$('customerSort').onchange=loadCustomers;if($('customerHistoryClose'))$('customerHistoryClose').onclick=()=>{$('customerHistoryDetail').style.display='none'};if($('clearOldCustomerView'))$('clearOldCustomerView').onclick=()=>{localStorage.removeItem('pmktools_customer_transactions_v1');loadCustomers();};if($('pmkCrmQ'))$('pmkCrmQ').oninput=renderPmkCrm;if($('pmkCrmSave'))$('pmkCrmSave').onclick=pmkCrmSave;if($('pmkCrmCancel'))$('pmkCrmCancel').onclick=pmkCrmClose;pmkInitBusinessCardV54();if($('pmkSupplierNew'))$('pmkSupplierNew').onclick=()=>pmkSupplierOpen({});if($('pmkSupplierSave'))$('pmkSupplierSave').onclick=pmkSupplierSave;if($('pmkSupplierCancel'))$('pmkSupplierCancel').onclick=pmkSupplierClose;if($('pmkSupplierQ'))$('pmkSupplierQ').oninput=renderSuppliers;$('reloadShipping').onclick=loadShipping;$('shippingTypeFilter').onchange=loadShipping;$('shippingQ').oninput=loadShipping;$('reloadDocuments').onclick=loadDocuments;$('docQ').oninput=loadDocuments;$('docStatus').onchange=loadDocuments;$('reloadReports').onclick=loadReports;$('saveBusinessSettings').onclick=saveBusinessSettings;$('applyEducationCategories').onclick=applyBookWideEducationCategories;$('migrateProductsOnce').onclick=migrateProductsOnce;
 $('seedFlower12').onclick=seedFlowerPartner12;
 $('reloadCategories').onclick=loadCategories;$('catSaveBtn').onclick=saveCategory;$('catCancelBtn').onclick=resetCategoryEditor;initCollapsibles();initV49Layout();if($('savePricingRules'))$('savePricingRules').onclick=savePricingRulesV1;
 if($('addPricingCategoryRule'))$('addPricingCategoryRule').onclick=addPricingCategoryRuleV1;
