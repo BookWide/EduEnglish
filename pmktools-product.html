@@ -1776,16 +1776,37 @@ function pmkTplAccessoryRoleV602(col){
   if(/wrench/.test(src)&&!/qty/.test(src))return 'wrench';
   return '';
 }
+function pmkAccessoryBackendSkuV680(v,role){
+  const t=v?.technical_params||{};
+  const linked=t.accessory_links&&typeof t.accessory_links==='object'?t.accessory_links[role]:null;
+  if(linked&&typeof linked==='object'&&String(linked.sku||'').trim())return String(linked.sku).trim();
+  const legacy={
+    center:['center_insert_options','center_insert'],
+    middle:['intermediate_insert_options','intermediate_insert'],
+    peripheral:['peripheral_insert_options','peripheral_insert'],
+    plate:['support_plate_options','support_plate'],
+    screw:['screw_options','screw'],
+    wrench:['wrench_options','wrench']
+  }[role]||[];
+  for(const key of legacy){
+    const x=t[key];
+    if(Array.isArray(x)){const a=x.map(z=>String(z||'').trim()).filter(Boolean);if(a.length)return a.join(' / ')}
+    else if(String(x||'').trim())return String(x).trim();
+  }
+  return '';
+}
 function pmkTplAccessorySplitTextV602(v,col){
   const role=pmkTplAccessoryRoleV602(col);
   if(!role)return '';
+  // 主欄位永遠先讀後台目前 Variation 的 accessory_links；避免前台硬編規則蓋掉人工資料。
+  const canonical=pmkAccessoryBackendSkuV680(v,role);
+  if(canonical)return canonical;
+  // 舊資料相容：曾經使用 accessory_links_v2 分 Dc 儲存的資料仍可顯示。
   const list=v?.technical_params?.accessory_links_v2?.[role];
   if(!Array.isArray(list)||!list.length)return '';
   return list.map(x=>{
     const a=Number(x?.min_dc),b=Number(x?.max_dc);
-    const range=(Number.isFinite(a)&&Number.isFinite(b))
-      ? `${a.toFixed(2)}–${b.toFixed(2)}`
-      : '';
+    const range=(Number.isFinite(a)&&Number.isFinite(b))?`${a.toFixed(2)}–${b.toFixed(2)}`:'';
     const sku=String(x?.sku||'').trim();
     return [range,sku].filter(Boolean).join(' ');
   }).filter(Boolean).join(' / ');
@@ -2053,53 +2074,6 @@ function pmkRender4205CatalogV641(vars,selectedVar){
   </tr></thead><tbody>${body}</tbody></table></div></div>`;
 }
 
-function pmk42410SizeCode(v){
-  const m=String(v?.sku||'').trim().match(/^424[.]10-([0-9]+E?)DXX[.]XX$/i);
-  return m?m[1].toUpperCase():String(v?.technical_params?.drill_size_code||'').trim();
-}
-function pmk42410DcRange(v){
-  const a=v?.attributes||{},t=v?.technical_params||{};
-  for(const key of ['刃徑','直徑範圍 Dc','直徑範圍 Dc,mm','Dc']){
-    const value=String(a[key]||'').trim();
-    if(value)return value;
-  }
-  return String(t.drill_diameter_range_mm||'').trim();
-}
-function pmk42410DcStart(v){
-  const m=pmk42410DcRange(v).match(/\d+(?:[.]\d+)?/);
-  return m?Number(m[0]):9999;
-}
-function pmk42410AccessoryText(v,role){
-  const list=v?.technical_params?.accessory_links_v2?.[role];
-  if(Array.isArray(list)&&list.length){
-    const skus=[...new Set(list.map(x=>String(x?.sku||'').trim()).filter(Boolean))];
-    if(skus.length)return skus.join(' / ');
-  }
-  const t=v?.technical_params||{};
-  const key={center:'center_insert_options',middle:'intermediate_insert_options',peripheral:'peripheral_insert_options',plate:'support_plate_options'}[role];
-  const value=t[key];
-  if(Array.isArray(value))return value.filter(Boolean).join(' / ')||'—';
-  return String(value||'').trim()||'—';
-}
-function pmkRender42410Catalog(vars,selectedVar){
-  const rows=vars.filter(pmkIs42410Variation).map((v,i)=>({v,i:vars.indexOf(v)}))
-    .sort((a,b)=>pmk42410DcStart(a.v)-pmk42410DcStart(b.v)||pmk42410SizeCode(a.v).localeCompare(pmk42410SizeCode(b.v)));
-  return `<div class="pmkTplCatalog pmk42410Catalog">
-    <div class="pmkTplCatalogTitle">424.10 深孔鑽｜Dc 套用範圍選型</div>
-    <div class="sub" style="margin:4px 0 10px;color:#64748b">依原廠目錄方式排列；直接點選一列，再輸入實際訂購 Dc。</div>
-    <div class="pmkTplScroll"><table class="pmkTplTable"><thead><tr>
-      <th>Dc mm／套用範圍</th><th>尺寸碼</th><th>訂貨號／鑽頭型號</th><th>中心刀片</th><th>中間刀片</th><th>周邊刀片</th><th>支撐板</th>
-    </tr></thead><tbody>${rows.map(({v,i})=>`<tr data-var-i="${i}" tabindex="0" class="${selectedVar===v?'active':''}" ${selectedVar===v?'data-preselected="1"':''}>
-      <td><b>${esc(pmk42410DcRange(v)||'—')}</b></td>
-      <td><b>${esc(pmk42410SizeCode(v)||'—')}</b></td>
-      <td><b>${esc(String(v.sku||''))}</b></td>
-      <td>${esc(pmk42410AccessoryText(v,'center'))}</td>
-      <td>${esc(pmk42410AccessoryText(v,'middle'))}</td>
-      <td>${esc(pmk42410AccessoryText(v,'peripheral'))}</td>
-      <td>${esc(pmk42410AccessoryText(v,'plate'))}</td>
-    </tr>`).join('')}</tbody></table></div>
-  </div>`;
-}
 
 function renderOptions(){
   const box=$('options'),vars=(P.variations||[]).filter(v=>v&&v.is_active!==false);
@@ -2236,171 +2210,9 @@ function pmkFindAccessoryRefV598(ref){
   return null;
 }
 
-const PMK_80020_ROW_RULES_V601={
-  '25.00-26.40':{
-    center:[{min:25.00,max:26.40,sku:'800-05 03 08M-C-G'}],
-    middle:[{min:25.00,max:26.40,sku:'800-05 03 08M-I-G'}],
-    peripheral:[{min:25.00,max:26.40,sku:'800-06 03 08H-P-G'}],
-    plate:[{min:25.00,max:26.40,sku:'800-06A'}]
-  },
-  '26.41-28.70':{
-    center:[{min:26.41,max:28.70,sku:'800-05 03 08M-C-G'}],
-    middle:[{min:26.41,max:28.70,sku:'800-05 03 08M-I-G'}],
-    peripheral:[{min:26.41,max:28.70,sku:'800-06 03 08H-P-G'}],
-    plate:[{min:26.41,max:28.70,sku:'800-06A'}]
-  },
-  '28.71-31.00':{
-    center:[{min:28.71,max:31.00,sku:'800-06 T3 08M-C-G'}],
-    middle:[{min:28.71,max:31.00,sku:'800-06 T3 08M-I-G'}],
-    peripheral:[{min:28.71,max:31.00,sku:'800-06 03 08H-P-G'}],
-    plate:[{min:28.71,max:31.00,sku:'800-06A'}]
-  },
-  '31.01-33.30':{
-    center:[{min:31.01,max:33.30,sku:'800-06 T3 08M-C-G'}],
-    middle:[{min:31.01,max:33.30,sku:'800-06 T3 08M-I-G'}],
-    peripheral:[{min:31.01,max:33.30,sku:'800-08 T3 08H-P-G'}],
-    plate:[{min:31.01,max:33.30,sku:'800-07A'}]
-  },
-  '33.31-36.20':{
-    center:[
-      {min:31.01,max:34.99,sku:'800-06 T3 08M-C-G'},
-      {min:35.00,max:36.20,sku:'800-08 T3 08M-C-G'}
-    ],
-    middle:[
-      {min:31.01,max:34.99,sku:'800-06 T3 08M-I-G'},
-      {min:35.00,max:36.20,sku:'800-08 T3 08M-I-G'}
-    ],
-    peripheral:[{min:33.31,max:36.20,sku:'800-08 T3 08H-P-G'}],
-    plate:[{min:33.31,max:36.20,sku:'800-07A'}]
-  },
-  '36.21-39.60':{
-    center:[{min:36.21,max:39.60,sku:'800-08 T3 08M-C-G'}],
-    middle:[{min:36.21,max:39.60,sku:'800-08 T3 08M-I-G'}],
-    peripheral:[
-      {min:36.21,max:38.99,sku:'800-08 T3 08H-P-G'},
-      {min:39.00,max:39.60,sku:'800-09 T3 08H-P-G'}
-    ],
-    plate:[{min:36.21,max:39.60,sku:'800-07A'}]
-  },
-  '39.61-43.00':{
-    center:[{min:39.61,max:43.00,sku:'800-08 T3 08M-C-G'}],
-    middle:[{min:39.61,max:43.00,sku:'800-08 T3 08M-I-G'}],
-    peripheral:[{min:39.61,max:43.00,sku:'800-09 T3 08H-P-G'}],
-    plate:[{min:39.61,max:43.00,sku:'800-08A'}]
-  },
-  '43.01-47.00':{
-    center:[{min:43.01,max:47.00,sku:'800-10 T3 08M-C-G'}],
-    middle:[{min:43.01,max:47.00,sku:'800-08 T3 08M-I-G'}],
-    peripheral:[{min:43.01,max:47.00,sku:'800-09 T3 08H-P-G'}],
-    plate:[{min:43.01,max:47.00,sku:'800-08A'}]
-  },
-  '47.01-51.70':{
-    center:[
-      {min:47.01,max:49.99,sku:'800-12 T3 08M-C-G'},
-      {min:50.00,max:51.70,sku:'800-10 T3 08M-C-G'}
-    ],
-    middle:[{min:47.01,max:51.70,sku:'800-08 T3 08M-I-G'}],
-    peripheral:[
-      {min:47.01,max:49.99,sku:'800-09 T3 08H-P-G'},
-      {min:50.00,max:51.70,sku:'800-11 T3 08H-P-G'}
-    ],
-    plate:[{min:47.01,max:51.70,sku:'800-10A'}]
-  },
-  '51.71-56.20':{
-    center:[{min:51.71,max:56.20,sku:'800-10 T3 08M-C-G'}],
-    middle:[
-      {min:51.71,max:54.99,sku:'800-08 T3 08M-I-G'},
-      {min:55.00,max:56.20,sku:'800-12 T3 08M-I-G'}
-    ],
-    peripheral:[{min:51.71,max:56.20,sku:'800-11 T3 08H-P-G'}],
-    plate:[
-      {min:51.71,max:54.99,sku:'800-10A'},
-      {min:55.00,max:56.20,sku:'800-12A'}
-    ]
-  },
-  '56.21-65.00':{
-    center:[
-      {min:56.21,max:57.99,sku:'800-10 T3 08M-C-G'},
-      {min:58.00,max:65.00,sku:'800-12 T3 08M-C-G'}
-    ],
-    middle:[{min:56.21,max:65.00,sku:'800-12 T3 08M-I-G'}],
-    peripheral:[{min:56.21,max:65.00,sku:'800-11 T3 08H-P-G'}],
-    plate:[{min:56.21,max:65.00,sku:'800-12A'}]
-  },
-  '60.61-65.00':{
-    center:[{min:60.61,max:65.00,sku:'800-12 T3 08M-C-G'}],
-    middle:[{min:60.61,max:65.00,sku:'800-12 T3 08M-I-G'}],
-    peripheral:[{min:60.61,max:65.00,sku:'800-11 T3 08H-P-G'}],
-    plate:[{min:60.61,max:65.00,sku:'800-12A'}]
-  }
-};
-
-const PMK_80020_FASTENER_RULES_V62=[
-  {min:25.00,max:28.70,screw:'5513 020-20',wrench:'5680 046-03 (7IP)'},
-  {min:28.71,max:31.00,screw:'5513 020-20',wrench:'5680 046-03 (7IP)'},
-  {min:31.01,max:39.60,screw:'416.1-832',wrench:'5680 046-04 (9IP)'},
-  {min:39.61,max:65.00,screw:'5513 020-16',wrench:'5680 046-05 (10IP)'}
-];
-function pmk80020FastenerCandidatesV62(role){
-  if(role!=='screw'&&role!=='wrench')return [];
-  return PMK_80020_FASTENER_RULES_V62.map(r=>({
-    sku:r[role],min_dc:r.min,max_dc:r.max,qty:1
-  }));
-}
-
-function pmk80020RangeKeyV601(v){
-  const raw=String(v?.technical_params?.drill_diameter_range_mm||Object.values(v?.attributes||{}).find(x=>/\d+(?:\.\d+)?\s*[-–～~]\s*\d+(?:\.\d+)?/.test(String(x||'')))||'');
-  const n=raw.replace(/[–—～~]/g,'-').match(/\d+(?:\.\d+)?/g)||[];
-  if(n.length<2)return '';
-  return `${Number(n[0]).toFixed(2)}-${Number(n[1]).toFixed(2)}`;
-}
-
 function pmkDcValueV600(){
   const raw=String($('pmkOrderDimensionV596')?.value||'').trim();
   const n=Number(raw);return Number.isFinite(n)?n:null;
-}
-function pmkRuleRefV600(role,r){
-  if(!r)return null;
-  return {role,sku:r.sku,qty:pmkAccessoryRoleMetaV61(role).default_qty,min_dc:r.min,max_dc:r.max,key:`${role}_${r.min}_${r.max}_${r.sku}`};
-}
-function pmk80020DefsV600(){
-  const dc=pmkDcValueV600();if(dc===null||!selectedVariation)return [];
-  const labels={center:'中心刀片',middle:'中間刀片',peripheral:'周邊刀片',plate:'支撐板',screw:'螺絲',wrench:'扳手'},out=[];
-  const t=selectedVariation.technical_params||{};
-  const saved=t.accessory_links_v2&&typeof t.accessory_links_v2==='object'?t.accessory_links_v2:null;
-  for(const role of ['center','middle','peripheral','plate','screw','wrench']){
-    let candidates=Array.isArray(saved?.[role])?saved[role]:[];
-    if(!candidates.length){
-      const key=pmk80020RangeKeyV601(selectedVariation);
-      const rowCandidates=PMK_80020_ROW_RULES_V601[key]?.[role]||[];
-      candidates=(rowCandidates.length?rowCandidates:pmk80020FastenerCandidatesV62(role))
-        .map(r=>({sku:r.sku,min_dc:r.min,max_dc:r.max,qty:r.qty||pmkAccessoryRoleMetaV61(role).default_qty}));
-    }
-    const r=candidates.find(x=>dc>=Number(x.min_dc) && dc<=Number(x.max_dc));
-    if(r)out.push({
-      role,label:labels[role],ref:{product_id:r.product_id||'',variation_id:r.variation_id||'',sku:r.sku||''},
-      sku:String(r.sku||''),qty:Math.max(1,Number(r.qty||1)),
-      min_dc:Number(r.min_dc),max_dc:Number(r.max_dc),
-      key:`${role}_${r.min_dc}_${r.max_dc}_${r.product_id||''}_${r.variation_id||''}_${r.sku||''}`
-    });
-  }
-
-  const custom=Array.isArray(saved?.custom)?saved.custom:[];
-  custom.forEach((x,n)=>{
-    const a=x?.min_dc===null||x?.min_dc===undefined||x?.min_dc===''?null:Number(x.min_dc);
-    const b=x?.max_dc===null||x?.max_dc===undefined||x?.max_dc===''?null:Number(x.max_dc);
-    const inRange=(a===null||dc>=a)&&(b===null||dc<=b);
-    if(!inRange)return;
-    const label=String(x?.name||'配件').trim()||'配件';
-    out.push({
-      role:'custom_'+n,label,
-      ref:{product_id:x?.product_id||'',variation_id:x?.variation_id||'',sku:x?.sku||''},
-      sku:String(x?.sku||''),qty:Math.max(1,Number(x?.qty||1)),
-      min_dc:a,max_dc:b,
-      key:`custom_${n}_${a??''}_${b??''}_${x?.product_id||''}_${x?.variation_id||''}_${x?.sku||''}`
-    });
-  });
-  return out;
 }
 
 function pmkSelectedDcForAccessoriesV670(){
@@ -2412,41 +2224,45 @@ function pmkSelectedDcForAccessoriesV670(){
 }
 function pmkVariationAccessoryDefsV597(){
   if(!selectedVariation)return [];
-  if(pmkOrderInputCfgV596()){
-    const auto=pmk80020DefsV600();
-    if(auto.length)return auto;
-  }
-  const t=selectedVariation.technical_params||{},links=t.accessory_links&&typeof t.accessory_links==='object'?t.accessory_links:null;
-  if(links){
-    return [
-      ['center','中心刀片'],['middle','中間刀片'],['peripheral','周邊刀片'],['plate','支撐板'],['screw','螺絲'],['wrench','扳手']
-    ].map(([role,label])=>{
-      const x=links[role];if(!x||!x.product_id)return null;
-      return {role,label,ref:x,sku:String(x.sku||''),qty:Math.max(1,Number(x.qty||1)),key:role+'_'+String(x.product_id)+'_'+String(x.variation_id||'')};
-    }).filter(Boolean);
-  }
-  const out=[],add=(role,label,vals,qty=1)=>{
-    const arr=Array.isArray(vals)?vals:String(vals||'').split(/[\n,，;；]+/);
-    [...new Set(arr.map(x=>String(x||'').trim()).filter(Boolean))].forEach((sku,n)=>out.push({role,label,ref:{sku},sku,qty:Math.max(1,Number(qty||1)),key:role+'_'+n+'_'+sku}));
+  const t=selectedVariation.technical_params||{};
+  const out=[];
+  const meta=[
+    ['center','中心刀片',1],['middle','中間刀片',1],['peripheral','周邊刀片',1],['plate','支撐板',Math.max(1,Number(t.support_plate_qty||2))],
+    ['screw','螺絲',Math.max(1,Number(t.screw_qty||1))],['wrench','扳手',Math.max(1,Number(t.wrench_qty||1))]
+  ];
+  const links=t.accessory_links&&typeof t.accessory_links==='object'?t.accessory_links:{};
+  const fallback={
+    center:t.center_insert_options?.length?t.center_insert_options:t.center_insert,
+    middle:t.intermediate_insert_options?.length?t.intermediate_insert_options:t.intermediate_insert,
+    peripheral:t.peripheral_insert_options?.length?t.peripheral_insert_options:t.peripheral_insert,
+    plate:t.support_plate_options?.length?t.support_plate_options:t.support_plate,
+    screw:t.screw_options?.length?t.screw_options:t.screw,
+    wrench:t.wrench_options?.length?t.wrench_options:t.wrench
   };
-  add('center','中心刀片',t.center_insert_options?.length?t.center_insert_options:t.center_insert,1);
-  add('middle','中間刀片',t.intermediate_insert_options?.length?t.intermediate_insert_options:t.intermediate_insert,1);
-  add('peripheral','周邊刀片',t.peripheral_insert_options?.length?t.peripheral_insert_options:t.peripheral_insert,1);
-  add('plate','支撐板',t.support_plate_options?.length?t.support_plate_options:t.support_plate,t.support_plate_qty||1);
-  add('screw','螺絲',t.screw_options?.length?t.screw_options:t.screw,t.screw_qty||1);
-  add('wrench','扳手',t.wrench_options?.length?t.wrench_options:t.wrench,t.wrench_qty||1);
+  meta.forEach(([role,label,defaultQty])=>{
+    const ref=links[role]&&typeof links[role]==='object'?links[role]:null;
+    if(ref&&(ref.product_id||ref.variation_id||String(ref.sku||'').trim())){
+      out.push({role,label,ref:{product_id:String(ref.product_id||''),variation_id:String(ref.variation_id||''),sku:String(ref.sku||'')},sku:String(ref.sku||''),qty:Math.max(1,Number(ref.qty||defaultQty)),key:`${role}_${ref.product_id||''}_${ref.variation_id||''}_${ref.sku||''}`});
+      return;
+    }
+    const raw=fallback[role],arr=Array.isArray(raw)?raw:String(raw||'').split(/[\n,，;；]+/);
+    [...new Set(arr.map(x=>String(x||'').trim()).filter(Boolean))].forEach((sku,n)=>out.push({role,label,ref:{sku},sku,qty:defaultQty,key:`${role}_${n}_${sku}`}));
+  });
 
+  // 自訂配件完全依後台 accessory_links_v2.custom；Dc 範圍只做顯示篩選，不生成任何前台規則。
   const custom=Array.isArray(t?.accessory_links_v2?.custom)?t.accessory_links_v2.custom:[];
   const selectedDc=pmkSelectedDcForAccessoriesV670();
   custom.forEach((x,n)=>{
     const a=x?.min_dc===null||x?.min_dc===undefined||x?.min_dc===''?null:Number(x.min_dc);
     const b=x?.max_dc===null||x?.max_dc===undefined||x?.max_dc===''?null:Number(x.max_dc);
     if(selectedDc!==null&&((a!==null&&selectedDc<a)||(b!==null&&selectedDc>b)))return;
-    const label=String(x?.name||'配件').trim()||'配件';
-    out.push({role:'custom_'+n,label,ref:{product_id:x?.product_id||'',variation_id:x?.variation_id||'',sku:x?.sku||''},sku:String(x?.sku||''),qty:Math.max(1,Number(x?.qty||1)),min_dc:a,max_dc:b,key:'custom_'+n+'_'+String(x?.product_id||'')+'_'+String(x?.variation_id||'')});
+    const label=String(x?.name||'配件').trim()||'配件',sku=String(x?.sku||'').trim();
+    if(!sku&&!x?.product_id&&!x?.variation_id)return;
+    out.push({role:'custom_'+n,label,ref:{product_id:String(x?.product_id||''),variation_id:String(x?.variation_id||''),sku},sku,qty:Math.max(1,Number(x?.qty||1)),min_dc:a,max_dc:b,key:`custom_${n}_${x?.product_id||''}_${x?.variation_id||''}_${sku}`});
   });
   return out;
 }
+
 function pmkRenderVariationAccessoriesV597(){
   const section=$('variationAccessories'),grid=$('variationAccessoryGrid');if(!section||!grid)return;
   const defs=pmkVariationAccessoryDefsV597();
