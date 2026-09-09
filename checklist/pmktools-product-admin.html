@@ -2954,45 +2954,75 @@ function pmkApplyTubeToExistingV635(){
 async function pmkPersistFrontendTemplateV652(){
   if(!editingId)return false;
   const current=products.find(x=>String(x.id)===String(editingId));
-  if(!current)return false;
+  if(!current)throw new Error('找不到目前商品主檔，請先重新開啟商品');
   // 套模板的唯一作用：把前台目錄版型寫回商品主檔。商品屬性 / Variation / SKU / 價格完全不動。
   const tm=pmkFrontendTemplateMetaV593();
   const next={...current,template_key:tm.template_key,frontend_layout:tm.frontend_layout,frontend_schema:tm.frontend_schema};
-  await productAdminPost('/api/bw-product-save',{id:current.id,product:next});
+  const saved=await productAdminPost('/api/bw-product-save',{id:current.id,product:next});
+  const returned=saved?.product||saved?.row||null;
+  const merged=returned&&String(returned.id||'')===String(current.id)?returned:next;
   const idx=products.findIndex(x=>String(x.id)===String(current.id));
-  if(idx>=0)products[idx]=next;
-  return true;
+  if(idx>=0)products[idx]=merged;
+
+  // 立即從 R2 主檔再讀一次驗證，避免「畫面顯示已套用、實際沒有寫入」。
+  const r=await fetch(HIKING_API_BASE+'/api/bw-products',{cache:'no-store'});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok||j.ok===false||!Array.isArray(j.products))throw new Error(j.message||j.error||('驗證 R2 主檔失敗 HTTP '+r.status));
+  const fresh=j.products.find(x=>String(x.id)===String(current.id));
+  if(!fresh)throw new Error('R2 驗證找不到目前商品');
+  const ok=String(fresh.template_key||'')===String(tm.template_key||'') && String(fresh.frontend_layout||'')===String(tm.frontend_layout||'');
+  if(!ok)throw new Error('R2 主檔沒有保留前台目錄模板欄位');
+  products=j.products;
+  return fresh;
 }
 
 async function pmkApplyProductTemplateV590(){
   const key=String($('pmkProductTemplate')?.value||''),tpl=PMK_PRODUCT_TEMPLATES_V590[key];
-  if(!tpl)return setStatus('請先選商品模板');
+  const btn=$('pmkApplyProductTemplate'),st=$('pmkTemplateStatus');
+  if(!tpl){
+    if(st){st.textContent='⚠️ 請先選商品模板';st.style.color='#b45309';st.style.fontWeight='700';}
+    return setStatus('請先選商品模板');
+  }
   if(key==='deep_hole_tube'&&Array.isArray(v54Variations)&&v54Variations.length){
     pmkApplyTubeToExistingV635();
   }
   const hasExisting=(Array.isArray(v54Variations)&&v54Variations.length>0)||attributesV54().length>0;
-  if(hasExisting){
-    try{
+  const oldText=btn?.textContent||'套用到現有款式';
+  if(btn){btn.disabled=true;btn.textContent='套用中…';btn.style.opacity='.7';}
+  if(st){st.textContent=`⏳ 正在把「${tpl.name}」寫入商品主檔…`;st.style.color='#1d4ed8';st.style.fontWeight='700';}
+  try{
+    if(hasExisting){
       const persisted=await pmkPersistFrontendTemplateV652();
-      if($('pmkTemplateStatus'))$('pmkTemplateStatus').textContent=persisted
-        ?`目前已套用「${tpl.name}」：前台目錄設定已直接寫入商品主檔；屬性、Variation、SKU、價格、圖片、庫存不變。`
-        :`已指定「${tpl.name}」：這是新商品，儲存商品後前台目錄設定才會寫入主檔。`;
-      setStatus(persisted?`✅ 前台目錄模板已永久套用：${tpl.name}`:`✅ 已指定前台目錄模板：${tpl.name}；請儲存商品。`);
-      renderVariationEditorV54();
-      return true;
-    }catch(e){
-      setStatus('❌ 套用前台目錄模板失敗：'+String(e?.message||e));
+      if(persisted){
+        if(st){st.textContent=`✅ 已套用「${tpl.name}」｜R2 主檔驗證成功｜前台會使用目錄樣式`;st.style.color='#15803d';st.style.fontWeight='800';}
+        if(btn){btn.textContent='✓ 已套用';btn.style.background='#15803d';btn.style.color='#fff';btn.style.borderColor='#15803d';}
+        setStatus(`✅ 前台目錄模板已套用並驗證：${tpl.name}`);
+        renderVariationEditorV54();
+        setTimeout(()=>{if(btn){btn.disabled=false;btn.textContent='重新套用模板';btn.style.opacity='1';btn.style.background='';btn.style.color='';btn.style.borderColor='';}},1600);
+        return true;
+      }
+      if(st){st.textContent=`⚠️ 已指定「${tpl.name}」，但此商品尚未建立主檔；請先儲存商品。`;st.style.color='#b45309';}
+      setStatus(`⚠️ 已指定前台目錄模板：${tpl.name}；請先儲存商品。`);
       return false;
     }
+    // 新商品沒有商品主檔可立即寫入，只建立最小欄位；建立 / 儲存後再保存模板 key。
+    $('attributes_text').value=tpl.fields.map(name=>{
+      const vals=pmkTemplateUniqV590(tpl.fixed?.[name]||[]);
+      return `${name}|${vals.join(',')}`;
+    }).join('\n');
+    if(st){st.textContent=`✅ 已建立「${tpl.name}」最小欄位；請填屬性資料、產生款式，再儲存商品。`;st.style.color='#15803d';st.style.fontWeight='700';}
+    setStatus(`✅ 已建立商品模板：${tpl.name}`);
+    return true;
+  }catch(e){
+    const msg=String(e?.message||e);
+    if(st){st.textContent='❌ 套用失敗：'+msg;st.style.color='#dc2626';st.style.fontWeight='800';}
+    if(btn){btn.textContent='套用失敗';btn.style.background='#dc2626';btn.style.color='#fff';btn.style.borderColor='#dc2626';}
+    setStatus('❌ 套用前台目錄模板失敗：'+msg);
+    setTimeout(()=>{if(btn){btn.disabled=false;btn.textContent=oldText;btn.style.opacity='1';btn.style.background='';btn.style.color='';btn.style.borderColor='';}},2200);
+    return false;
+  }finally{
+    if(btn&&btn.disabled&&btn.textContent==='套用中…'){btn.disabled=false;btn.textContent=oldText;btn.style.opacity='1';}
   }
-  // 新商品沒有商品主檔可立即寫入，只建立最小欄位；建立 / 儲存後再保存模板 key。
-  $('attributes_text').value=tpl.fields.map(name=>{
-    const vals=pmkTemplateUniqV590(tpl.fixed?.[name]||[]);
-    return `${name}|${vals.join(',')}`;
-  }).join('\n');
-  if($('pmkTemplateStatus'))$('pmkTemplateStatus').textContent=`已建立「${tpl.name}」最小欄位；請自行填屬性資料，再產生款式。`;
-  setStatus(`✅ 已建立商品模板：${tpl.name}`);
-  return true;
 }
 
 function attributesV54(){return linesV54('attributes_text').map((line,i)=>{const k=line.indexOf('|');if(k<1)return null;const name=line.slice(0,k).trim(),values=[...new Set(line.slice(k+1).split(',').map(x=>x.trim()).filter(Boolean))];return name&&values.length?{id:'attr-'+(i+1),name,variation:true,visible:true,values}:null}).filter(Boolean)}
