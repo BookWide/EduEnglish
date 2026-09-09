@@ -1422,11 +1422,7 @@ function pmkIs42410Product(){
   return (P?.variations||[]).some(v=>v&&v.is_active!==false&&pmkIs42410Variation(v));
 }
 function pmkOrderInputCfgV596(){
-  const saved=P?.frontend_schema?.order_input||null;
-  if(saved)return saved;
-  // 424.10 後台已建好 Variation/SKU；前台只提供 Dc 訂購尺寸，不回寫後台。
-  if(pmkIs42410Variation(selectedVariation))return {key:'Dc',label:'訂購鑽頭直徑 Dc',range_source:'technical_params.drill_diameter_range_mm',unit:'mm',decimals:2,required:true,note_label:'訂貨註記'};
-  return null;
+  return P?.frontend_schema?.order_input||null;
 }
 function pmkOrderRangeV596(v,cfg){
   const candidates=[
@@ -1783,11 +1779,21 @@ function pmkTplAccessorySplitTextV602(v,col){
   }).filter(Boolean).join(' / ');
 }
 
+function pmkTplDerivedV660(v,col){
+  if(col?.derive==='size_code'){
+    const sku=String(v?.sku||'').trim();
+    const m=sku.match(/-(M?\d+E?)D/i);
+    return m?m[1].toUpperCase():'';
+  }
+  return '';
+}
 function pmkTplCellV593(v,col){
   const split=pmkTplAccessorySplitTextV602(v,col);
   if(split)return split;
   let x=pmkTplPathV593(v,col?.source);
-  if((x===undefined||x===null||x==='')&&col?.fallback)x=pmkTplPathV593(v,col.fallback);
+  const fallbacks=[col?.fallback,...(Array.isArray(col?.fallbacks)?col.fallbacks:[])].filter(Boolean);
+  for(const fb of fallbacks){if(x===undefined||x===null||x==='')x=pmkTplPathV593(v,fb);else break}
+  if((x===undefined||x===null||x==='')&&col?.derive)x=pmkTplDerivedV660(v,col);
   if(Array.isArray(x))x=x.filter(z=>String(z??'').trim()).join(col?.join||' / ');
   if(x===undefined||x===null||x==='')return '—';
   return String(x)+(col?.suffix||'');
@@ -1796,26 +1802,33 @@ function pmkHasTemplateCatalogV593(p){
   const schema=p?.frontend_schema;
   return p?.frontend_layout==='catalog_table'&&schema&&Array.isArray(schema.columns)&&schema.columns.length>0;
 }
-// Catalog Table 共用核心：800.20、424.10 與後台 frontend_schema 都走同一套表格引擎，
-// 不再為 424.10 維護另一套平行 UI。
-function pmkRenderCatalogTableCoreV644(vars,sel,schema,opts={}){
-  const cols=Array.isArray(schema?.columns)?schema.columns:[];
+function pmkCatalogColumnHasDataV650(vars,col){
+  return (vars||[]).some(v=>{const x=pmkTplCellV593(v,col);return String(x||'').trim()&&x!=='—'});
+}
+function pmkCatalogColumnsV650(vars){
+  const schema=P?.frontend_schema||{};
+  const defined=Array.isArray(schema.columns)?schema.columns.filter(Boolean):[];
+  const base=defined.filter(c=>c?.optional!==true||pmkCatalogColumnHasDataV650(vars,c));
+  const seen=new Set(base.map(c=>String(c?.source||c?.label||'').toLowerCase()));
+  const optional=[
+    {label:'dm',source:'technical_params.dm_mm',suffix:' mm'},
+    {label:'l2',source:'technical_params.l2_mm',suffix:' mm'},
+    {label:'調整量',source:'technical_params.adjustment_mm',fallback:'technical_params.adjustment',suffix:' mm'},
+    {label:'中心刀片',source:'technical_params.center_insert_options',join:' / '},
+    {label:'中間刀片',source:'technical_params.intermediate_insert_options',join:' / '},
+    {label:'周邊刀片',source:'technical_params.peripheral_insert_options',join:' / '},
+    {label:'支撐板',source:'technical_params.support_plate_options',join:' / '},
+    {label:'數量',source:'technical_params.support_plate_qty'}
+  ];
+  optional.forEach(c=>{const key=String(c.source||c.label).toLowerCase();if(!seen.has(key)&&pmkCatalogColumnHasDataV650(vars,c)){base.push(c);seen.add(key)}});
+  return base;
+}
+function pmkRenderTemplateCatalogV593(vars,sel){
+  const schema=P?.frontend_schema||{},cols=pmkCatalogColumnsV650(vars);
   const weight=c=>/刀片|型號|SKU|支撐板/.test(String(c?.label||''))?1.7:/直徑|範圍/.test(String(c?.label||''))?1.25:.75;
   const total=cols.reduce((n,c)=>n+weight(c),0)||1;
   const colgroup=`<colgroup>${cols.map(c=>`<col style="width:${(weight(c)/total*100).toFixed(2)}%">`).join('')}</colgroup>`;
-  const rows=Array.isArray(opts.rows)?opts.rows:vars.map((v,i)=>({v,i}));
-  const cell=typeof opts.cell==='function'?opts.cell:(v,c)=>pmkTplCellV593(v,c);
-  const extraClass=String(opts.className||'').trim();
-  const sub=String(opts.sub||'').trim();
-  return `<div class="pmkTplCatalog${extraClass?' '+esc(extraClass):''}">
-    <div class="pmkTplCatalogTitle">${esc(schema?.title||P?.name||'規格目錄')}</div>
-    ${sub?`<div class="sub" style="margin:4px 14px 10px;color:#64748b">${esc(sub)}</div>`:''}
-    <div class="pmkTplScroll"><table class="pmkTplTable">${colgroup}<thead><tr>${cols.map(c=>`<th>${esc(c.label||'')}</th>`).join('')}</tr></thead>
-    <tbody>${rows.map(({v,i})=>`<tr data-var-i="${i}" tabindex="0" class="${sel===v?'active':''}" ${sel===v?'data-preselected="1"':''}>${cols.map(c=>`<td>${esc(cell(v,c))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>
-  </div>`;
-}
-function pmkRenderTemplateCatalogV593(vars,sel){
-  return pmkRenderCatalogTableCoreV644(vars,sel,P?.frontend_schema||{});
+  return `<div class="pmkTplCatalog"><div class="pmkTplCatalogTitle">${esc(schema.title||P?.name||'規格目錄')}</div><div class="pmkTplScroll"><table class="pmkTplTable">${colgroup}<thead><tr>${cols.map(c=>`<th>${esc(c.label||'')}</th>`).join('')}</tr></thead><tbody>${vars.map((v,i)=>`<tr data-var-i="${i}" tabindex="0" class="${sel===v?'active':''}" ${sel===v?'data-preselected="1"':''}>${cols.map(c=>`<td>${esc(pmkTplCellV593(v,c))}</td>`).join('')}</tr>`).join('')}</tbody></table></div><div class="pmkTplHint">點選任一列 → SKU、價格、圖片、技術資料全部使用同一筆後台 Variation</div></div>`;
 }
 
 function pmkIsDeepHoleCatalogV1(vars){
@@ -2033,102 +2046,43 @@ function pmk42410AccessoryText(v,role){
   if(Array.isArray(value))return value.filter(Boolean).join(' / ')||'—';
   return String(value||'').trim()||'—';
 }
-function pmk42410FirstValue(v,keys){
-  const t=v?.technical_params||{},a=v?.attributes||{};
-  for(const key of keys){
-    const x=key.startsWith('attributes.')?a[key.slice(11)]:t[key];
-    if(x!==undefined&&x!==null&&String(x).trim()!=='')return String(x).trim();
-  }
-  return '—';
-}
-function pmk42410Qty(v){
-  return pmk42410FirstValue(v,['support_plate_qty','plate_qty','quantity']);
-}
-function pmk42410CatalogCell(v,col){
-  switch(col.key){
-    case 'range': return pmk42410DcRange(v)||'—';
-    case 'code': return pmk42410SizeCode(v)||'—';
-    case 'sku': return String(v?.sku||'').trim()||'—';
-    case 'dm': return pmk42410FirstValue(v,['dm_mm','dm']);
-    case 'l2': return pmk42410FirstValue(v,['l2_mm','l2']);
-    case 'adjust': return pmk42410FirstValue(v,['adjustment_mm','adjust_mm','dc_adjustment_mm','adjustment','調整量','attributes.調整量']);
-    case 'center': return pmk42410AccessoryText(v,'center');
-    case 'middle': return pmk42410AccessoryText(v,'middle');
-    case 'peripheral': return pmk42410AccessoryText(v,'peripheral');
-    case 'plate': return pmk42410AccessoryText(v,'plate');
-    case 'qty': return pmk42410Qty(v);
-    default: return '—';
-  }
-}
 function pmkRender42410Catalog(vars,selectedVar){
-  const rows=vars.filter(pmkIs42410Variation).map(v=>({v,i:vars.indexOf(v)}))
+  const rows=vars.filter(pmkIs42410Variation).map((v,i)=>({v,i:vars.indexOf(v)}))
     .sort((a,b)=>pmk42410DcStart(a.v)-pmk42410DcStart(b.v)||pmk42410SizeCode(a.v).localeCompare(pmk42410SizeCode(b.v)));
-  const schema={
-    title:'T-MAX® 424.10 深孔鑽｜原廠目錄選刀',
-    columns:[
-      {key:'range',label:'直徑範圍 Dc'},
-      {key:'code',label:'尺寸碼'},
-      {key:'sku',label:'鑽頭型號'},
-      {key:'dm',label:'dm'},
-      {key:'l2',label:'l2'},
-      {key:'adjust',label:'調整量'},
-      {key:'center',label:'中心刀片'},
-      {key:'middle',label:'中間刀片'},
-      {key:'peripheral',label:'周邊刀片'},
-      {key:'plate',label:'支撐板'},
-      {key:'qty',label:'數量'}
-    ]
-  };
-  return pmkRenderCatalogTableCoreV644(vars,selectedVar,schema,{
-    rows,
-    className:'pmk42410Catalog',
-    sub:'點選 Dc 範圍選擇鑽頭；再輸入實際訂購 Dc，SKU、價格、圖片、技術資料同步。',
-    cell:pmk42410CatalogCell
-  });
+  return `<div class="pmkTplCatalog pmk42410Catalog">
+    <div class="pmkTplCatalogTitle">424.10 深孔鑽｜Dc 套用範圍選型</div>
+    <div class="sub" style="margin:4px 0 10px;color:#64748b">依原廠目錄方式排列；直接點選一列，再輸入實際訂購 Dc。</div>
+    <div class="pmkTplScroll"><table class="pmkTplTable"><thead><tr>
+      <th>Dc mm／套用範圍</th><th>尺寸碼</th><th>訂貨號／鑽頭型號</th><th>中心刀片</th><th>中間刀片</th><th>周邊刀片</th><th>支撐板</th>
+    </tr></thead><tbody>${rows.map(({v,i})=>`<tr data-var-i="${i}" tabindex="0" class="${selectedVar===v?'active':''}" ${selectedVar===v?'data-preselected="1"':''}>
+      <td><b>${esc(pmk42410DcRange(v)||'—')}</b></td>
+      <td><b>${esc(pmk42410SizeCode(v)||'—')}</b></td>
+      <td><b>${esc(String(v.sku||''))}</b></td>
+      <td>${esc(pmk42410AccessoryText(v,'center'))}</td>
+      <td>${esc(pmk42410AccessoryText(v,'middle'))}</td>
+      <td>${esc(pmk42410AccessoryText(v,'peripheral'))}</td>
+      <td>${esc(pmk42410AccessoryText(v,'plate'))}</td>
+    </tr>`).join('')}</tbody></table></div>
+  </div>`;
 }
 
 function renderOptions(){
   const box=$('options'),vars=(P.variations||[]).filter(v=>v&&v.is_active!==false);
-  if(vars.length&&(P.product_type==='variable'||pmkIs42410Product())){
+  const usesCatalog=pmkHasTemplateCatalogV593(P);
+  if(vars.length&&(P.product_type==='variable'||usesCatalog)){
     const requested=String(new URL(location.href).searchParams.get('product')||productId||'').trim();
     selectedVariation=vars.find(v=>[v?.sku,v?.id].map(x=>String(x||'').trim()).includes(requested))||selectedVariation||null;
     if(selectedVariation)selected={...(selectedVariation.attributes||{})};
-    const specHtml=pmkIs42410Product()?pmkRender42410Catalog(vars,selectedVariation):(pmkIs4205TubeV641(vars)?pmkRender4205CatalogV641(vars,selectedVariation):(pmkHasTemplateCatalogV593(P)?pmkRenderTemplateCatalogV593(vars,selectedVariation):pmkIsDeepHoleCatalogV1(vars)?pmkRenderDeepHoleCatalogV1(vars,selectedVariation):`<div class="varGrid">${vars.map((v,i)=>`<button type="button" class="varBtn" data-var-i="${i}" ${selectedVariation===v?'data-preselected="1"':''}>${v.image_url?`<img class="varThumb" src="${esc(v.image_url)}" alt="">`:''}<span>${esc(variationName(v,i))}</span></button>`).join('')}</div>`));
+    const specHtml=usesCatalog?pmkRenderTemplateCatalogV593(vars,selectedVariation):(pmkIs4205TubeV641(vars)?pmkRender4205CatalogV641(vars,selectedVariation):(pmkIsDeepHoleCatalogV1(vars)?pmkRenderDeepHoleCatalogV1(vars,selectedVariation):`<div class="varGrid">${vars.map((v,i)=>`<button type="button" class="varBtn" data-var-i="${i}" ${selectedVariation===v?'data-preselected="1"':''}>${v.image_url?`<img class="varThumb" src="${esc(v.image_url)}" alt="">`:''}<span>${esc(variationName(v,i))}</span></button>`).join('')}</div>`));
     box.innerHTML=`<div class="optGroup"><div class="optLabel">商品規格</div>${specHtml}<div id="selectedSku" class="selectedSku">請先選擇規格</div></div>`;
     box.querySelectorAll('[data-var-i]').forEach(btn=>btn.classList.toggle('active',btn.dataset.preselected==='1'));
-    box.querySelectorAll('[data-var-i]').forEach(btn=>{
-      const choose=()=>{
-        const i=Number(btn.dataset.varI);
-        selectedVariation=vars[i]||null;
-        selected=selectedVariation?{...(selectedVariation.attributes||{})}:{};
-        if(selectedVariation){
-          const nextKey=String(selectedVariation.sku||selectedVariation.id||'').trim();
-          if(nextKey){
-            const u=new URL(location.href);u.searchParams.set('product',nextKey);history.replaceState(null,'',u.pathname+u.search+u.hash);
-          }
-        }
-        const grouped=!!btn.closest('.deepHoleCatalog')||!!btn.closest('.pmkTplCatalog');
-        box.querySelectorAll('[data-var-i]').forEach(x=>x.classList.toggle('active',grouped?x.dataset.varI===btn.dataset.varI:x===btn));
-        refreshDirectVariation();
-      };
-      btn.onclick=choose;
-      if(btn.matches('.deepHoleRow')||btn.closest('.pmkTplCatalog'))btn.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();choose()}};
-    });
+    box.querySelectorAll('[data-var-i]').forEach(btn=>{const choose=()=>{const i=Number(btn.dataset.varI);selectedVariation=vars[i]||null;selected=selectedVariation?{...(selectedVariation.attributes||{})}:{};if(selectedVariation){const nextKey=String(selectedVariation.sku||selectedVariation.id||'').trim();if(nextKey){const u=new URL(location.href);u.searchParams.set('product',nextKey);history.replaceState(null,'',u.pathname+u.search+u.hash)}}box.querySelectorAll('[data-var-i]').forEach(x=>x.classList.toggle('active',x.dataset.varI===btn.dataset.varI));refreshDirectVariation()};btn.onclick=choose;if(btn.closest('.pmkTplCatalog')||btn.matches('.deepHoleRow'))btn.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();choose()}}});
     refreshDirectVariation();return;
   }
   const gs=groups();
-  const renderOptionGroups=()=>{
-    box.innerHTML=gs.map((g,gi)=>{
-      let vals=(g.values||[]);
-      return `<div class="optGroup"><div class="optLabel">${esc(g.name)}${g.required!==false?' *':''}</div><div class="options">${vals.map(v=>`<button type="button" class="opt ${String(selected[g.name]||'')===String(v)?'active':''}" data-n="${esc(g.name)}" data-v="${esc(v)}">${esc(v)}</button>`).join('')}</div></div>`;
-    }).join('');
-    box.querySelectorAll('.opt').forEach(b=>b.onclick=()=>{
-      const name=b.dataset.n,val=b.dataset.v,idx=gs.findIndex(g=>g.name===name);
-      selected[name]=val;
-      renderOptionGroups();refresh();
-    });
-  };
-  renderOptionGroups();refresh()}
+  const renderOptionGroups=()=>{box.innerHTML=gs.map(g=>{const vals=g.values||[];return `<div class="optGroup"><div class="optLabel">${esc(g.name)}${g.required!==false?' *':''}</div><div class="options">${vals.map(v=>`<button type="button" class="opt ${String(selected[g.name]||'')===String(v)?'active':''}" data-n="${esc(g.name)}" data-v="${esc(v)}">${esc(v)}</button>`).join('')}</div></div>`}).join('');box.querySelectorAll('.opt').forEach(b=>b.onclick=()=>{selected[b.dataset.n]=b.dataset.v;renderOptionGroups();refresh()})};
+  renderOptionGroups();refresh()
+}
 function refreshDirectVariation(){
   const vars=(P?.variations||[]).filter(v=>v&&v.is_active!==false);
   let can=!!selectedVariation,priceText='請選擇型號',stock='請先選擇規格';
