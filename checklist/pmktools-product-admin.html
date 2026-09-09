@@ -3144,6 +3144,35 @@ function pmkAddonPoolVariationOptionsV598(){
   return out.sort((a,b)=>String(a.label).localeCompare(String(b.label),'zh-Hant'));
 }
 
+let pmkAccessoryPoolCacheV700=[];
+function pmkAccessoryPoolV700(){
+  return Array.isArray(pmkAccessoryPoolCacheV700)&&pmkAccessoryPoolCacheV700.length
+    ? pmkAccessoryPoolCacheV700
+    : (pmkAccessoryPoolCacheV700=pmkAddonPoolVariationOptionsV598());
+}
+function pmkAccessorySearchPoolV700(raw,limit=40){
+  const q=pmkAccessorySkuNormV599(raw);
+  const txt=String(raw||'').normalize('NFKC').trim().toUpperCase();
+  if(!q&&!txt)return [];
+  const exact=[],partial=[];
+  for(const x of pmkAccessoryPoolV700()){
+    const sku=pmkAccessorySkuNormV599(x.sku||'');
+    const hay=String((x.sku||'')+' '+(x.label||'')).normalize('NFKC').toUpperCase();
+    if(q&&sku===q)exact.push(x);
+    else if((q&&sku&&(sku.includes(q)||q.includes(sku)))||(txt&&hay.includes(txt)))partial.push(x);
+    if(exact.length+partial.length>=limit*2)break;
+  }
+  return exact.concat(partial).slice(0,limit);
+}
+function pmkFillAccessorySelectV700(sel,hits,selectedKey=''){
+  if(!sel)return;
+  const current=selectedKey||String(sel.value||'');
+  sel.innerHTML='<option value="">— 未指定 —</option>'+hits.map(x=>{
+    const key=String(x.product_id||'')+'|'+String(x.variation_id||'');
+    return `<option value="${esc(key)}" data-sku="${esc(x.sku||'')}" ${key===current?'selected':''}>${esc(x.label||x.sku||key)}</option>`;
+  }).join('');
+}
+
 function pmkAccessorySkuNormV599(v){
   return String(v||'').normalize('NFKC').toUpperCase().replace(/[^A-Z0-9]/g,'');
 }
@@ -3175,23 +3204,21 @@ function pmkAccessoryRefV598(t,role){
 
 
 function pmkAccessorySearchRowV651(role,i,ref,opts,label,qty){
-  ref=pmkResolveLegacyAccessoryV599(ref,opts);
+  ref=pmkResolveLegacyAccessoryV599(ref,pmkAccessoryPoolV700());
   const selectedKey=String(ref?.product_id||'')+'|'+String(ref?.variation_id||'');
-  const rows=(opts||[]).map(x=>{
-    const key=String(x.product_id||'')+'|'+String(x.variation_id||'');
-    return `<option value="${esc(key)}" data-sku="${esc(x.sku||'')}" ${key===selectedKey?'selected':''}>${esc(x.label||x.sku||key)}</option>`;
-  }).join('');
   const sku=String(ref?.sku||'').trim();
-  const qtyHtml=role==='plate'?`<label style="display:flex;align-items:center;gap:5px;white-space:nowrap">數量 <input data-vacc-plateqty="${i}" type="number" min="1" max="99" value="${Math.max(1,Number(qty||ref?.qty||2))}" style="width:58px"></label>`:`<span class="muted">×1</span>`;
+  const hit=selectedKey!=='|'?pmkAccessoryPoolV700().find(x=>(String(x.product_id||'')+'|'+String(x.variation_id||''))===selectedKey):null;
+  const selectedHtml=hit?`<option value="${esc(selectedKey)}" data-sku="${esc(hit.sku||sku)}" selected>${esc(hit.label||hit.sku||selectedKey)}</option>`:'';
+  const defaultQty=role==='plate'?Math.max(1,Number(qty||ref?.qty||2)):Math.max(1,Number(qty||ref?.qty||1));
   return `<b>${label}</b>
     <div style="min-width:0">
-      <input type="search" data-vacc-search="${role}" data-vacc-index="${i}" value="${esc(sku)}" placeholder="直接輸入完整 SKU 搜尋" autocomplete="off" style="width:100%;min-width:0">
+      <input type="search" data-vacc-search="${role}" data-vacc-index="${i}" value="${esc(sku)}" placeholder="輸入完整 SKU 搜尋" autocomplete="off" style="width:100%;min-width:0">
       <div data-vacc-msg="${role}|${i}" style="font-size:10px;line-height:1.2;min-height:12px;margin-top:2px;color:#64748b"></div>
     </div>
     <select data-vacc-ref="${role}" data-vacc-index="${i}" style="min-width:0">
-      <option value="">— 未指定 —</option>${rows}
+      <option value="">— 未指定 —</option>${selectedHtml}
     </select>
-    ${qtyHtml}`;
+    <label style="display:flex;align-items:center;gap:5px;white-space:nowrap">數量 <input data-vacc-qty="${role}" data-vacc-index="${i}" type="number" min="1" max="99" value="${defaultQty}" style="width:58px"></label>`;
 }
 function pmkWireAccessorySkuSearchV651(box){
   box.querySelectorAll('[data-vacc-search]').forEach(inp=>{
@@ -3199,75 +3226,32 @@ function pmkWireAccessorySkuSearchV651(box){
     const sel=box.querySelector(`[data-vacc-ref="${role}"][data-vacc-index="${i}"]`);
     const msg=box.querySelector(`[data-vacc-msg="${role}|${i}"]`);
     if(!sel)return;
-    const norm=v=>pmkAccessorySkuNormV599(v);
     const setMsg=(t,state)=>{if(msg){msg.textContent=t||'';msg.style.color=state===true?'#15803d':state===false?'#b91c1c':'#64748b';}};
-    const apply=opt=>{
-      if(!opt||!opt.value)return false;
-      sel.value=opt.value;
-      inp.value=String(opt.dataset.sku||'').trim();
-      [...sel.options].forEach(o=>o.hidden=false);
-      setMsg('✓ 已找到並綁定 '+inp.value,true);
-      sel.dispatchEvent(new Event('change',{bubbles:true}));
-      return true;
+    const applyHit=x=>{
+      if(!x)return false;
+      const key=String(x.product_id||'')+'|'+String(x.variation_id||'');
+      pmkFillAccessorySelectV700(sel,[x],key); sel.value=key; inp.value=String(x.sku||'').trim();
+      setMsg('✓ 已找到並綁定 '+inp.value,true); return true;
     };
     const search=()=>{
-      const raw=String(inp.value||'').trim(),q=norm(raw),txt=String(raw||'').normalize('NFKC').trim().toUpperCase();
-      let exact=[],partial=[];
-      [...sel.options].forEach((opt,idx)=>{
-        if(idx===0){opt.hidden=false;return;}
-        const sku=norm(opt.dataset.sku||''),hay=String(opt.textContent||'').normalize('NFKC').toUpperCase();
-        const isExact=!!q&&sku===q;
-        const hit=!q||isExact||(sku&&sku.includes(q))||(q&&q.includes(sku))||(txt&&hay.includes(txt));
-        opt.hidden=!hit;
-        if(isExact)exact.push(opt); else if(hit)partial.push(opt);
-      });
-      if(!q){setMsg('',null);return null;}
-      if(exact.length===1){apply(exact[0]);return exact[0];}
-      if(exact.length>1){setMsg(`找到 ${exact.length} 筆相同 SKU，請從右側確認商品/Grade`,null);return null;}
-      if(partial.length===1){apply(partial[0]);return partial[0];}
-      if(!partial.length){setMsg('找不到此 SKU；請先建立「深孔刀片」商品/規格或檢查 SKU',false);return null;}
-      setMsg(`找到 ${partial.length} 筆，請補完整 SKU`,null);return null;
+      const raw=String(inp.value||'').trim();
+      if(!raw){pmkFillAccessorySelectV700(sel,[]);setMsg('',null);return;}
+      const hits=pmkAccessorySearchPoolV700(raw,40);
+      pmkFillAccessorySelectV700(sel,hits);
+      const q=pmkAccessorySkuNormV599(raw);
+      const exact=hits.filter(x=>pmkAccessorySkuNormV599(x.sku||'')===q);
+      if(exact.length===1)return applyHit(exact[0]);
+      if(!hits.length){setMsg('找不到此 SKU；仍可保留 SKU 後儲存',false);return;}
+      setMsg(exact.length>1?`找到 ${exact.length} 筆相同 SKU，請右側選擇`:`找到 ${hits.length} 筆，請右側選擇`,null);
     };
-    inp.oninput=search;
+    let timer=0;
+    inp.oninput=()=>{clearTimeout(timer);timer=setTimeout(search,120)};
     inp.onpaste=()=>setTimeout(search,0);
-    inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();search();}else if(e.key==='Escape'){inp.value='';[...sel.options].forEach(o=>o.hidden=false);setMsg('',null);}};
+    inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();search();}else if(e.key==='Escape'){inp.value='';pmkFillAccessorySelectV700(sel,[]);setMsg('',null);}};
     sel.onchange=()=>{const opt=sel.selectedOptions?.[0];if(opt&&sel.value){inp.value=String(opt.dataset.sku||'').trim();setMsg('✓ 已綁定 '+inp.value,true);}else setMsg('',null);};
-    const selected=sel.selectedOptions?.[0];
-    if(selected&&selected.value){inp.value=String(selected.dataset.sku||'').trim();setMsg('目前：'+inp.value,null);}
+    const selected=sel.selectedOptions?.[0];if(selected&&selected.value)setMsg('目前：'+String(selected.dataset.sku||inp.value||''),null);
   });
 }
-
-function pmk80020SavedSplitRefV603(v,role,candidate,n){
-  const rows=v?.technical_params?.accessory_links_v2?.[role];
-  if(!Array.isArray(rows)||!rows.length)return null;
-  const min=Number(candidate?.min),max=Number(candidate?.max);
-  let hit=rows.find(x=>Number(x?.min_dc)===min&&Number(x?.max_dc)===max);
-  if(!hit)hit=rows[n];
-  if(!hit)return null;
-  return {product_id:String(hit.product_id||''),variation_id:String(hit.variation_id||''),sku:String(hit.sku||''),qty:Math.max(1,Number(hit.qty||1)),min_dc:min,max_dc:max};
-}
-function pmkAccessoryCandidateSelectV601(i,role,n,candidate,opts,v){
-  // 已人工更正過的 accessory_links_v2 優先；沒有才套 TECH_DATA 自動規則。
-  const saved=pmk80020SavedSplitRefV603(v,role,candidate,n);
-  const ref=(saved&&saved.sku)?pmkResolveLegacyAccessoryV599(saved,opts):
-    (pmk80020ResolveRuleRefV600(candidate,opts,role)||{product_id:'',variation_id:'',sku:candidate.sku||'',qty:role==='plate'?2:1,min_dc:candidate.min,max_dc:candidate.max});
-  const selectedKey=String(ref.product_id||'')+'|'+String(ref.variation_id||'');
-  const rows=opts.map(x=>{
-    const key=String(x.product_id)+'|'+String(x.variation_id||'');
-    return `<option value="${esc(key)}" data-sku="${esc(x.sku)}" ${key===selectedKey?'selected':''}>${esc(x.label)}</option>`;
-  }).join('');
-  const initialSku=String(ref.sku||candidate.sku||'').trim();
-  return `<div style="display:grid;grid-template-columns:145px minmax(170px,.55fr) minmax(0,1fr);gap:7px;align-items:center;margin:5px 0">
-    <span style="font-weight:900">${Number(candidate.min).toFixed(2)}–${Number(candidate.max).toFixed(2)}</span>
-    <div style="min-width:0"><input type="search" data-vacc-split-search="${role}" data-vacc-split-search-index="${i}" data-vacc-split-search-n="${n}" value="${esc(initialSku)}" placeholder="貼上正確 SKU 後自動更正" autocomplete="off" style="width:100%;min-width:0"><div data-vacc-split-msg="${role}|${i}|${n}" style="font-size:10px;line-height:1.2;min-height:12px;margin-top:2px;color:#64748b"></div></div>
-    <select data-vacc-split="${role}" data-vacc-split-index="${i}" data-vacc-split-n="${n}" data-min="${candidate.min}" data-max="${candidate.max}" data-default-sku="${esc(candidate.sku)}">
-      <option value="">— 未指定 —</option>${rows}
-    </select>
-  </div>`;
-}
-
-
-
 function pmkCustomAccessoryRowsV63(v){
   const x=v?.technical_params?.accessory_links_v2?.custom;
   return Array.isArray(x)?x:[];
@@ -3275,17 +3259,12 @@ function pmkCustomAccessoryRowsV63(v){
 function pmkCustomAccessoryProductSelectV63(i,n,row,opts){
   const pid=String(row?.product_id||''),vid=String(row?.variation_id||'');
   const selectedKey=pid+'|'+vid;
-  const rows=(opts||[]).map(x=>{
-    const key=String(x.product_id)+'|'+String(x.variation_id||'');
-    const sku=String(x.sku||'').trim();
-    const label=String(x.label||'').trim();
-    const search=(sku+' '+label).toUpperCase();
-    return `<option value="${esc(key)}" data-sku="${esc(sku)}" data-search="${esc(search)}" ${key===selectedKey?'selected':''}>${esc(label)}</option>`;
-  }).join('');
+  const hit=selectedKey!=='|'?pmkAccessoryPoolV700().find(x=>(String(x.product_id||'')+'|'+String(x.variation_id||''))===selectedKey):null;
+  const selectedHtml=hit?`<option value="${esc(selectedKey)}" data-sku="${esc(hit.sku||row?.sku||'')}" selected>${esc(hit.label||hit.sku||selectedKey)}</option>`:'';
   return `<div class="pmkCustomAccessoryPickerV637">
     <input type="search" data-vcustom-search="${i}" data-vcustom-n="${n}" placeholder="輸入 SKU / 型號搜尋" autocomplete="off">
     <select data-vcustom-product="${i}" data-vcustom-n="${n}">
-      <option value="">— 只顯示規格 SKU，不連商品 —</option>${rows}
+      <option value="">— 只顯示規格 SKU，不連商品 —</option>${selectedHtml}
     </select>
   </div>`;
 }
@@ -3371,13 +3350,13 @@ function pmkVariationAddonEditorV597(v,i){
   const isHolder=templateKey==='deep_hole_holder';
   const hasAny=[t.center_insert_options,t.center_insert,t.intermediate_insert_options,t.intermediate_insert,t.peripheral_insert_options,t.peripheral_insert,t.support_plate_options,t.support_plate,t.accessory_links,t.accessory_links_v2].some(x=>x&&(Array.isArray(x)?x.length:true));
   if(!isHolder&&!hasAny)return '';
-  const opts=pmkAddonPoolVariationOptionsV598();
+  const opts=pmkAccessoryPoolV700();
   const center=pmkAccessoryRefV598(t,'center'),middle=pmkAccessoryRefV598(t,'middle'),peripheral=pmkAccessoryRefV598(t,'peripheral'),plate=pmkAccessoryRefV598(t,'plate');
   return `<div class="v545-field" style="grid-column:1/-1">
     <details open style="border:1px solid #bfdbfe;border-radius:8px;padding:10px;background:#f8fbff">
       <summary style="cursor:pointer;font-weight:900;color:#1d4ed8">適用刀片 / 配件（依目前 Variation）</summary>
       <div class="muted" style="font-size:11px;margin:7px 0 9px">
-        直接輸入商品庫中的完整 SKU 即可搜尋並綁定實際商品 / Variation（含 Grade）。儲存後前台目錄直接套印這一筆 Variation 的中心刀片、中間刀片、周邊刀片、支撐板與數量。
+        直接輸入完整 SKU 後才搜尋商品庫（不再每列預載全站選項）。中心／中間／周邊刀片與支撐板數量都可調整；預設刀片 1、支撐板 2。
       </div>
       ${opts.length?'':`<div style="padding:8px;margin-bottom:8px;background:#fff3cd;border:1px solid #f0d98a;border-radius:6px">商品庫目前沒有其他商品可供 SKU 配對。</div>`}
       <div style="display:grid;grid-template-columns:120px minmax(180px,.72fr) minmax(260px,1.3fr) 90px;gap:7px;align-items:center">
@@ -3391,18 +3370,19 @@ function pmkVariationAddonEditorV597(v,i){
   </div>`;
 }
 function pmkReadAccessoryLinksV598(i,v){
-  const old=v?.technical_params||{},roles=['center','middle','peripheral','plate'],out={};
+  const roles=['center','middle','peripheral','plate'],out={};
   roles.forEach(role=>{
     const el=document.querySelector(`[data-vacc-ref="${role}"][data-vacc-index="${i}"]`);
+    const skuInput=document.querySelector(`[data-vacc-search="${role}"][data-vacc-index="${i}"]`);
+    const qtyInput=document.querySelector(`[data-vacc-qty="${role}"][data-vacc-index="${i}"]`);
     const val=String(el?.value||'');
-    if(!val)return;
-    const [product_id,variation_id='']=val.split('|');
-    const opt=el.selectedOptions?.[0],sku=String(opt?.dataset?.sku||'').trim();
-    if(product_id)out[role]={product_id,variation_id,sku,qty:role==='plate'?Math.max(1,Number(document.querySelector(`[data-vacc-plateqty="${i}"]`)?.value||2)):1};
+    const sku=String(skuInput?.value||el?.selectedOptions?.[0]?.dataset?.sku||'').trim();
+    const qty=Math.max(1,Number(qtyInput?.value||((role==='plate')?2:1)));
+    if(val){const [product_id,variation_id='']=val.split('|');if(product_id)out[role]={product_id,variation_id,sku,qty};}
+    else if(sku){out[role]={product_id:'',variation_id:'',sku,qty};}
   });
   return out;
 }
-
 
 function pmkNormAccessorySearchV637(v){
   return String(v||'').normalize('NFKC').trim().toUpperCase().replace(/\s+/g,' ');
@@ -3413,61 +3393,24 @@ function pmkWireCustomAccessorySearchV637(box){
     const sel=box.querySelector(`[data-vcustom-product="${i}"][data-vcustom-n="${n}"]`);
     const skuBox=box.querySelector(`[data-vcustom-sku="${i}"][data-vcustom-n="${n}"]`);
     if(!sel)return;
-    const applyPick=opt=>{
-      if(!opt)return;
-      sel.value=opt.value;
-      const sku=String(opt.dataset.sku||'').trim();
-      if(skuBox&&sku)skuBox.value=sku;
+    const applyHit=x=>{
+      if(!x)return;
+      const key=String(x.product_id||'')+'|'+String(x.variation_id||'');
+      pmkFillAccessorySelectV700(sel,[x],key); sel.value=key;
+      if(skuBox&&x.sku)skuBox.value=String(x.sku).trim(); inp.value=String(x.sku||'').trim();
     };
     const search=()=>{
-      const q=pmkNormAccessorySearchV637(inp.value);
-      let first=null,exact=null,count=0;
-      [...sel.options].forEach((opt,idx)=>{
-        if(idx===0){opt.hidden=false;return}
-        const sku=pmkNormAccessorySearchV637(opt.dataset.sku||'');
-        const hay=pmkNormAccessorySearchV637(opt.dataset.search||opt.textContent||'');
-        const hit=!q||sku.includes(q)||hay.includes(q);
-        opt.hidden=!hit;
-        if(hit){
-          count++;
-          if(!first)first=opt;
-          if(sku===q)exact=opt;
-        }
-      });
-      if(q&&(exact||count===1))applyPick(exact||first);
+      const raw=String(inp.value||skuBox?.value||'').trim();
+      if(!raw){pmkFillAccessorySelectV700(sel,[]);return;}
+      const hits=pmkAccessorySearchPoolV700(raw,40); pmkFillAccessorySelectV700(sel,hits);
+      const q=pmkAccessorySkuNormV599(raw); const exact=hits.filter(x=>pmkAccessorySkuNormV599(x.sku||'')===q);
+      if(exact.length===1)applyHit(exact[0]);
     };
-    inp.oninput=search;
-    inp.onkeydown=e=>{
-      if(e.key==='Enter'){
-        e.preventDefault();
-        search();
-        const visible=[...sel.options].find((o,idx)=>idx>0&&!o.hidden);
-        if(visible)applyPick(visible);
-        sel.focus();
-      }else if(e.key==='Escape'){
-        inp.value='';
-        search();
-      }
-    };
-    sel.onchange=()=>{
-      const opt=sel.selectedOptions?.[0];
-      const sku=String(opt?.dataset?.sku||'').trim();
-      if(skuBox&&sku)skuBox.value=sku;
-      if(opt&&sel.value)inp.value=sku||String(opt.textContent||'').trim();
-    };
-    if(skuBox){
-      const matchSku=()=>{
-        const q=pmkNormAccessorySearchV637(skuBox.value);
-        if(!q)return;
-        const exact=[...sel.options].find((o,idx)=>idx>0&&pmkNormAccessorySearchV637(o.dataset.sku||'')===q);
-        if(exact){ applyPick(exact); inp.value=String(exact.dataset.sku||'').trim(); }
-      };
-      skuBox.addEventListener('change',matchSku);
-      skuBox.addEventListener('blur',matchSku);
-      skuBox.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();matchSku();}});
-    }
-    const selected=sel.selectedOptions?.[0];
-    if(selected&&sel.value)inp.value=String(selected.dataset.sku||'').trim();
+    let timer=0; inp.oninput=()=>{clearTimeout(timer);timer=setTimeout(search,120)};
+    inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();search();}else if(e.key==='Escape'){inp.value='';pmkFillAccessorySelectV700(sel,[]);}};
+    sel.onchange=()=>{const opt=sel.selectedOptions?.[0];const sku=String(opt?.dataset?.sku||'').trim();if(skuBox&&sku)skuBox.value=sku;if(opt&&sel.value)inp.value=sku||String(opt.textContent||'').trim();};
+    if(skuBox){const matchSku=()=>{const raw=String(skuBox.value||'').trim();if(!raw)return;const hits=pmkAccessorySearchPoolV700(raw,20);const q=pmkAccessorySkuNormV599(raw);const exact=hits.find(x=>pmkAccessorySkuNormV599(x.sku||'')===q);if(exact)applyHit(exact)};skuBox.onchange=matchSku;skuBox.onblur=matchSku;skuBox.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();matchSku();}};}
+    const selected=sel.selectedOptions?.[0];if(selected&&sel.value)inp.value=String(selected.dataset.sku||'').trim();
   });
 }
 
@@ -3485,6 +3428,8 @@ function renderVariationEditorV54(){
   const pageStart=v54VariationPage*V54_VARIATION_PAGE_SIZE;
   const pageEnd=Math.min(v54Variations.length,pageStart+V54_VARIATION_PAGE_SIZE);
   const pageRows=v54Variations.slice(pageStart,pageEnd).map((v,local)=>({v,i:pageStart+local}));
+  // 效能：全站商品/Variation 只建立一次快取；每個配件欄位輸入 SKU 後才載入最多 40 筆。
+  pmkAccessoryPoolCacheV700=pmkAddonPoolVariationOptionsV598();
   box.innerHTML=`<div class="v545-toolbar"><div class="v545-toolbar-main"><button type="button" class="btn gray" id="v545ExpandAll">本頁展開</button><button type="button" class="btn gray" id="v545CollapseAll">全部收合</button><button type="button" class="btn" id="v545AddVariation" style="background:#2563eb;color:#fff">＋ 新增</button><button type="button" class="btn" id="pmkTechExportBtn" style="background:#0f766e;color:#fff">匯出技術資料</button><button type="button" class="btn" id="pmkTechImportBtn" style="background:#b45309;color:#fff">匯入技術資料</button><button type="button" id="pmkV14LocalWhiteLogoBtn" class="btn" style="background:#475569;color:#fff">批次白貼 Logo</button><button type="button" class="btn gray" id="pmkV13LogoPauseBtn" style="display:none">暫停</button><button type="button" class="btn gray" id="pmkV13LogoResumeBtn" style="display:none">繼續</button><button type="button" class="btn gray" id="pmkV13LogoRestoreBtn" style="display:none">恢復原圖</button></div><div class="v545-toolbar-meta"><span id="pmkV13LogoStatus" class="muted"></span><span id="pmkRepairStatus" class="muted"></span><span class="v545-page"><button type="button" class="btn gray" id="v545PrevPage" ${v54VariationPage<=0?'disabled':''}>上一頁</button><b style="font-size:12px;color:#475569">${v54VariationPage+1} / ${pageCount}｜${pageStart+1}-${pageEnd}</b><button type="button" class="btn gray" id="v545NextPage" ${v54VariationPage>=pageCount-1?'disabled':''}>下一頁</button></span><span class="v545-count">${v54Variations.length} 個變化類型｜每頁 12 筆</span></div></div>`+
   pageRows.map(({v,i})=>`<div class="v545-variation" data-vrow="${i}">
     <div class="v545-summary">
