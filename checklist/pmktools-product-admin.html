@@ -4582,136 +4582,153 @@ function pmkTechExportV1(){
 }
 function pmkTechImportApplyV1(payload){
   if(!payload||payload.format!==PMK_TECH_EXCHANGE_FORMAT||Number(payload.version)!==PMK_TECH_EXCHANGE_VERSION)throw new Error('不是 PMKTOOLS 技術資料交換檔 V1');
-  const incoming=Array.isArray(payload.rows)?payload.rows:[];if(!incoming.length)throw new Error('交換檔沒有 rows 資料');
+  const incoming=Array.isArray(payload.rows)?payload.rows:[];
+  if(!incoming.length)throw new Error('交換檔沒有 rows 資料');
 
-  if(String(payload.import_mode||'')==='replace_variations_from_exchange'){
-    const current=readVariationsV54();
-    const bySource=new Map(),sourceCount=new Map(),bySku=new Map();
-    current.forEach(v=>{
-      const src=pmkTechExchangeText(v.source_sku_id).toUpperCase();
-      if(src){sourceCount.set(src,(sourceCount.get(src)||0)+1);if(!bySource.has(src))bySource.set(src,v);}
-      const sku=pmkTechExchangeText(v.sku).toUpperCase();if(sku&&!bySku.has(sku))bySku.set(sku,v);
-    });
+  const current=readVariationsV54();
+  const norm=s=>pmkTechExchangeText(s).toUpperCase();
+  const attrKey=v=>pmkTechExchangeAttrsKey(v?.attributes||{}).toUpperCase();
+  const blankAttrs=v=>Object.values(v?.attributes||{}).every(x=>!pmkTechExchangeText(x));
+  const isPlaceholder=v=>!pmkTechExchangeText(v?.sku)&&!pmkTechExchangeText(v?.source_sku_id)&&blankAttrs(v);
 
-    // 只在既有 TECH_DATA replace importer 內補規格圖繼承。
-    const supportDims=v=>{
-      const tp=v?.technical_params||{};
-      const num=x=>{const n=Number(x);return Number.isFinite(n)&&n>0?n:0};
-      let w=num(tp.support_plate_width_b_mm||tp.support_plate_width_w1_mm||tp.support_plate_W1_mm);
-      let t=num(tp.support_plate_thickness_s_mm||tp.support_plate_S_mm);
-      let l=num(tp.support_plate_length_l_mm||tp.support_plate_length_insl_mm||tp.support_plate_INSL_mm);
-      if(!(w&&t&&l)){
-        const raw=String(tp.support_plate_dimension_b_s_l_mm||tp.geometry||v?.sku||v?.variation_name||'');
-        const m=raw.match(/(\d+(?:\.\d+)?)\s*[*x×-]\s*(\d+(?:\.\d+)?)\s*[*x×-]\s*(\d+(?:\.\d+)?)/i);
-        if(m){w=Number(m[1]);t=Number(m[2]);l=Number(m[3]);}
-      }
-      if(!(w&&t&&l)){
-        const key=String(v?.sku||v?.variation_name||Object.values(v?.attributes||{}).join(' ')).toUpperCase();
-        const known=[
-          [/800[- ]?06A?/,6,3,18],[/800[- ]?07A?/,7,3.5,20],[/800[- ]?08A?/,8,4.5,25],
-          [/800[- ]?10A?/,10,4.5,30],[/800[- ]?12A?/,12,5.5,35],
-          [/800[- ]?14A?/,14,7,35],[/800[- ]?20A?/,20,8.5,50]
-        ];
-        const k=known.find(x=>x[0].test(key));if(k){w=k[1];t=k[2];l=k[3];}
-      }
-      const mat=String(tp.support_plate_material||tp.material||tp.material_label||tp.grade||'');
-      return {w,t,l,mat};
-    };
-    const imageRefs=current.filter(v=>String(v?.image_url||'').trim()).map(v=>({v,d:supportDims(v)}));
-    const inheritImage=row=>{
-      if(!imageRefs.length)return null;
-      const d=supportDims(row);
-      if(!(d.w&&d.t&&d.l))return imageRefs[0].v;
-      let best=null,bestScore=Infinity;
-      for(const r of imageRefs){
-        if(!(r.d.w&&r.d.t&&r.d.l))continue;
-        let score=
-          Math.pow((d.w-r.d.w)/Math.max(1,r.d.w),2)+
-          Math.pow((d.t-r.d.t)/Math.max(1,r.d.t),2)+
-          Math.pow((d.l-r.d.l)/Math.max(1,r.d.l),2);
-        if(d.mat&&r.d.mat&&d.mat!==r.d.mat)score+=0.35;
-        if(score<bestScore){bestScore=score;best=r.v;}
-      }
-      return best||imageRefs[0].v;
-    };
+  // 建立「唯一值」索引；只有唯一時才拿來匹配，避免共用來源碼誤配。
+  function uniqueIndex(values){
+    const count=new Map(),first=new Map();
+    values.forEach((value,i)=>{if(!value)return;count.set(value,(count.get(value)||0)+1);if(!first.has(value))first.set(value,i)});
+    const out=new Map();
+    count.forEach((n,k)=>{if(n===1)out.set(k,first.get(k))});
+    return out;
+  }
+  const keyIndex=uniqueIndex(current.map(v=>pmkTechExchangeMatchKey(v).toUpperCase()));
+  const sourceIndex=uniqueIndex(current.map(v=>norm(v.source_sku_id)));
+  const skuIndex=uniqueIndex(current.map(v=>norm(v.sku)));
+  const attrsIndex=uniqueIndex(current.map(v=>attrKey(v)));
 
-    const next=incoming.map((row,n)=>{
-      const src=pmkTechExchangeText(row.source_sku_id).toUpperCase(),sku=pmkTechExchangeText(row.sku).toUpperCase();
-      // SKU 優先；共用來源碼（例如 PV001）不拿來強制配同一筆。
-      const old=(sku&&bySku.get(sku))||(src&&sourceCount.get(src)===1&&bySource.get(src))||null;
-      const imageOld=old&&String(old.image_url||'').trim()?old:inheritImage(row);
-      return {
-        ...(old||{}),
-        id:old?.id||('tech-'+Date.now().toString(36)+'-'+String(n+1)),
-        attributes:row.attributes&&typeof row.attributes==='object'?pmkTechExchangeClone(row.attributes):{},
-        variation_name:pmkTechExchangeText(row.variation_name)||pmkTechExchangeText(row.sku),
-        variation_name_manual_locked:true,
-        sku:asciiSkuV33(row.sku),
-        sku_manual_locked:true,
-        source_sku_id:pmkTechExchangeText(row.source_sku_id)||old?.source_sku_id||'',
-        source_price:Number(row.source_price||0)>0?Number(row.source_price):Number(old?.source_price||0),
-        price:pricingPublicFromCny(
-          Number(row.source_price||0)>0?Number(row.source_price):Number(old?.source_price||0),
-          $('category')?.value||'',
-          pricingRules(),
-          editingId||$('external_id')?.value||''
-        ),
-        sale_price:old?.sale_price||0,
-        stock_tracking_enabled:!!old?.stock_tracking_enabled,
-        stock_qty:Number(old?.stock_qty||0),
-        image_url:old?.image_url||imageOld?.image_url||'',
-        original_image_url:old?.original_image_url||imageOld?.original_image_url||imageOld?.image_url||'',
-        image_locale:old?.image_locale||imageOld?.image_locale||'',
-        is_active:old?old.is_active!==false:true,
-        technical_params:row.technical_params&&typeof row.technical_params==='object'?pmkTechExchangeClone(row.technical_params):{},
-        _manual_draft:false
-      };
-    });
+  // 額外建立單一屬性唯一索引，例如「直徑範圍,mm=68」。
+  const attrPairBuckets=new Map();
+  current.forEach((v,i)=>Object.entries(v.attributes||{}).forEach(([k,val])=>{
+    const kk=norm(k),vv=norm(val);if(!kk||!vv)return;
+    const pair=`${kk}=${vv}`;if(!attrPairBuckets.has(pair))attrPairBuckets.set(pair,[]);attrPairBuckets.get(pair).push(i);
+  }));
 
-    if(!confirm(`交換檔共 ${incoming.length} 組。\n\n將直接以交換檔型號清單重建目前 Variation：\n目前 ${current.length} 組 → 匯入後 ${next.length} 組。\n\n型號會直接寫入「顏色分類」，並同步商品屬性清單，不再出現舊 7 個值或「任意 顏色分類」。\n既有能匹配的人工售價／庫存／圖片／來源 SKU 會保留；基礎價依來源價重新計算；新增規格若無專圖，依支撐板尺寸＋材質繼承最接近的既有規格圖。\n\n確定套用到目前編輯畫面？`))return {cancelled:true};
+  const used=new Set();
+  const plan=[];
+  let matched=0,created=0;
 
-    // 先同步商品屬性值，再畫 Variation；否則下拉仍只會顯示舊的 7 個值。
-    const attrOrder=[],attrValues=new Map();
-    incoming.forEach(row=>{
-      const attrs=row.attributes&&typeof row.attributes==='object'?row.attributes:{};
-      Object.entries(attrs).forEach(([name,val])=>{
-        const n=String(name||'').trim(),v=String(val||'').trim();
-        if(!n||!v)return;
-        if(!attrValues.has(n)){attrValues.set(n,[]);attrOrder.push(n);}
-        const arr=attrValues.get(n);if(!arr.includes(v))arr.push(v);
-      });
-    });
-    if(attrOrder.length&&$('attributes_text')){
-      $('attributes_text').value=attrOrder.map(n=>`${n}|${attrValues.get(n).join(',')}`).join('\n');
-      $('attributes_text').dispatchEvent(new Event('input',{bubbles:true}));
+  function findCurrentIndex(row){
+    const key=norm(row.match_key);
+    const src=norm(row.source_sku_id);
+    const sku=norm(row.sku);
+    const ak=attrKey(row);
+    const candidates=[];
+    if(key&&keyIndex.has(key))candidates.push(keyIndex.get(key));
+    if(sku&&skuIndex.has(sku))candidates.push(skuIndex.get(sku));
+    if(src&&sourceIndex.has(src))candidates.push(sourceIndex.get(src));
+    if(ak&&attrsIndex.has(ak))candidates.push(attrsIndex.get(ak));
+
+    for(const i of candidates)if(!used.has(i))return i;
+
+    // 完整 attributes 找不到時，以「任一個非空屬性且唯一」做次級匹配。
+    const attrs=row.attributes&&typeof row.attributes==='object'?row.attributes:{};
+    for(const [k,val] of Object.entries(attrs)){
+      const kk=norm(k),vv=norm(val);if(!kk||!vv)continue;
+      const arr=attrPairBuckets.get(`${kk}=${vv}`)||[];
+      const free=arr.filter(i=>!used.has(i));
+      if(free.length===1)return free[0];
     }
-
-    $('product_type').value='variable';
-    v54Variations=next;
-    renderVariationEditorV54();
-    setStatus(`✓ 已依交換檔重建 Variation：${current.length} → ${next.length} 組。型號已直接寫入顏色分類；按「更新商品」正式儲存。`);
-    alert(`匯入完成。\nVariation：${current.length} → ${next.length} 組\n\n型號已直接帶入顏色分類。\n請抽查後按「更新商品」正式儲存。`);
-    return {matched:next.length,replaced:true,total:next.length};
+    return -1;
   }
 
-  const current=readVariationsV54(),byKey=new Map(),bySource=new Map(),bySku=new Map();
-  current.forEach((v,i)=>{const key=pmkTechExchangeMatchKey(v);if(key&&!byKey.has(key))byKey.set(key,i);const src=pmkTechExchangeText(v.source_sku_id).toUpperCase();if(src&&!bySource.has(src))bySource.set(src,i);const sku=pmkTechExchangeText(v.sku).toUpperCase();if(sku&&!bySku.has(sku))bySku.set(sku,i);});
-  let matched=0,changedRows=0,changedFields=0,missed=[];const next=current.map(v=>({...v,attributes:{...(v.attributes||{})},technical_params:pmkTechExchangeClone(v.technical_params||{})}));
-  for(const row of incoming){
-    const key=pmkTechExchangeText(row.match_key),src=pmkTechExchangeText(row.source_sku_id).toUpperCase(),sku=pmkTechExchangeText(row.sku).toUpperCase();
-    let i=key&&byKey.has(key)?byKey.get(key):(src&&bySource.has(src)?bySource.get(src):(sku&&bySku.has(sku)?bySku.get(sku):-1));
-    if(i<0){missed.push(pmkTechExchangeText(row.sku||row.source_sku_id||row.match_key||'?'));continue}matched++;
-    const before=next[i],after={...before};let rowChanges=0;
-    const nextSku=asciiSkuV33(row.sku);if(nextSku&&nextSku!==asciiSkuV33(before.sku)){after.sku=nextSku;after.sku_manual_locked=true;rowChanges++;changedFields++;}
-    const nextName=pmkTechExchangeText(row.variation_name);if(nextName&&nextName!==pmkTechExchangeText(before.variation_name)){after.variation_name=nextName;after.variation_name_manual_locked=true;rowChanges++;changedFields++;}
-    if(row.technical_params&&typeof row.technical_params==='object'){const oldJson=JSON.stringify(before.technical_params||{}),newTech=pmkTechExchangeClone(row.technical_params||{}),newJson=JSON.stringify(newTech);if(oldJson!==newJson){after.technical_params=newTech;rowChanges++;changedFields++;}}
-    if(rowChanges){next[i]=after;changedRows++;}
+  incoming.forEach((row,n)=>{
+    const i=findCurrentIndex(row);
+    if(i>=0){used.add(i);matched++;plan.push({row,old:current[i],oldIndex:i,newRow:false,order:n});}
+    else{created++;plan.push({row,old:null,oldIndex:-1,newRow:true,order:n});}
+  });
+
+  const unmatchedCurrent=current.map((v,i)=>({v,i})).filter(x=>!used.has(x.i));
+  const droppedPlaceholders=unmatchedCurrent.filter(x=>isPlaceholder(x.v));
+  const preservedExtras=unmatchedCurrent.filter(x=>!isPlaceholder(x.v));
+
+  function makeVariation(row,old,n){
+    const attrs=row.attributes&&typeof row.attributes==='object'?pmkTechExchangeClone(row.attributes):{};
+    const tech=row.technical_params&&typeof row.technical_params==='object'?pmkTechExchangeClone(row.technical_params):{};
+    const nextSku=asciiSkuV33(row.sku);
+    const nextName=pmkTechExchangeText(row.variation_name)||nextSku||pmkTechExchangeText(old?.variation_name)||`Variation ${n+1}`;
+    if(old){
+      return {
+        ...old,
+        sku:nextSku||old.sku||'',
+        sku_manual_locked:!!nextSku||old.sku_manual_locked===true,
+        variation_name:nextName,
+        variation_name_manual_locked:true,
+        technical_params:tech
+      };
+    }
+    return {
+      id:'tech-'+Date.now().toString(36)+'-'+String(n+1)+'-'+Math.random().toString(36).slice(2,7),
+      attributes:attrs,
+      variation_name:nextName,
+      variation_name_manual_locked:true,
+      sku:nextSku,
+      sku_manual_locked:true,
+      source_sku_id:pmkTechExchangeText(row.source_sku_id),
+      source_price:0,
+      price:0,
+      sale_price:0,
+      stock_tracking_enabled:false,
+      stock_qty:0,
+      image_url:'',
+      original_image_url:'',
+      image_locale:'',
+      is_active:true,
+      technical_params:tech,
+      _manual_draft:false
+    };
   }
-  if(!matched)throw new Error('沒有任何 SKU 能與目前商品匹配，未套用資料');
-  const warning=missed.length?`\n另有 ${missed.length} 組無法匹配，會略過。`:'';
-  if(!confirm(`交換檔共 ${incoming.length} 組；匹配 ${matched} 組，將修改 ${changedRows} 組。\n\n只允許匯入：SKU、規格名稱、技術參數。\n價格／庫存／圖片／來源 SKU 不會修改。${warning}\n\n確定套用到目前編輯畫面？`))return {cancelled:true};
-  v54Variations=next;renderVariationEditorV54();setStatus(`✓ 技術資料已匯入：匹配 ${matched} 組，更新 ${changedRows} 組；${missed.length} 組略過。`);
-  alert(`匯入完成。\n匹配：${matched} 組\n更新：${changedRows} 組\n略過：${missed.length} 組\n\n請抽查後再按「更新商品」正式儲存。`);return {matched,changedRows,changedFields,missed};
+
+  const reconciled=plan.map((x,n)=>makeVariation(x.row,x.old,n));
+  // 非空、非交換檔規格不自動刪除；只有純空白 placeholder 會清掉。
+  const next=reconciled.concat(preservedExtras.map(x=>x.v));
+
+  const msg=[
+    `交換檔共 ${incoming.length} 組。`,
+    `既有匹配：${matched} 組`,
+    `新增規格：${created} 組`,
+    `清除空白佔位：${droppedPlaceholders.length} 組`,
+    preservedExtras.length?`保留既有額外規格：${preservedExtras.length} 組`:'',
+    '',
+    '交換檔會更新：SKU、規格名稱、技術參數。',
+    '新增規格會使用交換檔 attributes 建立 Variation。',
+    '既有價格／庫存／圖片／來源 SKU 不會修改。',
+    '',
+    `目前 ${current.length} 組 → 套用後 ${next.length} 組。`,
+    '',
+    '確定套用到目前編輯畫面？'
+  ].filter(Boolean).join('\n');
+  if(!confirm(msg))return {cancelled:true};
+
+  // 用交換檔重新同步商品屬性清單，讓新增 Variation 的下拉值可直接顯示。
+  const attrOrder=[],attrValues=new Map();
+  incoming.forEach(row=>{
+    const attrs=row.attributes&&typeof row.attributes==='object'?row.attributes:{};
+    Object.entries(attrs).forEach(([name,val])=>{
+      const n=String(name||'').trim(),v=String(val||'').trim();
+      if(!n||!v)return;
+      if(!attrValues.has(n)){attrValues.set(n,[]);attrOrder.push(n);}
+      const arr=attrValues.get(n);if(!arr.includes(v))arr.push(v);
+    });
+  });
+  if(attrOrder.length&&$('attributes_text')){
+    $('attributes_text').value=attrOrder.map(n=>`${n}|${attrValues.get(n).join(',')}`).join('\n');
+    $('attributes_text').dispatchEvent(new Event('input',{bubbles:true}));
+  }
+
+  if($('product_type'))$('product_type').value='variable';
+  v54Variations=next;
+  renderVariationEditorV54();
+  setStatus(`✓ TECH_DATA 已整合：匹配 ${matched}、新增 ${created}、清除空白 ${droppedPlaceholders.length}；目前 ${next.length} 組。按「更新商品」正式儲存。`);
+  alert(`匯入完成。\n匹配：${matched} 組\n新增：${created} 組\n清除空白佔位：${droppedPlaceholders.length} 組\n保留額外規格：${preservedExtras.length} 組\n\n目前 Variation：${next.length} 組\n請抽查後按「更新商品」正式儲存。`);
+  return {matched,created,droppedPlaceholders:droppedPlaceholders.length,preservedExtras:preservedExtras.length,total:next.length};
 }
 function pmkTechImportPickV1(){
   const input=document.createElement('input');input.type='file';input.accept='.json,application/json';input.style.display='none';document.body.appendChild(input);
@@ -6672,7 +6689,7 @@ $('subcategory_detail')?.addEventListener('change',()=>{renderVariationEditorV54
 </script>
 
 <style id="pmk-attribute-engine-css">
-.pmk-v01-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;background:#f6f7f7;border:1px solid #dcdcde;margin-bottom:10px}.pmk-v01-title{font-weight:900;font-size:15px}.pmk-v01-note{font-size:12px;color:#646970}.pmk-v01-attr-list{display:grid;gap:8px}.pmk-v01-attr{border:1px solid #dcdcde;background:#fff}.pmk-v01-attr-summary{display:grid;grid-template-columns:26px minmax(150px,240px) 1fr auto;gap:8px;align-items:center;padding:10px}.pmk-v01-attr-summary input{width:100%}.pmk-v01-values{font-size:12px;color:#50575e;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pmk-v01-actions{display:flex;gap:6px}.pmk-v01-actions button{border:0;background:transparent;color:#2271b1;cursor:pointer;font-weight:700}.pmk-v01-actions .danger{color:#b32d2e}.pmk-v01-panel{display:none;padding:12px;border-top:1px solid #dcdcde;background:#fafafa}.pmk-v01-attr.open .pmk-v01-panel{display:block}.pmk-v01-panel textarea{width:100%;min-height:82px}.pmk-v01-checks{display:flex;gap:18px;margin-top:8px;font-size:13px}.pmk-v01-toolbar{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}.pmk-v01-toolbar .btn-primary{background:#2271b1;color:#fff;border-color:#2271b1}.pmk-v01-badge{font-size:11px;font-weight:900;background:#111827;color:#fff;border-radius:999px;padding:3px 8px}.pmk-v01-hidden{display:none!important}
+.pmk-v01-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;background:#f6f7f7;border:1px solid #dcdcde;margin-bottom:10px}.pmk-v01-title{font-weight:900;font-size:15px}.pmk-v01-note{font-size:12px;color:#646970}.pmk-v01-attr-list{display:grid;gap:8px}.pmk-v01-attr{border:1px solid #dcdcde;background:#fff}.pmk-v01-attr-summary{display:grid;grid-template-columns:26px minmax(150px,240px) 1fr auto;gap:8px;align-items:center;padding:10px}.pmk-v01-attr-summary input{width:100%}.pmk-v01-values{width:100%;min-width:260px;height:42px;min-height:42px;resize:vertical;padding:8px 10px;border:1px solid #8c8f94;background:#fff;font-size:13px;line-height:1.35;color:#1d2327;box-sizing:border-box}.pmk-v01-actions{display:flex;gap:6px}.pmk-v01-actions button{border:0;background:transparent;color:#2271b1;cursor:pointer;font-weight:700}.pmk-v01-actions .danger{color:#b32d2e}.pmk-v01-panel{display:none;padding:12px;border-top:1px solid #dcdcde;background:#fafafa}.pmk-v01-attr.open .pmk-v01-panel{display:block}.pmk-v01-panel textarea{width:100%;min-height:82px}.pmk-v01-checks{display:flex;gap:18px;margin-top:8px;font-size:13px}.pmk-v01-toolbar{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}.pmk-v01-toolbar .btn-primary{background:#2271b1;color:#fff;border-color:#2271b1}.pmk-v01-badge{font-size:11px;font-weight:900;background:#111827;color:#fff;border-radius:999px;padding:3px 8px}.pmk-v01-hidden{display:none!important}
 </style>
 <script id="pmk-v01-attribute-engine">
 (function(){
@@ -6706,7 +6723,7 @@ $('subcategory_detail')?.addEventListener('change',()=>{renderVariationEditorV54
   function render(reset=true){
     const list=$v('pmkV01AttrList');if(!list)return;
     if(reset)rows=parse();
-    list.innerHTML=rows.length?rows.map((r,i)=>`<div class="pmk-v01-attr" data-v01-row="${i}"><div class="pmk-v01-attr-summary"><span>≡</span><input data-v01-name value="${escv(r.name)}" placeholder="例如：刃徑 / 車削方式 / 使用刀片"><div class="pmk-v01-values">${escv(r.values.join(' ｜ '))}</div><div class="pmk-v01-actions"><button type="button" data-v01-edit="${i}">展開</button><button type="button" class="danger" data-v01-del="${i}">刪除</button></div></div><div class="pmk-v01-panel"><label><b>數值</b>（可用逗號、｜或換行分隔）</label><textarea data-v01-values>${escv(r.values.join(' | '))}</textarea><div class="pmk-v01-checks"><label><input type="checkbox" data-v01-visible ${r.visible!==false?'checked':''}> 在商品頁中可見</label><label><input type="checkbox" data-v01-variation ${r.variation!==false?'checked':''}> 用於變化類型</label></div></div></div>`).join(''):'<div class="muted" style="padding:12px;border:1px dashed #c3c4c7">尚未建立屬性。例：直徑範圍、抗震倍數、車削方式、刀片型號。</div>';
+    list.innerHTML=rows.length?rows.map((r,i)=>`<div class="pmk-v01-attr" data-v01-row="${i}"><div class="pmk-v01-attr-summary"><span>≡</span><input data-v01-name value="${escv(r.name)}" placeholder="例如：刃徑 / 車削方式 / 使用刀片"><textarea class="pmk-v01-values" data-v01-values title="可直接貼上；支援逗號、｜或換行分隔" placeholder="直接貼上數值；可用逗號、｜或換行分隔">${escv(r.values.join(' | '))}</textarea><div class="pmk-v01-actions"><button type="button" data-v01-edit="${i}">展開</button><button type="button" class="danger" data-v01-del="${i}">刪除</button></div></div><div class="pmk-v01-panel"><div style="font-size:12px;color:#646970;margin-bottom:8px">上方數值框可直接貼上整串資料；支援逗號、｜或換行分隔。</div><div class="pmk-v01-checks"><label><input type="checkbox" data-v01-visible ${r.visible!==false?'checked':''}> 在商品頁中可見</label><label><input type="checkbox" data-v01-variation ${r.variation!==false?'checked':''}> 用於變化類型</label></div></div></div>`).join(''):'<div class="muted" style="padding:12px;border:1px dashed #c3c4c7">尚未建立屬性。例：直徑範圍、抗震倍數、車削方式、刀片型號。</div>';
     list.querySelectorAll('[data-v01-edit]').forEach(b=>b.onclick=()=>{const r=b.closest('.pmk-v01-attr');r.classList.toggle('open');b.textContent=r.classList.contains('open')?'收合':'展開'});
     list.querySelectorAll('[data-v01-del]').forEach(b=>b.onclick=()=>{rows=readDom();rows.splice(Number(b.dataset.v01Del),1);write(rows);render(false)});
     list.querySelectorAll('input,textarea').forEach(el=>el.addEventListener('change',()=>{rows=readDom();write(rows);render(false)}));
