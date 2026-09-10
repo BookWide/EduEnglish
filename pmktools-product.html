@@ -2378,12 +2378,59 @@ function pmkSyncMobileAccessoriesV1(){
 }
 
 
-function pmkDefaultAccessoryChoiceV605(choices){
+function pmkDefaultAccessoryChoiceV605(choices, role){
   if(!Array.isArray(choices)||!choices.length)return -1;
 
+  const dc=pmkDcValueV600();
+
+  // 1. 最優先：資料本身已有 Dc 起/迄，直接用原廠範圍判讀。
+  if(dc!=null){
+    let i=choices.findIndex(x=>{
+      if(!x?.stockOk)return false;
+      const a=Number(x?.def?.ref?.min_dc ?? x?.def?.min_dc);
+      const b=Number(x?.def?.ref?.max_dc ?? x?.def?.max_dc);
+      return Number.isFinite(a)&&Number.isFinite(b)&&dc>=a&&dc<=b;
+    });
+    if(i>=0)return i;
+  }
+
+  // 2. 800.20 / 800.24 舊資料沒有保存 min_dc/max_dc 時，
+  //    恢復原廠「鑽頭直徑範圍 → G 刀片/支撐板」判讀表。
+  const family=String(currentProduct?.display_name||currentProduct?.name||selectedVariation?.sku||'').toUpperCase();
+  if(dc!=null && /800[.]2[04]/.test(family)){
+    const rules={
+      center:[
+        [25,28.70,'800-05'],[28.71,33.99,'800-06'],[34,43,'800-08'],
+        [43.01,47,'800-10'],[47.01,49.99,'800-12'],[50,57.99,'800-10'],[58,65,'800-12']
+      ],
+      middle:[
+        [25,31,'800-05'],[31.01,34.99,'800-06'],[35,54.99,'800-08'],[55,65,'800-12']
+      ],
+      peripheral:[
+        [25,31,'800-06'],[31.01,38.99,'800-08'],[39,49.99,'800-09'],[50,65,'800-11']
+      ],
+      plate:[
+        [25,31,'800-06A'],[31.01,39.60,'800-07A'],[39.61,47,'800-08A'],
+        [47.01,54.99,'800-10A'],[55,65,'800-12A']
+      ]
+    };
+    const r=(rules[role]||[]).find(x=>dc>=x[0]&&dc<=x[1]);
+    if(r){
+      const want=String(r[2]).replace(/[^A-Z0-9]/g,'');
+      const i=choices.findIndex(x=>{
+        if(!x?.stockOk)return false;
+        const s=String(x?.sku||'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+        return s.includes(want);
+      });
+      if(i>=0)return i;
+    }
+  }
+
+  // 3. 後台若明確指定 catalog_default / is_default，採用指定值。
   let i=choices.findIndex(x=>x?.stockOk && (x?.def?.catalog_default===true || x?.def?.is_default===true));
   if(i>=0)return i;
 
+  // 4. 其餘系列：原廠 G 幾何優先；L / 其他斷屑槽保留人工選。
   i=choices.findIndex(x=>{
     if(!x?.stockOk)return false;
     const s=String(x?.sku||'').toUpperCase().replace(/\s+/g,'');
@@ -2391,6 +2438,7 @@ function pmkDefaultAccessoryChoiceV605(choices){
   });
   if(i>=0)return i;
 
+  // 5. 424.10 等沒有 G 尾碼的舊系列，維持原目錄第一筆。
   i=choices.findIndex(x=>x?.stockOk);
   return i>=0?i:0;
 }
@@ -2425,7 +2473,7 @@ function pmkRenderVariationAccessoriesV597(){
       const isTube=!!hit&&(/鑽管/.test(String(def.label||''))||/^420[.]5-/i.test(sku));
       return {def,hit,p,v,sku,img,price,stockOk,isTube,di};
     });
-    const defaultIndex=pmkDefaultAccessoryChoiceV605(choices);
+    const defaultIndex=pmkDefaultAccessoryChoiceV605(choices,g.role);
     const first=choices[defaultIndex]||choices[0]||{};
     const key=`vacc_group_${gi}_${g.role}`;
     const options=choices.map((x,ci)=>{
