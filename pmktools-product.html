@@ -2443,6 +2443,32 @@ function pmkDefaultAccessoryChoiceV605(choices, role){
   return i>=0?i:0;
 }
 
+
+function pmkAccessoryRequiredSlotV606(def){
+  const role=String(def?.role||'custom');
+  const sku=String(def?.sku||def?.ref?.sku||'').toUpperCase().replace(/\s+/g,'');
+
+  // Only cutting inserts need "same role but several required sizes" splitting.
+  if(!['center','middle','peripheral'].includes(role)) return role;
+
+  let m;
+  // Sandvik 800 inserts: 800-08T308M-I-G1025 -> size family 800-08T308
+  m=sku.match(/^(800-\d{2}T\d{3})/);
+  if(m) return `${role}|${m[1]}`;
+
+  // TPMT: TPMT16T312R-22 / TPMT16T312TR-23 -> same physical size family TPMT16T312
+  m=sku.match(/^(TPMT\d{2}T\d{3})/);
+  if(m) return `${role}|${m[1]}`;
+
+  // R424.9 peripheral insert: keep same dimensional insert together, chipbreaker suffix as alternative.
+  m=sku.match(/^(R424[.]9-\d{2,6}T?\d{0,4})/);
+  if(m) return `${role}|${m[1]}`;
+
+  // Generic ISO insert fallback: strip grade / last chipbreaker part conservatively.
+  const core=sku.replace(/(?:[-_](?:G|L|M|H|P|C|I|R|TR)\w*)?\d{4}$/,'');
+  return `${role}|${core||sku}`;
+}
+
 function pmkRenderVariationAccessoriesV597(){
   const section=$('variationAccessories'),grid=$('variationAccessoryGrid');if(!section||!grid)return;
   const defs=pmkVariationAccessoryDefsV597();
@@ -2453,14 +2479,29 @@ function pmkRenderVariationAccessoriesV597(){
   // pmkVariationAccessoryDefsV597() 轉成相同資料，不需重填後台。
   const groups=[];
   const map=new Map();
+  const roleCounts={};
   defs.forEach(def=>{
     const role=String(def.role||'custom');
     const baseLabel=String(def.label||'配件').split('｜')[0].trim()||'配件';
-    const groupKey=role.startsWith('custom_')?role:role;
+    const groupKey=pmkAccessoryRequiredSlotV606(def);
     if(!map.has(groupKey)){
-      const g={role:groupKey,label:baseLabel,items:[]};map.set(groupKey,g);groups.push(g);
+      roleCounts[role]=(roleCounts[role]||0)+1;
+      const g={role,slotKey:groupKey,label:baseLabel,slotNo:roleCounts[role],items:[]};
+      map.set(groupKey,g);groups.push(g);
     }
     map.get(groupKey).items.push(def);
+  });
+
+  // If one role has multiple required dimensional sizes, label each line clearly.
+  const roleTotal={};
+  groups.forEach(g=>roleTotal[g.role]=(roleTotal[g.role]||0)+1);
+  groups.forEach(g=>{
+    if(roleTotal[g.role]>1 && ['center','middle','peripheral'].includes(g.role)){
+      const probe=String(g.items?.[0]?.sku||g.items?.[0]?.ref?.sku||'');
+      const m=probe.toUpperCase().replace(/\s+/g,'').match(/800-(\d{2})T|TPMT(\d{2}T\d{3})|R424[.]9-(\d+)/);
+      const size=m?(m[1]||m[2]||m[3]||g.slotNo):g.slotNo;
+      g.label=`${g.label} ${size}`;
+    }
   });
 
   grid.innerHTML=groups.map((g,gi)=>{
@@ -2475,7 +2516,7 @@ function pmkRenderVariationAccessoriesV597(){
     });
     const defaultIndex=pmkDefaultAccessoryChoiceV605(choices,g.role);
     const first=choices[defaultIndex]||choices[0]||{};
-    const key=`vacc_group_${gi}_${g.role}`;
+    const key=`vacc_group_${gi}_${g.role}_${String(g.slotKey||'').replace(/[^A-Za-z0-9_-]/g,'_')}`;
     const options=choices.map((x,ci)=>{
       const title=[x.sku,x.p?.display_name||x.p?.name||'',PMK_CURRENT_USER&&x.hit?fmt(x.isTube?pmkTubeLengthPriceV643(x.v,x.p,null):x.price):''].filter(Boolean).join('｜');
       return `<option value="${ci}" ${ci===defaultIndex?'selected':''} ${x.stockOk?'':'disabled'}>${esc(title||('選項 '+(ci+1)))}${x.hit?'':'｜未關聯'}${x.stockOk?'':'｜缺貨'}</option>`;
@@ -2488,7 +2529,7 @@ function pmkRenderVariationAccessoriesV597(){
         <select class="pmkAccessoryChoiceSelect" data-vgroup-select="${esc(key)}">
           <option value="">— 不加購 —</option>${options}
         </select>
-        <span class="pmkAccessorySku" data-vgroup-detail="${esc(key)}">${first?.sku?`預設：${esc(first.sku)}${choices.length>1?`（另有 ${choices.length-1} 種可選）`:''}`:(choices.length>1?`此刀位有 ${choices.length} 種刀片可選`:'選擇後加入購物車')}</span>
+        <span class="pmkAccessorySku" data-vgroup-detail="${esc(key)}">${first?.sku?`預設：${esc(first.sku)}${choices.length>1?`（同尺寸另有 ${choices.length-1} 種可選）`:''}`:(choices.length>1?`同尺寸有 ${choices.length} 種刀片可選`:'選擇後加入購物車')}</span>
         <span class="pmkAccessoryTubeSlot" data-vgroup-tube="${esc(key)}"></span>
         <span style="display:flex;align-items:center;gap:6px;margin-top:7px;font-size:12px">數量 <input data-vgroup-qty="${esc(key)}" type="number" min="1" max="99" value="${Math.max(1,Number(first.def?.qty||1))}" style="width:58px"></span>
       </span>
@@ -2526,7 +2567,11 @@ function pmkVariationAccessorySelectedV597(){
   const root=(window.matchMedia&&window.matchMedia('(max-width:900px)').matches&&$('mVariationAccessoryGrid'))?$('mVariationAccessoryGrid'):$('variationAccessoryGrid');
   if(!root)return [];
   const groups=[];const map=new Map();
-  defs.forEach(def=>{const role=String(def.role||'custom');if(!map.has(role)){const g={role,items:[]};map.set(role,g);groups.push(g)}map.get(role).items.push(def)});
+  defs.forEach(def=>{
+    const role=String(def.role||'custom'),slotKey=pmkAccessoryRequiredSlotV606(def);
+    if(!map.has(slotKey)){const g={role,slotKey,items:[]};map.set(slotKey,g);groups.push(g)}
+    map.get(slotKey).items.push(def);
+  });
   return [...root.querySelectorAll('[data-vgroup-select]')].map(sel=>{
     if(sel.value==='')return null;
     const key=String(sel.dataset.vgroupSelect||''),gi=Number((key.match(/^vacc_group_(\d+)_/)||[])[1]),ci=Number(sel.value);
