@@ -2136,18 +2136,29 @@ function renderOptions(){
 }
 
 function pmkScrollToOrderAreaV1(){
+  // 點目錄規格後，畫面要像使用者示意圖二：
+  // 訂購直徑 / SKU 區出現在可視畫面上方，而不是只做 scrollIntoView。
   const target =
     document.getElementById('directDcBox') ||
     document.querySelector('.dcOrderBox') ||
-    document.getElementById('variationAccessories') ||
-    document.querySelector('.buyarea') ||
-    document.querySelector('[data-order-area]');
-  if(!target)return;
-  try{
-    target.scrollIntoView({behavior:'smooth',block:'start'});
-  }catch(e){
-    target.scrollIntoView();
-  }
+    document.querySelector('[data-order-area]') ||
+    document.getElementById('variationAccessories');
+  if(!target) return;
+
+  const header =
+    document.querySelector('.topbar') ||
+    document.querySelector('header') ||
+    document.querySelector('.site-header');
+  const headerH = header ? header.getBoundingClientRect().height : 0;
+  const y = Math.max(0, window.scrollY + target.getBoundingClientRect().top - headerH - 18);
+
+  window.scrollTo({top:y, behavior:'smooth'});
+
+  // 部分舊程式 render 完會再改高度/捲動位置，因此 render 後再校正一次。
+  setTimeout(()=>{
+    const y2 = Math.max(0, window.scrollY + target.getBoundingClientRect().top - headerH - 18);
+    if(Math.abs(window.scrollY-y2)>8) window.scrollTo({top:y2, behavior:'smooth'});
+  },180);
 }
 
 function pmkSelectCatalogVariationV1(v){
@@ -2165,7 +2176,7 @@ function pmkSelectCatalogVariationV1(v){
   try{
     if(typeof syncMobileBuy==='function') syncMobileBuy();
   }catch(e){}
-  setTimeout(pmkScrollToOrderAreaV1,60);
+  requestAnimationFrame(()=>requestAnimationFrame(()=>pmkScrollToOrderAreaV1()));
 }
 
 function refreshDirectVariation(){
@@ -2693,25 +2704,46 @@ $('pmkTechPrintV291')?.addEventListener('click',pmkPrintTechLabelV291);(async()=
 })();
 </script>
 
+
+
+
 <script>
+/* Catalog row -> exact Variation -> order area */
 document.addEventListener('click', function(e){
-  const row = e.target.closest(
-    'tr[data-variation-index], tr[data-var-index], tr[data-variation-id], .catalogRow[data-variation-index], .catalog-row[data-variation-index]'
-  );
+  const row = e.target.closest('table tbody tr');
   if(!row) return;
 
+  const table = row.closest('table');
+  const tableText = String(table?.innerText || '');
+  // Only act on the original catalog/specification table.
+  if(!/鑽頭型號|型號|直徑範圍|原廠目錄/.test(tableText)) return;
+
+  const rowText = String(row.innerText || '').replace(/\s+/g,' ').trim();
+  if(!rowText) return;
+
+  const vars =
+    (window.currentProduct && Array.isArray(currentProduct.variations) && currentProduct.variations) ||
+    (typeof currentProduct !== 'undefined' && Array.isArray(currentProduct?.variations) && currentProduct.variations) ||
+    [];
+
   let v = null;
-  const idxRaw = row.dataset.variationIndex ?? row.dataset.varIndex;
-  if(idxRaw !== undefined && window.currentProduct && Array.isArray(currentProduct.variations)){
-    const idx = Number(idxRaw);
-    if(Number.isFinite(idx)) v = currentProduct.variations[idx] || null;
+
+  // Prefer exact SKU found in the visible row.
+  v = vars.find(x=>{
+    const sku=String(x?.sku||'').trim();
+    return sku && rowText.includes(sku);
+  }) || null;
+
+  // Fallback to data attributes if renderer supplied them.
+  if(!v){
+    const idxRaw=row.dataset.variationIndex ?? row.dataset.varIndex;
+    const idx=Number(idxRaw);
+    if(idxRaw!==undefined && Number.isFinite(idx)) v=vars[idx]||null;
   }
-  if(!v && row.dataset.variationId && window.currentProduct && Array.isArray(currentProduct.variations)){
-    const id = String(row.dataset.variationId);
-    v = currentProduct.variations.find(x => String(x.id||x.variation_id||'') === id) || null;
-  }
-  if(v && typeof pmkSelectCatalogVariationV1 === 'function'){
-    e.preventDefault();
+
+  if(!v) return;
+  e.preventDefault();
+  if(typeof pmkSelectCatalogVariationV1==='function'){
     pmkSelectCatalogVariationV1(v);
   }
 }, true);
