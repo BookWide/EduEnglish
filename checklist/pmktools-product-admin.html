@@ -803,9 +803,11 @@
       <input id="pmkCatalogIndexFileV8" type="file" accept=".json,application/json" hidden>
       <button type="button" class="btn" id="pmkCatalogSeriesLoadBtnV8" style="background:#2563eb;color:#fff">依索引匯入系列 JSON</button>
       <input id="pmkCatalogSeriesFileV8" type="file" accept=".json,application/json" hidden>
+      <button type="button" class="btn" id="pmkCatalogBatchLoadBtnV12" style="background:#0f766e;color:#fff">批次匯入系列 JSON</button>
+      <input id="pmkCatalogBatchFilesV12" type="file" accept=".json,application/json" multiple hidden>
     </div>
   </div>
-  <div id="pmkCatalogIndexStatusV8" class="muted" style="font-size:11px;margin:8px 0 10px"></div>
+  <div id="pmkCatalogIndexStatusV8" class="muted" style="font-size:11px;margin:8px 0 10px;white-space:pre-line"></div>
   <div style="display:grid;grid-template-columns:minmax(220px,320px) minmax(0,1fr);gap:12px">
     <div>
       <label style="font-size:12px;font-weight:850">型錄大類</label>
@@ -5638,9 +5640,161 @@ function pmkCatalogIndexRenderV8(){
   }
   PMK_CATALOG_INDEX_SELECTION_V8={group:gi,series:si};
 }
+
+function pmkCatalogFindIndexMatchV12(payload){
+  const product=payload?.product||{};
+  const actual=String(product.public_name||product.name||'').trim();
+  const page=String(product?.internal_source?.catalog_page??'').replace(/\D/g,'');
+  const groups=PMK_CATALOG_INDEX_V8?.groups||[];
+  for(let gi=0;gi<groups.length;gi++){
+    const items=Array.isArray(groups[gi]?.items)?groups[gi].items:[];
+    for(let si=0;si<items.length;si++){
+      const item=items[si]||{};
+      const byName=actual && String(item.public_name||'').trim()===actual;
+      const byPage=page && String(item.catalog_page||'').replace(/\D/g,'')===page;
+      if(byName || (byPage && !actual)) return {gi,si,g:groups[gi],item};
+    }
+  }
+  // 第二輪：頁碼 + 名稱容錯
+  for(let gi=0;gi<groups.length;gi++){
+    const items=Array.isArray(groups[gi]?.items)?groups[gi].items:[];
+    for(let si=0;si<items.length;si++){
+      const item=items[si]||{};
+      if(page && String(item.catalog_page||'').replace(/\D/g,'')===page) return {gi,si,g:groups[gi],item};
+    }
+  }
+  return null;
+}
+function pmkCatalogMasterSkuForMatchV12(match,payload){
+  const group=String(match?.g?.group_code||'00').replace(/\D/g,'').padStart(2,'0');
+  const page=String(match?.item?.catalog_page||payload?.product?.internal_source?.catalog_page||'00').replace(/\D/g,'').padStart(2,'0');
+  return `CAT-G${group}-P${page}`;
+}
+function pmkCatalogExistingForV12(masterSku,match){
+  const group=String(match?.g?.group_code||'');
+  const page=String(match?.item?.catalog_page||'');
+  return (products||[]).find(p=>{
+    const m=p?.catalog_meta||{};
+    return String(m.master_sku||'')===masterSku ||
+      String(p?.external_id||'')===masterSku ||
+      (
+        String(m?.catalog_index?.group_code||'')===group &&
+        String(m?.catalog_index?.catalog_page||'')===page
+      );
+  })||null;
+}
+function pmkCatalogPreparePayloadForSaveV12(){
+  let p=formData();
+  p=pmkApplyCrownJcdSkuV589(p);
+  p=pmkCleanVariationsForSaveV21(p);
+  delete p._variation_drafts_skipped;
+  p=pmkSequenceDuplicateVariationSkusV570(p);
+  p=pricingApplyProduct(p);
+  return p;
+}
+async function pmkCatalogSilentSaveV12(existingId=''){
+  const p=pmkCatalogPreparePayloadForSaveV12();
+  if(!p.name)throw new Error('商品名稱空白');
+  const saved=await productAdminPost('/api/bw-product-save',{id:String(existingId||''),product:p});
+  const savedProduct=saved?.product||saved?.row||null;
+  if(savedProduct){
+    const i=products.findIndex(x=>String(x.id)===String(savedProduct.id));
+    if(i>=0)products[i]=savedProduct;else products.unshift(savedProduct);
+    editingId=savedProduct.id;
+  }
+  return savedProduct||p;
+}
+
+
+async function pmkCatalogBatchImportV12(files){
+  const list=[...(files||[])];
+  if(!list.length)return;
+  if(!PMK_CATALOG_INDEX_V8?.groups?.length)throw new Error('請先匯入 catalog_index.json');
+
+  const parsed=[];
+  for(const f of list){
+    const payload=JSON.parse(await f.text());
+    const match=pmkCatalogFindIndexMatchV12(payload);
+    if(!match)throw new Error(`${f.name}：找不到對應型錄索引`);
+    parsed.push({
+      file:f,
+      payload,
+      match,
+      masterSku:pmkCatalogMasterSkuForMatchV12(match,payload)
+    });
+  }
+
+  parsed.sort((a,b)=>{
+    const ga=Number(a.match.g?.group_code||0),gb=Number(b.match.g?.group_code||0);
+    if(ga!==gb)return ga-gb;
+    return Number(a.match.item?.catalog_page||0)-Number(b.match.item?.catalog_page||0);
+  });
+
+  const seen=new Set();
+  for(const x of parsed){
+    if(seen.has(x.masterSku))throw new Error('批次檔案有重複系列：'+x.masterSku);
+    seen.add(x.masterSku);
+  }
+
+  let ok=0,fail=0;
+  const rows=[];
+
+  for(let i=0;i<parsed.length;i++){
+    const x=parsed[i];
+    const name=String(x.payload?.product?.public_name||x.payload?.product?.name||x.file.name);
+    pmkCatalogIndexSetStatusV8(`⏳ 批次 ${i+1}/${parsed.length}：${name}`);
+
+    try{
+      const existing=pmkCatalogExistingForV12(x.masterSku,x.match);
+
+      // 只有「同系列」才更新原商品；不存在就建立新商品。
+      if(existing){
+        fill(existing);
+      }else{
+        clearForm();
+        editingId=null;
+      }
+
+      PMK_CATALOG_INDEX_SELECTION_V8={group:x.match.gi,series:x.match.si};
+      pmkCatalogApplyToFormV1(x.payload);
+      PMK_CATALOG_INDEX_SELECTION_V8={group:x.match.gi,series:x.match.si};
+
+      if($('is_active'))$('is_active').value=String(existing?existing.is_active!==false:true);
+
+      const p=pmkCatalogPreparePayloadForSaveV12();
+      const saved=await productAdminPost('/api/bw-product-save',{
+        id:existing?.id||'',
+        product:p
+      });
+
+      const savedProduct=saved?.product||saved?.row||null;
+      if(savedProduct){
+        const pi=products.findIndex(q=>String(q.id)===String(savedProduct.id));
+        if(pi>=0)products[pi]=savedProduct;
+        else products.unshift(savedProduct);
+      }
+
+      ok++;
+      rows.push(`✅ ${String(x.match.item?.catalog_page||'').padStart(2,'0')} ${name}｜${x.payload?.product?.variations?.length||0} 規格`);
+    }catch(e){
+      fail++;
+      rows.push(`❌ ${String(x.match.item?.catalog_page||'').padStart(2,'0')} ${name}｜${String(e?.message||e)}`);
+      console.error('[CATALOG BATCH SIMPLE]',x.file?.name,e);
+    }
+  }
+
+  clearForm();
+  await load();
+  pmkCatalogIndexShowV8(true);
+  pmkCatalogIndexBindV8();
+  pmkCatalogIndexSetStatusV8(`${fail?'⚠️':'✅'} 批次完成：成功 ${ok}，失敗 ${fail}\n${rows.join('\n')}`);
+  alert(`型錄批次完成\n成功：${ok}\n失敗：${fail}\n\n${rows.join('\n')}`);
+}
+
 function pmkCatalogIndexBindV8(){
   const loadBtn=$('pmkCatalogIndexLoadBtnV8'), idxFile=$('pmkCatalogIndexFileV8');
   const seriesBtn=$('pmkCatalogSeriesLoadBtnV8'), seriesFile=$('pmkCatalogSeriesFileV8');
+  const batchBtn=$('pmkCatalogBatchLoadBtnV12'), batchFiles=$('pmkCatalogBatchFilesV12');
   const gs=$('pmkCatalogGroupSelectV8'), ss=$('pmkCatalogSeriesSelectV8');
   if(loadBtn)loadBtn.onclick=()=>{if(idxFile){idxFile.value='';idxFile.click()}};
   if(idxFile)idxFile.onchange=async()=>{
@@ -5655,6 +5809,12 @@ function pmkCatalogIndexBindV8(){
   if(gs)gs.onchange=()=>{PMK_CATALOG_INDEX_SELECTION_V8={group:Number(gs.value||0),series:0};pmkCatalogIndexRenderV8()};
   if(ss)ss.onchange=()=>{PMK_CATALOG_INDEX_SELECTION_V8.series=Number(ss.value||0);pmkCatalogIndexRenderV8()};
   if(seriesBtn)seriesBtn.onclick=()=>{if(seriesFile){seriesFile.value='';seriesFile.click()}};
+  if(batchBtn)batchBtn.onclick=()=>{if(batchFiles){batchFiles.value='';batchFiles.click()}};
+  if(batchFiles)batchFiles.onchange=async()=>{
+    try{await pmkCatalogBatchImportV12(batchFiles.files)}
+    catch(e){alert('型錄批次匯入失敗：'+String(e?.message||e))}
+    finally{if(batchFiles)batchFiles.value=''}
+  };
   if(seriesFile)seriesFile.onchange=async()=>{
     try{
       const f=seriesFile.files?.[0]; if(!f)return;
@@ -5689,17 +5849,28 @@ async function pmkCatalogHeaderDiagramUploadV7(file){
     const st=$('pmkCatalogImportStatus');
     if(st)st.textContent='⏳ 正在上傳型錄表頭圖片…';
 
-    let uploadProductId=String($('external_id')?.value||'').trim();
-    if(!uploadProductId && PMK_CATALOG_META_V1?.mode==='catalog_master'){
-      uploadProductId=String(PMK_CATALOG_META_V1.master_sku||'').trim();
-      if(uploadProductId && $('external_id'))$('external_id').value=uploadProductId;
+    let safeId=String(PMK_CATALOG_META_V1?.master_sku||'').trim();
+    if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(safeId)){
+      const gi=Number(PMK_CATALOG_INDEX_SELECTION_V8?.group||0);
+      const g=PMK_CATALOG_INDEX_V8?.groups?.[gi];
+      const group=String(g?.group_code||'00').replace(/\D/g,'').padStart(2,'0');
+      const page=String(PMK_CATALOG_META_V1?.catalog_index?.catalog_page||PMK_CATALOG_META_V1?.internal_source?.catalog_page||'00').replace(/\D/g,'').padStart(2,'0');
+      safeId=`CAT-G${group}-P${page}`;
+      if(PMK_CATALOG_META_V1)PMK_CATALOG_META_V1.master_sku=safeId;
     }
-    if(!uploadProductId){
-      uploadProductId='catalog-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);
-      if($('external_id'))$('external_id').value=uploadProductId;
+    if($('external_id'))$('external_id').value=safeId;
+
+    // Worker 要求商品 ID 必須已存在：
+    // 新系列只做「靜默存草稿」，不 clearForm、不 load、不動主圖/圖庫/介紹。
+    let current=editingId?products.find(x=>String(x.id)===String(editingId)):null;
+    if(!current){
+      const saved=await pmkCatalogSilentSaveV12('');
+      current=saved?.id? saved : (editingId?products.find(x=>String(x.id)===String(editingId)):null);
     }
+
+    const uploadProductId=String(current?.external_id||safeId||current?.id||'').trim();
     if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(uploadProductId)){
-      throw new Error('BookWide 商品 ID 格式不正確：'+uploadProductId);
+      throw new Error('BookWide 商品 ID 格式不正確');
     }
 
     const url=await pmkUploadDetailPasteImageV1(file,0,uploadProductId);
@@ -5707,7 +5878,10 @@ async function pmkCatalogHeaderDiagramUploadV7(file){
     if(!PMK_CATALOG_META_V1.catalog_header)PMK_CATALOG_META_V1.catalog_header={};
     PMK_CATALOG_META_V1.catalog_header.diagram_image=url;
     pmkCatalogHeaderDiagramRenderV7(url);
-    if(st)st.textContent='✅ 型錄表頭圖片已上傳；主圖、圖庫與商品資料未變更。按「更新商品」正式儲存。';
+
+    // 把新圖片寫回目前商品，但仍不 reload。
+    await pmkCatalogSilentSaveV12(editingId||'');
+    if(st)st.textContent='✅ 型錄表頭圖片已上傳；主圖、圖庫、商品介紹均未清除。';
   }catch(e){
     alert('型錄表頭圖片上傳失敗：'+String(e?.message||e));
   }
@@ -5775,13 +5949,21 @@ function pmkCatalogHeaderSyncMetaV3(){
 function pmkCatalogApplyToFormV1(payload){
   const {product,schema,name}=pmkCatalogImportNormalizeV1(payload);
 
+  const targetMatch=pmkCatalogFindIndexMatchV12(payload);
+  if(targetMatch)PMK_CATALOG_INDEX_SELECTION_V8={group:targetMatch.gi,series:targetMatch.si};
+  const targetMasterSku=pmkCatalogMasterSkuForMatchV12(targetMatch,payload);
   const currentBeforeImport=editingId?products.find(x=>String(x.id)===String(editingId)):null;
   const currentCatalogName=String(
     currentBeforeImport?.catalog_meta?.public_name||
     currentBeforeImport?.display_name||
     currentBeforeImport?.name||''
   ).trim();
-  const sameFamily=!!currentBeforeImport && currentCatalogName===String(name||'').trim();
+  const currentMasterSku=String(currentBeforeImport?.catalog_meta?.master_sku||currentBeforeImport?.external_id||'');
+  const sameFamily=!!currentBeforeImport && (
+    currentMasterSku===targetMasterSku ||
+    currentCatalogName===String(name||'').trim()
+  );
+  if(!sameFamily)editingId=null;
   const protectedBeforeImport=sameFamily?{
     editingId:String(editingId||''),
     external_id:String($('external_id')?.value||currentBeforeImport?.external_id||''),
@@ -5808,7 +5990,7 @@ function pmkCatalogApplyToFormV1(payload){
     renderMainImageV547(); galleryPreviewV54(); renderVideoV552(); pmkLoadDetailEditorV1();
   }
 
-  const familySku=pmkCatalogFamilyCodeV2(product);
+  const familySku=targetMasterSku||pmkCatalogFamilyCodeV2(product);
   $('product_type').value='variable';
   $('source_type').value='manual';
   $('brand').value='';                    // 前台禁止供應商品牌
