@@ -819,12 +819,12 @@
   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
     <div>
       <div style="font-weight:950;color:#1d4ed8">📚 型錄索引｜系列管理</div>
-      <div class="muted" style="font-size:11px;margin-top:3px">先匯入完整 catalog_index.json；再一次全選 01～05 五個大類包。已存在系列自動略過，不覆蓋手工資料。</div>
+      <div class="muted" style="font-size:11px;margin-top:3px">先匯入完整 catalog_index.json；再選 01_05_catalog_all_pack.json 一次匯入 01～05。已存在系列自動略過，不覆蓋手工資料。</div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button type="button" class="btn gray" id="pmkCatalogIndexLoadBtnV8">匯入 catalog_index.json</button>
       <input id="pmkCatalogIndexFileV8" type="file" accept=".json,application/json" hidden>
-      <button type="button" class="btn" id="pmkCatalogSeriesLoadBtnV8" style="background:#2563eb;color:#fff">匯入大類／系列 JSON（可多選）</button>
+      <button type="button" class="btn" id="pmkCatalogSeriesLoadBtnV8" style="background:#2563eb;color:#fff">匯入 01～05 全包 JSON</button>
       <input id="pmkCatalogSeriesFileV8" type="file" accept=".json,application/json" multiple hidden>
     </div>
   </div>
@@ -3077,9 +3077,8 @@ function pmkCatalogVariationFoldersV606(){
   if(PMK_CATALOG_META_V1?.mode!=='catalog_master' || !Array.isArray(PMK_CATALOG_META_V1.catalog_groups))return [];
   const out=[];
   for(const g of PMK_CATALOG_META_V1.catalog_groups){
-    const gc=String(g.group_code||'').padStart(2,'0');
-    const groupName=String(g.public_group_name||g.group_name||`型錄大類 ${gc}`);
     for(const s of (g.series||[])){
+      const gc=String(g.group_code||'').padStart(2,'0');
       const sc=String(s.catalog_page||'').padStart(2,'0');
       const key=`${gc}:${sc}`;
       const count=v54Variations.filter(v=>{
@@ -3087,39 +3086,20 @@ function pmkCatalogVariationFoldersV606(){
         return String(tp.catalog_group_code||'').padStart(2,'0')===gc &&
           String(tp.catalog_series_code||tp.catalog_page||'').padStart(2,'0')===sc;
       }).length;
-      out.push({key,gc,sc,name:String(s.public_name||'系列'),groupName,count});
+      out.push({key,gc,sc,name:String(s.public_name||'系列'),count});
     }
   }
   return out;
 }
 function pmkCatalogVariationFolderBarV606(folders){
   if(!folders.length)return '';
-
-  // 目前上方「型錄大類」選到哪一類，下方資料夾就只顯示該大類。
-  let activeGc='';
-  try{
-    const sel=document.getElementById('pmkCatalogIndexGroupV8');
-    if(sel && sel.value!=='')activeGc=String(PMK_CATALOG_INDEX_V8?.groups?.[Number(sel.value)]?.group_code||'').padStart(2,'0');
-  }catch(_){}
-  if(!activeGc && pmkCatalogVariationFolderV606){
-    activeGc=String(pmkCatalogVariationFolderV606).split(':')[0]||'';
+  if(!pmkCatalogVariationFolderV606 || !folders.some(x=>x.key===pmkCatalogVariationFolderV606)){
+    pmkCatalogVariationFolderV606=folders[0].key;
   }
-  if(!activeGc)activeGc=folders[0].gc;
-
-  const visible=folders.filter(x=>x.gc===activeGc);
-  const use=visible.length?visible:folders;
-
-  if(!pmkCatalogVariationFolderV606 || !use.some(x=>x.key===pmkCatalogVariationFolderV606)){
-    pmkCatalogVariationFolderV606=use[0].key;
-  }
-
-  const groupName=use[0]?.groupName||`型錄大類 ${activeGc}`;
   return `<div class="pmk-vfolder-wrap" style="margin:0 0 12px;border:1px solid #cbd5e1;border-radius:10px;background:#f8fafc;overflow:hidden">
-    <div style="padding:10px 12px;font-weight:950;color:#0f172a;border-bottom:1px solid #e2e8f0">
-      型錄系列資料夾｜${activeGc}｜${esc(groupName)}｜${use.length} 個系列
-    </div>
+    <div style="padding:10px 12px;font-weight:950;color:#0f172a;border-bottom:1px solid #e2e8f0">型錄系列資料夾｜${folders.length} 個系列</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;padding:10px 12px">
-      ${use.map(x=>`<button type="button" data-pmk-vfolder="${x.key}" class="btn ${x.key===pmkCatalogVariationFolderV606?'':'gray'}" style="${x.key===pmkCatalogVariationFolderV606?'background:#0f766e;color:#fff':''}">
+      ${folders.map(x=>`<button type="button" data-pmk-vfolder="${x.key}" class="btn ${x.key===pmkCatalogVariationFolderV606?'':'gray'}" style="${x.key===pmkCatalogVariationFolderV606?'background:#0f766e;color:#fff':''}">
         ${x.sc}｜${esc(x.name)} <b>(${x.count})</b>
       </button>`).join('')}
     </div>
@@ -5929,6 +5909,28 @@ function pmkCatalogSeriesExistsV612(match){
   );
 }
 function pmkCatalogExpandImportFileV612(payload,fileName){
+  // 01~05 全包：一個檔案內含 5 個大類。
+  if(payload?.import_mode==='catalog_all_pack' || payload?.schema_version==='pmk_catalog_all_pack_v1'){
+    const groups=Array.isArray(payload.groups)?payload.groups:[];
+    if(!groups.length)throw new Error(`${fileName}：全包沒有 groups`);
+    const out=[];
+    groups.forEach((g,gi)=>{
+      const arr=Array.isArray(g?.series_payloads)?g.series_payloads:[];
+      arr.forEach((seriesPayload,i)=>out.push({
+        payload:seriesPayload,
+        sourceFile:fileName,
+        fromGroupPack:true,
+        fromAllPack:true,
+        packGroup:g.group||{},
+        packIndex:i,
+        packGroupIndex:gi
+      }));
+    });
+    if(!out.length)throw new Error(`${fileName}：全包沒有系列資料`);
+    return out;
+  }
+
+  // 單一大類包仍保留相容。
   if(payload?.import_mode==='catalog_group_pack' || payload?.schema_version==='pmk_catalog_group_pack_v1'){
     const arr=Array.isArray(payload.series_payloads)?payload.series_payloads:[];
     if(!arr.length)throw new Error(`${fileName}：大類包沒有 series_payloads`);
@@ -5936,14 +5938,18 @@ function pmkCatalogExpandImportFileV612(payload,fileName){
       payload:seriesPayload,
       sourceFile:fileName,
       fromGroupPack:true,
+      fromAllPack:false,
       packGroup:payload.group||{},
       packIndex:i
     }));
   }
+
+  // 舊單系列 JSON 也能繼續匯。
   return [{
     payload,
     sourceFile:fileName,
     fromGroupPack:false,
+    fromAllPack:false,
     packGroup:null,
     packIndex:0
   }];
