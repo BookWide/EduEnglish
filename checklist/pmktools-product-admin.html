@@ -796,13 +796,15 @@
   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
     <div>
       <div style="font-weight:950;color:#1d4ed8">📚 型錄索引｜系列管理</div>
-      <div class="muted" style="font-size:11px;margin-top:3px">索引只管理「型錄分類 → 商品系列 → 對應 JSON」；真正規格仍在各系列 JSON。</div>
+      <div class="muted" style="font-size:11px;margin-top:3px">同一供應來源只建立 1 個型錄主檔；結構固定為「型錄大類 → 商品系列 → 規格/SKU」。各系列 JSON 只併入主檔，不再建立多筆父商品。</div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button type="button" class="btn gray" id="pmkCatalogIndexLoadBtnV8">匯入 catalog_index.json</button>
       <input id="pmkCatalogIndexFileV8" type="file" accept=".json,application/json" hidden>
       <button type="button" class="btn" id="pmkCatalogSeriesLoadBtnV8" style="background:#2563eb;color:#fff">依索引匯入系列 JSON</button>
       <input id="pmkCatalogSeriesFileV8" type="file" accept=".json,application/json" hidden>
+      <button type="button" class="btn green" id="pmkCatalogBatchLoadBtnV13">一次匯入多系列 JSON</button>
+      <input id="pmkCatalogBatchFilesV13" type="file" accept=".json,application/json" multiple hidden>
     </div>
   </div>
   <div id="pmkCatalogIndexStatusV8" class="muted" style="font-size:11px;margin:8px 0 10px"></div>
@@ -5599,6 +5601,64 @@ function pmkCatalogFamilyCodeV2(product){
 
 
 
+/* CATALOG CORE V13 — single supplier catalog master; groups -> series -> specifications. */
+function pmkCatalogMasterIdentityV13(){
+  const src=PMK_CATALOG_INDEX_V8?.internal_source||{};
+  const raw=pmkCatalogSafeTextV1(src.supplier_brand||src.supplier_name||'PMKTOOLS');
+  const code=(raw||'PMKTOOLS').toUpperCase().replace(/[^A-Z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,24)||'PMKTOOLS';
+  return {master_sku:`CATALOG-${code}`,supplier_brand:pmkCatalogSafeTextV1(src.supplier_brand||''),supplier_name:pmkCatalogSafeTextV1(src.supplier_name||'')};
+}
+function pmkCatalogFindIndexMatchV13(payload){
+  const p=payload?.product||{};
+  const actual=pmkCatalogSafeTextV1(p.public_name||p.name||'');
+  const page=String(p?.internal_source?.catalog_page??'').replace(/\D/g,'');
+  const groups=PMK_CATALOG_INDEX_V8?.groups||[];
+  for(let gi=0;gi<groups.length;gi++){
+    const items=Array.isArray(groups[gi]?.items)?groups[gi].items:[];
+    for(let si=0;si<items.length;si++){
+      const item=items[si]||{};
+      if((actual&&pmkCatalogSafeTextV1(item.public_name)===actual)||(page&&String(item.catalog_page??'').replace(/\D/g,'')===page))return {gi,si,g:groups[gi],item};
+    }
+  }
+  return null;
+}
+function pmkCatalogEnsureMasterV13(){
+  if(PMK_CATALOG_META_V1?.mode==='catalog_master'&&PMK_CATALOG_META_V1?.master_scope==='supplier')return;
+  clearForm();
+  const id=pmkCatalogMasterIdentityV13();
+  const firstGroup=PMK_CATALOG_INDEX_V8?.groups?.[0]||{};
+  $('product_type').value='variable';
+  $('source_type').value='manual';
+  $('brand').value='';
+  $('name').value='PMKTOOLS 切削刀具型錄';
+  if($('display_name'))$('display_name').value='PMKTOOLS 切削刀具型錄';
+  if($('external_id'))$('external_id').value=id.master_sku;
+  refreshCategorySelect('切削刀具');refreshSubcategorySelect('');refreshSubcategoryDetailSelect('');
+  $('supplier').value=id.supplier_name;
+  if($('source_platform'))$('source_platform').value='catalog_master';
+  if($('source_item_id'))$('source_item_id').value=id.master_sku;
+  if($('source_seller'))$('source_seller').value=id.supplier_name||id.supplier_brand;
+  if($('source_currency'))$('source_currency').value='CNY';
+  PMK_CATALOG_META_V1={version:3,mode:'catalog_master',master_scope:'supplier',master_sku:id.master_sku,public_name:'PMKTOOLS 切削刀具型錄',public_name_en:'',hide_supplier_brand:true,hide_supplier_name:true,catalog_groups:[],technical_schema:[],internal_source:{supplier_brand:id.supplier_brand,supplier_name:id.supplier_name}};
+  v54Variations=[];
+}
+function pmkCatalogUpsertSeriesMetaV13(match,product,schema,variationSkus){
+  const gcode=pmkCatalogSafeTextV1(match?.g?.group_code||'');
+  let g=PMK_CATALOG_META_V1.catalog_groups.find(x=>String(x.group_code)===gcode);
+  if(!g){g={group_code:gcode,public_group_name:pmkCatalogSafeTextV1(match?.g?.public_group_name||''),series:[]};PMK_CATALOG_META_V1.catalog_groups.push(g)}
+  const page=String(match?.item?.catalog_page??product?.internal_source?.catalog_page??'');
+  const s={catalog_page:page,pdf_page:String(match?.item?.pdf_page??product?.internal_source?.pdf_page??''),public_name:pmkCatalogSafeTextV1(match?.item?.public_name||product?.public_name||product?.name||''),public_name_en:pmkCatalogSafeTextV1(product?.public_name_en||''),catalog_header:{features:Array.isArray(product?.catalog_header?.features)?product.catalog_header.features.map(x=>pmkCatalogSafeTextV1(x)).filter(Boolean):[],materials:Array.isArray(product?.catalog_header?.materials)?product.catalog_header.materials.map(x=>pmkCatalogSafeTextV1(x).toUpperCase()).filter(Boolean):[],unit:pmkCatalogSafeTextV1(product?.catalog_header?.unit||'MM')||'MM',diagram_image:pmkCatalogSafeTextV1(product?.catalog_header?.diagram_image||'')},technical_schema:schema.map(x=>({key:pmkCatalogSafeTextV1(x.key),label:pmkCatalogFieldLabelV1(x),unit:pmkCatalogSafeTextV1(x.unit||'')})).filter(x=>x.key),variation_skus:[...variationSkus]};
+  const i=g.series.findIndex(x=>String(x.catalog_page)===page);
+  if(i>=0)g.series[i]=s;else g.series.push(s);
+  g.series.sort((a,b)=>Number(a.catalog_page||0)-Number(b.catalog_page||0));
+  PMK_CATALOG_META_V1.catalog_groups.sort((a,b)=>Number(a.group_code||0)-Number(b.group_code||0));
+}
+function pmkCatalogRebuildUnionSchemaV13(){
+  const seen=new Set(), out=[];
+  for(const g of PMK_CATALOG_META_V1?.catalog_groups||[])for(const s of g.series||[])for(const c of s.technical_schema||[]){if(c?.key&&!seen.has(c.key)){seen.add(c.key);out.push(c)}}
+  PMK_CATALOG_META_V1.technical_schema=out;
+}
+
 let PMK_CATALOG_INDEX_V8=null;
 let PMK_CATALOG_INDEX_SELECTION_V8={group:0,series:0};
 
@@ -5640,6 +5700,7 @@ function pmkCatalogIndexRenderV8(){
 function pmkCatalogIndexBindV8(){
   const loadBtn=$('pmkCatalogIndexLoadBtnV8'), idxFile=$('pmkCatalogIndexFileV8');
   const seriesBtn=$('pmkCatalogSeriesLoadBtnV8'), seriesFile=$('pmkCatalogSeriesFileV8');
+  const batchBtn=$('pmkCatalogBatchLoadBtnV13'), batchFiles=$('pmkCatalogBatchFilesV13');
   const gs=$('pmkCatalogGroupSelectV8'), ss=$('pmkCatalogSeriesSelectV8');
   if(loadBtn)loadBtn.onclick=()=>{if(idxFile){idxFile.value='';idxFile.click()}};
   if(idxFile)idxFile.onchange=async()=>{
@@ -5654,6 +5715,8 @@ function pmkCatalogIndexBindV8(){
   if(gs)gs.onchange=()=>{PMK_CATALOG_INDEX_SELECTION_V8={group:Number(gs.value||0),series:0};pmkCatalogIndexRenderV8()};
   if(ss)ss.onchange=()=>{PMK_CATALOG_INDEX_SELECTION_V8.series=Number(ss.value||0);pmkCatalogIndexRenderV8()};
   if(seriesBtn)seriesBtn.onclick=()=>{if(seriesFile){seriesFile.value='';seriesFile.click()}};
+  if(batchBtn)batchBtn.onclick=()=>{if(batchFiles){batchFiles.value='';batchFiles.click()}};
+  if(batchFiles)batchFiles.onchange=async()=>{try{await pmkCatalogBatchImportV13(batchFiles.files)}catch(e){alert('多系列匯入失敗：'+String(e?.message||e))}finally{batchFiles.value=''}};
   if(seriesFile)seriesFile.onchange=async()=>{
     try{
       const f=seriesFile.files?.[0]; if(!f)return;
@@ -5747,121 +5810,68 @@ function pmkCatalogHeaderSyncMetaV3(){
       public_name:item?.public_name||''
     };
   }
-  PMK_CATALOG_META_V1.public_name=String($('pmkCatalogHeaderZhV3')?.value||PMK_CATALOG_META_V1.public_name||'').trim();
-  PMK_CATALOG_META_V1.public_name_en=String($('pmkCatalogHeaderEnV3')?.value||'').trim();
+  const editedName=String($('pmkCatalogHeaderZhV3')?.value||'').trim();
+  const editedEn=String($('pmkCatalogHeaderEnV3')?.value||'').trim();
+  if(PMK_CATALOG_META_V1.master_scope!=='supplier'){PMK_CATALOG_META_V1.public_name=editedName||PMK_CATALOG_META_V1.public_name||'';PMK_CATALOG_META_V1.public_name_en=editedEn;}
   PMK_CATALOG_META_V1.catalog_header={
     features:String($('pmkCatalogHeaderFeaturesV3')?.value||'').split(/\r?\n/).map(x=>x.trim()).filter(Boolean),
     materials:String($('pmkCatalogHeaderMaterialsV3')?.value||'').split(/[,\s、，]+/).map(x=>x.trim().toUpperCase()).filter(Boolean),
     unit:String($('pmkCatalogHeaderUnitV3')?.value||'MM').trim()||'MM',
     diagram_image:String(PMK_CATALOG_META_V1?.catalog_header?.diagram_image||'').trim()
   };
+  if(PMK_CATALOG_META_V1.master_scope==='supplier'&&item){
+    const gg=(PMK_CATALOG_META_V1.catalog_groups||[]).find(x=>String(x.group_code)===String(g?.group_code||''));
+    const ss=gg?.series?.find(x=>String(x.catalog_page)===String(item?.catalog_page||''));
+    if(ss){ss.public_name=editedName||ss.public_name;ss.public_name_en=editedEn;ss.catalog_header=JSON.parse(JSON.stringify(PMK_CATALOG_META_V1.catalog_header));}
+  }
 }
 
-function pmkCatalogApplyToFormV1(payload){
+function pmkCatalogApplyToFormV1(payload,opts={}){
   const {product,schema,name}=pmkCatalogImportNormalizeV1(payload);
-
-  // 原廠型錄 = 建立「1 個商品家族 + N 個 Variation」
-  // 不把每個原廠型號拆成獨立商品。
-  clearForm();
-
-  const familySku=pmkCatalogFamilyCodeV2(product);
-  $('product_type').value='variable';
-  $('source_type').value='manual';
-  $('brand').value='';                    // 前台禁止供應商品牌
-  $('name').value=name;                   // 父商品固定為系列名稱
-  if($('display_name'))$('display_name').value=name;
-  if($('external_id'))$('external_id').value=familySku;
-
-  refreshCategorySelect(product.category||'切削刀具');
-  refreshSubcategorySelect(product.subcategory||'螺紋加工');
-  refreshSubcategoryDetailSelect(product.subcategory_detail||'螺紋銑刀');
-
-  const internal=product.internal_source||{};
-  $('supplier').value=pmkCatalogSafeTextV1(internal.supplier_name||'');
-  if($('source_platform'))$('source_platform').value='catalog_master';
-  if($('source_item_id'))$('source_item_id').value=familySku;
-  if($('source_seller'))$('source_seller').value=pmkCatalogSafeTextV1(internal.supplier_name||internal.supplier_brand||'');
-  if($('source_currency'))$('source_currency').value='CNY';
-
-  // Variation 唯一選擇屬性 = 原廠型號。技術尺寸不做排列組合。
-  const skuValues=product.variations.map(v=>pmkCatalogSafeTextV1(v.sku)).filter(Boolean);
-  $('attributes_text').value='型號|'+skuValues.join(',');
-
-  v54Variations=product.variations.map((row,i)=>{
-    const sku=pmkCatalogSafeTextV1(row.sku);
-    const fields={};
-    for(const col of schema){
-      if(!col?.key)continue;
-      fields[col.key]=row[col.key]??'';
-    }
+  if(!PMK_CATALOG_INDEX_V8?.groups?.length)throw new Error('請先匯入 catalog_index.json');
+  const match=opts.match||pmkCatalogFindIndexMatchV13(payload);
+  if(!match)throw new Error(`找不到「${name}」對應的型錄索引`);
+  pmkCatalogEnsureMasterV13();
+  PMK_CATALOG_INDEX_SELECTION_V8={group:match.gi,series:match.si};
+  const id=pmkCatalogMasterIdentityV13();
+  const page=String(match.item?.catalog_page??product?.internal_source?.catalog_page??'').padStart(2,'0');
+  const groupCode=pmkCatalogSafeTextV1(match.g?.group_code||'');
+  const groupName=pmkCatalogSafeTextV1(match.g?.public_group_name||'');
+  const seriesName=pmkCatalogSafeTextV1(match.item?.public_name||name);
+  const incomingSkus=[];
+  // Replace only this series inside the master. Other imported series stay intact.
+  v54Variations=(v54Variations||[]).filter(v=>!(String(v?.technical_params?.catalog_group_code||'')===groupCode&&String(v?.technical_params?.catalog_series_page||'')===String(match.item?.catalog_page??'')));
+  for(let i=0;i<product.variations.length;i++){
+    const row=product.variations[i]||{}, sku=pmkCatalogSafeTextV1(row.sku); if(!sku)continue;
+    incomingSkus.push(sku);
+    const fields={}; for(const col of schema){if(col?.key)fields[col.key]=row[col.key]??''}
     const thread=pmkCatalogSafeTextV1(row.thread_size||'');
-    return {
-      id:`catalog-${familySku}-${String(i+1).padStart(2,'0')}`,
-      variation_name:thread?`${thread}｜${sku}`:sku,
-      variation_name_manual_locked:false,
-      sku,
-      sku_manual_locked:true,
-      source_sku_id:pmkCatalogSafeTextV1(row.source_sku||''),
-      source_price:Math.max(0,Number(row.source_price_cny||0)),
-      source_currency:'CNY',
-      price:Math.max(0,Number(row.base_price_ntd||0)),
-      sale_price:Math.max(0,Number(row.market_price_ntd||0)),
-      image_url:pmkCatalogSafeTextV1(row.image_url||''),
-      attributes:{'型號':sku},
-      stock_tracking_enabled:true,
-      stock_qty:Math.max(0,Number(row.stock_qty||0)),
-      is_active:true,
-      technical_params:{
-        catalog_master:true,
-        catalog_family_sku:familySku,
-        catalog_page:row.source_catalog_page??internal.catalog_page??'',
-        catalog_pdf_page:row.source_pdf_page??internal.pdf_page??'',
-        catalog_fields:fields
-      }
-    };
-  });
+    v54Variations.push({id:`catalog-${groupCode}-${page}-${String(i+1).padStart(3,'0')}`,variation_name:thread?`${thread}｜${sku}`:sku,variation_name_manual_locked:false,sku,sku_manual_locked:true,source_sku_id:pmkCatalogSafeTextV1(row.source_sku||''),source_price:Math.max(0,Number(row.source_price_cny||0)),source_currency:'CNY',price:Math.max(0,Number(row.base_price_ntd||0)),sale_price:Math.max(0,Number(row.market_price_ntd||0)),image_url:pmkCatalogSafeTextV1(row.image_url||''),attributes:{'型號':sku},stock_tracking_enabled:true,stock_qty:Math.max(0,Number(row.stock_qty||0)),is_active:true,technical_params:{catalog_master:true,catalog_master_sku:id.master_sku,catalog_group_code:groupCode,catalog_group_name:groupName,catalog_series_page:String(match.item?.catalog_page??''),catalog_series_pdf_page:String(match.item?.pdf_page??product?.internal_source?.pdf_page??''),catalog_series_name:seriesName,catalog_fields:fields}});
+  }
+  pmkCatalogUpsertSeriesMetaV13(match,product,schema,incomingSkus);
+  pmkCatalogRebuildUnionSchemaV13();
+  PMK_CATALOG_META_V1.variation_count=v54Variations.length;
+  PMK_CATALOG_META_V1.catalog_index={group_code:groupCode,group_name:groupName,catalog_page:String(match.item?.catalog_page??''),pdf_page:String(match.item?.pdf_page??''),public_name:seriesName};
+  $('attributes_text').value='型號|'+v54Variations.map(v=>v.sku).filter(Boolean).join(',');
+  // Header editor reflects the currently selected series; master metadata keeps every series separately.
+  pmkCatalogHeaderFillV3({public_name:seriesName,public_name_en:pmkCatalogSafeTextV1(product.public_name_en||''),catalog_header:product.catalog_header||{}});
+  syncProductTypeV544();v54VariationPage=0;renderVariationEditorV54();seoAutoFillV574(true);pmkCatalogIndexRenderV8();
+  const totalSeries=(PMK_CATALOG_META_V1.catalog_groups||[]).reduce((n,g)=>n+(g.series?.length||0),0);
+  const st=$('pmkCatalogImportStatus');if(st)st.textContent=`✅ 已併入型錄主檔：${groupCode} ${groupName} › ${seriesName}｜本系列 ${incomingSkus.length} 規格｜目前共 ${totalSeries} 系列 / ${v54Variations.length} 規格。`;
+  setStatus(`✅ 型錄主檔準備完成：1 個主檔｜${totalSeries} 系列｜${v54Variations.length} 規格｜主 SKU：${id.master_sku}`);
+}
 
-  PMK_CATALOG_META_V1={
-    version:2,
-    mode:'catalog_master',
-    master_sku:familySku,
-    public_name:name,
-    public_name_en:pmkCatalogSafeTextV1(product.public_name_en||''),
-    catalog_header:{
-      features:Array.isArray(product.catalog_header?.features)?product.catalog_header.features.map(x=>String(x||'').trim()).filter(Boolean):[],
-      materials:Array.isArray(product.catalog_header?.materials)?product.catalog_header.materials.map(x=>String(x||'').trim().toUpperCase()).filter(Boolean):[],
-      unit:pmkCatalogSafeTextV1(product.catalog_header?.unit||'MM')||'MM',
-      diagram_image:pmkCatalogSafeTextV1(product.catalog_header?.diagram_image||'')
-    },
-    variation_count:v54Variations.length,
-    hide_supplier_brand:true,
-    hide_supplier_name:true,
-    technical_schema:schema.map(x=>({
-      key:pmkCatalogSafeTextV1(x.key),
-      label:pmkCatalogFieldLabelV1(x),
-      unit:pmkCatalogSafeTextV1(x.unit||'')
-    })).filter(x=>x.key),
-    internal_source:{
-      supplier_brand:pmkCatalogSafeTextV1(internal.supplier_brand||''),
-      supplier_name:pmkCatalogSafeTextV1(internal.supplier_name||''),
-      catalog_page:internal.catalog_page??'',
-      pdf_page:internal.pdf_page??''
-    }
-  };
-
-  pmkCatalogHeaderFillV3({
-    public_name:name,
-    public_name_en:PMK_CATALOG_META_V1.public_name_en,
-    catalog_header:PMK_CATALOG_META_V1.catalog_header
-  });
-  syncProductTypeV544();
-  v54VariationPage=0;
-  renderVariationEditorV54();
-  seoAutoFillV574(true);
-
-  const st=$('pmkCatalogImportStatus');
-  if(st)st.textContent=`✅ 商品家族「${name}」已建立：${v54Variations.length} 個 Variation。圖片／價格／庫存可逐筆補，供應商品牌不顯示前台。`;
-  setStatus(`✅ 型錄家族匯入完成：1 個父商品｜${v54Variations.length} 個規格｜父 SKU：${familySku}`);
+async function pmkCatalogBatchImportV13(files){
+  const list=[...(files||[])];if(!list.length)return;
+  if(!PMK_CATALOG_INDEX_V8?.groups?.length)throw new Error('請先匯入 catalog_index.json');
+  const parsed=[];
+  for(const f of list){const payload=JSON.parse(await f.text());const match=pmkCatalogFindIndexMatchV13(payload);if(!match)throw new Error(`${f.name}：找不到對應型錄索引`);parsed.push({f,payload,match})}
+  parsed.sort((a,b)=>Number(a.match.g?.group_code||0)-Number(b.match.g?.group_code||0)||Number(a.match.item?.catalog_page||0)-Number(b.match.item?.catalog_page||0));
+  // Build in memory only. Existing D1/R2 data is untouched until the normal Save button is pressed.
+  clearForm();PMK_CATALOG_META_V1=null;v54Variations=[];
+  for(let i=0;i<parsed.length;i++){const x=parsed[i];pmkCatalogIndexSetStatusV8(`⏳ ${i+1}/${parsed.length} 併入：${x.match.item?.public_name||x.f.name}`);pmkCatalogApplyToFormV1(x.payload,{match:x.match})}
+  const seriesCount=(PMK_CATALOG_META_V1?.catalog_groups||[]).reduce((n,g)=>n+(g.series?.length||0),0);
+  pmkCatalogIndexSetStatusV8(`✅ 已組成 1 個型錄主檔：${seriesCount} 系列、${v54Variations.length} 規格。尚未寫入現有資料；請確認後再按原本「儲存商品」。`);
 }
 
 function pmkCatalogBindImportV1(){
@@ -5895,10 +5905,11 @@ function fill(p){
   if(!p)return;
   PMK_CATALOG_META_V1=p.catalog_meta?JSON.parse(JSON.stringify(p.catalog_meta)):null;
   if(PMK_CATALOG_META_V1?.mode==='catalog_master'){
+    const firstSeries=PMK_CATALOG_META_V1.master_scope==='supplier'?PMK_CATALOG_META_V1.catalog_groups?.[0]?.series?.[0]:null;
     pmkCatalogHeaderFillV3({
-      public_name:PMK_CATALOG_META_V1.public_name||p.display_name||p.name||'',
-      public_name_en:PMK_CATALOG_META_V1.public_name_en||'',
-      catalog_header:PMK_CATALOG_META_V1.catalog_header||{}
+      public_name:firstSeries?.public_name||PMK_CATALOG_META_V1.public_name||p.display_name||p.name||'',
+      public_name_en:firstSeries?.public_name_en||PMK_CATALOG_META_V1.public_name_en||'',
+      catalog_header:firstSeries?.catalog_header||PMK_CATALOG_META_V1.catalog_header||{}
     });
   }else pmkCatalogHeaderShowV3(false);
   editingId=p.id;
@@ -6371,6 +6382,8 @@ async function load(){
 // V57.0 SEQ ONLY: only duplicate PMKTOOLS SKUs inside the SAME product get -01, -02...
 // A SKU that appears only once is left exactly unchanged.
 function pmkSequenceDuplicateVariationSkusV570(p){
+  // V13 catalog master preserves the manufacturer SKU exactly, even when the same SKU is referenced by more than one series.
+  if(p?.catalog_meta?.mode==='catalog_master'&&p?.catalog_meta?.master_scope==='supplier')return p;
   if(!p || !Array.isArray(p.variations) || p.variations.length<2)return p;
   const counts=new Map();
   for(const v of p.variations){
