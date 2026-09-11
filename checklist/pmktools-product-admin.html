@@ -834,7 +834,7 @@
               <select id="pmkProductTemplate"><option value="">— 不套模板 —</option><option value="deep_hole_holder">深孔鑽頭</option><option value="deep_hole_insert">深孔刀片</option><option value="deep_hole_tube">深孔鑽管</option></select>
             </div>
             <button type="button" class="btn gray" id="pmkApplyProductTemplate">套用到現有款式</button><button type="button" class="btn" id="pmkCreateBlankTemplate">建立新商品模板</button>
-            <button type="button" class="btn" id="pmkCatalogImportBtn" style="background:#0f766e;color:#fff">匯入原廠型錄 JSON</button>
+            <button type="button" class="btn" id="pmkCatalogImportBtn" style="background:#0f766e;color:#fff">匯入原廠型錄｜建立商品家族</button>
             <input id="pmkCatalogImportFile" type="file" accept=".json,application/json" hidden>
             <span id="pmkTemplateStatus" class="muted" style="font-size:12px">模板只整理欄位；不覆蓋 SKU、價格、圖片、庫存與已填技術資料。</span>
             <span id="pmkCatalogImportStatus" class="muted" style="font-size:12px;color:#0f766e;font-weight:800"></span>
@@ -3326,6 +3326,21 @@ function pmkTubeSaleHintV638(v){
 }
 
 function pmkVariationCatalogFieldsV660(v,i){
+  if(PMK_CATALOG_META_V1?.mode==='catalog_master'){
+    const schema=Array.isArray(PMK_CATALOG_META_V1.technical_schema)?PMK_CATALOG_META_V1.technical_schema:[];
+    const f=v?.technical_params?.catalog_fields||{};
+    const cells=schema.map(c=>{
+      const val=(f[c.key]===undefined||f[c.key]===null||f[c.key]==='')?'—':String(f[c.key]);
+      return `<div style="border:1px solid #e2e8f0;border-radius:7px;padding:8px;background:#fff"><b style="display:block;font-size:11px;color:#64748b">${esc(c.label||c.key)}</b><span style="display:block;margin-top:3px;font-weight:900;color:#0f172a">${esc(val)}${val!=='—'&&c.unit?' '+esc(c.unit):''}</span></div>`;
+    }).join('');
+    return `<div class="v545-field" style="grid-column:1/-1">
+      <details open style="border:1px solid #0f766e;border-radius:8px;padding:10px;background:#f0fdfa">
+        <summary style="cursor:pointer;font-weight:950;color:#0f766e">原廠型錄規格｜此 Variation</summary>
+        <div class="muted" style="font-size:11px;margin:7px 0 9px">這些欄位來自原廠型錄主資料；價格、庫存、圖片仍由 PMKTOOLS 後台維護。</div>
+        <div style="display:grid;grid-template-columns:repeat(4,minmax(110px,1fr));gap:7px">${cells||'<span class="muted">此規格沒有型錄欄位</span>'}</div>
+      </details>
+    </div>`;
+  }
   const currentProduct=editingId?products.find(x=>String(x.id)===String(editingId)):null;
   const templateKey=String($('pmkProductTemplate')?.value||currentProduct?.template_key||'').trim();
   if(templateKey!=='deep_hole_holder')return '';
@@ -3349,6 +3364,7 @@ function pmkVariationCatalogFieldsV660(v,i){
 }
 
 function pmkVariationAddonEditorV597(v,i){
+  if(PMK_CATALOG_META_V1?.mode==='catalog_master')return '';
   if(pmkIsDeepHoleTubeVariationV638(v))return '';
   const t=v?.technical_params||{};
   const currentProduct=editingId?products.find(x=>String(x.id)===String(editingId)):null;
@@ -5490,30 +5506,39 @@ function pmkCatalogImportNormalizeV1(payload){
   return {payload,product,schema,name};
 }
 
+function pmkCatalogFamilyCodeV2(product){
+  const page=String(product?.internal_source?.catalog_page||'').padStart(2,'0');
+  const n=String(product?.public_name||product?.name||'CATALOG')
+    .replace(/\s+/g,'').replace(/[^\u4e00-\u9fffA-Za-z0-9_-]/g,'').slice(0,20);
+  return `CAT-P${page}-${n||'PRODUCT'}`;
+}
 function pmkCatalogApplyToFormV1(payload){
   const {product,schema,name}=pmkCatalogImportNormalizeV1(payload);
 
-  // 不改既有商品；型錄匯入先建立一個乾淨的新商品編輯狀態。
+  // 原廠型錄 = 建立「1 個商品家族 + N 個 Variation」
+  // 不把每個原廠型號拆成獨立商品。
   clearForm();
 
+  const familySku=pmkCatalogFamilyCodeV2(product);
   $('product_type').value='variable';
   $('source_type').value='manual';
-  $('brand').value=''; // 前台絕不帶供應商品牌
-  $('name').value=name;
+  $('brand').value='';                    // 前台禁止供應商品牌
+  $('name').value=name;                   // 父商品固定為系列名稱
   if($('display_name'))$('display_name').value=name;
+  if($('external_id'))$('external_id').value=familySku;
 
   refreshCategorySelect(product.category||'切削刀具');
   refreshSubcategorySelect(product.subcategory||'螺紋加工');
-  refreshSubcategoryDetailSelect(product.subcategory_detail||'螺紋銑削');
+  refreshSubcategoryDetailSelect(product.subcategory_detail||'螺紋銑刀');
 
   const internal=product.internal_source||{};
   $('supplier').value=pmkCatalogSafeTextV1(internal.supplier_name||'');
   if($('source_platform'))$('source_platform').value='catalog_master';
-  if($('source_item_id'))$('source_item_id').value=`CATALOG-P${pmkCatalogSafeTextV1(internal.catalog_page||'')}`;
+  if($('source_item_id'))$('source_item_id').value=familySku;
   if($('source_seller'))$('source_seller').value=pmkCatalogSafeTextV1(internal.supplier_name||internal.supplier_brand||'');
   if($('source_currency'))$('source_currency').value='CNY';
 
-  // 只用一個「型號」屬性控制 Variation，不把全部技術尺寸變成笛卡兒積。
+  // Variation 唯一選擇屬性 = 原廠型號。技術尺寸不做排列組合。
   const skuValues=product.variations.map(v=>pmkCatalogSafeTextV1(v.sku)).filter(Boolean);
   $('attributes_text').value='型號|'+skuValues.join(',');
 
@@ -5524,9 +5549,10 @@ function pmkCatalogApplyToFormV1(payload){
       if(!col?.key)continue;
       fields[col.key]=row[col.key]??'';
     }
+    const thread=pmkCatalogSafeTextV1(row.thread_size||'');
     return {
-      id:`catalog-${Date.now().toString(36)}-${i+1}`,
-      variation_name:`${name}/${sku}`,
+      id:`catalog-${familySku}-${String(i+1).padStart(2,'0')}`,
+      variation_name:thread?`${thread}｜${sku}`:sku,
       variation_name_manual_locked:false,
       sku,
       sku_manual_locked:true,
@@ -5542,6 +5568,7 @@ function pmkCatalogApplyToFormV1(payload){
       is_active:true,
       technical_params:{
         catalog_master:true,
+        catalog_family_sku:familySku,
         catalog_page:row.source_catalog_page??internal.catalog_page??'',
         catalog_pdf_page:row.source_pdf_page??internal.pdf_page??'',
         catalog_fields:fields
@@ -5550,9 +5577,11 @@ function pmkCatalogApplyToFormV1(payload){
   });
 
   PMK_CATALOG_META_V1={
-    version:1,
+    version:2,
     mode:'catalog_master',
+    master_sku:familySku,
     public_name:name,
+    variation_count:v54Variations.length,
     hide_supplier_brand:true,
     hide_supplier_name:true,
     technical_schema:schema.map(x=>({
@@ -5574,8 +5603,8 @@ function pmkCatalogApplyToFormV1(payload){
   seoAutoFillV574(true);
 
   const st=$('pmkCatalogImportStatus');
-  if(st)st.textContent=`✅ 已載入 ${v54Variations.length} 個原廠規格；品牌只留後台，不顯示前台。請補價格/庫存/圖片後儲存。`;
-  setStatus(`✅ 原廠型錄已載入：${name}｜${v54Variations.length} 個 SKU`);
+  if(st)st.textContent=`✅ 商品家族「${name}」已建立：${v54Variations.length} 個 Variation。圖片／價格／庫存可逐筆補，供應商品牌不顯示前台。`;
+  setStatus(`✅ 型錄家族匯入完成：1 個父商品｜${v54Variations.length} 個規格｜父 SKU：${familySku}`);
 }
 
 function pmkCatalogBindImportV1(){
@@ -5603,7 +5632,7 @@ function pmkFrontendTemplateMetaV593(){
   return {template_key:key,frontend_layout:tpl.frontend_layout,frontend_schema:{title,columns:Array.isArray(tpl.frontend_columns)?tpl.frontend_columns:[],image_overlays:Array.isArray(tpl.frontend_image_overlays)?tpl.frontend_image_overlays:[],order_input:tpl.frontend_order_input||null}};
 }
 
-function formData(){pmkSyncDetailEditorV1();const product_type=['simple','external','variable'].includes($('product_type').value)?$('product_type').value:'simple';const varsNow=product_type==='variable'?readVariationsV54():[];const vPrices=varsNow.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(x=>x>0);const price=product_type==='variable'?(vPrices.length?Math.min(...vPrices):0):Math.max(0,Number($('price').value||0));let sale_mode=$('sale_mode').value||'auto';if(price>0&&price<200)sale_mode='redeem_only';const attributes=product_type==='variable'?attributesV54():[],variations=product_type==='variable'?varsNow:[];const tm=pmkFrontendTemplateMetaV593();return {catalog_meta:PMK_CATALOG_META_V1?JSON.parse(JSON.stringify(PMK_CATALOG_META_V1)):null,template_key:tm.template_key,frontend_layout:tm.frontend_layout,frontend_schema:tm.frontend_schema,is_addon_product:$('is_addon_product')?.checked===true,external_id:$('external_id').value.trim()||null,source_type:$('source_type').value||'manual',product_type,brand:$('brand').value.trim(),name:$('name').value.trim(),display_name:String($('display_name')?.value||'').trim(),price,category:$('category').value||'切削刀具',subcategory:String($('subcategory')?.value||'').trim(),subcategory_detail:String($('subcategory_detail')?.value||'').trim(),sale_mode,fulfillment_type:$('fulfillment_type').value||'voucher',shipping_methods:shippingMethodsV563(),cost_price:Math.max(0,Number($('cost_price').value||0)),supplier:$('supplier').value.trim(),stock_tracking_enabled:$('stock_tracking_enabled').value==='true',stock_qty:Math.max(0,Number($('stock_qty').value||0)),low_stock_qty:Math.max(0,Number($('low_stock_qty').value||0)),festival_keys:selectedFestivals(),sort_order:Number($('sort_order').value||100),is_active:$('is_active').value==='true',line_url:String($('line_url_shadow')?.value||$('line_url')?.value||'').trim(),image_url:$('image_url').value.trim(),video_url:$('video_url').value.trim(),gallery_urls:linesV54('gallery_urls'),detail_summary:'',detail_description:$('detail_description').value.trim(),detail_highlights:[],detail_specs:[],detail_notices:[],add_on_product_ids:addonItemsV557().map(x=>x.product_id),add_on_items:addonItemsV557(),attributes,option_groups:attributes.map(a=>({name:a.name,required:true,values:a.values})),variations,sku:productFormSkuV205(varsNow),sku_rule_system:String($('sku_rule_system')?.value||'manual'),sku_rule_family:String($('sku_rule_family')?.value||''),seo_title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,seo_description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,seo_keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,seo_canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical,seo:{title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical},source:{platform:$('source_platform')?.value.trim()||$('source_type').value,item_id:$('source_item_id')?.value.trim()||'',url:$('line_url_shadow')?.value.trim()||'',seller:$('source_seller')?.value.trim()||'',currency:$('source_currency')?.value.trim()||'TWD'}}}
+function formData(){pmkSyncDetailEditorV1();const product_type=['simple','external','variable'].includes($('product_type').value)?$('product_type').value:'simple';const varsNow=product_type==='variable'?readVariationsV54():[];const vPrices=varsNow.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(x=>x>0);const price=product_type==='variable'?(vPrices.length?Math.min(...vPrices):0):Math.max(0,Number($('price').value||0));let sale_mode=$('sale_mode').value||'auto';if(price>0&&price<200)sale_mode='redeem_only';const attributes=product_type==='variable'?attributesV54():[],variations=product_type==='variable'?varsNow:[];const tm=pmkFrontendTemplateMetaV593();return {catalog_meta:PMK_CATALOG_META_V1?JSON.parse(JSON.stringify(PMK_CATALOG_META_V1)):null,template_key:tm.template_key,frontend_layout:tm.frontend_layout,frontend_schema:tm.frontend_schema,is_addon_product:$('is_addon_product')?.checked===true,external_id:$('external_id').value.trim()||null,source_type:$('source_type').value||'manual',product_type,brand:$('brand').value.trim(),name:$('name').value.trim(),display_name:String($('display_name')?.value||'').trim(),price,category:$('category').value||'切削刀具',subcategory:String($('subcategory')?.value||'').trim(),subcategory_detail:String($('subcategory_detail')?.value||'').trim(),sale_mode,fulfillment_type:$('fulfillment_type').value||'voucher',shipping_methods:shippingMethodsV563(),cost_price:Math.max(0,Number($('cost_price').value||0)),supplier:$('supplier').value.trim(),stock_tracking_enabled:$('stock_tracking_enabled').value==='true',stock_qty:Math.max(0,Number($('stock_qty').value||0)),low_stock_qty:Math.max(0,Number($('low_stock_qty').value||0)),festival_keys:selectedFestivals(),sort_order:Number($('sort_order').value||100),is_active:$('is_active').value==='true',line_url:String($('line_url_shadow')?.value||$('line_url')?.value||'').trim(),image_url:$('image_url').value.trim(),video_url:$('video_url').value.trim(),gallery_urls:linesV54('gallery_urls'),detail_summary:'',detail_description:$('detail_description').value.trim(),detail_highlights:[],detail_specs:[],detail_notices:[],add_on_product_ids:addonItemsV557().map(x=>x.product_id),add_on_items:addonItemsV557(),attributes,option_groups:attributes.map(a=>({name:a.name,required:true,values:a.values})),variations,sku:(PMK_CATALOG_META_V1?.mode==='catalog_master'&&PMK_CATALOG_META_V1?.master_sku)?PMK_CATALOG_META_V1.master_sku:productFormSkuV205(varsNow),sku_rule_system:String($('sku_rule_system')?.value||'manual'),sku_rule_family:String($('sku_rule_family')?.value||''),seo_title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,seo_description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,seo_keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,seo_canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical,seo:{title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical},source:{platform:$('source_platform')?.value.trim()||$('source_type').value,item_id:$('source_item_id')?.value.trim()||'',url:$('line_url_shadow')?.value.trim()||'',seller:$('source_seller')?.value.trim()||'',currency:$('source_currency')?.value.trim()||'TWD'}}}
 function clearForm(){PMK_CATALOG_META_V1=null;pmkOriginalProductNameV342='';aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();if($('is_addon_product'))$('is_addon_product').checked=false;editingId=null;['external_id','brand','name','price','line_url','image_url','video_url','detail_description','gallery_urls','attributes_text','add_on_product_ids','add_on_items_json','shipping_methods_json','source_platform','source_item_id','source_seller','display_name','seo_title','seo_description','seo_keywords','seo_canonical'].forEach(id=>$(id).value='');$('source_type').value='manual';if($('source_currency'))$('source_currency').value='TWD';$('product_type').value='simple';v54Variations=[];syncProductTypeV544();galleryPreviewV54();renderMainImageV547();renderVideoV552();refreshCategorySelect('切削刀具');refreshSubcategorySelect('');refreshSubcategoryDetailSelect('');$('sale_mode').value='auto';$('fulfillment_type').value='voucher';setShippingMethodsV563([]);renderShippingMethodsV563();$('cost_price').value='0';$('supplier').value='';$('stock_tracking_enabled').value='false';$('stock_qty').value='0';$('low_stock_qty').value='3';setFestivals([]);$('sort_order').value='100';$('is_active').value='true';setSkuRuleV1('manual','');renderAddonConfigV557();renderSeoPreviewV574();if($('pmkProductTemplate'))$('pmkProductTemplate').value='';if($('pmkTemplateStatus'))$('pmkTemplateStatus').textContent='模板只整理欄位；不覆蓋 SKU、價格、圖片、庫存與已填技術資料。'}
 function fill(p){
   if(!p)return;
