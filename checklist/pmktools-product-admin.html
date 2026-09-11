@@ -5731,7 +5731,12 @@ function pmkCatalogSeriesKeyV60(groupCode,catalogPage){
 }
 function pmkCatalogEnsureV3MetaV60(product){
   const old=PMK_CATALOG_META_V1;
-  if(old?.mode==='catalog_master' && Array.isArray(old.catalog_groups))return old;
+  if(old?.mode==='catalog_master' && Array.isArray(old.catalog_groups)){
+    if(!old.catalog_index_master && PMK_CATALOG_INDEX_V8?.groups?.length){
+      old.catalog_index_master=pmkCatalogIndexCloneV611(PMK_CATALOG_INDEX_V8);
+    }
+    return old;
+  }
 
   const masterSku=pmkCatalogMasterCodeV60(product);
   const meta={
@@ -5743,6 +5748,7 @@ function pmkCatalogEnsureV3MetaV60(product){
     hide_supplier_brand:true,
     hide_supplier_name:true,
     catalog_groups:[],
+    catalog_index_master:PMK_CATALOG_INDEX_V8?.groups?.length?pmkCatalogIndexCloneV611(PMK_CATALOG_INDEX_V8):null,
     internal_source:{
       supplier_brand:String(product?.internal_source?.supplier_brand||old?.internal_source?.supplier_brand||PMK_CATALOG_INDEX_V8?.internal_source?.supplier_brand||'').trim(),
       supplier_name:String(product?.internal_source?.supplier_name||old?.internal_source?.supplier_name||PMK_CATALOG_INDEX_V8?.internal_source?.supplier_name||'').trim()
@@ -5815,6 +5821,48 @@ function pmkCatalogIndexShowV8(show=true){
 function pmkCatalogIndexSetStatusV8(msg){
   const el=$('pmkCatalogIndexStatusV8'); if(el)el.textContent=String(msg||'');
 }
+
+function pmkCatalogIndexCloneV611(idx){
+  return idx?JSON.parse(JSON.stringify(idx)):null;
+}
+function pmkCatalogIndexFallbackFromMetaV611(meta){
+  if(!meta || !Array.isArray(meta.catalog_groups) || !meta.catalog_groups.length)return null;
+  return {
+    version:1,
+    source:'catalog_meta_fallback',
+    internal_source:JSON.parse(JSON.stringify(meta.internal_source||{})),
+    groups:meta.catalog_groups.map(g=>({
+      group_code:String(g.group_code||'').padStart(2,'0'),
+      public_group_name:String(g.public_group_name||''),
+      items:(g.series||[]).map(s=>({
+        catalog_page:String(s.catalog_page||'').padStart(2,'0'),
+        pdf_page:String(s.pdf_page||''),
+        public_name:String(s.public_name||''),
+        public_name_en:String(s.public_name_en||'')
+      }))
+    }))
+  };
+}
+function pmkCatalogRestoreIndexV611(){
+  if(PMK_CATALOG_META_V1?.mode!=='catalog_master')return false;
+  const saved=PMK_CATALOG_META_V1.catalog_index_master;
+  if(saved?.groups?.length){
+    PMK_CATALOG_INDEX_V8=pmkCatalogIndexCloneV611(saved);
+    return true;
+  }
+  const fallback=pmkCatalogIndexFallbackFromMetaV611(PMK_CATALOG_META_V1);
+  if(fallback?.groups?.length){
+    PMK_CATALOG_INDEX_V8=fallback;
+    return true;
+  }
+  return false;
+}
+function pmkCatalogPersistIndexV611(){
+  if(PMK_CATALOG_META_V1?.mode==='catalog_master' && PMK_CATALOG_INDEX_V8?.groups?.length){
+    PMK_CATALOG_META_V1.catalog_index_master=pmkCatalogIndexCloneV611(PMK_CATALOG_INDEX_V8);
+  }
+}
+
 function pmkCatalogIndexNormalizeV8(payload){
   if(!payload||typeof payload!=='object'||!Array.isArray(payload.groups))throw new Error('catalog_index.json 格式不正確：缺少 groups');
   return payload;
@@ -5868,8 +5916,9 @@ function pmkCatalogIndexBindV8(){
       const f=idxFile.files?.[0]; if(!f)return;
       PMK_CATALOG_INDEX_V8=pmkCatalogIndexNormalizeV8(JSON.parse(await f.text()));
       PMK_CATALOG_INDEX_SELECTION_V8={group:0,series:0};
+      pmkCatalogPersistIndexV611();
       pmkCatalogIndexRenderV8();
-      pmkCatalogIndexSetStatusV8(`✅ 已載入型錄索引：${PMK_CATALOG_INDEX_V8.groups.length} 個大類。`);
+      pmkCatalogIndexSetStatusV8(`✅ 已載入型錄索引：${PMK_CATALOG_INDEX_V8.groups.length} 個大類。索引會隨型錄主檔一起儲存。`);
     }catch(e){ alert('型錄索引匯入失敗：'+String(e?.message||e));}
   };
   if(gs)gs.onchange=()=>{PMK_CATALOG_INDEX_SELECTION_V8={group:Number(gs.value||0),series:0};pmkCatalogIndexRenderV8()};
@@ -6197,6 +6246,7 @@ function pmkCatalogApplyToFormV1(payload){
   $('attributes_text').value=`系列|${[...new Set(allSeries)].join(',')}\n型號|${[...new Set(allSkus)].join(',')}`;
 
   PMK_CATALOG_META_V1=meta;
+  pmkCatalogPersistIndexV611();
   PMK_CATALOG_INDEX_SELECTION_V8={group:match.gi,series:match.si};
   pmkCatalogVariationFolderV606=`${groupCode}:${catalogPage}`;
   pmkCatalogHeaderFillV3(seriesMeta);
@@ -6244,12 +6294,14 @@ function pmkFrontendTemplateMetaV593(){
   return {template_key:key,frontend_layout:tpl.frontend_layout,frontend_schema:{title,columns:Array.isArray(tpl.frontend_columns)?tpl.frontend_columns:[],image_overlays:Array.isArray(tpl.frontend_image_overlays)?tpl.frontend_image_overlays:[],order_input:tpl.frontend_order_input||null}};
 }
 
-function formData(){pmkSyncDetailEditorV1();pmkCatalogHeaderSyncMetaV3();const product_type=['simple','external','variable'].includes($('product_type').value)?$('product_type').value:'simple';const varsNow=product_type==='variable'?readVariationsV54():[];const vPrices=varsNow.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(x=>x>0);const price=product_type==='variable'?(vPrices.length?Math.min(...vPrices):0):Math.max(0,Number($('price').value||0));let sale_mode=$('sale_mode').value||'auto';if(price>0&&price<200)sale_mode='redeem_only';const attributes=product_type==='variable'?attributesV54():[],variations=product_type==='variable'?varsNow:[];const tm=pmkFrontendTemplateMetaV593();return {catalog_meta:PMK_CATALOG_META_V1?JSON.parse(JSON.stringify(PMK_CATALOG_META_V1)):null,template_key:tm.template_key,frontend_layout:tm.frontend_layout,frontend_schema:tm.frontend_schema,is_addon_product:$('is_addon_product')?.checked===true,external_id:$('external_id').value.trim()||null,source_type:$('source_type').value||'manual',product_type,brand:$('brand').value.trim(),name:$('name').value.trim(),display_name:String($('display_name')?.value||'').trim(),price,category:$('category').value||'切削刀具',subcategory:String($('subcategory')?.value||'').trim(),subcategory_detail:String($('subcategory_detail')?.value||'').trim(),sale_mode,fulfillment_type:$('fulfillment_type').value||'voucher',shipping_methods:shippingMethodsV563(),cost_price:Math.max(0,Number($('cost_price').value||0)),supplier:$('supplier').value.trim(),stock_tracking_enabled:$('stock_tracking_enabled').value==='true',stock_qty:Math.max(0,Number($('stock_qty').value||0)),low_stock_qty:Math.max(0,Number($('low_stock_qty').value||0)),festival_keys:selectedFestivals(),sort_order:Number($('sort_order').value||100),is_active:$('is_active').value==='true',line_url:String($('line_url_shadow')?.value||$('line_url')?.value||'').trim(),image_url:$('image_url').value.trim(),video_url:$('video_url').value.trim(),gallery_urls:linesV54('gallery_urls'),detail_summary:'',detail_description:$('detail_description').value.trim(),detail_highlights:[],detail_specs:[],detail_notices:[],add_on_product_ids:addonItemsV557().map(x=>x.product_id),add_on_items:addonItemsV557(),attributes,option_groups:attributes.map(a=>({name:a.name,required:true,values:a.values})),variations,sku:(PMK_CATALOG_META_V1?.mode==='catalog_master'&&PMK_CATALOG_META_V1?.master_sku)?PMK_CATALOG_META_V1.master_sku:productFormSkuV205(varsNow),sku_rule_system:String($('sku_rule_system')?.value||'manual'),sku_rule_family:String($('sku_rule_family')?.value||''),seo_title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,seo_description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,seo_keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,seo_canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical,seo:{title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical},source:{platform:$('source_platform')?.value.trim()||$('source_type').value,item_id:$('source_item_id')?.value.trim()||'',url:$('line_url_shadow')?.value.trim()||'',seller:$('source_seller')?.value.trim()||'',currency:$('source_currency')?.value.trim()||'TWD'}}}
+function formData(){pmkSyncDetailEditorV1();pmkCatalogHeaderSyncMetaV3();pmkCatalogPersistIndexV611();const product_type=['simple','external','variable'].includes($('product_type').value)?$('product_type').value:'simple';const varsNow=product_type==='variable'?readVariationsV54():[];const vPrices=varsNow.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(x=>x>0);const price=product_type==='variable'?(vPrices.length?Math.min(...vPrices):0):Math.max(0,Number($('price').value||0));let sale_mode=$('sale_mode').value||'auto';if(price>0&&price<200)sale_mode='redeem_only';const attributes=product_type==='variable'?attributesV54():[],variations=product_type==='variable'?varsNow:[];const tm=pmkFrontendTemplateMetaV593();return {catalog_meta:PMK_CATALOG_META_V1?JSON.parse(JSON.stringify(PMK_CATALOG_META_V1)):null,template_key:tm.template_key,frontend_layout:tm.frontend_layout,frontend_schema:tm.frontend_schema,is_addon_product:$('is_addon_product')?.checked===true,external_id:$('external_id').value.trim()||null,source_type:$('source_type').value||'manual',product_type,brand:$('brand').value.trim(),name:$('name').value.trim(),display_name:String($('display_name')?.value||'').trim(),price,category:$('category').value||'切削刀具',subcategory:String($('subcategory')?.value||'').trim(),subcategory_detail:String($('subcategory_detail')?.value||'').trim(),sale_mode,fulfillment_type:$('fulfillment_type').value||'voucher',shipping_methods:shippingMethodsV563(),cost_price:Math.max(0,Number($('cost_price').value||0)),supplier:$('supplier').value.trim(),stock_tracking_enabled:$('stock_tracking_enabled').value==='true',stock_qty:Math.max(0,Number($('stock_qty').value||0)),low_stock_qty:Math.max(0,Number($('low_stock_qty').value||0)),festival_keys:selectedFestivals(),sort_order:Number($('sort_order').value||100),is_active:$('is_active').value==='true',line_url:String($('line_url_shadow')?.value||$('line_url')?.value||'').trim(),image_url:$('image_url').value.trim(),video_url:$('video_url').value.trim(),gallery_urls:linesV54('gallery_urls'),detail_summary:'',detail_description:$('detail_description').value.trim(),detail_highlights:[],detail_specs:[],detail_notices:[],add_on_product_ids:addonItemsV557().map(x=>x.product_id),add_on_items:addonItemsV557(),attributes,option_groups:attributes.map(a=>({name:a.name,required:true,values:a.values})),variations,sku:(PMK_CATALOG_META_V1?.mode==='catalog_master'&&PMK_CATALOG_META_V1?.master_sku)?PMK_CATALOG_META_V1.master_sku:productFormSkuV205(varsNow),sku_rule_system:String($('sku_rule_system')?.value||'manual'),sku_rule_family:String($('sku_rule_family')?.value||''),seo_title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,seo_description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,seo_keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,seo_canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical,seo:{title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical},source:{platform:$('source_platform')?.value.trim()||$('source_type').value,item_id:$('source_item_id')?.value.trim()||'',url:$('line_url_shadow')?.value.trim()||'',seller:$('source_seller')?.value.trim()||'',currency:$('source_currency')?.value.trim()||'TWD'}}}
 function clearForm(){PMK_CATALOG_META_V1=null;pmkCatalogVariationFolderV606='';pmkCatalogHeaderShowV3(false);pmkOriginalProductNameV342='';aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();if($('is_addon_product'))$('is_addon_product').checked=false;editingId=null;['external_id','brand','name','price','line_url','image_url','video_url','detail_description','gallery_urls','attributes_text','add_on_product_ids','add_on_items_json','shipping_methods_json','source_platform','source_item_id','source_seller','display_name','seo_title','seo_description','seo_keywords','seo_canonical'].forEach(id=>$(id).value='');$('source_type').value='manual';if($('source_currency'))$('source_currency').value='TWD';$('product_type').value='simple';v54Variations=[];syncProductTypeV544();galleryPreviewV54();renderMainImageV547();renderVideoV552();refreshCategorySelect('切削刀具');refreshSubcategorySelect('');refreshSubcategoryDetailSelect('');$('sale_mode').value='auto';$('fulfillment_type').value='voucher';setShippingMethodsV563([]);renderShippingMethodsV563();$('cost_price').value='0';$('supplier').value='';$('stock_tracking_enabled').value='false';$('stock_qty').value='0';$('low_stock_qty').value='3';setFestivals([]);$('sort_order').value='100';$('is_active').value='true';setSkuRuleV1('manual','');renderAddonConfigV557();renderSeoPreviewV574();if($('pmkProductTemplate'))$('pmkProductTemplate').value='';if($('pmkTemplateStatus'))$('pmkTemplateStatus').textContent='模板只整理欄位；不覆蓋 SKU、價格、圖片、庫存與已填技術資料。'}
 function fill(p){
   if(!p)return;
   PMK_CATALOG_META_V1=p.catalog_meta?JSON.parse(JSON.stringify(p.catalog_meta)):null;
   if(PMK_CATALOG_META_V1?.mode==='catalog_master'){
+    pmkCatalogRestoreIndexV611();
+    pmkCatalogIndexShowV8(true);
     const firstGroup=Array.isArray(PMK_CATALOG_META_V1.catalog_groups)?PMK_CATALOG_META_V1.catalog_groups[0]:null;
     const firstSeries=firstGroup?.series?.[0]||null;
     if(firstGroup&&firstSeries){
@@ -6262,6 +6314,11 @@ function fill(p){
       public_name_en:PMK_CATALOG_META_V1.public_name_en||'',
       catalog_header:PMK_CATALOG_META_V1.catalog_header||{}
     });
+    pmkCatalogIndexRenderV8();
+    setTimeout(()=>pmkCatalogIndexBindV8(),0);
+    if(PMK_CATALOG_INDEX_V8?.groups?.length){
+      pmkCatalogIndexSetStatusV8(`✅ 已從型錄主檔還原索引：${PMK_CATALOG_INDEX_V8.groups.length} 個大類。`);
+    }
   }else pmkCatalogHeaderShowV3(false);
   editingId=p.id;
   if($('is_addon_product'))$('is_addon_product').checked=p.is_addon_product===true;
