@@ -3077,8 +3077,9 @@ function pmkCatalogVariationFoldersV606(){
   if(PMK_CATALOG_META_V1?.mode!=='catalog_master' || !Array.isArray(PMK_CATALOG_META_V1.catalog_groups))return [];
   const out=[];
   for(const g of PMK_CATALOG_META_V1.catalog_groups){
+    const gc=String(g.group_code||'').padStart(2,'0');
+    const groupName=String(g.public_group_name||g.group_name||`型錄大類 ${gc}`);
     for(const s of (g.series||[])){
-      const gc=String(g.group_code||'').padStart(2,'0');
       const sc=String(s.catalog_page||'').padStart(2,'0');
       const key=`${gc}:${sc}`;
       const count=v54Variations.filter(v=>{
@@ -3086,20 +3087,35 @@ function pmkCatalogVariationFoldersV606(){
         return String(tp.catalog_group_code||'').padStart(2,'0')===gc &&
           String(tp.catalog_series_code||tp.catalog_page||'').padStart(2,'0')===sc;
       }).length;
-      out.push({key,gc,sc,name:String(s.public_name||'系列'),count});
+      out.push({key,gc,sc,name:String(s.public_name||'系列'),groupName,count});
     }
   }
   return out;
 }
 function pmkCatalogVariationFolderBarV606(folders){
   if(!folders.length)return '';
-  if(!pmkCatalogVariationFolderV606 || !folders.some(x=>x.key===pmkCatalogVariationFolderV606)){
-    pmkCatalogVariationFolderV606=folders[0].key;
+  let activeGc='';
+  try{
+    const gi=Number(PMK_CATALOG_INDEX_SELECTION_V8?.group||0);
+    activeGc=String(PMK_CATALOG_INDEX_V8?.groups?.[gi]?.group_code||'').padStart(2,'0');
+  }catch(_){}
+  if(!activeGc && pmkCatalogVariationFolderV606)activeGc=String(pmkCatalogVariationFolderV606).split(':')[0]||'';
+  if(!activeGc)activeGc=folders[0].gc;
+
+  const visible=folders.filter(x=>x.gc===activeGc);
+  const use=visible.length?visible:folders;
+
+  if(!pmkCatalogVariationFolderV606 || !use.some(x=>x.key===pmkCatalogVariationFolderV606)){
+    pmkCatalogVariationFolderV606=use[0].key;
   }
+
+  const groupName=use[0]?.groupName||`型錄大類 ${activeGc}`;
   return `<div class="pmk-vfolder-wrap" style="margin:0 0 12px;border:1px solid #cbd5e1;border-radius:10px;background:#f8fafc;overflow:hidden">
-    <div style="padding:10px 12px;font-weight:950;color:#0f172a;border-bottom:1px solid #e2e8f0">型錄系列資料夾｜${folders.length} 個系列</div>
+    <div style="padding:10px 12px;font-weight:950;color:#0f172a;border-bottom:1px solid #e2e8f0">
+      型錄系列資料夾｜${activeGc}｜${esc(groupName)}｜${use.length} 個系列
+    </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;padding:10px 12px">
-      ${folders.map(x=>`<button type="button" data-pmk-vfolder="${x.key}" class="btn ${x.key===pmkCatalogVariationFolderV606?'':'gray'}" style="${x.key===pmkCatalogVariationFolderV606?'background:#0f766e;color:#fff':''}">
+      ${use.map(x=>`<button type="button" data-pmk-vfolder="${x.key}" class="btn ${x.key===pmkCatalogVariationFolderV606?'':'gray'}" style="${x.key===pmkCatalogVariationFolderV606?'background:#0f766e;color:#fff':''}">
         ${x.sc}｜${esc(x.name)} <b>(${x.count})</b>
       </button>`).join('')}
     </div>
@@ -5971,7 +5987,17 @@ function pmkCatalogIndexBindV8(){
       pmkCatalogIndexSetStatusV8(`✅ 已載入型錄索引：${PMK_CATALOG_INDEX_V8.groups.length} 個大類。索引會隨型錄主檔一起儲存。`);
     }catch(e){ alert('型錄索引匯入失敗：'+String(e?.message||e));}
   };
-  if(gs)gs.onchange=()=>{PMK_CATALOG_INDEX_SELECTION_V8={group:Number(gs.value||0),series:0};pmkCatalogIndexRenderV8()};
+  if(gs)gs.onchange=()=>{
+    PMK_CATALOG_INDEX_SELECTION_V8={group:Number(gs.value||0),series:0};
+    pmkCatalogIndexRenderV8();
+    const g=PMK_CATALOG_INDEX_V8?.groups?.[PMK_CATALOG_INDEX_SELECTION_V8.group];
+    const gc=String(g?.group_code||'').padStart(2,'0');
+    const first=(PMK_CATALOG_META_V1?.catalog_groups||[])
+      .find(x=>String(x.group_code||'').padStart(2,'0')===gc)?.series?.[0];
+    if(first)pmkCatalogVariationFolderV606=`${gc}:${String(first.catalog_page||'').padStart(2,'0')}`;
+    v54VariationPage=0;
+    try{renderVariationEditorV54();}catch(_){}
+  };
   if(ss)ss.onchange=()=>{
     pmkCatalogHeaderSyncMetaV3();
     PMK_CATALOG_INDEX_SELECTION_V8.series=Number(ss.value||0);
@@ -5995,6 +6021,12 @@ function pmkCatalogIndexBindV8(){
       }
 
       const parsed=[];
+      // ONE-SHOT 先全數驗證，再開始寫入；避免匯到一半才出錯。
+      const allPackFiles=[...new Set(expanded.filter(x=>x.fromAllPack).map(x=>x.sourceFile))];
+      if(allPackFiles.length){
+        const allGroups=new Set(expanded.filter(x=>x.fromAllPack).map(x=>String(x.packGroup?.group_code||'').padStart(2,'0')));
+        if(allGroups.size!==5)throw new Error(`ONE-SHOT 驗證失敗：預期 5 個大類，實際 ${allGroups.size} 個`);
+      }
       for(const x of expanded){
         let match=null;
 
@@ -6023,6 +6055,10 @@ function pmkCatalogIndexBindV8(){
           throw new Error(`${x.sourceFile}：找不到 catalog_index 對應系列「${x.payload?.product?.public_name||''}」（大類 ${packGc||'-'} / 頁 ${page||'-'}）`);
         }
         parsed.push({...x,match});
+      }
+
+      if(expanded.some(x=>x.fromAllPack) && parsed.length!==56){
+        throw new Error(`ONE-SHOT 驗證失敗：預期 56 個商品系列，實際 ${parsed.length} 個`);
       }
 
       parsed.sort((a,b)=>{
