@@ -804,6 +804,7 @@
       <button type="button" class="btn" id="pmkCatalogSeriesLoadBtnV8" style="background:#2563eb;color:#fff">依索引匯入系列 JSON</button>
       <input id="pmkCatalogSeriesFileV8" type="file" accept=".json,application/json" hidden>
       <button type="button" class="btn green" id="pmkCatalogBatchLoadBtnV13">一次匯入多系列 JSON</button>
+      <button type="button" class="btn" id="pmkCatalogMergeExistingBtnV14" style="background:#0f766e">合併目前已建系列成單筆</button>
       <input id="pmkCatalogBatchFilesV13" type="file" accept=".json,application/json" multiple hidden>
     </div>
   </div>
@@ -5624,6 +5625,8 @@ function pmkCatalogFindIndexMatchV13(payload){
 }
 function pmkCatalogEnsureMasterV13(){
   if(PMK_CATALOG_META_V1?.mode==='catalog_master'&&PMK_CATALOG_META_V1?.master_scope==='supplier')return;
+  const existing=(products||[]).find(p=>!p?.catalog_merged_into&&p?.catalog_meta?.mode==='catalog_master'&&p?.catalog_meta?.master_scope==='supplier');
+  if(existing){fill(existing);if(PMK_CATALOG_META_V1?.mode==='catalog_master'&&PMK_CATALOG_META_V1?.master_scope==='supplier')return}
   clearForm();
   const id=pmkCatalogMasterIdentityV13();
   const firstGroup=PMK_CATALOG_INDEX_V8?.groups?.[0]||{};
@@ -5692,15 +5695,72 @@ function pmkCatalogIndexRenderV8(){
   ss.innerHTML=items.length?items.map((x,i)=>`<option value="${i}" ${i===si?'selected':''}>${String(x.catalog_page||'').padStart(2,'0')}｜${esc(x.public_name||'未命名系列')}</option>`).join(''):'<option>此分類沒有系列</option>';
   if(info){
     info.innerHTML=item
-      ? `<b>${esc(item.public_name||'')}</b><br>型錄頁：${esc(String(item.catalog_page||''))}｜PDF頁：${esc(String(item.pdf_page||''))}<br><span style="color:#475569">此索引項目對應一個商品家族；匯入其系列 JSON 後建立 1 個父商品 + N 個 Variation。</span>`
+      ? `<b>${esc(item.public_name||'')}</b><br>型錄頁：${esc(String(item.catalog_page||''))}｜PDF頁：${esc(String(item.pdf_page||''))}<br><span style="color:#475569">此索引項目是型錄主檔內的一個系列；系列 JSON 只併入同一筆型錄主檔，不另建父商品。</span>`
       : '此分類沒有可匯入系列。';
   }
   PMK_CATALOG_INDEX_SELECTION_V8={group:gi,series:si};
 }
+
+/* CATALOG CORE V14 — existing series -> ONE visible master; NO DELETE. */
+const PMK_CATALOG_SERIES_MAP_V14=[
+ {page:'1',code:'01',name:'單齒螺紋銑刀'},{page:'2',code:'02',name:'單齒螺紋銑刀-鈦合金/高溫合金'},
+ {page:'3',code:'03',name:'單齒加長螺紋銑刀'},{page:'4',code:'04',name:'單齒鋼用範圍螺紋銑刀'},
+ {page:'5',code:'05',name:'單齒鋼用範圍螺紋銑刀-避空加長'},{page:'6',code:'06',name:'單齒範圍螺紋銑刀-鈦合金/高溫合金'},
+ {page:'7',code:'07',name:'單齒DLC七彩鋁用範圍螺紋銑刀'},{page:'8',code:'08',name:'單齒55°英制範圍螺紋銑刀'},
+ {page:'9',code:'09',name:'30°梯形螺紋銑刀'},{page:'10',code:'10',name:'29°愛克母螺紋銑刀'},
+ {page:'11',code:'11',name:'80°PG德標螺紋銑刀'}];
+function pmkCatalogNormNameV14(v){return String(v||'').trim().replace(/[－—–]/g,'-').replace(/\s+/g,'').toLowerCase()}
+function pmkCatalogSeriesDefForProductV14(p){
+ const n=pmkCatalogNormNameV14(p?.name||p?.display_name||'');
+ let hit=PMK_CATALOG_SERIES_MAP_V14.find(x=>pmkCatalogNormNameV14(x.name)===n);if(hit)return hit;
+ const ref=String(p?.external_id||p?.sku||p?.source?.item_id||'').toUpperCase();
+ const m=ref.match(/CAT-(?:G00-)?P(\d{1,2})\b/);if(m){hit=PMK_CATALOG_SERIES_MAP_V14.find(x=>x.page===String(Number(m[1])));if(hit)return hit}
+ const pg=p?.catalog_meta?.catalog_index?.catalog_page;if(pg){hit=PMK_CATALOG_SERIES_MAP_V14.find(x=>x.page===String(Number(pg)));if(hit)return hit}
+ return null;
+}
+function pmkCatalogExistingCandidatesV14(){return (products||[]).filter(p=>!p?.catalog_merged_into&&pmkCatalogSeriesDefForProductV14(p))}
+function pmkCatalogVariationKeyV14(v){const t=v?.technical_params||{};return String(t.catalog_series_page||'')+'|'+String(v?.sku||'').trim().toUpperCase()+'|'+JSON.stringify(v?.attributes||{})}
+function pmkCatalogMergeVariationRowsV14(rows){const out=[],seen=new Set();for(const v of rows){const k=pmkCatalogVariationKeyV14(v);if(seen.has(k))continue;seen.add(k);out.push(v)}return out}
+function pmkCatalogSeriesMetaFromProductV14(p,def){
+ const old=p?.catalog_meta||{};for(const g of (old.catalog_groups||[])){const f=(g.series||[]).find(x=>String(Number(x.catalog_page||0))===def.page);if(f)return JSON.parse(JSON.stringify(f))}
+ const h=old.catalog_header||{};return {catalog_page:def.page,pdf_page:String(Number(def.page)+5),public_name:def.name,public_name_en:'',
+ catalog_header:{features:Array.isArray(h.features)?h.features:[],materials:Array.isArray(h.materials)?h.materials:[],unit:String(h.unit||'MM'),diagram_image:String(h.diagram_image||'')},
+ technical_schema:Array.isArray(old.technical_schema)?old.technical_schema:[],variation_skus:(p.variations||[]).map(v=>String(v?.sku||'').trim()).filter(Boolean)};
+}
+async function pmkCatalogMergeExistingV14(){
+ const candidates=pmkCatalogExistingCandidatesV14().sort((a,b)=>Number(pmkCatalogSeriesDefForProductV14(a)?.page||99)-Number(pmkCatalogSeriesDefForProductV14(b)?.page||99));
+ if(candidates.length<2)return alert(`目前找到 ${candidates.length} 筆可合併系列；至少需要 2 筆。`);
+ const primary=candidates.find(p=>pmkCatalogSeriesDefForProductV14(p)?.page==='1')||candidates[0], extras=candidates.filter(p=>String(p.id)!==String(primary.id));
+ const defs=candidates.map(p=>pmkCatalogSeriesDefForProductV14(p)), total=candidates.reduce((n,p)=>n+(p.variations?.length||0),0);
+ if(!confirm(`將目前 ${candidates.length} 筆系列併成 1 筆型錄主檔。\n\n保留主資料：${primary.name}\n系列：${defs.map(x=>x.code).join('、')}\n目前規格：約 ${total} 筆\n\n• 不刪除任何原資料\n• 01 改為型錄主檔\n• 其餘完整封存並下架\n• 商品清單只顯示合併後 1 筆\n\n確定執行？`))return;
+ setStatus(`⏳ 正在把 ${candidates.length} 筆系列併入單一型錄主檔…`);
+ const id=pmkCatalogMasterIdentityV13(), merged=JSON.parse(JSON.stringify(primary)), allVars=[],series=[];
+ for(const p of candidates){
+  const def=pmkCatalogSeriesDefForProductV14(p), vars=JSON.parse(JSON.stringify(p.variations||[]));
+  for(const v of vars){v.technical_params={...(v.technical_params||{}),catalog_master:true,catalog_master_sku:id.master_sku,catalog_group_code:'01',catalog_group_name:'鎢鋼單齒螺紋銑刀',catalog_series_page:def.page,catalog_series_pdf_page:String(Number(def.page)+5),catalog_series_name:def.name};allVars.push(v)}
+  const sm=pmkCatalogSeriesMetaFromProductV14(p,def);sm.variation_skus=vars.map(v=>String(v?.sku||'').trim()).filter(Boolean);series.push(sm);
+ }
+ series.sort((a,b)=>Number(a.catalog_page||0)-Number(b.catalog_page||0));
+ const union=[],keys=new Set();for(const sm of series)for(const c of (sm.technical_schema||[])){const k=String(c?.key||'').trim();if(k&&!keys.has(k)){keys.add(k);union.push(c)}}
+ merged.name='鎢鋼單齒螺紋銑刀';merged.display_name='鎢鋼單齒螺紋銑刀';merged.product_type='variable';merged.sku=id.master_sku;merged.sku_manual_locked=true;merged.is_active=true;
+ merged.variations=pmkCatalogMergeVariationRowsV14(allVars);
+ const vals=[...new Set(merged.variations.map(v=>String(v?.sku||'').trim()).filter(Boolean))];
+ merged.attributes=[{name:'型號',values:vals}];merged.option_groups=[{name:'型號',required:true,values:vals}];
+ merged.catalog_meta={version:4,mode:'catalog_master',master_scope:'supplier',master_sku:id.master_sku,public_name:'鎢鋼單齒螺紋銑刀',public_name_en:'',hide_supplier_brand:true,hide_supplier_name:true,
+ catalog_groups:[{group_code:'01',public_group_name:'鎢鋼單齒螺紋銑刀',series}],technical_schema:union,variation_count:merged.variations.length,
+ merged_source_ids:extras.map(x=>String(x.id)),merged_at:new Date().toISOString(),internal_source:{supplier_brand:id.supplier_brand,supplier_name:id.supplier_name}};
+ merged.catalog_merge_history=[...(primary.catalog_merge_history||[]),{merged_at:new Date().toISOString(),kept_id:String(primary.id),source_ids:candidates.map(x=>String(x.id)),source_names:candidates.map(x=>String(x.name||'')),mode:'non_destructive_archive'}];
+ await productAdminPost('/api/bw-product-save',{id:primary.id,product:merged});
+ for(const p of extras){await productAdminPost('/api/bw-product-save',{id:p.id,product:{...p,is_active:false,catalog_merged_into:String(primary.id),catalog_merged_into_sku:id.master_sku,catalog_merged_at:new Date().toISOString(),catalog_archive:true}})}
+ await load();setStatus(`✅ 已併成單筆：1 個型錄主檔｜${series.length} 系列｜${merged.variations.length} 規格。原 ${extras.length} 筆沒有刪除，已完整封存。`);
+ alert(`完成。\n現在商品清單只顯示 1 筆「鎢鋼單齒螺紋銑刀」。\n原 ${extras.length} 筆沒有刪除，已下架封存。`);
+}
+
 function pmkCatalogIndexBindV8(){
   const loadBtn=$('pmkCatalogIndexLoadBtnV8'), idxFile=$('pmkCatalogIndexFileV8');
   const seriesBtn=$('pmkCatalogSeriesLoadBtnV8'), seriesFile=$('pmkCatalogSeriesFileV8');
   const batchBtn=$('pmkCatalogBatchLoadBtnV13'), batchFiles=$('pmkCatalogBatchFilesV13');
+  const mergeExistingBtn=$('pmkCatalogMergeExistingBtnV14');
   const gs=$('pmkCatalogGroupSelectV8'), ss=$('pmkCatalogSeriesSelectV8');
   if(loadBtn)loadBtn.onclick=()=>{if(idxFile){idxFile.value='';idxFile.click()}};
   if(idxFile)idxFile.onchange=async()=>{
@@ -5716,6 +5776,7 @@ function pmkCatalogIndexBindV8(){
   if(ss)ss.onchange=()=>{PMK_CATALOG_INDEX_SELECTION_V8.series=Number(ss.value||0);pmkCatalogIndexRenderV8()};
   if(seriesBtn)seriesBtn.onclick=()=>{if(seriesFile){seriesFile.value='';seriesFile.click()}};
   if(batchBtn)batchBtn.onclick=()=>{if(batchFiles){batchFiles.value='';batchFiles.click()}};
+  if(mergeExistingBtn)mergeExistingBtn.onclick=()=>pmkCatalogMergeExistingV14().catch(e=>{setStatus('❌ 型錄合併失敗：'+String(e?.message||e));alert('型錄合併失敗：'+String(e?.message||e))});
   if(batchFiles)batchFiles.onchange=async()=>{try{await pmkCatalogBatchImportV13(batchFiles.files)}catch(e){alert('多系列匯入失敗：'+String(e?.message||e))}finally{batchFiles.value=''}};
   if(seriesFile)seriesFile.onchange=async()=>{
     try{
@@ -5867,8 +5928,9 @@ async function pmkCatalogBatchImportV13(files){
   const parsed=[];
   for(const f of list){const payload=JSON.parse(await f.text());const match=pmkCatalogFindIndexMatchV13(payload);if(!match)throw new Error(`${f.name}：找不到對應型錄索引`);parsed.push({f,payload,match})}
   parsed.sort((a,b)=>Number(a.match.g?.group_code||0)-Number(b.match.g?.group_code||0)||Number(a.match.item?.catalog_page||0)-Number(b.match.item?.catalog_page||0));
-  // Build in memory only. Existing D1/R2 data is untouched until the normal Save button is pressed.
-  clearForm();PMK_CATALOG_META_V1=null;v54Variations=[];
+  // Reuse the existing visible catalog master; never create another parent row.
+  const existing=(products||[]).find(p=>!p?.catalog_merged_into&&p?.catalog_meta?.mode==='catalog_master'&&p?.catalog_meta?.master_scope==='supplier');
+  if(existing)fill(existing);else{clearForm();PMK_CATALOG_META_V1=null;v54Variations=[];}
   for(let i=0;i<parsed.length;i++){const x=parsed[i];pmkCatalogIndexSetStatusV8(`⏳ ${i+1}/${parsed.length} 併入：${x.match.item?.public_name||x.f.name}`);pmkCatalogApplyToFormV1(x.payload,{match:x.match})}
   const seriesCount=(PMK_CATALOG_META_V1?.catalog_groups||[]).reduce((n,g)=>n+(g.series?.length||0),0);
   pmkCatalogIndexSetStatusV8(`✅ 已組成 1 個型錄主檔：${seriesCount} 系列、${v54Variations.length} 規格。尚未寫入現有資料；請確認後再按原本「儲存商品」。`);
@@ -6153,6 +6215,7 @@ function filteredProducts(){
   const q=String($('q')?.value||'').trim().toLowerCase(),cat=String($('productCategoryFilter')?.value||''),st=String($('productStatusFilter')?.value||'');
   const tf=pmk577TaxFilter;
   const list=products.filter(p=>{
+    if(p?.catalog_merged_into)return false;
     if(tf.category&&String(p.category||'')!==tf.category)return false;
     if(tf.subcategory&&String(p.subcategory||'')!==tf.subcategory)return false;
     if(tf.detail&&String(p.subcategory_detail||'')!==tf.detail)return false;
