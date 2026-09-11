@@ -819,12 +819,12 @@
   <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
     <div>
       <div style="font-weight:950;color:#1d4ed8">📚 型錄索引｜系列管理</div>
-      <div class="muted" style="font-size:11px;margin-top:3px">索引只管理「型錄分類 → 商品系列 → 對應 JSON」；真正規格仍在各系列 JSON。</div>
+      <div class="muted" style="font-size:11px;margin-top:3px">先匯入完整 catalog_index.json；再一次全選 01～05 五個大類包。已存在系列自動略過，不覆蓋手工資料。</div>
     </div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button type="button" class="btn gray" id="pmkCatalogIndexLoadBtnV8">匯入 catalog_index.json</button>
       <input id="pmkCatalogIndexFileV8" type="file" accept=".json,application/json" hidden>
-      <button type="button" class="btn" id="pmkCatalogSeriesLoadBtnV8" style="background:#2563eb;color:#fff">匯入系列 JSON（可多選）</button>
+      <button type="button" class="btn" id="pmkCatalogSeriesLoadBtnV8" style="background:#2563eb;color:#fff">匯入大類／系列 JSON（可多選）</button>
       <input id="pmkCatalogSeriesFileV8" type="file" accept=".json,application/json" multiple hidden>
     </div>
   </div>
@@ -5899,6 +5899,36 @@ function pmkCatalogIndexFindMatchV60(payload){
   }
   return null;
 }
+
+function pmkCatalogSeriesExistsV612(match){
+  if(!match?.g||!match?.item||PMK_CATALOG_META_V1?.mode!=='catalog_master')return false;
+  return !!pmkCatalogFindSeriesV60(
+    PMK_CATALOG_META_V1,
+    String(match.g.group_code||'').padStart(2,'0'),
+    String(match.item.catalog_page||'').padStart(2,'0')
+  );
+}
+function pmkCatalogExpandImportFileV612(payload,fileName){
+  if(payload?.import_mode==='catalog_group_pack' || payload?.schema_version==='pmk_catalog_group_pack_v1'){
+    const arr=Array.isArray(payload.series_payloads)?payload.series_payloads:[];
+    if(!arr.length)throw new Error(`${fileName}：大類包沒有 series_payloads`);
+    return arr.map((seriesPayload,i)=>({
+      payload:seriesPayload,
+      sourceFile:fileName,
+      fromGroupPack:true,
+      packGroup:payload.group||{},
+      packIndex:i
+    }));
+  }
+  return [{
+    payload,
+    sourceFile:fileName,
+    fromGroupPack:false,
+    packGroup:null,
+    packIndex:0
+  }];
+}
+
 function pmkCatalogIndexBindV8(){
   const loadBtn=$('pmkCatalogIndexLoadBtnV8'), idxFile=$('pmkCatalogIndexFileV8');
   const seriesBtn=$('pmkCatalogSeriesLoadBtnV8'), seriesFile=$('pmkCatalogSeriesFileV8');
@@ -5930,29 +5960,55 @@ function pmkCatalogIndexBindV8(){
     try{
       const files=[...(seriesFile.files||[])];
       if(!files.length)return;
-      const parsed=[];
+      if(!PMK_CATALOG_INDEX_V8?.groups?.length)throw new Error('請先匯入完整 catalog_index.json');
+
+      const expanded=[];
       for(const f of files){
-        const payload=JSON.parse(await f.text());
-        const match=pmkCatalogIndexFindMatchV60(payload);
-        if(!match)throw new Error(`${f.name}：找不到 catalog_index 對應系列`);
-        parsed.push({f,payload,match});
+        const raw=JSON.parse(await f.text());
+        expanded.push(...pmkCatalogExpandImportFileV612(raw,f.name));
       }
+
+      const parsed=[];
+      for(const x of expanded){
+        const match=pmkCatalogIndexFindMatchV60(x.payload);
+        if(!match){
+          throw new Error(`${x.sourceFile}：找不到 catalog_index 對應系列「${x.payload?.product?.public_name||''}」`);
+        }
+        parsed.push({...x,match});
+      }
+
       parsed.sort((a,b)=>{
-        const ga=Number(a.match.g?.group_code||0), gb=Number(b.match.g?.group_code||0);
+        const ga=Number(a.match.g?.group_code||0),gb=Number(b.match.g?.group_code||0);
         if(ga!==gb)return ga-gb;
         return Number(a.match.item?.catalog_page||0)-Number(b.match.item?.catalog_page||0);
       });
 
+      let imported=0,skipped=0;
+      const skippedNames=[];
+
       for(let i=0;i<parsed.length;i++){
         const x=parsed[i];
+
+        // 大類包只追加缺少系列：現有系列完全不覆蓋。
+        if(x.fromGroupPack && pmkCatalogSeriesExistsV612(x.match)){
+          skipped++;
+          skippedNames.push(`${String(x.match.item.catalog_page||'').padStart(2,'0')} ${x.match.item.public_name||''}`);
+          pmkCatalogIndexSetStatusV8(`⏭ ${i+1}/${parsed.length}｜已存在略過：${x.match.item.public_name||''}`);
+          continue;
+        }
+
         PMK_CATALOG_INDEX_SELECTION_V8={group:x.match.gi,series:x.match.si};
         pmkCatalogIndexRenderV8();
         pmkCatalogApplyToFormV1(x.payload);
+        imported++;
         pmkCatalogIndexSetStatusV8(`⏳ ${i+1}/${parsed.length}｜${x.match.item.public_name}`);
       }
-      pmkCatalogIndexSetStatusV8(`✅ 已匯入 ${parsed.length} 個系列到同一型錄主檔；目前共 ${(PMK_CATALOG_META_V1?.catalog_groups||[]).reduce((n,g)=>n+(g.series?.length||0),0)} 個系列。`);
+
+      const total=(PMK_CATALOG_META_V1?.catalog_groups||[]).reduce((n,g)=>n+(g.series?.length||0),0);
+      pmkCatalogIndexSetStatusV8(`✅ 匯入完成：新增 ${imported} 個系列，略過既有 ${skipped} 個；型錄主檔目前 ${total} 個系列。`);
+      alert(`型錄匯入完成\n新增：${imported} 個系列\n既有略過：${skipped} 個\n目前總系列：${total}${skippedNames.length?`\n\n保留未覆蓋：\n${skippedNames.join('\n')}`:''}`);
     }catch(e){
-      alert('系列 JSON 匯入失敗：'+String(e?.message||e));
+      alert('型錄 JSON 匯入失敗：'+String(e?.message||e));
     }finally{
       if(seriesFile)seriesFile.value='';
     }
