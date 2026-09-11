@@ -5591,10 +5591,11 @@ function pmkCatalogImportNormalizeV1(payload){
 }
 
 function pmkCatalogFamilyCodeV2(product){
-  const page=String(product?.internal_source?.catalog_page||'').padStart(2,'0');
-  const n=String(product?.public_name||product?.name||'CATALOG')
-    .replace(/\s+/g,'').replace(/[^\u4e00-\u9fffA-Za-z0-9_-]/g,'').slice(0,20);
-  return `CAT-P${page}-${n||'PRODUCT'}`;
+  const page=String(product?.internal_source?.catalog_page||'').replace(/\D/g,'').padStart(2,'0')||'00';
+  const gi=Number(PMK_CATALOG_INDEX_SELECTION_V8?.group||0);
+  const g=PMK_CATALOG_INDEX_V8?.groups?.[gi];
+  const group=String(g?.group_code||'00').replace(/\D/g,'').padStart(2,'0');
+  return `CAT-G${group}-P${page}`;
 }
 
 
@@ -5686,43 +5687,27 @@ async function pmkCatalogHeaderDiagramUploadV7(file){
   try{
     if(file.size>8*1024*1024)throw new Error('圖片不可超過 8MB');
     const st=$('pmkCatalogImportStatus');
-    if(st)st.textContent='⏳ 正在準備型錄系列並上傳表頭圖片…';
-
-    // 型錄表頭圖片仍沿用既有 /api/upload，但一定使用 D1 真實商品 id。
-    // 新匯入的 02~11 系列尚未建立商品時，先靜默建立「下架草稿」，
-    // 避免把 master_sku / external_id / 臨時 bw-* 當 product_id 而觸發 PRODUCT_ID_INVALID。
-    let uploadProductId=String(editingId||'').trim();
-    if(!uploadProductId){
-      pmkCatalogHeaderSyncMetaV3();
-      let draft=formData();
-      draft=pmkApplyCrownJcdSkuV589(draft);
-      draft=pmkCleanVariationsForSaveV21(draft);
-      delete draft._variation_drafts_skipped;
-      draft=pmkSequenceDuplicateVariationSkusV570(draft);
-      draft=pricingApplyProduct(draft);
-      draft.is_active=false;
-      if(!draft.name)throw new Error('請先匯入／填入系列名稱');
-      if(st)st.textContent='⏳ 此系列尚未建立，先建立下架草稿…';
-      const saved=await productAdminPost('/api/bw-product-save',{id:'',product:draft});
-      uploadProductId=String(saved?.id||saved?.product_id||saved?.product?.id||saved?.data?.id||'').trim();
-      if(!uploadProductId){
-        // 某些舊 API 不回傳 id；重新讀商品後用 master_sku / name 找剛建立的系列。
-        await load();
-        const masterSku=String(draft?.catalog_meta?.master_sku||draft?.sku||'').trim();
-        const found=products.find(x=>masterSku&&String(x?.catalog_meta?.master_sku||x?.sku||'').trim()===masterSku)
-          || products.find(x=>String(x?.name||'').trim()===String(draft.name||'').trim());
-        uploadProductId=String(found?.id||'').trim();
-      }
-      if(!uploadProductId)throw new Error('系列草稿已建立，但無法取得商品 ID，請重新開啟此系列再上傳圖片');
-      editingId=uploadProductId;
-    }
     if(st)st.textContent='⏳ 正在上傳型錄表頭圖片…';
+
+    let uploadProductId=String($('external_id')?.value||'').trim();
+    if(!uploadProductId && PMK_CATALOG_META_V1?.mode==='catalog_master'){
+      uploadProductId=String(PMK_CATALOG_META_V1.master_sku||'').trim();
+      if(uploadProductId && $('external_id'))$('external_id').value=uploadProductId;
+    }
+    if(!uploadProductId){
+      uploadProductId='catalog-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);
+      if($('external_id'))$('external_id').value=uploadProductId;
+    }
+    if(!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(uploadProductId)){
+      throw new Error('BookWide 商品 ID 格式不正確：'+uploadProductId);
+    }
+
     const url=await pmkUploadDetailPasteImageV1(file,0,uploadProductId);
     if(!PMK_CATALOG_META_V1)PMK_CATALOG_META_V1={mode:'catalog_master',catalog_header:{}};
     if(!PMK_CATALOG_META_V1.catalog_header)PMK_CATALOG_META_V1.catalog_header={};
     PMK_CATALOG_META_V1.catalog_header.diagram_image=url;
     pmkCatalogHeaderDiagramRenderV7(url);
-    if(st)st.textContent='✅ 型錄表頭圖片已上傳；儲存商品後前台會顯示在規格表上方。';
+    if(st)st.textContent='✅ 型錄表頭圖片已上傳；主圖、圖庫與商品資料未變更。按「更新商品」正式儲存。';
   }catch(e){
     alert('型錄表頭圖片上傳失敗：'+String(e?.message||e));
   }
@@ -5790,9 +5775,38 @@ function pmkCatalogHeaderSyncMetaV3(){
 function pmkCatalogApplyToFormV1(payload){
   const {product,schema,name}=pmkCatalogImportNormalizeV1(payload);
 
-  // 原廠型錄 = 建立「1 個商品家族 + N 個 Variation」
-  // 不把每個原廠型號拆成獨立商品。
+  const currentBeforeImport=editingId?products.find(x=>String(x.id)===String(editingId)):null;
+  const currentCatalogName=String(
+    currentBeforeImport?.catalog_meta?.public_name||
+    currentBeforeImport?.display_name||
+    currentBeforeImport?.name||''
+  ).trim();
+  const sameFamily=!!currentBeforeImport && currentCatalogName===String(name||'').trim();
+  const protectedBeforeImport=sameFamily?{
+    editingId:String(editingId||''),
+    external_id:String($('external_id')?.value||currentBeforeImport?.external_id||''),
+    image_url:String($('image_url')?.value||currentBeforeImport?.image_url||''),
+    gallery_urls:String($('gallery_urls')?.value||((currentBeforeImport?.gallery_urls||[]).join('\n'))||''),
+    video_url:String($('video_url')?.value||currentBeforeImport?.video_url||''),
+    detail_description:String($('detail_description')?.value||currentBeforeImport?.detail_description||''),
+    price:String($('price')?.value||currentBeforeImport?.price||0),
+    stock_qty:String($('stock_qty')?.value||currentBeforeImport?.stock_qty||0),
+    stock_tracking_enabled:String($('stock_tracking_enabled')?.value||currentBeforeImport?.stock_tracking_enabled||false)
+  }:null;
+
   clearForm();
+  if(protectedBeforeImport){
+    editingId=protectedBeforeImport.editingId;
+    if($('external_id'))$('external_id').value=protectedBeforeImport.external_id;
+    if($('image_url'))$('image_url').value=protectedBeforeImport.image_url;
+    if($('gallery_urls'))$('gallery_urls').value=protectedBeforeImport.gallery_urls;
+    if($('video_url'))$('video_url').value=protectedBeforeImport.video_url;
+    if($('detail_description'))$('detail_description').value=protectedBeforeImport.detail_description;
+    if($('price'))$('price').value=protectedBeforeImport.price;
+    if($('stock_qty'))$('stock_qty').value=protectedBeforeImport.stock_qty;
+    if($('stock_tracking_enabled'))$('stock_tracking_enabled').value=protectedBeforeImport.stock_tracking_enabled;
+    renderMainImageV547(); galleryPreviewV54(); renderVideoV552(); pmkLoadDetailEditorV1();
+  }
 
   const familySku=pmkCatalogFamilyCodeV2(product);
   $('product_type').value='variable';
@@ -5800,7 +5814,7 @@ function pmkCatalogApplyToFormV1(payload){
   $('brand').value='';                    // 前台禁止供應商品牌
   $('name').value=name;                   // 父商品固定為系列名稱
   if($('display_name'))$('display_name').value=name;
-  if($('external_id'))$('external_id').value=familySku;
+  if($('external_id'))if(!$('external_id').value.trim())$('external_id').value=familySku;
 
   refreshCategorySelect(product.category||'切削刀具');
   refreshSubcategorySelect(product.subcategory||'螺紋加工');
