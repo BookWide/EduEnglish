@@ -4153,34 +4153,33 @@ async function boot(){try{
   const t=localStorage.getItem(PMK_AUTH_KEY)||'';
   const headers=t?{Authorization:'Bearer '+t}:{};
 
-  // V3.34 BACKEND PRICE ALIGN：前台依後台 sale_price / price / source_price(CNY×10) 顯示。
-  // V3.32 MASTER ONLY：
-  // 前台商品唯一資料來源 = /api/pmk-products。
-  // 不再先讀 /api/pmk-product，也不再 merge 第二份 variation。
-  const master=await pmkFetchJson(API+'/api/pmk-products',headers);
-  const rows=Array.isArray(master.products)?master.products:[];
-  PMK_ADDON_MASTER=rows;
+  // V67 CORE ALIGN:
+  // 1) Resolve the requested product through the Worker's canonical single-product API.
+  // 2) Fetch the catalogue only as an add-on library; never use it to re-resolve/merge the main product.
   const requestedKey=String(productId||'').trim();
-  const q=requestedKey.toLowerCase();
+  if(!requestedKey)throw new Error('缺少商品代碼');
 
-  P=rows.find(p=>{
-    const vars=Array.isArray(p?.variations)?p.variations:[];
-    const keys=[
-      p?.id,p?.external_id,p?.sku,
-      ...vars.map(v=>v?.id),
-      ...vars.map(v=>v?.sku)
-    ].map(x=>String(x||'').trim().toLowerCase()).filter(Boolean);
-    return keys.includes(q);
-  })||null;
-
-  ALL=P?[P]:[];
+  const detail=await pmkFetchJson(API+'/api/pmk-product?product='+encodeURIComponent(requestedKey),headers);
+  P=detail?.product||null;
   if(!P)throw new Error('找不到商品');
+  ALL=[P];
 
-  // 目前 variation 只由 master 的 sku / id 決定。
-  // source_sku_id 只保留作後台來源追蹤，前台不參與選規格。
+  // Add-on selector still needs the active catalogue, but it is display-only here.
+  // Failure must not block the main product page.
+  try{
+    const addonMaster=await pmkFetchJson(API+'/api/pmk-products',headers);
+    PMK_ADDON_MASTER=Array.isArray(addonMaster?.products)?addonMaster.products:[];
+  }catch(addonErr){
+    console.warn('[V67 addon master fallback]',addonErr);
+    PMK_ADDON_MASTER=[];
+  }
+
+  // Variation selection uses the canonical product returned by /api/pmk-product.
+  // source_sku_id remains backend trace data only.
   const vars=Array.isArray(P.variations)?P.variations:[];
+  const requestedLower=requestedKey.toLowerCase();
   selectedVariation=vars.find(v=>
-    [v?.sku,v?.id].map(x=>String(x||'').trim()).includes(requestedKey)
+    [v?.sku,v?.id].map(x=>String(x||'').trim().toLowerCase()).includes(requestedLower)
   )||null;
   selected=selectedVariation?{...(selectedVariation.attributes||{})}:{};
 
