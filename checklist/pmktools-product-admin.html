@@ -5872,14 +5872,31 @@ function pmkCatalogIndexFallbackFromMetaV611(meta){
 }
 function pmkCatalogRestoreIndexV611(){
   if(PMK_CATALOG_META_V1?.mode!=='catalog_master')return false;
-  const saved=PMK_CATALOG_META_V1.catalog_index_master;
-  if(saved?.groups?.length){
-    PMK_CATALOG_INDEX_V8=pmkCatalogIndexCloneV611(saved);
+
+  const owned=new Set(
+    (PMK_CATALOG_META_V1.catalog_groups||[])
+      .map(g=>String(g?.group_code||'').padStart(2,'0'))
+      .filter(Boolean)
+  );
+
+  const clamp=(idx)=>{
+    if(!idx?.groups?.length)return null;
+    const out=pmkCatalogIndexCloneV611(idx);
+    out.groups=(out.groups||[]).filter(g=>owned.has(String(g?.group_code||'').padStart(2,'0')));
+    return out.groups.length?out:null;
+  };
+
+  const saved=clamp(PMK_CATALOG_META_V1.catalog_index_master);
+  if(saved){
+    PMK_CATALOG_INDEX_V8=saved;
+    PMK_CATALOG_INDEX_SELECTION_V8={group:0,series:0};
     return true;
   }
-  const fallback=pmkCatalogIndexFallbackFromMetaV611(PMK_CATALOG_META_V1);
-  if(fallback?.groups?.length){
+
+  const fallback=clamp(pmkCatalogIndexFallbackFromMetaV611(PMK_CATALOG_META_V1));
+  if(fallback){
     PMK_CATALOG_INDEX_V8=fallback;
+    PMK_CATALOG_INDEX_SELECTION_V8={group:0,series:0};
     return true;
   }
   return false;
@@ -5998,6 +6015,16 @@ function pmkCatalogIndexBindV8(){
     try{
       const f=idxFile.files?.[0]; if(!f)return;
       PMK_CATALOG_INDEX_V8=pmkCatalogIndexNormalizeV8(JSON.parse(await f.text()));
+
+      // 對真正已切分的 catalog master，只保留這個商品實際擁有的大類。
+      if(PMK_CATALOG_META_V1?.mode==='catalog_master'){
+        const owned=new Set((PMK_CATALOG_META_V1.catalog_groups||[]).map(g=>String(g?.group_code||'').padStart(2,'0')));
+        PMK_CATALOG_INDEX_V8={
+          ...PMK_CATALOG_INDEX_V8,
+          groups:(PMK_CATALOG_INDEX_V8.groups||[]).filter(g=>owned.has(String(g?.group_code||'').padStart(2,'0')))
+        };
+      }
+
       PMK_CATALOG_INDEX_SELECTION_V8={group:0,series:0};
       pmkCatalogPersistIndexV611();
       pmkCatalogIndexRenderV8();
@@ -6612,6 +6639,14 @@ function pmkBsktSplitPayloadsV650(master){
   const thread=pmkDeepCloneV650(src);
   thread.catalog_meta=pmkDeepCloneV650(src.catalog_meta||{});
   thread.catalog_meta.catalog_groups=g0104;
+  if(thread.catalog_meta.catalog_index_master?.groups){
+    thread.catalog_meta.catalog_index_master={
+      ...thread.catalog_meta.catalog_index_master,
+      groups:thread.catalog_meta.catalog_index_master.groups.filter(g=>
+        ['01','02','03','04'].includes(String(g?.group_code||'').padStart(2,'0'))
+      )
+    };
+  }
   thread.catalog_meta.master_sku='CAT-BSKT';
   thread.catalog_meta.public_name='螺紋銑削型錄';
   thread.external_id='CAT-BSKT';
@@ -6637,6 +6672,14 @@ function pmkBsktSplitPayloadsV650(master){
   swiss.display_name='鎢鋼小徑鏜刀系列';
   swiss.catalog_meta=pmkDeepCloneV650(src.catalog_meta||{});
   swiss.catalog_meta.catalog_groups=g05;
+  if(swiss.catalog_meta.catalog_index_master?.groups){
+    swiss.catalog_meta.catalog_index_master={
+      ...swiss.catalog_meta.catalog_index_master,
+      groups:swiss.catalog_meta.catalog_index_master.groups.filter(g=>
+        String(g?.group_code||'').padStart(2,'0')==='05'
+      )
+    };
+  }
   swiss.catalog_meta.master_sku='CAT-BSKT-05';
   swiss.catalog_meta.public_name='鎢鋼小徑鏜刀系列';
   swiss.variations=v05;
@@ -7145,6 +7188,72 @@ function renderAddonLibraryV558(){
   box.innerHTML=rows.length?rows.map(p=>`<tr><td><img class="thumb" src="${esc(p.image_url||'')}"></td><td><b>${esc(p.name||'')}</b><br><small class="muted">${esc(p.external_id||p.id||'')}</small></td><td>NT$ ${Number(p.price||0).toLocaleString('zh-TW')}</td><td>${esc(p.category||'')}</td><td><span class="badge ${p.is_active!==false?'on':'off'}">${p.is_active!==false?'上架':'下架'}</span></td><td><button class="rowbtn" onclick="fill(products.find(x=>String(x.id)==='${esc(String(p.id))}'));v49SwitchModule('products');wc548OpenTab('addons')">編輯</button> <button class="rowbtn" onclick="toggle('${esc(String(p.id))}')">${p.is_active!==false?'下架':'上架'}</button></td></tr>`).join(''):'<tr><td colspan="6" class="muted">尚未建立共用加購商品。按「＋ 新增加購商品」建立一次，之後所有主商品都能引用。</td></tr>';
 }
 function newAddonProductV558(){clearForm();if($('is_addon_product'))$('is_addon_product').checked=true;v49SwitchModule('products');wc548OpenTab('addons');setStatus('新增加購子項：填名稱、價格、圖片後儲存；此商品不會單獨出現在前台商品庫。')}
+
+let PMK_BSKT_SPLIT_AUTO_RUNNING_V651=false;
+
+async function pmkEnsureBskt05RealBackendV651(){
+  if(PMK_BSKT_SPLIT_AUTO_RUNNING_V651)return false;
+
+  const master=(products||[]).find(p=>
+    String(p?.external_id||p?.sku||p?.id||'').toUpperCase()==='CAT-BSKT'
+  );
+  if(!master)return false;
+
+  const has05=(master?.variations||[]).some(v=>pmkBsktGroupCodeV650(v)==='05')
+    || (master?.catalog_meta?.catalog_groups||[]).some(g=>String(g?.group_code||'').padStart(2,'0')==='05');
+
+  const separate=(products||[]).find(p=>
+    String(p?.external_id||p?.sku||'').toUpperCase()==='CAT-BSKT-05'
+  );
+
+  // Already truly split.
+  if(!has05 && separate)return false;
+
+  // Cannot invent missing 05 data.
+  if(!has05 && !separate)return false;
+
+  PMK_BSKT_SPLIT_AUTO_RUNNING_V651=true;
+  try{
+    const {thread,swiss}=pmkBsktSplitPayloadsV650(master);
+
+    // Create/update real Swiss-tool product first.
+    await productAdminPost('/api/bw-product-save',{
+      id:separate?.id||'',
+      product:swiss
+    });
+
+    // Then remove group 05 from original master.
+    await productAdminPost('/api/bw-product-save',{
+      id:master.id||'',
+      product:thread
+    });
+
+    const fresh=await productAdminGet('/api/bw-products');
+    if(Array.isArray(fresh?.products))products=fresh.products;
+
+    const checkThread=(products||[]).find(p=>
+      String(p?.external_id||p?.sku||p?.id||'').toUpperCase()==='CAT-BSKT'
+    );
+    const check05=(products||[]).find(p=>
+      String(p?.external_id||p?.sku||'').toUpperCase()==='CAT-BSKT-05'
+    );
+
+    const remain05=(checkThread?.catalog_meta?.catalog_groups||[])
+      .filter(g=>String(g?.group_code||'').padStart(2,'0')==='05').length;
+    const real05=(check05?.catalog_meta?.catalog_groups||[])
+      .filter(g=>String(g?.group_code||'').padStart(2,'0')==='05').length;
+
+    if(remain05!==0 || real05===0){
+      throw new Error(`後台切分驗證失敗：CAT-BSKT 殘留05=${remain05}，CAT-BSKT-05=${real05}`);
+    }
+
+    setStatus('✅ 已自動完成真正後台切分：01～04=螺紋銑削；05=車削加工 > 走心機刀具');
+    return true;
+  }finally{
+    PMK_BSKT_SPLIT_AUTO_RUNNING_V651=false;
+  }
+}
+
 async function load(){
   const previousProducts=Array.isArray(products)?products.slice():[];
   const hasPrevious=previousProducts.length>0;
@@ -7174,6 +7283,14 @@ async function load(){
       }
 
       products=j.products;
+
+      // 舊 CAT-BSKT 若仍混著第 05 類，登入後台時直接做真正 R2 主檔切分。
+      // 切分完成後 products 會重新從 R2 讀回，因此後台分類數量與前台完全一致。
+      try{await pmkEnsureBskt05RealBackendV651();}catch(splitErr){
+        console.error('BSKT 05 auto split failed',splitErr);
+        setStatus('❌ BSKT 05 真正後台切分失敗：'+String(splitErr?.message||splitErr));
+      }
+
       render();
       renderAddonLibraryV558();
       renderCategories();
