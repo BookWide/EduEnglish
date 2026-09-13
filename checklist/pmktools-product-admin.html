@@ -827,7 +827,7 @@
       <button type="button" class="btn" id="pmkCatalogSeriesLoadBtnV8" style="background:#2563eb;color:#fff">匯入 01～05 全包 JSON</button>
       <input id="pmkCatalogSeriesFileV8" type="file" accept=".json,application/json" multiple hidden>
       <button type="button" class="btn green" id="pmkCatalogPriceSave0104V642">01～04 價格覆蓋＋儲存後台</button>
-      <button type="button" class="btn" id="pmkCatalogSplit05BackendV650" style="background:#7c3aed;color:#fff">05 真正移到後台｜走心機刀具</button>
+      <button type="button" class="btn" id="pmkCatalogSplit05BackendV650" style="background:#7c3aed;color:#fff">05 表頭＋估價＋真正後台｜走心機刀具</button>
     </div>
   </div>
   <div id="pmkCatalogIndexStatusV8" class="muted" style="font-size:11px;margin:8px 0 10px"></div>
@@ -6619,6 +6619,76 @@ function pmkBsktGroupCodeV650(v){
   return String(v?.technical_params?.catalog_group_code||'').padStart(2,'0');
 }
 
+function pmkBskt05NumV652(x){
+  const n=Number(String(x??'').replace(/[^0-9.+-]/g,''));
+  return Number.isFinite(n)?n:0;
+}
+function pmkBskt05FieldV652(v, keys){
+  const f=v?.technical_params?.catalog_fields||{};
+  for(const k of keys){ if(f[k]!==undefined && String(f[k]).trim()!=='') return f[k]; }
+  return '';
+}
+function pmkBskt05EstimateCnyV652(v){
+  const tp=v?.technical_params||{}, sc=String(tp.catalog_series_code||tp.catalog_page||'').padStart(2,'0');
+  const d1=pmkBskt05NumV652(pmkBskt05FieldV652(v,['d1','cutting_diameter','刃径d1','刃徑d1']));
+  const D =pmkBskt05NumV652(pmkBskt05FieldV652(v,['D','shank_diameter','柄径D','柄徑D']));
+  const L =pmkBskt05NumV652(pmkBskt05FieldV652(v,['L','overall_length','总长L','總長L']));
+  const L1=pmkBskt05NumV652(pmkBskt05FieldV652(v,['L1','clearance_length','避空长L1','避空長L1']));
+  const dia=D||Math.max(4,Math.ceil(d1||4));
+  let cny=28 + dia*4.5 + Math.max(0,(L||50)-50)*0.32 + Math.max(0,(L1||0)-10)*0.28;
+  // 05/33-56 各刀型加工複雜度；只是估價，不冒充原廠/淘寶實價。
+  let mult=1.0;
+  if(['35'].includes(sc)) mult=1.05;                         // 不開槽鏜刀
+  else if(['36','37','38','39','40'].includes(sc)) mult=1.28; // 內孔螺紋車刀
+  else if(['41','42','43','44','45','46','47'].includes(sc)) mult=1.18; // 槽刀/端面槽刀
+  else if(['48','49','50','51','52'].includes(sc)) mult=1.22; // 仿形/反向
+  else if(['53','54','55','56'].includes(sc)) mult=1.12;       // 倒角/立銑/鑽頭
+  return Math.max(30,Math.round(cny*mult));
+}
+function pmkBskt05NormalizeV652(product){
+  const p=pmkDeepCloneV650(product), groups=p?.catalog_meta?.catalog_groups||[], vars=p?.variations||[];
+  const ntrSchema=[
+    {key:'model',label:'型號',unit:''},{key:'d1',label:'刃徑 d1',unit:'mm'},
+    {key:'R',label:'R',unit:'mm'},{key:'Q',label:'切深 Q',unit:'mm'},
+    {key:'L1',label:'避空長 L1',unit:'mm'},{key:'D',label:'柄徑 D',unit:'mm'},
+    {key:'L',label:'總長 L',unit:'mm'}
+  ];
+  for(const g of groups){
+    if(String(g?.group_code||'').padStart(2,'0')!=='05')continue;
+    for(const ser of (g.series||[])){
+      const sc=String(ser?.catalog_page||ser?.series_code||'').padStart(2,'0');
+      if(['33','34'].includes(sc)) ser.technical_schema=pmkDeepCloneV650(ntrSchema);
+    }
+  }
+  for(const v of vars){
+    const tp=v.technical_params=v.technical_params||{};
+    if(String(tp.catalog_group_code||'').padStart(2,'0')!=='05')continue;
+    const sc=String(tp.catalog_series_code||tp.catalog_page||'').padStart(2,'0');
+    const f=tp.catalog_fields=tp.catalog_fields||{};
+    if(['33','34'].includes(sc)){
+      // 原廠 PDF 33/34：產品編碼就是 SKU；表格第二欄才是「型號」。避免前台出現兩個「型號」。
+      const aliases={
+        model:['model','thread_size','型号','型號'], d1:['d1','cutting_diameter','刃径d1','刃徑d1'],
+        R:['R','r','radius'], Q:['Q','q','cut_depth','切深Q'], L1:['L1','clearance_length','避空长L1','避空長L1'],
+        D:['D','shank_diameter','柄径D','柄徑D'], L:['L','overall_length','总长L','總長L']
+      };
+      const nf={};
+      for(const [k,ks] of Object.entries(aliases)) nf[k]=pmkBskt05FieldV652(v,ks);
+      tp.catalog_fields=nf;
+    }
+    const oldCny=Number(v.source_price||0), oldNtd=Number(v.sale_price||v.price||0);
+    if(!(oldCny>0) && !(oldNtd>0)){
+      const cny=pmkBskt05EstimateCnyV652(v), ntd=Math.round(cny*10);
+      v.source_price=cny; v.source_currency='CNY'; v.price=ntd; v.sale_price=ntd;
+      tp.market_price_rule='BSKT_05_ESTIMATE_CNY_X10';
+      tp.market_price_source_cny=cny; tp.market_price_estimated=true;
+    }
+  }
+  const pp=vars.map(v=>Number(v?.sale_price||v?.price||0)).filter(x=>x>0);
+  p.price=pp.length?Math.min(...pp):Number(p.price||0);
+  return p;
+}
+
 function pmkBsktSplitPayloadsV650(master){
   if(!master)throw new Error('找不到 CAT-BSKT 主檔');
 
@@ -6696,7 +6766,8 @@ function pmkBsktSplitPayloadsV650(master){
   swiss.source=pmkDeepCloneV650(src.source||{});
   if(swiss.source)swiss.source.item_id='CAT-BSKT-05';
 
-  return {thread,swiss,v0104:v0104.length,v05:v05.length};
+  const swissNormalized=pmkBskt05NormalizeV652(swiss);
+  return {thread,swiss:swissNormalized,v0104:v0104.length,v05:v05.length};
 }
 
 async function pmkSplitBskt05ToBackendV650(){
@@ -6715,6 +6786,19 @@ async function pmkSplitBskt05ToBackendV650(){
     );
   }
   if(!master)throw new Error('後台找不到 CAT-BSKT');
+
+  const already05=(products||[]).find(p=>String(p?.external_id||p?.sku||'').toUpperCase()==='CAT-BSKT-05');
+  const masterHas05=(master?.variations||[]).some(v=>pmkBsktGroupCodeV650(v)==='05');
+  if(already05 && !masterHas05){
+    const fixed05=pmkBskt05NormalizeV652(already05);
+    setStatus('⏳ 正在補正 05 原廠表頭與缺價估價，並儲存真正後台…');
+    await productAdminPost('/api/bw-product-save',{id:already05.id||'',product:fixed05});
+    await load();
+    const cnt=(fixed05.variations||[]).filter(v=>Number(v.source_price||0)>0).length;
+    setStatus(`✅ 05 已補正：NTR 33/34 原廠表頭＋缺價估價；後台 ${cnt} 個規格已有來源價`);
+    alert('完成：05 走心機刀具已直接更新真正 R2 後台\nNTR 33/34 表頭依原廠 PDF\n缺價才估 CNY，NT$=CNY×10\n既有手填價格不覆蓋');
+    return;
+  }
 
   const {thread,swiss,v0104,v05}=pmkBsktSplitPayloadsV650(master);
   const existing05=(products||[]).find(p=>
