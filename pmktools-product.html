@@ -1494,13 +1494,57 @@ function positivePrice(...vals){
   for(const v of vals){const n=Number(v);if(Number.isFinite(n)&&n>0)return n}
   return 0
 }
+
+function pmkCatalogFieldNumV35(v, keys=[], labelRe=null){
+  const tp=v?.technical_params||{};
+  const f=tp.catalog_fields||{};
+  for(const k of keys){
+    const n=Number(f?.[k] ?? tp?.[k]);
+    if(Number.isFinite(n)&&n>0)return n;
+  }
+  if(labelRe){
+    const sc=pmkBsktCurrentSeriesV18?.(v);
+    const schema=Array.isArray(sc?.technical_schema)?sc.technical_schema:[];
+    for(const c of schema){
+      const label=String(c?.label||c?.name||'');
+      if(!labelRe.test(label))continue;
+      const n=Number(f?.[c?.key]);
+      if(Number.isFinite(n)&&n>0)return n;
+    }
+  }
+  return 0;
+}
+function pmkConfirmedCatalogCnyV35(v){
+  if(!v)return 0;
+  const gc=String(v?.technical_params?.catalog_group_code||'').padStart(2,'0');
+  const D=pmkCatalogFieldNumV35(v,['D_mm','D','柄徑','shank_diameter'],/柄徑\s*D|柄徑/i);
+  const L=pmkCatalogFieldNumV35(v,['L_mm','L','總長','overall_length'],/總長\s*L|總長/i);
+  if(!(D>0&&L>0))return 0;
+
+  const key=`${Number(D)}|${Number(L)}`;
+  const maps={
+    // 01 單齒：已由使用者提供淘寶實價確認
+    '01':{
+      '4|50':38.7,'6|50':58.5,'6|60':69.3,'8|60':128,
+      '10|75':246,'12|75':332,'14|100':578,'16|100':698
+    },
+    // 02 三排齒：已由使用者提供淘寶實價確認
+    '02':{
+      '4|50':50.4,'6|50':69.3,'8|60':138,'10|75':262,
+      '12|75':356,'14|100':612,'16|100':723
+    },
+    // 03 全牙：已由使用者提供淘寶實價確認
+    '03':{
+      '4|50':69.3,'6|60':107,'8|60':195,'10|75':340,
+      '12|75':425,'14|100':723,'16|100':868
+    }
+  };
+  return Number(maps?.[gc]?.[key]||0);
+}
+
 function variationPrice(v,p=P){
-  // 前台只依後台價格欄位顯示，不另外造價。
-  // 優先序：
-  // 1. 市場價 / 售價 sale_price
-  // 2. 基礎價 / 牌價 price
-  // 3. 後台來源價 CNY × 10（PMKTOOLS 既定換算）
-  // 4. 後台已計算 pricing_applied_price
+  // 前台先吃後台實際價格；若後台該 Variation 尚未帶出價格，
+  // CAT-BSKT 01~03 才使用已確認的 D+L 淘寶實價規則 ×10。
   if(v){
     const sale=Number(v?.sale_price||0);
     if(Number.isFinite(sale)&&sale>0)return sale;
@@ -1513,6 +1557,9 @@ function variationPrice(v,p=P){
 
     const applied=Number(v?.pricing_applied_price||0);
     if(Number.isFinite(applied)&&applied>0)return applied;
+
+    const confirmedCny=pmkConfirmedCatalogCnyV35(v);
+    if(confirmedCny>0)return Math.round(confirmedCny*10);
 
     return 0;
   }
