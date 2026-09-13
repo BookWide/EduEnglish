@@ -853,7 +853,103 @@ const CATEGORY_META = {
 let curveCategoryMode = 'all';
 let calendarExpanded = true;
 
-function playerHref(item){return `../player.html?cat=${encodeURIComponent(item.category||'story')}&slug=${encodeURIComponent(item.slug)}&device=${encodeURIComponent(BW_getDeviceType())}`;}
+function playerHref(item){
+  return `../player.html?cat=${encodeURIComponent(item.category||'story')}&slug=${encodeURIComponent(item.slug)}&device=${encodeURIComponent(BW_getDeviceType())}&from=learning-dashboard`;
+}
+
+// V31：控制台不再讓使用者手動按「完成」。
+// Player 在影片 ended 時已寫 watch_logs.progress_pct = 100；
+// 控制台只認這個實際觀看結果，完成後才解鎖下一 Day。
+let BW_WATCH_SYNC_RUNNING=false;
+async function BW_syncCompletedDaysFromWatchLogs({render=true}={}){
+  if(BW_WATCH_SYNC_RUNNING || !state?.currentUserId || !Array.isArray(state?.schedule) || !state.schedule.length) return false;
+  BW_WATCH_SYNC_RUNNING=true;
+  try{
+    const dayBySlug=new Map();
+    const slugs=[];
+    for(const dayObj of state.schedule){
+      for(const item of (dayObj.lessons||[])){
+        const slug=String(item?.slug||'').trim();
+        if(!slug) continue;
+        slugs.push(slug);
+        if(!dayBySlug.has(slug)) dayBySlug.set(slug,[]);
+        dayBySlug.get(slug).push({day:dayObj.day,category:String(item.category||dayObj.target_category||'')});
+      }
+    }
+    const uniqueSlugs=[...new Set(slugs)];
+    if(!uniqueSlugs.length) return false;
+
+    const {data:logs,error}=await supabaseClient
+      .from('watch_logs')
+      .select('video_slug,progress_pct,watched_seconds,duration_sec,updated_at')
+      .eq('user_id',state.currentUserId)
+      .in('video_slug',uniqueSlugs);
+
+    if(error) throw error;
+
+    // 同一 slug 可能有多筆，只取最高完成度。
+    const completeSlugs=new Set();
+    for(const row of (logs||[])){
+      const pct=Number(row?.progress_pct||0);
+      const watched=Number(row?.watched_seconds||0);
+      const duration=Number(row?.duration_sec||0);
+      // Player ended 會明確寫 100；duration fallback 只容許 2 秒誤差。
+      const completed = pct>=100 || (duration>0 && watched>=Math.max(1,duration-2));
+      if(completed) completeSlugs.add(String(row?.video_slug||''));
+    }
+
+    let changed=false;
+    const catSaved=getCatSaved();
+
+    // 嚴格依 Day 順序推進：前一 Day 沒完整看完，就不跳著解鎖後面。
+    for(const dayObj of state.schedule){
+      const lessons=(dayObj.lessons||[]).filter(x=>String(x?.slug||'').trim());
+      if(!lessons.length) break;
+      const allCompleted=lessons.every(x=>completeSlugs.has(String(x.slug||'')));
+      if(!allCompleted) break;
+
+      if(!state.progress[dayObj.day]){
+        state.progress[dayObj.day]=true;
+        changed=true;
+      }
+
+      const dateKey=getScheduleDateKey(dayObj.day);
+      catSaved[dateKey]=catSaved[dateKey]||{};
+      for(const item of lessons){
+        const cat=String(item.category||dayObj.target_category||'');
+        if(CATEGORY_KEYS.includes(cat) && !catSaved[dateKey][cat]){
+          catSaved[dateKey][cat]=true;
+          changed=true;
+        }
+      }
+    }
+
+    if(changed){
+      localStorage.setItem(STORAGE_KEY,JSON.stringify(state.progress||{}));
+      localStorage.setItem(CAT_PROGRESS_KEY,JSON.stringify(catSaved||{}));
+      const unlocked=getUnlockedDay(state.progress);
+      state.selectedDay=Math.max(state.selectedDay||1,unlocked);
+      await saveCloudProgressNow();
+      if(render) renderAll();
+    }
+    return changed;
+  }catch(err){
+    console.warn('[BW watch unlock] sync failed',err);
+    return false;
+  }finally{
+    BW_WATCH_SYNC_RUNNING=false;
+  }
+}
+
+function BW_startWatchUnlockSync(){
+  // 從 LINE / Player 看完回到控制台時立即同步；控制台開著時也定時追蹤。
+  window.addEventListener('pageshow',()=>{setTimeout(()=>BW_syncCompletedDaysFromWatchLogs({render:true}),250);});
+  window.addEventListener('focus',()=>{setTimeout(()=>BW_syncCompletedDaysFromWatchLogs({render:true}),250);});
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState==='visible') setTimeout(()=>BW_syncCompletedDaysFromWatchLogs({render:true}),250);
+  });
+  setInterval(()=>BW_syncCompletedDaysFromWatchLogs({render:true}),15000);
+}
 function getSaved(){try{return JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}")}catch(e){return {}}}
 function saveSaved(v){
   localStorage.setItem(STORAGE_KEY, JSON.stringify(v||{}));
@@ -1335,7 +1431,7 @@ function renderLessonDay(dayObj, progress){
     const tags = `<span style="border-color:${catMeta.color};color:${catMeta.color}">${catMeta.label}</span><span>${item.category}</span>${matchBadge}${(item.scene_tags||[]).slice(0,2).map(x=>`<span>${x}</span>`).join("")}`;
     const box=document.createElement("div");
     box.className="lesson";
-    box.innerHTML=`<div class="thumb" style="background-image:url('${item.cover||''}')"></div><div><div class="title">${item.title}</div><div class="meta">${badge} · ${metaMain}</div><div class="tiny">${tags}</div></div><div style="display:flex;flex-direction:column;gap:8px;"><a class="btn primary" href="${playerHref(item)}">進入播放器</a><button class="btn ${doneCat?'ok':''}" onclick="markCategoryDone(${dayObj.day}, '${cat}')">${doneCat?'本分類已完成':'完成本分類'}</button></div>`;
+    box.innerHTML=`<div class="thumb" style="background-image:url('${item.cover||''}')"></div><div><div class="title">${item.title}</div><div class="meta">${badge} · ${metaMain}</div><div class="tiny">${tags}</div></div><div style="display:flex;flex-direction:column;gap:8px;"><a class="btn primary" href="${playerHref(item)}">${doneCat?'重看影片':'進入播放器'}</a><span class="btn ${doneCat?'ok':''}" style="cursor:default">${doneCat?'✓ 已完整看完':'看完影片後自動完成'}</span></div>`;
     root.appendChild(box);
   });
   document.getElementById("todayCount").textContent=String(dayObj.lessons.length)
@@ -1393,12 +1489,11 @@ function renderCalendar(schedule, progress, selectedDay){
         ${locked
           ? '<button type="button" class="day-act lock">未解鎖</button>'
           : `<button type="button" class="day-act js-day-play">${done?'重看':'進入'}</button>
-             <button type="button" class="day-act done js-day-done">${done?'已完成':'完成'}</button>`}
+             <span class="day-act ${done?'done':'lock'}">${done?'影片已完整看完':'看完影片自動解鎖'}</span>`}
       </div>
     `;
     el.addEventListener('click', (ev)=>{
       const playBtn = ev.target.closest('.js-day-play');
-      const doneBtn = ev.target.closest('.js-day-done');
 
       if(locked){
         alert('請先完成前一天教材，系統會自動解鎖下一天。');
@@ -1409,11 +1504,6 @@ function renderCalendar(schedule, progress, selectedDay){
         if(item){
           location.href = playerHref(item);
         }
-        return;
-      }
-
-      if(doneBtn){
-        markDone(dayObj.day);
         return;
       }
 
@@ -1573,39 +1663,10 @@ function renderCurve(schedule, progress, selectedDay){
   const bottomFocus=document.getElementById('curveFocusTextBottom'); if(bottomFocus) bottomFocus.textContent=`目前焦點：Day ${selectedDay}｜${labelText}`;
 }
 async function markCategoryDone(day, cat){
-  const key=getScheduleDateKey(day);
-  const saved=getCatSaved();
-  saved[key]=saved[key]||{};
-  saved[key][cat]=true;
-  saveCatSaved(saved);
-
-  const dayObj=(state.schedule||[]).find(x=>x.day===day);
-  const cats=[...new Set(((dayObj&&dayObj.lessons)||[]).map(x=>String(x.category||'')).filter(c=>CATEGORY_KEYS.includes(c)))];
-  if(cats.length && cats.every(c=>!!(saved[key]&&saved[key][c]))){
-    const wasDone = !!state.progress[day];
-    state.progress[day]=true;
-    saveSaved(state.progress);
-    if(!wasDone) await BW_grantProgressRewardIfNeeded(day);
-    if(day < state.schedule.length && state.selectedDay===day) state.selectedDay=day+1;
-  }
-  await saveCloudProgressNow();
-  renderAll();
+  alert('完成狀態改由影片實際播放完成自動判定。請完整看完影片。');
 }
 async function markDone(day){
-  const dayObj=(state.schedule||[]).find(x=>x.day===day);
-  const cats=[...new Set(((dayObj&&dayObj.lessons)||[]).map(x=>String(x.category||'')).filter(c=>CATEGORY_KEYS.includes(c)))];
-  const saved=getCatSaved();
-  const key=getScheduleDateKey(day);
-  saved[key]=saved[key]||{};
-  cats.forEach(cat=>{ saved[key][cat]=true; });
-  saveCatSaved(saved);
-  const wasDone = !!state.progress[day];
-  state.progress[day]=true;
-  saveSaved(state.progress);
-  if(!wasDone) await BW_grantProgressRewardIfNeeded(day);
-  if(day < state.schedule.length && state.selectedDay===day) state.selectedDay=day+1;
-  await saveCloudProgressNow();
-  renderAll();
+  alert('完成狀態改由影片實際播放完成自動判定。請完整看完影片。');
 }
 function updateProfileUI(profile){
   const domainLabel = getDomainLabel(profile.domain_code);
@@ -1791,7 +1852,11 @@ async function bootstrap(){
     state.workRoadmap = buildFiveCategoryRoadmap(state.categoryRoadmaps);
     state.relaxRoadmap = buildRelaxRoadmap(assets, state.profile);
     state.schedule = buildSchedule(state.categoryRoadmaps, state.relaxRoadmap, 30);
-    // V30：排課完成後立即把 current_day / current_lesson 寫回雲端，供 LINE Worker 直接讀取。
+
+    // V31：先讀 Player 真實 watch_logs。只有影片 ended / 100% 才完成 Day 並解鎖下一天。
+    await BW_syncCompletedDaysFromWatchLogs({render:false});
+
+    // 完成同步後再把 current_day / current_lesson 寫回雲端，LINE Worker 下一次就會跟著往前。
     await saveCloudProgressNow();
 
     if(!state.workRoadmap.length){
@@ -1808,6 +1873,7 @@ async function bootstrap(){
 initCurveToggle();
 initUnlockToggle();
 initCalendarViewToggle();
+BW_startWatchUnlockSync();
 bootstrap();
 </script>
 
