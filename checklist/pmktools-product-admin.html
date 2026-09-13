@@ -6650,10 +6650,10 @@ const PMK_BSKT_05_HEADER_PDF_V653={"33":{"zh":"NTR鎢鋼小孔鏜刀-1","en":"NT
 function pmkBskt05NormalizeV652(product){
   const p=pmkDeepCloneV650(product), groups=p?.catalog_meta?.catalog_groups||[], vars=p?.variations||[];
   const ntrSchema=[
-    {key:'model',label:'型號',unit:''},{key:'d1',label:'刃徑 d1',unit:'mm'},
-    {key:'R',label:'R',unit:'mm'},{key:'Q',label:'切深 Q',unit:'mm'},
-    {key:'L1',label:'避空長 L1',unit:'mm'},{key:'D',label:'柄徑 D',unit:'mm'},
-    {key:'L',label:'總長 L',unit:'mm'}
+    {key:'model',label:'型號',unit:''},{key:'d1_mm',label:'刃徑 d1',unit:'mm'},
+    {key:'R_mm',label:'R',unit:'mm'},{key:'Q_mm',label:'切深 Q',unit:'mm'},
+    {key:'L1_mm',label:'避空長 L1',unit:'mm'},{key:'D_mm',label:'柄徑 D',unit:'mm'},
+    {key:'L_mm',label:'總長 L',unit:'mm'}
   ];
   for(const g of groups){
     if(String(g?.group_code||'').padStart(2,'0')!=='05')continue;
@@ -6676,26 +6676,48 @@ function pmkBskt05NormalizeV652(product){
     const sc=String(tp.catalog_series_code||tp.catalog_page||'').padStart(2,'0');
     const f=tp.catalog_fields=tp.catalog_fields||{};
     if(['33','34'].includes(sc)){
-      // 原廠 PDF 33/34：產品編碼就是 SKU；表格第二欄才是「型號」。避免前台出現兩個「型號」。
+      // 33/34：把原廠欄位真正整理成與 schema 完全相同的 key。
+      // 來源可能在 catalog_fields，也可能舊資料直接掛在 technical_params；兩邊都讀，不造假數值。
       const aliases={
-        model:['model','thread_size','型号','型號'], d1:['d1_mm','d1','cutting_diameter','刃径d1','刃徑d1'],
-        R:['R','r','radius'], Q:['Q','q','cut_depth','切深Q'], L1:['L1_mm','L1','clearance_length','避空长L1','避空長L1'],
-        D:['D_mm','D','shank_diameter','柄径D','柄徑D'], L:['L_mm','L','overall_length','总长L','總長L']
+        model:['model','thread_size','型号','型號'],
+        d1_mm:['d1_mm','d1','cutting_diameter','刃径d1','刃徑d1'],
+        R_mm:['R_mm','R','r','radius'], Q_mm:['Q_mm','Q','q','cut_depth','切深Q'],
+        L1_mm:['L1_mm','L1','clearance_length','避空长L1','避空長L1'],
+        D_mm:['D_mm','D','shank_diameter','柄径D','柄徑D'],
+        L_mm:['L_mm','L','overall_length','总长L','總長L']
       };
       const nf={};
-      for(const [k,ks] of Object.entries(aliases)) nf[k]=pmkBskt05FieldV652(v,ks);
+      for(const [dst,ks] of Object.entries(aliases)){
+        let val='';
+        for(const k of ks){
+          if(f[k]!==undefined && String(f[k]).trim()!==''){ val=f[k]; break; }
+          if(tp[k]!==undefined && String(tp[k]).trim()!==''){ val=tp[k]; break; }
+        }
+        if(val!=='' && val!==null) nf[dst]=val;
+      }
       tp.catalog_fields=nf;
     }
     const oldCny=Number(v.source_price||0), oldNtd=Number(v.sale_price||v.price||0);
-    if(!(oldCny>0) && !(oldNtd>0)){
-      const cny=pmkBskt05EstimateCnyV652(v), ntd=Math.round(cny*10);
-      v.source_price=cny; v.source_currency='CNY'; v.price=ntd; v.sale_price=ntd;
-      tp.market_price_rule='BSKT_05_ESTIMATE_CNY_X10';
-      tp.market_price_source_cny=cny; tp.market_price_estimated=true;
+    // 使用者規則：原本為 0 才補；既有非 0 價格絕不覆蓋。
+    // 有 NT$、缺 CNY：用既有 NT$/10 回推來源價；兩邊都 0：依尺寸估 CNY，再 ×10 得 NT$。
+    let cny=oldCny, ntd=oldNtd, estimated=false;
+    if(!(cny>0)){
+      if(ntd>0) cny=Math.round((ntd/10)*10)/10;
+      else { cny=pmkBskt05EstimateCnyV652(v); estimated=true; }
+      v.source_price=cny; v.source_currency='CNY';
     }
+    if(!(ntd>0)){
+      ntd=Math.round(cny*10);
+      v.price=ntd; v.sale_price=ntd;
+    }
+    tp.market_price_rule=estimated?'BSKT_05_ESTIMATE_CNY_X10':'BSKT_05_EXISTING_PRICE_ALIGN';
+    tp.market_price_source_cny=cny; tp.market_price_estimated=estimated;
   }
   const pp=vars.map(v=>Number(v?.sale_price||v?.price||0)).filter(x=>x>0);
   p.price=pp.length?Math.min(...pp):Number(p.price||0);
+  p.catalog_meta=p.catalog_meta||{};
+  p.catalog_meta.bskt05_real_data_version='V655';
+  p.catalog_meta.bskt05_real_data_updated_at=new Date().toISOString();
   return p;
 }
 
@@ -6851,6 +6873,77 @@ async function pmkSplitBskt05ToBackendV650(){
   );
 }
 
+
+let PMK_BSKT05_REAL_WRITE_RUNNING_V655=false;
+
+function pmkIsRealBskt05V655(p){
+  const ids=[
+    p?.external_id,p?.sku,p?.catalog_meta?.master_sku
+  ].map(x=>String(x||'').trim().toUpperCase());
+  if(ids.includes('CAT-BSKT-05'))return true;
+  // 舊資料若 external_id 尚未切好，只要主檔實際只含 05 類，也視為真正走心機主檔。
+  const vars=Array.isArray(p?.variations)?p.variations:[];
+  const codes=[...new Set(vars.map(v=>String(v?.technical_params?.catalog_group_code||'').padStart(2,'0')).filter(Boolean))];
+  return vars.length>0 && codes.length===1 && codes[0]==='05';
+}
+
+function pmkBskt05NeedsRealWriteV655(p){
+  if(!pmkIsRealBskt05V655(p))return false;
+  if(String(p?.catalog_meta?.bskt05_real_data_version||'')!=='V655')return true;
+
+  const groups=p?.catalog_meta?.catalog_groups||[];
+  const s34=groups.flatMap(g=>g?.series||[]).find(x=>
+    String(x?.catalog_page||x?.series_code||x?.catalog_series_code||'').padStart(2,'0')==='34'
+  );
+  const schema=(s34?.technical_schema||[]).map(x=>String(x?.key||''));
+  if(!['model','d1_mm','R_mm','Q_mm','L1_mm','D_mm','L_mm'].every(k=>schema.includes(k)))return true;
+
+  const vars=Array.isArray(p?.variations)?p.variations:[];
+  const zero=vars.some(v=>
+    String(v?.technical_params?.catalog_group_code||'').padStart(2,'0')==='05' &&
+    !(Number(v?.source_price||0)>0) &&
+    !(Number(v?.sale_price||v?.price||0)>0)
+  );
+  return zero;
+}
+
+async function pmkBskt05RealWriteV655(p){
+  if(PMK_BSKT05_REAL_WRITE_RUNNING_V655 || !pmkBskt05NeedsRealWriteV655(p))return;
+  PMK_BSKT05_REAL_WRITE_RUNNING_V655=true;
+  try{
+    const fixed=pmkBskt05NormalizeV652(p);
+    const vars=Array.isArray(fixed?.variations)?fixed.variations:[];
+    const group05=vars.filter(v=>String(v?.technical_params?.catalog_group_code||'').padStart(2,'0')==='05');
+    const stillZero=group05.filter(v=>!(Number(v?.source_price||0)>0) && !(Number(v?.sale_price||v?.price||0)>0));
+
+    if(stillZero.length){
+      throw new Error(`05 尚有 ${stillZero.length} 筆無法估價，停止寫入，避免留下 0 元`);
+    }
+
+    setStatus(`⏳ 正在把 05 表頭與 ${group05.length} 筆價格真正寫回 R2 後台…`);
+    await productAdminPost('/api/bw-product-save',{id:p.id||'',product:fixed});
+
+    // Update the actual in-memory backend object only after API save succeeds.
+    const pi=(products||[]).findIndex(x=>String(x?.id||'')===String(p.id||''));
+    if(pi>=0)products[pi]=fixed;
+
+    // Refill from the object that was successfully persisted.
+    fill(fixed);
+
+    const sample=group05.find(v=>String(v?.sku||'').toUpperCase()==='NTR39R015L220450') || group05[0];
+    setStatus(
+      `✅ 05 已真正寫回後台：${group05.length} 筆；`+
+      `${sample?.sku||''} CNY ${Number(sample?.source_price||0)} → NT$ ${Number(sample?.sale_price||sample?.price||0)}`
+    );
+  }catch(e){
+    console.error('BSKT05 real write V655 failed',e);
+    setStatus('❌ 05 真正後台寫入失敗：'+String(e?.message||e));
+    alert('05 真正後台寫入失敗：'+String(e?.message||e));
+  }finally{
+    PMK_BSKT05_REAL_WRITE_RUNNING_V655=false;
+  }
+}
+
 function formData(){pmkSyncDetailEditorV1();pmkCatalogHeaderSyncMetaV3();pmkCatalogPersistIndexV611();const product_type=['simple','external','variable'].includes($('product_type').value)?$('product_type').value:'simple';const varsNow=product_type==='variable'?pmkCatalogMarketPrice0104V641(readVariationsV54()):[];const vPrices=varsNow.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(x=>x>0);const price=product_type==='variable'?(vPrices.length?Math.min(...vPrices):0):Math.max(0,Number($('price').value||0));let sale_mode=$('sale_mode').value||'auto';if(price>0&&price<200)sale_mode='redeem_only';const attributes=product_type==='variable'?attributesV54():[],variations=product_type==='variable'?varsNow:[];const tm=pmkFrontendTemplateMetaV593();return {catalog_meta:PMK_CATALOG_META_V1?JSON.parse(JSON.stringify(PMK_CATALOG_META_V1)):null,template_key:tm.template_key,frontend_layout:tm.frontend_layout,frontend_schema:tm.frontend_schema,is_addon_product:$('is_addon_product')?.checked===true,external_id:$('external_id').value.trim()||null,source_type:$('source_type').value||'manual',product_type,brand:$('brand').value.trim(),name:$('name').value.trim(),display_name:String($('display_name')?.value||'').trim(),price,category:$('category').value||'切削刀具',subcategory:String($('subcategory')?.value||'').trim(),subcategory_detail:String($('subcategory_detail')?.value||'').trim(),sale_mode,fulfillment_type:$('fulfillment_type').value||'voucher',shipping_methods:shippingMethodsV563(),cost_price:Math.max(0,Number($('cost_price').value||0)),supplier:$('supplier').value.trim(),stock_tracking_enabled:$('stock_tracking_enabled').value==='true',stock_qty:Math.max(0,Number($('stock_qty').value||0)),low_stock_qty:Math.max(0,Number($('low_stock_qty').value||0)),festival_keys:selectedFestivals(),sort_order:Number($('sort_order').value||100),is_active:$('is_active').value==='true',line_url:String($('line_url_shadow')?.value||$('line_url')?.value||'').trim(),image_url:$('image_url').value.trim(),video_url:$('video_url').value.trim(),gallery_urls:linesV54('gallery_urls'),detail_summary:'',detail_description:$('detail_description').value.trim(),detail_highlights:[],detail_specs:[],detail_notices:[],add_on_product_ids:addonItemsV557().map(x=>x.product_id),add_on_items:addonItemsV557(),attributes,option_groups:attributes.map(a=>({name:a.name,required:true,values:a.values})),variations,sku:(PMK_CATALOG_META_V1?.mode==='catalog_master'&&PMK_CATALOG_META_V1?.master_sku)?PMK_CATALOG_META_V1.master_sku:productFormSkuV205(varsNow),sku_rule_system:String($('sku_rule_system')?.value||'manual'),sku_rule_family:String($('sku_rule_family')?.value||''),seo_title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,seo_description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,seo_keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,seo_canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical,seo:{title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical},source:{platform:$('source_platform')?.value.trim()||$('source_type').value,item_id:$('source_item_id')?.value.trim()||'',url:$('line_url_shadow')?.value.trim()||'',seller:$('source_seller')?.value.trim()||'',currency:$('source_currency')?.value.trim()||'TWD'}}}
 function clearForm(){PMK_CATALOG_META_V1=null;pmkCatalogVariationFolderV606='';pmkCatalogHeaderShowV3(false);pmkOriginalProductNameV342='';aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();if($('is_addon_product'))$('is_addon_product').checked=false;editingId=null;['external_id','brand','name','price','line_url','image_url','video_url','detail_description','gallery_urls','attributes_text','add_on_product_ids','add_on_items_json','shipping_methods_json','source_platform','source_item_id','source_seller','display_name','seo_title','seo_description','seo_keywords','seo_canonical'].forEach(id=>$(id).value='');$('source_type').value='manual';if($('source_currency'))$('source_currency').value='TWD';$('product_type').value='simple';v54Variations=[];syncProductTypeV544();galleryPreviewV54();renderMainImageV547();renderVideoV552();refreshCategorySelect('切削刀具');refreshSubcategorySelect('');refreshSubcategoryDetailSelect('');$('sale_mode').value='auto';$('fulfillment_type').value='voucher';setShippingMethodsV563([]);renderShippingMethodsV563();$('cost_price').value='0';$('supplier').value='';$('stock_tracking_enabled').value='false';$('stock_qty').value='0';$('low_stock_qty').value='3';setFestivals([]);$('sort_order').value='100';$('is_active').value='true';setSkuRuleV1('manual','');renderAddonConfigV557();renderSeoPreviewV574();if($('pmkProductTemplate'))$('pmkProductTemplate').value='';if($('pmkTemplateStatus'))$('pmkTemplateStatus').textContent='模板只整理欄位；不覆蓋 SKU、價格、圖片、庫存與已填技術資料。'}
 function fill(p){
@@ -6919,6 +7012,14 @@ function fill(p){
       :($('pmkProductTemplate').value?'已依商品名稱預選模板，但尚未確認寫入商品主檔；請按「套用前台目錄模板」。':'尚未套用前台目錄模板。');
   }
   v54Variations=Array.isArray(p.variations)?pmkCatalogMarketPrice0104V641(p.variations.map(v=>({...v,attributes:{...(v.attributes||{})}}))):[];
+
+  // CAT-BSKT-05：不是前台補字，也不是只改畫面。
+  // 打開真正後台商品時，若 33~56 表頭或價格仍未落庫，立即存入 R2，
+  // API 成功後才用已儲存資料重新填回編輯器。
+  if(pmkBskt05NeedsRealWriteV655(p)){
+    setTimeout(()=>pmkBskt05RealWriteV655(p),80);
+  }
+
   if(String($('pmkProductTemplate')?.value||'')==='deep_hole_tube'&&v54Variations.length){
     // SAFE: 載入商品時絕不自動重寫 attributes_text。
     // 使用者已手動補好的 30 個 Dc / 型號選項必須原樣保留；
