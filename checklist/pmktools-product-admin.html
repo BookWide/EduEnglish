@@ -827,6 +827,7 @@
       <button type="button" class="btn" id="pmkCatalogSeriesLoadBtnV8" style="background:#2563eb;color:#fff">匯入 01～05 全包 JSON</button>
       <input id="pmkCatalogSeriesFileV8" type="file" accept=".json,application/json" multiple hidden>
       <button type="button" class="btn green" id="pmkCatalogPriceSave0104V642">01～04 價格覆蓋＋儲存後台</button>
+      <button type="button" class="btn" id="pmkCatalogSplit05BackendV650" style="background:#7c3aed;color:#fff">05 真正移到後台｜走心機刀具</button>
     </div>
   </div>
   <div id="pmkCatalogIndexStatusV8" class="muted" style="font-size:11px;margin:8px 0 10px"></div>
@@ -6584,6 +6585,135 @@ async function pmkCatalogApplyAndSave0104V642(){
   await saveWithStateV200(publish);
 }
 
+
+function pmkDeepCloneV650(x){ return JSON.parse(JSON.stringify(x)); }
+
+function pmkBsktGroupCodeV650(v){
+  return String(v?.technical_params?.catalog_group_code||'').padStart(2,'0');
+}
+
+function pmkBsktSplitPayloadsV650(master){
+  if(!master)throw new Error('找不到 CAT-BSKT 主檔');
+
+  const src=pmkDeepCloneV650(master);
+  const groups=Array.isArray(src?.catalog_meta?.catalog_groups)?src.catalog_meta.catalog_groups:[];
+  const vars=Array.isArray(src?.variations)?src.variations:[];
+
+  const g0104=groups.filter(g=>['01','02','03','04'].includes(String(g?.group_code||'').padStart(2,'0')));
+  const g05=groups.filter(g=>String(g?.group_code||'').padStart(2,'0')==='05');
+  const v0104=vars.filter(v=>['01','02','03','04'].includes(pmkBsktGroupCodeV650(v)));
+  const v05=vars.filter(v=>pmkBsktGroupCodeV650(v)==='05');
+
+  if(!g05.length)throw new Error('CAT-BSKT 裡找不到第 05 類 catalog group');
+  if(!v05.length)throw new Error('CAT-BSKT 裡找不到第 05 類 Variations');
+  if(!g0104.length||!v0104.length)throw new Error('01～04 資料不完整，停止切分');
+
+  // Original catalog: real backend product, only 01~04.
+  const thread=pmkDeepCloneV650(src);
+  thread.catalog_meta=pmkDeepCloneV650(src.catalog_meta||{});
+  thread.catalog_meta.catalog_groups=g0104;
+  thread.catalog_meta.master_sku='CAT-BSKT';
+  thread.catalog_meta.public_name='螺紋銑削型錄';
+  thread.external_id='CAT-BSKT';
+  thread.sku='CAT-BSKT';
+  thread.category='切削刀具';
+  thread.subcategory='螺紋加工';
+  thread.subcategory_detail='螺紋銑削';
+  thread.name=String(thread.name||'螺紋銑削型錄');
+  thread.display_name=String(thread.display_name||thread.name||'螺紋銑削型錄');
+  thread.variations=v0104;
+  thread.price=Math.min(...v0104.map(v=>Number(v?.sale_price||v?.price||0)).filter(x=>x>0).concat([0]).filter((x,i,a)=>x>0||a.length===1));
+  if(!Number.isFinite(thread.price)||thread.price<0)thread.price=0;
+
+  // New real backend product: only group 05.
+  const swiss=pmkDeepCloneV650(src);
+  swiss.id=undefined;
+  swiss.external_id='CAT-BSKT-05';
+  swiss.sku='CAT-BSKT-05';
+  swiss.category='切削刀具';
+  swiss.subcategory='車削加工';
+  swiss.subcategory_detail='走心機刀具';
+  swiss.name='鎢鋼小徑鏜刀系列';
+  swiss.display_name='鎢鋼小徑鏜刀系列';
+  swiss.catalog_meta=pmkDeepCloneV650(src.catalog_meta||{});
+  swiss.catalog_meta.catalog_groups=g05;
+  swiss.catalog_meta.master_sku='CAT-BSKT-05';
+  swiss.catalog_meta.public_name='鎢鋼小徑鏜刀系列';
+  swiss.variations=v05;
+  swiss.is_active=src.is_active!==false;
+
+  const p05=v05.map(v=>Number(v?.sale_price||v?.price||0)).filter(x=>x>0);
+  swiss.price=p05.length?Math.min(...p05):0;
+
+  // Prefer a real group-05 variation image, otherwise keep original product image.
+  const vimg=v05.find(v=>String(v?.image_url||'').trim())?.image_url||'';
+  if(vimg)swiss.image_url=vimg;
+
+  // Do not retain a stale source ID that says this is the old single master.
+  swiss.source=pmkDeepCloneV650(src.source||{});
+  if(swiss.source)swiss.source.item_id='CAT-BSKT-05';
+
+  return {thread,swiss,v0104:v0104.length,v05:v05.length};
+}
+
+async function pmkSplitBskt05ToBackendV650(){
+  // Always use currently loaded backend products, not temporary frontend objects.
+  let master=(products||[]).find(p=>
+    String(p?.external_id||'').toUpperCase()==='CAT-BSKT' ||
+    String(p?.sku||'').toUpperCase()==='CAT-BSKT' ||
+    String(p?.id||'').toUpperCase()==='CAT-BSKT'
+  );
+  if(!master){
+    await load();
+    master=(products||[]).find(p=>
+      String(p?.external_id||'').toUpperCase()==='CAT-BSKT' ||
+      String(p?.sku||'').toUpperCase()==='CAT-BSKT' ||
+      String(p?.id||'').toUpperCase()==='CAT-BSKT'
+    );
+  }
+  if(!master)throw new Error('後台找不到 CAT-BSKT');
+
+  const {thread,swiss,v0104,v05}=pmkBsktSplitPayloadsV650(master);
+  const existing05=(products||[]).find(p=>
+    String(p?.external_id||'').toUpperCase()==='CAT-BSKT-05' ||
+    String(p?.sku||'').toUpperCase()==='CAT-BSKT-05'
+  );
+
+  setStatus(`⏳ 正在建立真正後台走心機商品：05 類 ${v05} 筆…`);
+
+  // 1. Create/update the real group-05 backend product first.
+  await productAdminPost('/api/bw-product-save',{
+    id:existing05?.id||'',
+    product:swiss
+  });
+
+  // 2. Only after 05 exists successfully, remove 05 from original CAT-BSKT.
+  setStatus(`⏳ 走心機商品已建立，正在把 CAT-BSKT 收斂成 01～04（${v0104} 筆）…`);
+  await productAdminPost('/api/bw-product-save',{
+    id:master.id||'',
+    product:thread
+  });
+
+  await load();
+
+  const checkThread=(products||[]).find(p=>String(p?.external_id||p?.sku||'').toUpperCase()==='CAT-BSKT');
+  const check05=(products||[]).find(p=>String(p?.external_id||p?.sku||'').toUpperCase()==='CAT-BSKT-05');
+  const t05=(checkThread?.variations||[]).filter(v=>pmkBsktGroupCodeV650(v)==='05').length;
+  const s05=(check05?.variations||[]).filter(v=>pmkBsktGroupCodeV650(v)==='05').length;
+
+  if(!check05 || s05===0 || t05!==0){
+    throw new Error(`切分驗證失敗：原型錄殘留05=${t05}；走心機05筆數=${s05}`);
+  }
+
+  setStatus(`✅ 真正後台切分完成：CAT-BSKT=01～04；CAT-BSKT-05=走心機刀具（${s05} 筆）`);
+  alert(
+    `完成真正後台切分\n\n`+
+    `CAT-BSKT：螺紋加工 > 螺紋銑削，只留 01～04\n`+
+    `CAT-BSKT-05：車削加工 > 走心機刀具，只放第 05 類\n`+
+    `第 05 類型號：${s05} 筆`
+  );
+}
+
 function formData(){pmkSyncDetailEditorV1();pmkCatalogHeaderSyncMetaV3();pmkCatalogPersistIndexV611();const product_type=['simple','external','variable'].includes($('product_type').value)?$('product_type').value:'simple';const varsNow=product_type==='variable'?pmkCatalogMarketPrice0104V641(readVariationsV54()):[];const vPrices=varsNow.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(x=>x>0);const price=product_type==='variable'?(vPrices.length?Math.min(...vPrices):0):Math.max(0,Number($('price').value||0));let sale_mode=$('sale_mode').value||'auto';if(price>0&&price<200)sale_mode='redeem_only';const attributes=product_type==='variable'?attributesV54():[],variations=product_type==='variable'?varsNow:[];const tm=pmkFrontendTemplateMetaV593();return {catalog_meta:PMK_CATALOG_META_V1?JSON.parse(JSON.stringify(PMK_CATALOG_META_V1)):null,template_key:tm.template_key,frontend_layout:tm.frontend_layout,frontend_schema:tm.frontend_schema,is_addon_product:$('is_addon_product')?.checked===true,external_id:$('external_id').value.trim()||null,source_type:$('source_type').value||'manual',product_type,brand:$('brand').value.trim(),name:$('name').value.trim(),display_name:String($('display_name')?.value||'').trim(),price,category:$('category').value||'切削刀具',subcategory:String($('subcategory')?.value||'').trim(),subcategory_detail:String($('subcategory_detail')?.value||'').trim(),sale_mode,fulfillment_type:$('fulfillment_type').value||'voucher',shipping_methods:shippingMethodsV563(),cost_price:Math.max(0,Number($('cost_price').value||0)),supplier:$('supplier').value.trim(),stock_tracking_enabled:$('stock_tracking_enabled').value==='true',stock_qty:Math.max(0,Number($('stock_qty').value||0)),low_stock_qty:Math.max(0,Number($('low_stock_qty').value||0)),festival_keys:selectedFestivals(),sort_order:Number($('sort_order').value||100),is_active:$('is_active').value==='true',line_url:String($('line_url_shadow')?.value||$('line_url')?.value||'').trim(),image_url:$('image_url').value.trim(),video_url:$('video_url').value.trim(),gallery_urls:linesV54('gallery_urls'),detail_summary:'',detail_description:$('detail_description').value.trim(),detail_highlights:[],detail_specs:[],detail_notices:[],add_on_product_ids:addonItemsV557().map(x=>x.product_id),add_on_items:addonItemsV557(),attributes,option_groups:attributes.map(a=>({name:a.name,required:true,values:a.values})),variations,sku:(PMK_CATALOG_META_V1?.mode==='catalog_master'&&PMK_CATALOG_META_V1?.master_sku)?PMK_CATALOG_META_V1.master_sku:productFormSkuV205(varsNow),sku_rule_system:String($('sku_rule_system')?.value||'manual'),sku_rule_family:String($('sku_rule_family')?.value||''),seo_title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,seo_description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,seo_keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,seo_canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical,seo:{title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical},source:{platform:$('source_platform')?.value.trim()||$('source_type').value,item_id:$('source_item_id')?.value.trim()||'',url:$('line_url_shadow')?.value.trim()||'',seller:$('source_seller')?.value.trim()||'',currency:$('source_currency')?.value.trim()||'TWD'}}}
 function clearForm(){PMK_CATALOG_META_V1=null;pmkCatalogVariationFolderV606='';pmkCatalogHeaderShowV3(false);pmkOriginalProductNameV342='';aiProductClipboardImagesV5=[];renderAiProductPastePreviewV5();if($('is_addon_product'))$('is_addon_product').checked=false;editingId=null;['external_id','brand','name','price','line_url','image_url','video_url','detail_description','gallery_urls','attributes_text','add_on_product_ids','add_on_items_json','shipping_methods_json','source_platform','source_item_id','source_seller','display_name','seo_title','seo_description','seo_keywords','seo_canonical'].forEach(id=>$(id).value='');$('source_type').value='manual';if($('source_currency'))$('source_currency').value='TWD';$('product_type').value='simple';v54Variations=[];syncProductTypeV544();galleryPreviewV54();renderMainImageV547();renderVideoV552();refreshCategorySelect('切削刀具');refreshSubcategorySelect('');refreshSubcategoryDetailSelect('');$('sale_mode').value='auto';$('fulfillment_type').value='voucher';setShippingMethodsV563([]);renderShippingMethodsV563();$('cost_price').value='0';$('supplier').value='';$('stock_tracking_enabled').value='false';$('stock_qty').value='0';$('low_stock_qty').value='3';setFestivals([]);$('sort_order').value='100';$('is_active').value='true';setSkuRuleV1('manual','');renderAddonConfigV557();renderSeoPreviewV574();if($('pmkProductTemplate'))$('pmkProductTemplate').value='';if($('pmkTemplateStatus'))$('pmkTemplateStatus').textContent='模板只整理欄位；不覆蓋 SKU、價格、圖片、庫存與已填技術資料。'}
 function fill(p){
@@ -8571,6 +8701,33 @@ document.addEventListener('click',function(e){
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',bind);
   else bind();
   setTimeout(bind,800);
+})();
+
+
+(function pmkBindCatalogSplit05BackendV650(){
+  const bind=()=>{
+    const b=document.getElementById('pmkCatalogSplit05BackendV650');
+    if(!b||b.dataset.bound650==='1')return;
+    b.dataset.bound650='1';
+    b.onclick=async()=>{
+      if(!confirm('這會真正修改後台：\n1. 建立/更新 CAT-BSKT-05 到 車削加工 > 走心機刀具\n2. 從 CAT-BSKT 移除第 05 類，只保留 01～04\n\n確定執行？'))return;
+      const old=b.textContent;
+      b.disabled=true;
+      b.textContent='後台切分中…';
+      try{await pmkSplitBskt05ToBackendV650();}
+      catch(e){
+        console.error(e);
+        setStatus('❌ 05 後台切分失敗：'+String(e?.message||e));
+        alert('05 後台切分失敗：'+String(e?.message||e));
+      }finally{
+        b.disabled=false;
+        b.textContent=old;
+      }
+    };
+  };
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',bind);
+  else bind();
+  setTimeout(bind,900);
 })();
 
 </script>
