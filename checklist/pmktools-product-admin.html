@@ -6445,27 +6445,88 @@ function pmkFrontendTemplateMetaV593(){
 
 function pmkCatalogMarketPrice0104V641(rows){
   if(PMK_CATALOG_META_V1?.mode!=='catalog_master' || !Array.isArray(rows))return rows;
-  const maps={
-    '01':{'4|50':38.7,'6|50':58.5,'6|60':69.3,'8|60':128,'10|75':246,'12|75':332,'14|100':578,'16|100':698},
-    '12':{'4|50':50.4,'6|50':69.3,'8|60':138,'10|75':262,'12|75':356,'14|100':612,'16|100':723},
-    '22':{'4|50':69.3,'6|60':107,'8|60':195,'10|75':340,'12|75':425,'14|100':723,'16|100':868},
-    '29':{'6|50':105,'8|60':202,'10|75':300},
-    '30':{'10|75':372,'12|75':483,'14|75':793},
-    '31':{'10|75':372,'12|75':483,'14|75':793}
+
+  // 01~04 型錄：來源價 CNY 必須有值。
+  // exact = 已由實際淘寶截圖確認；infer = 缺資料時依同刀型/同級距的 D + L 自動推導。
+  const exact={
+    single:{'4|50':38.7,'6|50':58.5,'6|60':69.3,'8|60':128,'10|75':246,'12|75':332,'14|100':578,'16|100':698},
+    triple:{'4|50':50.4,'6|50':69.3,'8|60':138,'10|75':262,'12|75':356,'14|100':612,'16|100':723},
+    full:{'4|50':69.3,'6|60':107,'8|60':195,'10|75':340,'12|75':425,'14|100':723,'16|100':868},
+    blind:{'6|50':105,'8|60':202,'10|75':300},
+    combo:{'10|75':372,'12|75':483,'14|75':793}
   };
+  const num=x=>Math.max(0,Number(x||0));
+  const r1=x=>Math.round(num(x)*10)/10;
+  const infer=(D,L,map)=>{
+    D=num(D);L=num(L);
+    if(!(D>0)||!(L>0))return 0;
+    const k=`${D}|${L}`;
+    if(num(map?.[k])>0)return num(map[k]);
+    const pts=Object.entries(map||{}).map(([kk,p])=>{
+      const [d,l]=kk.split('|').map(Number);return {d,l,p:Number(p)};
+    }).filter(x=>x.d>0&&x.l>0&&x.p>0);
+    if(!pts.length)return 0;
+    // 先找最接近的 D/L，再按材料體積的溫和尺度推估，避免直接留 0。
+    pts.sort((a,b)=>{
+      const sa=Math.abs(Math.log(D/a.d))*2.2+Math.abs(Math.log(L/a.l))*0.8;
+      const sb=Math.abs(Math.log(D/b.d))*2.2+Math.abs(Math.log(L/b.l))*0.8;
+      return sa-sb;
+    });
+    const a=pts[0];
+    const scale=Math.pow(D/a.d,1.65)*Math.pow(L/a.l,0.55);
+    return Math.max(1,r1(a.p*scale));
+  };
+  const familyFor=(gc,sc,name)=>{
+    name=String(name||'');
+    if(gc==='01')return 'single';
+    if(gc==='02')return 'triple';
+    if(gc==='03')return 'full';
+    if(gc==='04'){
+      if(['30','31'].includes(sc)||/三合一/.test(name))return 'combo';
+      if(['28','29'].includes(sc)||/免打底孔/.test(name))return 'blind';
+      if(sc==='27'||/二排牙/.test(name))return 'triple';
+      // 醫療骨板等特殊刀型沒有直接價格截圖時，以 04 類已確認的盲孔刀級距推導。
+      return 'blind';
+    }
+    return 'single';
+  };
+
   return rows.map(v=>{
     const tp=(v?.technical_params&&typeof v.technical_params==='object')?v.technical_params:{};
     const gc=String(tp.catalog_group_code||'').padStart(2,'0');
     if(!['01','02','03','04'].includes(gc))return v;
-    const sc=String(tp.catalog_series_code||'').padStart(2,'0');
+    const sc=String(tp.catalog_series_code||tp.catalog_page||'').padStart(2,'0');
+    const name=String(tp.catalog_series_name||'');
     const cf=(tp.catalog_fields&&typeof tp.catalog_fields==='object')?tp.catalog_fields:{};
-    const D=Number(cf.D_mm||cf.D||0),L=Number(cf.L_mm||cf.L||0);
+    const D=num(cf.D_mm??cf.D),L=num(cf.L_mm??cf.L);
     const key=`${D}|${L}`;
-    let cny=Number(maps[sc]?.[key]||0);
-    if(!(cny>0))cny=Math.max(0,Number(v?.source_price||0));
-    if(!(cny>0))return v;
+    const family=familyFor(gc,sc,name);
+    const map=exact[family]||exact.single;
+    const exactCny=num(map[key]);
+    let cny=exactCny>0?exactCny:infer(D,L,map);
+    // 若規格缺 D/L，最後才沿用既有來源價；仍不無故把已有價格清成 0。
+    if(!(cny>0))cny=num(v?.source_price);
+    if(!(cny>0))cny=1;
+    cny=r1(cny);
     const ntd=Math.round(cny*10);
-    return {...v,source_price:cny,source_currency:'CNY',sale_price:ntd,pricing_auto:true,pricing_applied_price:ntd,technical_params:{...tp,market_price_rule:'SERIES_D_L_CNY_X10',market_price_source_cny:cny,market_price_key:key}};
+    const inferred=!(exactCny>0);
+    return {
+      ...v,
+      source_price:cny,
+      source_currency:'CNY',
+      price:ntd,
+      sale_price:ntd,
+      pricing_auto:true,
+      pricing_applied_price:ntd,
+      technical_params:{
+        ...tp,
+        market_price_rule:inferred?'SERIES_D_L_CNY_INFER_X10':'SERIES_D_L_CNY_EXACT_X10',
+        market_price_source_cny:cny,
+        market_price_key:key,
+        market_price_family:family,
+        market_price_inferred:inferred
+      }
+    };
   });
 }
 function formData(){pmkSyncDetailEditorV1();pmkCatalogHeaderSyncMetaV3();pmkCatalogPersistIndexV611();const product_type=['simple','external','variable'].includes($('product_type').value)?$('product_type').value:'simple';const varsNow=product_type==='variable'?pmkCatalogMarketPrice0104V641(readVariationsV54()):[];const vPrices=varsNow.filter(v=>v&&v.is_active!==false).map(v=>Number(v.sale_price||v.price||0)).filter(x=>x>0);const price=product_type==='variable'?(vPrices.length?Math.min(...vPrices):0):Math.max(0,Number($('price').value||0));let sale_mode=$('sale_mode').value||'auto';if(price>0&&price<200)sale_mode='redeem_only';const attributes=product_type==='variable'?attributesV54():[],variations=product_type==='variable'?varsNow:[];const tm=pmkFrontendTemplateMetaV593();return {catalog_meta:PMK_CATALOG_META_V1?JSON.parse(JSON.stringify(PMK_CATALOG_META_V1)):null,template_key:tm.template_key,frontend_layout:tm.frontend_layout,frontend_schema:tm.frontend_schema,is_addon_product:$('is_addon_product')?.checked===true,external_id:$('external_id').value.trim()||null,source_type:$('source_type').value||'manual',product_type,brand:$('brand').value.trim(),name:$('name').value.trim(),display_name:String($('display_name')?.value||'').trim(),price,category:$('category').value||'切削刀具',subcategory:String($('subcategory')?.value||'').trim(),subcategory_detail:String($('subcategory_detail')?.value||'').trim(),sale_mode,fulfillment_type:$('fulfillment_type').value||'voucher',shipping_methods:shippingMethodsV563(),cost_price:Math.max(0,Number($('cost_price').value||0)),supplier:$('supplier').value.trim(),stock_tracking_enabled:$('stock_tracking_enabled').value==='true',stock_qty:Math.max(0,Number($('stock_qty').value||0)),low_stock_qty:Math.max(0,Number($('low_stock_qty').value||0)),festival_keys:selectedFestivals(),sort_order:Number($('sort_order').value||100),is_active:$('is_active').value==='true',line_url:String($('line_url_shadow')?.value||$('line_url')?.value||'').trim(),image_url:$('image_url').value.trim(),video_url:$('video_url').value.trim(),gallery_urls:linesV54('gallery_urls'),detail_summary:'',detail_description:$('detail_description').value.trim(),detail_highlights:[],detail_specs:[],detail_notices:[],add_on_product_ids:addonItemsV557().map(x=>x.product_id),add_on_items:addonItemsV557(),attributes,option_groups:attributes.map(a=>({name:a.name,required:true,values:a.values})),variations,sku:(PMK_CATALOG_META_V1?.mode==='catalog_master'&&PMK_CATALOG_META_V1?.master_sku)?PMK_CATALOG_META_V1.master_sku:productFormSkuV205(varsNow),sku_rule_system:String($('sku_rule_system')?.value||'manual'),sku_rule_family:String($('sku_rule_family')?.value||''),seo_title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,seo_description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,seo_keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,seo_canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical,seo:{title:String($('seo_title')?.value||'').trim()||pmkSeoDefaultsV574().title,description:String($('seo_description')?.value||'').trim()||pmkSeoDefaultsV574().description,keywords:String($('seo_keywords')?.value||'').trim()||pmkSeoDefaultsV574().keywords,canonical:String($('seo_canonical')?.value||'').trim()||pmkSeoDefaultsV574().canonical},source:{platform:$('source_platform')?.value.trim()||$('source_type').value,item_id:$('source_item_id')?.value.trim()||'',url:$('line_url_shadow')?.value.trim()||'',seller:$('source_seller')?.value.trim()||'',currency:$('source_currency')?.value.trim()||'TWD'}}}
