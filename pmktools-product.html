@@ -2682,8 +2682,10 @@ function pmkBindMobileCatalogNavV16(list,vars){
       const g=pmkCatalogVisibleGroupsV22(selectedVariation).find(x=>pmkCatalogCodeV14(x?.group_code)===gc);
       const first=(g?.series||[])[0]||null;
       PMK_CATALOG_NAV_V14={group:gc,series:pmkCatalogCodeV14(first?.catalog_page)};
+      pmkSyncCurrentCatalogHeaderImageV71(selectedVariation);
       PMK_MOBILE_CATALOG_COLLAPSE_V16.series=false;
-      PMK_MOBILE_MEDIA_MODE_V20='spec';
+      PMK_MOBILE_MEDIA_MODE_V20='media';
+      PMK_MOBILE_MEDIA_INDEX_V20=0;
       renderMobileBuy();
       pmkMobileRenderMediaStageV20(true);
     };
@@ -2698,7 +2700,9 @@ function pmkBindMobileCatalogNavV16(list,vars){
         selectedVariation=target;
         selected={...(target.attributes||{})};
       }
-      PMK_MOBILE_MEDIA_MODE_V20='spec';
+      PMK_MOBILE_MEDIA_MODE_V20='media';
+      PMK_MOBILE_MEDIA_INDEX_V20=0;
+      pmkSyncCurrentCatalogHeaderImageV71(selectedVariation);
       renderMobileBuy();
       pmkMobileRenderMediaStageV20(true);
       refreshDirectVariation();
@@ -2721,24 +2725,44 @@ function pmkMobileBsktSpecCardV19(){
 
 let PMK_MOBILE_MEDIA_MODE_V20='spec';
 let PMK_MOBILE_MEDIA_INDEX_V20=0;
+let PMK_CURRENT_CATALOG_HEADER_IMAGE_V71='';
 
-// V70 MOBILE CATALOG HEADER — 手機左上直接沿用 PC 型錄表頭圖，同一資料來源，不建立第二套圖片。
-function pmkCatalogHeaderDiagramUrlV70(v=selectedVariation){
-  if(!pmkIsSupplierCatalogMasterV13()||!v)return '';
-  const series=pmkBsktCurrentSeriesV18(v);
+// V71 SINGLE CATALOG HEADER SOURCE
+// PC 型錄表頭與手機左上只能經由這一個函式取得圖片，禁止各自 fallback。
+function pmkCatalogSeriesDiagramUrlV71(series, vars=[]){
   if(!series)return '';
   const h=series?.catalog_header||{};
-  const gc=pmkCatalogGroupCodeV14(v);
-  const sc=pmkCatalogSeriesCodeV14(v);
-  const vars=(P?.variations||[]).filter(x=>x&&x.is_active!==false&&pmkCatalogGroupCodeV14(x)===gc&&pmkCatalogSeriesCodeV14(x)===sc);
+  const sv=Array.isArray(vars)?vars:[];
   return String(
     h.diagram_image ||
     series.diagram_image ||
     series.image_url ||
-    (vars.find(x=>String(x?.diagram_image||'').trim())?.diagram_image) ||
-    (vars.find(x=>String(x?.image_url||'').trim())?.image_url) ||
+    (sv.find(x=>String(x?.diagram_image||'').trim())?.diagram_image) ||
+    (sv.find(x=>String(x?.image_url||'').trim())?.image_url) ||
     ''
   ).trim();
+}
+
+function pmkSyncCurrentCatalogHeaderImageV71(v=selectedVariation){
+  if(!pmkIsSupplierCatalogMasterV13()){
+    PMK_CURRENT_CATALOG_HEADER_IMAGE_V71='';
+    return '';
+  }
+  // 優先使用目前正在瀏覽的型錄導覽 group/series；只有導覽尚未建立時才回退 selectedVariation。
+  const navGc=pmkCatalogCodeV14(PMK_CATALOG_NAV_V14?.group||'');
+  const navSc=pmkCatalogCodeV14(PMK_CATALOG_NAV_V14?.series||'');
+  const gc=navGc||pmkCatalogGroupCodeV14(v);
+  const sc=navSc||pmkCatalogSeriesCodeV14(v);
+  const series=pmkCatalogSeriesSchemaV14(gc,sc)||pmkBsktCurrentSeriesV18(v);
+  if(!series){
+    PMK_CURRENT_CATALOG_HEADER_IMAGE_V71='';
+    return '';
+  }
+  const resolvedGc=gc||pmkCatalogGroupCodeV14(v);
+  const resolvedSc=sc||pmkCatalogCodeV14(series?.catalog_page)||pmkCatalogSeriesCodeV14(v);
+  const vars=(P?.variations||[]).filter(x=>x&&x.is_active!==false&&pmkCatalogGroupCodeV14(x)===resolvedGc&&pmkCatalogSeriesCodeV14(x)===resolvedSc);
+  PMK_CURRENT_CATALOG_HEADER_IMAGE_V71=pmkCatalogSeriesDiagramUrlV71(series,vars);
+  return PMK_CURRENT_CATALOG_HEADER_IMAGE_V71;
 }
 
 function pmkMobileMediaItemsV20(){
@@ -2750,8 +2774,8 @@ function pmkMobileMediaItemsV20(){
     seen.add(u); out.push({...it,url:u});
   };
   // 第一張固定是 PC 右上型錄表頭的「產品圖＋尺寸圖」。
-  // 使用完全相同的 series/catalog_header fallback 規則，PC / 手機不會再各抓一張。
-  const catalogHeader=pmkCatalogHeaderDiagramUrlV70(selectedVariation);
+  // V71：PC 與手機共用 pmkCatalogSeriesDiagramUrlV71，不再各自推導圖片。
+  const catalogHeader=pmkSyncCurrentCatalogHeaderImageV71(selectedVariation);
   if(catalogHeader)push({type:'image',url:catalogHeader,source:'catalog-header-diagram'});
   (mediaItems(P)||[]).forEach(push);
   return out;
@@ -2808,6 +2832,7 @@ function pmkMobileRenderMediaStageV20(forceSpec=false){
 
   if(items.length>0){
     PMK_MOBILE_MEDIA_MODE_V20='media';
+    if(forceSpec&&isBskt)PMK_MOBILE_MEDIA_INDEX_V20=0;
     if(PMK_MOBILE_MEDIA_INDEX_V20>=items.length)PMK_MOBILE_MEDIA_INDEX_V20=0;
   }else if(forceSpec&&isBskt){
     PMK_MOBILE_MEDIA_MODE_V20='spec';
@@ -3488,14 +3513,8 @@ function pmkCatalogSupplierHtmlV13(vars,selectedVar){
 
     // PC 型錄：每個系列都恢復自己的「照片 / 尺寸示意圖」。
     // 優先讀系列表頭 diagram_image；舊資料若圖片掛在 series 或該系列 Variation，亦可顯示。
-    const seriesDiagram=String(
-      h.diagram_image ||
-      series.diagram_image ||
-      series.image_url ||
-      (sv.find(v=>String(v?.diagram_image||'').trim())?.diagram_image) ||
-      (sv.find(v=>String(v?.image_url||'').trim())?.image_url) ||
-      ''
-    ).trim();
+    const seriesDiagram=pmkCatalogSeriesDiagramUrlV71(series,sv);
+    if(sc===activeSc)PMK_CURRENT_CATALOG_HEADER_IMAGE_V71=seriesDiagram;
     const seriesDiagramHtml=seriesDiagram
       ? `<div class="pmkCatalogDiagram"><img src="${esc(seriesDiagram)}" alt="${esc(series.public_name||'')} 尺寸示意圖"></div>`
       : '';
