@@ -1,9 +1,12 @@
 <!doctype html>
 <html lang="zh-Hant">
 <head>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>BookWide Learning Dashboard V30</title>
+  <title>BookWide Learning Dashboard V31.1 Cloud Sync</title>
   <style>
     :root{--bg:#f5f7fb;--card:#fff;--line:#e5e7eb;--ink:#0f172a;--muted:#64748b;--brand:#2563eb;--brand-2:#1d4ed8;--soft:#eff6ff;--done:#16a34a;--shadow:0 14px 34px rgba(15,23,42,.08)}
     *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.42 system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans TC","Microsoft JhengHei",sans-serif}
@@ -897,17 +900,22 @@ async function BW_rebuildProgressFromWatchLogs({render=true}={}){
     }
     slugs.forEach(slug=>{if(BW_hasPlayerDoneMarker(slug)) fullyWatched.add(slug)});
 
-    const rebuilt={};
+    // V31.1：雲端 completed_days 是跨 PC / 手機的共同進度。
+    // 不再每台裝置都從 {} 重建，否則手機會把 PC 已完成的 Day 清掉。
+    // watch_logs / ended marker 只負責往前補完成，不負責倒退或清空雲端進度。
+    const rebuilt=normalizeProgressObject(state.progress);
     const catSaved=getCatSaved();
     for(const dayObj of state.schedule){
       const lessons=(dayObj.lessons||[]).filter(x=>String(x?.slug||'').trim());
       if(!lessons.length) break;
-      const complete=lessons.every(x=>fullyWatched.has(String(x.slug||'').trim()));
+      const alreadyDone=rebuilt[dayObj.day]===true;
+      const watchedComplete=lessons.every(x=>fullyWatched.has(String(x.slug||'').trim()));
+      const complete=alreadyDone || watchedComplete;
       const dateKey=getScheduleDateKey(dayObj.day);
       catSaved[dateKey]=catSaved[dateKey]||{};
       for(const item of lessons){
         const cat=String(item.category||dayObj.target_category||'');
-        if(CATEGORY_KEYS.includes(cat)) catSaved[dateKey][cat]=complete;
+        if(CATEGORY_KEYS.includes(cat) && complete) catSaved[dateKey][cat]=true;
       }
       if(!complete) break;
       rebuilt[dayObj.day]=true;
@@ -917,7 +925,8 @@ async function BW_rebuildProgressFromWatchLogs({render=true}={}){
     state.progress=rebuilt;
     localStorage.setItem(STORAGE_KEY,after);
     localStorage.setItem(CAT_PROGRESS_KEY,JSON.stringify(catSaved));
-    state.selectedDay=getUnlockedDay(rebuilt);
+    const sharedUnlockedDay=getUnlockedDay(rebuilt);
+    state.selectedDay=Math.max(1,Math.min(sharedUnlockedDay,state.schedule.length||30));
     await saveCloudProgressNow();
     if(render) renderAll();
     return before!==after;
@@ -975,6 +984,7 @@ async function loadCloudProgress(userId){
     if(data){
       const cloudCompleted=normalizeProgressObject(data.completed_days);
       const cloudCategory=normalizeProgressObject(data.category_progress);
+      // V31.1：同帳號 PC / 手機以雲端 completed_days 為共同真相。
       state.progress=cloudCompleted;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(cloudCompleted));
       localStorage.setItem(CAT_PROGRESS_KEY, JSON.stringify(cloudCategory));
@@ -1058,8 +1068,9 @@ function isCategoryDone(dayNo, cat){
 }
 function isDayCompleted(dayObj){
   if(!dayObj) return false;
-  const cats=[...new Set((dayObj.lessons||[]).map(x=>String(x.category||'')).filter(c=>CATEGORY_KEYS.includes(c)))];
-  return !!state.progress[dayObj.day] || (!!cats.length && cats.every(cat=>isCategoryDone(dayObj.day, cat)));
+  // V31.1：Day 完成/解鎖只認同一份 state.progress。
+  // category_progress 只給學習曲線，不再造成「上面完成、下面未解鎖」的矛盾。
+  return state.progress?.[dayObj.day] === true;
 }
 function normalizeArray(v){
   if(Array.isArray(v)) return v.map(x=>String(x||'').trim()).filter(Boolean);
