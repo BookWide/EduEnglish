@@ -1470,7 +1470,7 @@ body.card-pick-active .sticker-maker-btn{background:#f2a51a!important;color:#111
     <div id="lineAutoActionFlow" class="line-auto-action-flow" aria-label="LINE 日安圖操作順序">
       <div class="line-auto-action-heading">日安卡＋每日學習自動排程</div>
       <div class="line-auto-action-body">
-        <div class="line-auto-action-title">統一主流程：① 產生今天日安圖（有指定用指定，未指定則隨機）→ ② 儲存設定 → ③ 啟用排程</div>
+        <div class="line-auto-action-title">統一主流程：① 產生今天日安圖＋最終預覽（依照片 ID 順序）→ ② 儲存設定 → ③ 啟用排程</div>
         <div class="line-auto-action-row line-auto-primary-flow">
           <button class="btn gold" onclick="lineAutoRun(false)"><span class="line-auto-step">1</span>產生今天日安圖</button>
           <span class="line-auto-arrow" aria-hidden="true">→</span>
@@ -6274,6 +6274,20 @@ function lineAutoStartStatusTimer(){if(lineAutoStatusTimer)clearInterval(lineAut
 function lineAutoValue(id){return document.getElementById(id)?.value||''}
 function lineAutoBool(id){return lineAutoValue(id)==='true'}
 function lineAutoSelectedIds(){return [...document.querySelectorAll('#laRecipientList input[type="checkbox"]:checked')].map(x=>String(x.value||'').trim()).filter(Boolean)}
+function lineAutoPreviewRecipientIds(){
+  const selected=lineAutoSelectedIds();
+  if(selected.length)return selected;
+  const saved=Array.isArray(lineAutoLastConfig?.recipient_ids)
+    ? [...new Set(lineAutoLastConfig.recipient_ids.map(x=>String(x||'').trim()).filter(Boolean))]
+    : [];
+  if(saved.length)return saved;
+  const own=bwLineBindingForProfile(typeof BOOKWIDE_PROFILE==='object'?BOOKWIDE_PROFILE:null);
+  const ownId=String(own?.id||own?.line_user_id||'').trim();
+  if(ownId)return [ownId];
+  const first=(lineAutoTargets||[]).find(x=>x&&x.active!==false&&String(x.id||x.line_user_id||'').trim());
+  const firstId=String(first?.id||first?.line_user_id||'').trim();
+  return firstId?[firstId]:[];
+}
 function lineAutoPayload(){const selectedRecipients=lineAutoSelectedIds();return {
   recipient_ids:selectedRecipients, recipient_id:selectedRecipients[0]||'', recipient_groups:lineAutoRecipientGroups,
   schedule_interval_days:Math.max(1,Math.min(3,Number(lineAutoValue('laIntervalDays')||1))),
@@ -7145,9 +7159,8 @@ async function lineAutoStoreComposedForSchedule(){if(!greetingMakerState.blob)th
       if(lineAutoCurrentComposedUrl){
         lineAutoLastConfig={...(lineAutoLastConfig||{}),scheduled_composed_url:lineAutoCurrentComposedUrl};
       }
-      // V40.10：存好日安成品後，主畫面只刷新「實際會送出的整併卡」。
-      // 歷史池預覽只有使用者按「預覽歷史卡＋Player」時才顯示，不能再蓋掉主預覽。
-      setTimeout(()=>lineAutoFinalMergedPreview(lineAutoTodayTaipei()),0);
+      // V40.17：只負責存成品，不再從這裡另開第二次預覽。
+      // 預覽由 lineAutoRun 單一流程負責，避免兩個 /run 競爭後互相覆蓋畫面。
       return data;
     }
     lastError=data.error||text||`HTTP ${res.status}`;
@@ -7506,10 +7519,10 @@ async function lineAutoFinalMergedPreview(date,readyResult=null){
   try{
     let d=readyResult;
     if(!d){
-      const ids=lineAutoSelectedIds();
+      const ids=lineAutoPreviewRecipientIds();
       if(!ids.length){
         box.style.display='block';
-        box.innerHTML='<div class="notice">請先勾選 LINE 收件人。</div>';
+        box.innerHTML='<div class="notice">目前沒有任何已綁定 LINE 的會員可供預覽。</div>';
         return null;
       }
       const specialPayload=dailySpecialPayload(date);
@@ -7540,7 +7553,7 @@ async function lineAutoRun(send){try{
   }catch(mapError){
     console.warn('發送前 24 節氣 Player mapping 讀取失敗',mapError);
   }
-  await lineAutoSave(true);
+  if(send)await lineAutoSave(true);
   const testDate=document.getElementById('laDailySpecialDate')?.value||lineAutoTodayTaipei();
   const special=dailySpecialResolved(testDate);
 
@@ -7596,9 +7609,9 @@ async function lineAutoRun(send){try{
     const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,group_id:BOOKWIDE_GROUP_ID||'',photo_url:fixed,source_photo_url:fixed,selected_photo_url:fixed,greeting_pool_urls:lineAutoGreetingPool(),avoid_recent_photos:false})});
     await lineAutoOpenPreview({...d,photo_url:fixed,worker_photo_url:d?.photo_url||''});
     await lineAutoFinalMergedPreview(testDate);
-    lineAutoShow('✅ 今日日安成品已產生；下方顯示的是實際會發送的「日安＋每日學習」整併卡。');
+    lineAutoShow('✅ 今日日安成品已產生；下方就是排程會使用的最終整併 LINE。');
   }
-  await lineAutoRefreshScheduleStatus(false);return}if(send){const pick=lineAutoNextGreetingPhoto();if(!pick.url)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在從 ${pick.total} 張日安素材依 ID 順序發送；本輪尚餘 ${pick.remaining} 張…`);applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const ids=lineAutoSelectedIds();if(!ids.length)throw new Error('請至少勾選一個 LINE 收件人');const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:true,force:false,group_id:BOOKWIDE_GROUP_ID||'',recipient_ids:ids,photo_url:pick.url,source_photo_url:pick.url,selected_photo_url:pick.url,greeting_pool_urls:lineAutoGreetingPool(),greeting_pool_items:lineAutoGreetingPoolItems(),greeting_photo_id:pick.id,avoid_recent_photos:false,rotation_remaining:pick.remaining})});lineAutoShow(`✅ ${d.message||'一般日安圖已依 ID 順序送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}；本輪尚餘 ${pick.remaining} 張。`);await lineAutoRefreshScheduleStatus(false);return}const pick=lineAutoNextGreetingPhoto();if(!pick.url)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在從 ${pick.total} 張日安素材依 ID 順序；本輪尚餘 ${pick.remaining} 張…`);applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,group_id:BOOKWIDE_GROUP_ID||'',photo_url:pick.url,source_photo_url:pick.url,selected_photo_url:pick.url,greeting_pool_urls:lineAutoGreetingPool(),greeting_pool_items:lineAutoGreetingPoolItems(),greeting_photo_id:pick.id,avoid_recent_photos:false,rotation_remaining:pick.remaining})});await lineAutoOpenPreview({...d,photo_url:pick.url,worker_photo_url:d?.photo_url||''});await lineAutoFinalMergedPreview(testDate,d);lineAutoShow(`✅ 已使用輪播素材產生完整日安圖；下方為實際整併 LINE，目前 ID ${pick.id}；尚餘 ${pick.remaining} 張。`);await lineAutoRefreshScheduleStatus(false);}catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error')}
+  await lineAutoRefreshScheduleStatus(false);return}if(send){const pick=lineAutoNextGreetingPhoto();if(!pick.url)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在從 ${pick.total} 張日安素材依 ID 順序發送；本輪尚餘 ${pick.remaining} 張…`);applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const ids=lineAutoSelectedIds();if(!ids.length)throw new Error('請至少勾選一個 LINE 收件人');const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:true,force:false,group_id:BOOKWIDE_GROUP_ID||'',recipient_ids:ids,photo_url:pick.url,source_photo_url:pick.url,selected_photo_url:pick.url,greeting_pool_urls:lineAutoGreetingPool(),greeting_pool_items:lineAutoGreetingPoolItems(),greeting_photo_id:pick.id,avoid_recent_photos:false,rotation_remaining:pick.remaining})});lineAutoShow(`✅ ${d.message||'一般日安圖已依 ID 順序送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}；本輪尚餘 ${pick.remaining} 張。`);await lineAutoRefreshScheduleStatus(false);return}const pick=lineAutoNextGreetingPhoto();if(!pick.url)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在從 ${pick.total} 張日安素材依 ID 順序；本輪尚餘 ${pick.remaining} 張…`);applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,group_id:BOOKWIDE_GROUP_ID||'',photo_url:pick.url,source_photo_url:pick.url,selected_photo_url:pick.url,greeting_pool_urls:lineAutoGreetingPool(),greeting_pool_items:lineAutoGreetingPoolItems(),greeting_photo_id:pick.id,avoid_recent_photos:false,rotation_remaining:pick.remaining})});await lineAutoOpenPreview({...d,photo_url:pick.url,worker_photo_url:d?.photo_url||''});await lineAutoFinalMergedPreview(testDate);lineAutoShow(`✅ 已產生完整日安圖；下方就是排程會使用的最終整併 LINE。目前 ID ${pick.id}。`);await lineAutoRefreshScheduleStatus(false);}catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error')}
 }
 
 async function lineAutoSetEnabled(enabled){if(enabled&&!bwIsSubscribed()){alert('每日自動 LINE 推播只提供訂閱會員；Admin 不限制。');return;}
@@ -7827,7 +7840,7 @@ async function dailyEnglishSetSchedule(enabled){
   return lineAutoSetEnabled(enabled);
 }
 
-window.BOOKWIDE_MHIKING_VERSION='V40.16_UNIFIED_PREVIEW_REBUILD';
+window.BOOKWIDE_MHIKING_VERSION='V40.17_FINAL_PREVIEW_SINGLE_FLOW';
 setTimeout(birthdayAdminInitButtonState,0);
 /* v26.1 birthday actions */
 function v261BirthdayPreview(){const url=String(document.getElementById('laBirthdayCardImage')?.value||'').trim();
