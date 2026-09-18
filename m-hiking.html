@@ -6144,36 +6144,17 @@ function lineAutoGreetingSourceDate(url){
   }
   return lineAutoTodayTaipei().replaceAll('-','');
 }
+// V40.24：前端不再建立、重編或保存日安照片 ID。
+// 唯一 ID 主控在 Worker；m-hiking 只提供目前有效照片 URL 池。
 function lineAutoGreetingPoolItems(){
-  const urls=lineAutoGreetingPool();
-  const grouped=new Map();
-  for(const url of urls){
-    const day=lineAutoGreetingSourceDate(url);
-    if(!grouped.has(day))grouped.set(day,[]);
-    grouped.get(day).push(url);
-  }
-  const items=[];
-  for(const day of [...grouped.keys()].sort()){
-    const dayUrls=grouped.get(day).slice().sort((a,b)=>String(a).localeCompare(String(b)));
-    dayUrls.forEach((url,i)=>items.push({id:`${day}${String(i+1).padStart(2,'0')}`,url}));
-  }
-  return items.sort((a,b)=>a.id.localeCompare(b.id));
+  const live=new Set(lineAutoGreetingPool().map(normalizePhotoUrl).filter(isImageUrl));
+  const saved=Array.isArray(lineAutoLastConfig?.greeting_pool_items)?lineAutoLastConfig.greeting_pool_items:[];
+  return saved
+    .filter(x=>x&&/^\d{10,}$/.test(String(x.id||''))&&live.has(normalizePhotoUrl(x.url)))
+    .map(x=>({id:String(x.id),url:normalizePhotoUrl(x.url)}));
 }
 function lineAutoGreetingId(url){
-  return lineAutoGreetingPoolItems().find(x=>x.url===String(url||'').trim())?.id||'';
-}
-function lineAutoNextGreetingPhoto(){
-  const items=lineAutoGreetingPoolItems(),scope=BOOKWIDE_GROUP_ID||'default';
-  if(!items.length)return {id:'',url:'',total:0,remaining:0};
-  let saved={};try{saved=JSON.parse(localStorage.getItem(GREETING_SEQUENCE_KEY)||'{}')}catch(_e){}
-  const previous=saved?.[scope]||{};
-  const lastId=String(previous.last_id||'');
-  let index=items.findIndex(x=>x.id>lastId);
-  if(index<0)index=0;
-  const picked=items[index];
-  saved[scope]={last_id:picked.id,updated_at:new Date().toISOString(),pool_size:items.length};
-  localStorage.setItem(GREETING_SEQUENCE_KEY,JSON.stringify(saved));
-  return {id:picked.id,url:picked.url,total:items.length,remaining:Math.max(0,items.length-index-1)};
+  return lineAutoGreetingPoolItems().find(x=>x.url===normalizePhotoUrl(url))?.id||'';
 }
 function greetingHistoryKey(value){const raw=String(value||lineAutoTodayTaipei()).trim(),m=raw.match(/(?:\d{4}-)?(\d{2})-(\d{2})$/);return m?`${m[1]}-${m[2]}`:''
 }
@@ -6307,7 +6288,7 @@ function lineAutoPayload(){const selectedRecipients=lineAutoSelectedIds();return
   use_openai:lineAutoBool('laOpenAI'), use_photo_understanding:lineAutoBool('laVision'),
   greeting_engine_version:GREETING_ENGINE_VERSION, greeting_prompt_mode:'greeting_copy_no_signature',
   /* V33.4：不把日安設計存成群組規格；只送照片池。Worker 必須使用共用日安成品。 */
-  album_scope:'group_then_shared', greeting_pool_urls:lineAutoGreetingPool(), greeting_pool_items:lineAutoGreetingPoolItems(), greeting_rotation_mode:'id_sequence', greeting_rotation_reset:'after_pool_exhausted',
+  album_scope:'group_then_shared', greeting_pool_urls:lineAutoGreetingPool(), greeting_rotation_mode:'id_sequence', greeting_rotation_reset:'after_pool_exhausted',
   greeting_history_enabled:true, greeting_history_library:greetingHistoryLibrary, greeting_history_rotation:greetingHistoryRotation, ...greetingHistoryTodayPayload(lineAutoTodayTaipei(),{commit:true}), ...dailySpecialPayload(lineAutoTodayTaipei()),
   holiday_auto_match:true, holiday_card_library:holidayCardLibrary, holiday_content_library:holidayContentLibrary,
   group_id:BOOKWIDE_GROUP_ID||'', timezone:'Asia/Taipei'
@@ -7611,7 +7592,7 @@ async function lineAutoRun(send){try{
     await lineAutoFinalMergedPreview(testDate);
     lineAutoShow('✅ 今日日安成品已產生；下方就是排程會使用的最終整併 LINE。');
   }
-  await lineAutoRefreshScheduleStatus(false);return}if(send){const pick=lineAutoNextGreetingPhoto();if(!pick.url)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在從 ${pick.total} 張日安素材依 ID 順序發送；本輪尚餘 ${pick.remaining} 張…`);applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const ids=lineAutoSelectedIds();if(!ids.length)throw new Error('請至少勾選一個 LINE 收件人');const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:true,force:false,group_id:BOOKWIDE_GROUP_ID||'',recipient_ids:ids,photo_url:pick.url,source_photo_url:pick.url,selected_photo_url:pick.url,greeting_pool_urls:lineAutoGreetingPool(),greeting_pool_items:lineAutoGreetingPoolItems(),greeting_photo_id:pick.id,avoid_recent_photos:false,rotation_remaining:pick.remaining})});lineAutoShow(`✅ ${d.message||'一般日安圖已依 ID 順序送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}；本輪尚餘 ${pick.remaining} 張。`);await lineAutoRefreshScheduleStatus(false);return}const pick=lineAutoNextGreetingPhoto();if(!pick.url)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在從 ${pick.total} 張日安素材依 ID 順序；本輪尚餘 ${pick.remaining} 張…`);applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,group_id:BOOKWIDE_GROUP_ID||'',photo_url:pick.url,source_photo_url:pick.url,selected_photo_url:pick.url,greeting_pool_urls:lineAutoGreetingPool(),greeting_pool_items:lineAutoGreetingPoolItems(),greeting_photo_id:pick.id,avoid_recent_photos:false,rotation_remaining:pick.remaining})});await lineAutoOpenPreview({...d,photo_url:pick.url,worker_photo_url:d?.photo_url||''});await lineAutoFinalMergedPreview(testDate);lineAutoShow(`✅ 已產生完整日安圖；下方就是排程會使用的最終整併 LINE。目前 ID ${pick.id}。`);await lineAutoRefreshScheduleStatus(false);}catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error')}
+  await lineAutoRefreshScheduleStatus(false);return}if(send){const pool=lineAutoGreetingPool();if(!pool.length)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在由 Worker 從 ${pool.length} 張正式照片池依永久 ID 順序發送…`);applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const ids=lineAutoSelectedIds();if(!ids.length)throw new Error('請至少勾選一個 LINE 收件人');const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:true,force:false,group_id:BOOKWIDE_GROUP_ID||'',recipient_ids:ids,greeting_pool_urls:pool,avoid_recent_photos:false})});lineAutoShow(`✅ ${d.message||'一般日安圖已依永久 ID 順序送出。'} 成功 ${d.sent_count||0}，失敗 ${d.failed_count||0}。`);await lineAutoRefreshScheduleStatus(false);return}const pool=lineAutoGreetingPool();if(!pool.length)throw new Error('日安素材池沒有可用照片。');lineAutoShow(`正在由 Worker 從 ${pool.length} 張正式照片池計算下一個永久 ID…`);applyGreetingGlobalSettings({...GREETING_GLOBAL_DEFAULTS});const d=await lineAutoApi('/run',{method:'POST',body:JSON.stringify({send:false,group_id:BOOKWIDE_GROUP_ID||'',greeting_pool_urls:pool,avoid_recent_photos:false})});await lineAutoOpenPreview({...d,photo_url:d?.photo_url||'',worker_photo_url:d?.photo_url||''});await lineAutoFinalMergedPreview(testDate);lineAutoShow(`✅ 已產生完整日安圖；Worker 下一張 ID ${d?.greeting_photo_id||'—'}。預覽不推進正式順序。`);await lineAutoRefreshScheduleStatus(false);}catch(e){lineAutoShow('❌ 執行失敗：'+e.message,'error')}
 }
 
 async function lineAutoSetEnabled(enabled){if(enabled&&!bwIsSubscribed()){alert('每日自動 LINE 推播只提供訂閱會員；Admin 不限制。');return;}
