@@ -2021,6 +2021,7 @@ if (autoplay) {
 
     const NON_ADMIN_PER_CATEGORY_LIMIT = 12; // 非 admin 輪動：每分類最多 12 片；全部最多 60 片
     let CURRENT_USER_IS_ADMIN = false;   // 從 profiles.is_admin 讀取
+    let BW_LIST_LOADED_AS_ADMIN = null;  // 清單是用哪種身分查的（admin 才含未上架）
     const ADMIN_EMAILS = ['pmktools@gmail.com'];
 
     function isAdminEmail(email) {
@@ -2055,11 +2056,21 @@ if (autoplay) {
       return (items || []).filter(v => !CURRENT_UNLOCKED_SLUGS.has(String(v.slug || '').trim()));
     }
 
+    // 輪動週數：以固定起點（2026-01-05 週一）算自然週，每週一自動換一批；不受方案 4 週上限卡死。
+    function BW_rotationWeekIndex() {
+      const epoch = new Date(2026, 0, 5); epoch.setHours(0,0,0,0);
+      const today = new Date(); today.setHours(0,0,0,0);
+      return Math.max(0, Math.floor((today - epoch) / (7 * 86400000)));
+    }
+    function BW_rotationStart(total, perCat) {
+      if (!total || total <= perCat) return 0;
+      return (BW_rotationWeekIndex() * perCat) % total; // 每週整批往後推 perCat 片
+    }
+
     function rotatePerCategoryItems(items, perCat = NON_ADMIN_PER_CATEGORY_LIMIT) {
       const list = Array.isArray(items) ? items.slice() : [];
       if (!list.length) return [];
 
-      const weekIndex = getWeekIndex();
       const byCat = {};
       for (const v of list) {
         const cat = String(v.category || '').trim() || 'other';
@@ -2077,7 +2088,7 @@ if (autoplay) {
         const total = catList.length;
         if (!total) continue;
         const count = Math.min(perCat, total);
-        const start = total ? (weekIndex % total) : 0;
+        const start = BW_rotationStart(total, perCat);
         for (let i = 0; i < count; i++) {
           result.push(catList[(start + i) % total]);
         }
@@ -2111,7 +2122,6 @@ if (autoplay) {
       const preferredCats = ['travel','story','music','movie','news','pro','monk'];
       const otherCats = Object.keys(reserveByCat).filter(cat => !preferredCats.includes(cat)).sort();
       const cats = preferredCats.filter(cat => reserveByCat[cat]?.length).concat(otherCats);
-      const weekIndex = getWeekIndex();
 
       for (const cat of cats) {
         const need = Math.max(0, NON_ADMIN_PER_CATEGORY_LIMIT - Number(categoryCount[cat] || 0));
@@ -2121,7 +2131,7 @@ if (autoplay) {
         const total = pool.length;
         if (!total) continue;
 
-        const start = total ? (weekIndex % total) : 0;
+        const start = BW_rotationStart(total, NON_ADMIN_PER_CATEGORY_LIMIT);
         let added = 0;
         for (let i = 0; i < total && added < need; i++) {
           const v = pool[(start + i) % total];
@@ -2929,6 +2939,7 @@ async function loadAllVideoItems() {
         .order('slug', { ascending: true });
 
       // 一般用戶：只顯示已上架
+      BW_LIST_LOADED_AS_ADMIN = CURRENT_USER_IS_ADMIN;
       if (!CURRENT_USER_IS_ADMIN) q = q.eq('is_published', true);
 
       const { data, error } = await q;
@@ -3794,10 +3805,14 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
       }
     });
 
+    let BW_ADMIN_BY_EMAIL = false;
     async function initAuthAndProfile(){
       try {
         const { data } = await supa.auth.getSession();
         const user = data.session?.user ?? null;
+        // admin email 立即判定，後面任何步驟出錯都不會把 admin 蓋回 false。
+        BW_ADMIN_BY_EMAIL = !!(user && isAdminEmail(user.email));
+        CURRENT_USER_IS_ADMIN = BW_ADMIN_BY_EMAIL;
 
         // V37：登入有效時，清掉舊版守門留下的踢出 query。
         // device_kicked=1 並不存在於 V34.6~V35.3 這批 index 原始碼中；
@@ -3840,7 +3855,7 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         }
 
 
-        CURRENT_USER_IS_ADMIN = false;
+        CURRENT_USER_IS_ADMIN = BW_ADMIN_BY_EMAIL;
         if (user) {
           const { data: profile, error } = await supa
             .from('profiles')
@@ -3925,10 +3940,13 @@ const SUPABASE_URL  = 'https://jeajrwpmrgczimmrflxo.supabase.co';
         }
       } catch (e) {
         console.error('check admin failed', e);
-        CURRENT_USER_IS_ADMIN = false;
+        CURRENT_USER_IS_ADMIN = BW_ADMIN_BY_EMAIL;
       }
-      // 使用者狀態確定後，再重畫一次列表（決定是否套用 15 片限制）
-      if (typeof renderGrid === 'function') {
+      console.info('[index] admin =', CURRENT_USER_IS_ADMIN, '| list loaded as admin =', BW_LIST_LOADED_AS_ADMIN);
+      // 使用者狀態確定後：admin 若清單是用一般身分載入（只有已上架），重新載入完整清單；否則只重畫。
+      if (CURRENT_USER_IS_ADMIN && BW_LIST_LOADED_AS_ADMIN === false && typeof loadAllVideoItems === 'function') {
+        loadAllVideoItems();
+      } else if (typeof renderGrid === 'function') {
         renderGrid();
       }
     }
