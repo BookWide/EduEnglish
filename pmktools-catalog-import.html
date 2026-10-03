@@ -1,0 +1,430 @@
+<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PMKTOOLS 型錄匯入</title><style>
+body{font-family:Arial,"Noto Sans TC",sans-serif;margin:0;background:#f5f7fb;color:#172033}.wrap{max-width:1100px;margin:auto;padding:24px}.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.card{background:#fff;border:1px solid #d8dee9;border-radius:12px;padding:18px;margin-top:16px}button,.btn{border:0;border-radius:8px;padding:10px 16px;font-weight:800;cursor:pointer;background:#0f766e;color:#fff}.gray{background:#475569}.danger{background:#b91c1c}input{padding:9px;border:1px solid #cbd5e1;border-radius:7px}.muted{color:#64748b}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.stat{padding:12px;background:#f8fafc;border-radius:8px}.log{white-space:pre-wrap;max-height:360px;overflow:auto;background:#0f172a;color:#e2e8f0;padding:12px;border-radius:8px;font-family:monospace;font-size:12px}a{color:#0f766e;font-weight:800;text-decoration:none}</style></head><body><div class="wrap">
+<div class="bar"><a href="/pmktools-product-admin.html">← 商品／庫存</a><h2 style="margin:0">PMKTOOLS 型錄匯入中心</h2></div>
+<div class="card"><b>職責：</b>原廠型錄 PDF／JSON → <b>1 個型錄主商品</b> → 系列 → 規格 → R2。PDF 先在瀏覽器解析／OCR 並預覽，確認後才寫入 R2；商品 Admin 不再負責大量型錄匯入／拆分。</div>
+<div class="card">
+<div class="bar">
+  <input id="file" type="file" accept=".json,application/json,.pdf,application/pdf">
+  <button id="preview">讀取／預覽</button>
+  <button id="save" disabled>正式寫入 R2</button>
+</div>
+<div id="pdfFields" style="display:none;margin-top:12px">
+  <div class="bar">
+    <label>品牌 <input id="pdfBrand" value="聯鑽"></label>
+    <label>型錄名稱 <input id="pdfCatalogName" value="絲攻"></label>
+  </div>
+  <p class="muted">快速模式：先讀 PDF 原生規格；抓到 M／UNC／UNF／管牙規格的頁面直接略過 OCR。封面／目錄／說明頁不 OCR；只有疑似規格表但抓不到螺紋規格的頁面才補 OCR。PDF 沒有明確 SKU 時不自行造假 SKU，會標示「待確認」。</p>
+</div>
+<p class="muted">JSON：沿用既有結構。PDF：直接解析原廠型錄；例如聯鑽絲攻目錄可辨識 M／UNC／UNF／管牙等規格並依頁面標題分系列。</p>
+<div id="stats" class="grid"></div></div>
+<div class="card"><b>系列預覽</b><div id="series" style="margin-top:10px"></div></div><div class="card"><b>執行紀錄</b><div id="log" class="log">等待 PDF／JSON…</div></div></div>
+<script>
+const API='https://pmktools-api.pmktools.workers.dev'; let raw=null,master=null,existing=[];
+const $=id=>document.getElementById(id), esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+function token(){return localStorage.getItem('pmk_session_v1')||localStorage.getItem('pmktools_admin_token')||localStorage.getItem('pmk_admin_token')||localStorage.getItem('bookwide_admin_token')||''}
+function seriesCode(p,i){return String(p.series||p.family||p.sku||('S'+(i+1))).trim()}
+// V2 修正（2026-10）：原版 buildMaster() 有兩個根因問題，兩者都會讓前台「看起來沒抓到資料」，
+// 其實資料都在，只是沒被正確帶到前台讀取的欄位：
+//   1) 每筆 variation 固定寫 price:0、sale_price:0，且從未讀取 technical_params 裡的報價欄位
+//      （例如 price_rmb），也沒有寫入後台「來源價(CNY)」實際使用的 source_price 欄位 →
+//      後台/前台价格永遠是 0 ／詢價中。
+//   2) 每個系列固定寫 technical_schema:[]（空陣列）。前台「技術資料／切削參數」卡片
+//      (pmkBsktCurrentSeriesV18 → series.technical_schema) 完全依賴這個欄位決定要顯示
+//      哪些欄位；schema 是空的，不管 technical_params 裡實際存了多少尺寸資料，前台都不會
+//      顯示任何一欄 → 看起來像「沒抓到外型尺寸」，其實資料都已經寫進資料庫了。
+// 修法：自動從每個系列實際出現過的 technical_params 欄位產生 technical_schema（含常見欄位的
+// 中文標籤對照表，沒對到的欄位就用欄位名稱本身當標籤），並把 price_rmb 同時映射到
+// source_price／source_currency。這是通用修法，不限於絲攻，之後匯入其他系列一樣會自動生效。
+const PMK_TECH_LABEL_MAP_V1={
+  thread_spec:['規格',''],precision:['精度',''],finish:['食付',''],
+  length_mm:['全長','mm'],thread_length_mm:['螺紋長','mm'],relief_length_mm:['避空長','mm'],
+  shank_dia_mm:['柄徑','mm'],square_dia_mm:['四方徑','mm'],square_length_mm:['四方長','mm'],
+  coating:['鍍層',''],price_rmb:['來源報價(CNY)','CNY']
+};
+function pmkAutoFieldLabelV1(key){
+  const hit=PMK_TECH_LABEL_MAP_V1[key];
+  if(hit)return hit;
+  const label=String(key||'').replace(/_mm$/,'').replace(/_/g,' ').trim();
+  return [label||key,/_mm$/.test(key)?'mm':''];
+}
+function buildMaster(j){
+  if(!j||!Array.isArray(j.products)||!j.products.length)throw Error('JSON 缺少 products');
+  const brand=String(j.brand||'CATALOG').trim();
+  const cat=String(j.catalog_name||'Catalog').trim();
+  const masterSku='CAT-'+brand.toUpperCase().replace(/[^A-Z0-9]+/g,'-')+'-'+cat.toUpperCase().replace(/[^A-Z0-9]+/g,'-').replace(/^-|-$/g,'');
+  let vars=[];
+  // 這些是系統內部記帳用欄位，不應該被當成「技術規格」顯示在前台技術資料卡片裡。
+  const skipSchemaKeys=new Set(['catalog_values','catalog_master','catalog_master_sku','catalog_group_code','catalog_group_name','catalog_series_code','catalog_series_name','catalog_page','catalog_pdf_page','catalog_fields','series_table','source_meta']);
+  const series=j.products.map((p,i)=>{
+    const sc=seriesCode(p,i),cp=String(i+1).padStart(2,'0'),rows=Array.isArray(p.variations)?p.variations:[];
+    const schemaKeys=[]; // 保留出現順序、去重，作為這個系列的 technical_schema 欄位清單
+    for(const [ri,r] of rows.entries()){
+      const tp=JSON.parse(JSON.stringify(r.technical_params||{}));
+      const vals=Array.isArray(tp.catalog_values)?tp.catalog_values:[];
+      const fields={min_dia_A:tp.min_dia_A??'',tool_bar_dia_D:tp.tool_bar_dia_D??''};
+      vals.forEach((v,k)=>fields['value_'+String(k+1).padStart(2,'0')]=v);
+      // 把 technical_params 裡所有「展示用」欄位也同步寫進 catalog_fields：
+      // 前台技術資料卡片會優先讀 catalog_fields[key]，找不到才退回 technical_params[key]，
+      // 兩邊都寫可以確保不管前台走哪一條顯示路徑都讀得到。
+      Object.keys(tp).forEach(k=>{
+        if(skipSchemaKeys.has(k))return;
+        if(tp[k]===null||tp[k]===undefined||tp[k]==='')return;
+        fields[k]=tp[k];
+        if(!schemaKeys.includes(k))schemaKeys.push(k);
+      });
+      // 來源報價（CNY）：寫入後台「來源價(CNY)」實際使用的 source_price／source_currency 欄位。
+      // 基礎價(NT$) 仍交由後台「匯入牌價」或手動輸入觸發分類倍率公式計算，這裡不自行假設匯率。
+      const cny=Number(tp.price_rmb);
+      const hasCny=Number.isFinite(cny)&&cny>0;
+      vars.push({
+        id:`catalog-${masterSku}-${sc}-${ri+1}`,
+        variation_name:r.variation_name||r.sku||'',
+        sku:r.sku||'',
+        sku_manual_locked:true,
+        source_price:hasCny?cny:0,
+        source_currency:'CNY',
+        price:0,sale_price:0,stock_qty:0,is_active:true,
+        attributes:{'系列':sc,'型號':r.sku||''},
+        technical_params:{...tp,catalog_master:true,catalog_master_sku:masterSku,catalog_group_code:'01',catalog_group_name:cat,catalog_series_code:cp,catalog_series_name:sc,catalog_page:cp,catalog_pdf_page:'',catalog_fields:fields}
+      });
+    }
+    const technical_schema=schemaKeys.map(k=>{const [label,unit]=pmkAutoFieldLabelV1(k);return {key:k,label,unit};});
+    return {catalog_page:cp,pdf_page:'',series_code:sc,public_name:p.name||sc,public_name_en:p.name||sc,catalog_header:{features:[],materials:[],unit:'MM',diagram_image:p.image_url||''},technical_schema,variation_count:rows.length};
+  });
+  // 類別預設維持舊行為（向下相容其他型錄匯入檔）；若來源 JSON 自己指定了
+  // category/subcategory/subcategory_detail，則以該指定值為準，不再一律套用「車削加工/走心機刀具」。
+  const outCategory=String(j.category||'切削刀具').trim();
+  const outSubcategory=String(j.subcategory||'車削加工').trim();
+  const outSubdetail=String(j.subcategory_detail||'走心機刀具').trim();
+  return {external_id:masterSku,sku:masterSku,source_type:'catalog',product_type:'variable',brand:'',name:cat,display_name:cat,price:0,category:outCategory,subcategory:outSubcategory,subcategory_detail:outSubdetail,sale_mode:'auto',fulfillment_type:'voucher',stock_tracking_enabled:false,stock_qty:0,low_stock_qty:3,sort_order:100,is_active:true,image_url:'',gallery_urls:[],attributes:[{name:'系列',values:series.map(x=>x.series_code)},{name:'型號',values:vars.map(v=>v.sku)}],option_groups:[],variations:vars,catalog_meta:{version:3,mode:'catalog_master',master_sku:masterSku,public_name:cat,public_name_en:cat,hide_supplier_brand:true,hide_supplier_name:true,catalog_groups:[{group_code:'01',public_group_name:cat,series}],catalog_index_master:{version:3,groups:[{group_code:'01',public_group_name:cat,items:series.map(x=>({catalog_page:x.catalog_page,pdf_page:x.pdf_page,public_name:x.public_name,public_name_en:x.public_name_en}))}]},internal_source:{supplier_brand:brand,supplier_name:brand}}};
+}
+
+async function loadScriptOnce(src,test){
+  if(test())return;
+  await new Promise((ok,bad)=>{const sc=document.createElement('script');sc.src=src;sc.onload=ok;sc.onerror=()=>bad(Error('載入解析元件失敗：'+src));document.head.appendChild(sc)});
+}
+async function ensurePdfJs(){
+  await loadScriptOnce('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js',()=>!!window.pdfjsLib);
+  pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  return pdfjsLib;
+}
+async function ensureTesseract(){
+  await loadScriptOnce('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js',()=>!!window.Tesseract);
+  return window.Tesseract;
+}
+function pdfLog(t){$('log').textContent=t}
+async function pdfPageText(page){
+  // 保留每一列（依 y 座標分行），不要整頁攤平成一行空白分隔字串——
+  // 表格要逐列解析（規格/精度/食付/長度.../4種塗層報價），需要列的邊界。
+  const tc=await page.getTextContent();
+  const lines=[]; let cur=[]; let lastY=null;
+  for(const item of tc.items){
+    const str=String(item.str||'').trim(); if(!str)continue;
+    const y=item.transform?item.transform[5]:null;
+    if(lastY!==null && y!==null && Math.abs(y-lastY)>2){ if(cur.length)lines.push(cur.join(' ')); cur=[]; }
+    cur.push(str); lastY=y;
+  }
+  if(cur.length)lines.push(cur.join(' '));
+  return {text:lines.join(' ').replace(/\s+/g,' ').trim(), lines};
+}
+async function ocrPdfPage(page,n,total){
+  pdfLog(`掃描型 PDF：OCR 第 ${n}/${total} 頁…\n第一次 OCR 需下載中英文字庫，請保持網路連線。`);
+  // scale 從 1.8 提高到 3.2：規格表字體很小（精度/長度/報價都是小數字），
+  // 太低的解析度會讓 tesseract 把表格數字讀錯，等於解析出一堆假資料。
+  const vp=page.getViewport({scale:3.2});
+  const c=document.createElement('canvas'); c.width=Math.ceil(vp.width); c.height=Math.ceil(vp.height);
+  await page.render({canvasContext:c.getContext('2d'),viewport:vp}).promise;
+  const T=await ensureTesseract();
+  const r=await T.recognize(c,'chi_tra+eng',{logger:m=>{if(m.status==='recognizing text')pdfLog(`OCR 第 ${n}/${total} 頁：${Math.round((m.progress||0)*100)}%`)}});
+  const text=String(r?.data?.text||'').replace(/\r/g,'');
+  const lines=(r?.data?.lines||[]).map(l=>String(l.text||'').replace(/\r/g,'').trim()).filter(Boolean);
+  return {text, lines: lines.length?lines:text.split('\n').map(x=>x.trim()).filter(Boolean)};
+}
+function tapSeriesName(text,current){
+  const t=String(text||'').replace(/\s+/g,'');
+  const rules=[
+    ['擠壓絲攻',/擠壓|挤压|無屑|无屑|FORM/i],
+    ['螺旋絲攻',/螺旋|SPIRALFLUTE/i],
+    ['先端絲攻',/先端|螺尖|SPIRALPOINT|GUN/i],
+    ['直槽絲攻',/直槽|STRAIGHTFLUTE/i],
+    ['管牙絲攻',/管牙|NPT|NPS|PT\b|BSP|G螺紋|G螺纹/i],
+    ['鎢鋼絲攻',/鎢鋼|钨钢|CARBIDE/i],
+    ['德標絲攻',/DIN|德標|德标/i],
+    ['絲攻',/絲攻|丝攻|TAP/i]
+  ];
+  for(const [name,re] of rules)if(re.test(t))return name;
+  return current||'絲攻';
+}
+function tapSpecsFromText(text){
+  const out=[], seen=new Set();
+  const clean=String(text||'').replace(/[＊*]/g,'×').replace(/[Xx]/g,'×');
+  const patterns=[
+    /\bM\s*\d+(?:\.\d+)?\s*(?:×\s*\d+(?:\.\d+)?)?/gi,
+    /\b(?:UNC|UNF|UNEF)\s*#?\s*\d+(?:\/\d+)?\s*(?:[-×]\s*\d+(?:\.\d+)?)?/gi,
+    /\b(?:NPT|NPS|PT|BSPT|BSPP|G)\s*\d+(?:\/\d+)?(?:\s*[-×]\s*\d+(?:\.\d+)?)?/gi
+  ];
+  for(const re of patterns)for(const m of clean.matchAll(re)){
+    const spec=m[0].replace(/\s+/g,'').toUpperCase();
+    if(!seen.has(spec)){seen.add(spec);out.push(spec)}
+  }
+  return out;
+}
+// ── 絲攻規格表「逐列」解析 ──────────────────────────────────────────────
+// 型錄裡一個「規格」底下常常有好幾列（不同精度RHx／食付B,P／長度組合），
+// 而每一列又對應4種塗層（白色／TC50／TIN／TICN）各自報價＝4個可下單的SKU。
+// 這跟原本 tapSpecsFromText() 的「整頁文字當字串掃、同規格去重只留一筆」完全
+// 是兩回事——那個函式繼續保留給「只想抓規格名稱」的用途，這裡另外補一個
+// 「依表格欄位還原每一列真實資料」的解析器，只用在 buildPdfMaster() 裡。
+const TAP_SPEC_RE=/^(?:M\d+(?:\.\d+)?\*\d+(?:\.\d+)?|(?:UNC|UNF|UNEF|UNS)\d+(?:\/\d+)?(?:\.\d+)?-\d+(?:\.\d+)?|(?:NPT|NPS|PT|BSPT|BSPP|G)\d+(?:\/\d+)?(?:-\d+(?:\.\d+)?)?|W\d+(?:\/\d+)?-\d+)$/i;
+const TAP_RH_RE=/^RH\d{1,2}$/i, TAP_FIN_RE=/^[BP]$/i, TAP_NUM_RE=/^\d+(?:\.\d+)?$/;
+function tapTableRowsFromLines(lines,state){
+  // state={currentSpec} 要由呼叫端在「整份PDF」範圍內持續傳遞，
+  // 因為「規格」是合併儲存格，常常只印在這組的第一列，後面幾列靠表格延續。
+  const rows=[];
+  for(const raw of (lines||[])){
+    let t=String(raw||'').trim().replace(/[Xx×]/g,'*').replace(/，/g,',');
+    if(!t)continue;
+    const tokens=t.split(/\s+/).filter(Boolean);
+    if(!tokens.length)continue;
+    let idx=0, specHere=null;
+    if(TAP_SPEC_RE.test(tokens[0])){ specHere=tokens[0].toUpperCase(); idx=1; }
+    const rest=tokens.slice(idx);
+    if(specHere && rest.length===0){ state.currentSpec=specHere; continue; } // 規格單獨一行（合併儲存格換行）
+    if(rest.length>=11 && TAP_RH_RE.test(rest[0]) && TAP_FIN_RE.test(rest[1])){
+      const nums=rest.slice(2,11);
+      if(nums.length===9 && nums.every(x=>TAP_NUM_RE.test(x))){
+        const spec=specHere||state.currentSpec;
+        if(spec){
+          const [L,L1,D,K,LK,p1,p2,p3,p4]=nums.map(Number);
+          rows.push({spec,precision:rest[0].toUpperCase(),finish:rest[1].toUpperCase(),L,L1,D,K,LK,prices:{'白色':p1,'TC50':p2,'TIN':p3,'TICN':p4}});
+          if(specHere)state.currentSpec=specHere;
+          continue;
+        }
+      }
+    }
+    if(specHere)state.currentSpec=specHere; // 規格後面接了讀不出來的雜訊，至少更新目前規格
+  }
+  return rows;
+}
+function buildPdfMaster(parsed,brand,cat,filename){
+  const safe=x=>String(x||'').toUpperCase().replace(/[^A-Z0-9]+/g,'-').replace(/^-|-$/g,'');
+  const known=x=>{
+    const v=String(x||'').trim();
+    const map={'聯鑽':'LIANZUAN','联钻':'LIANZUAN','絲攻':'TAPS','丝攻':'TAPS'};
+    return map[v]||safe(v);
+  };
+  const masterSku='CAT-'+(known(brand)||'CATALOG')+'-'+(known(cat)||'TAPS');
+  const groups=new Map(); let current='絲攻';
+  const rowState={currentSpec:null};
+  let totalRowsParsed=0, totalFallbackSpecs=0;
+  for(const p of parsed){
+    current=tapSeriesName(p.text,current);
+    const lines=(p.lines&&p.lines.length)?p.lines:[];
+    const rows=tapTableRowsFromLines(lines,rowState);
+    if(!groups.has(current))groups.set(current,[]);
+    if(rows.length){
+      totalRowsParsed+=rows.length;
+      for(const row of rows)groups.get(current).push({...row,page:p.page,parsed:true});
+    }else{
+      // 安全網：這一頁逐列解析不到任何列（OCR品質不佳或版面跟預期不同），
+      // 退回舊的「整頁掃規格名稱」做法，至少把規格名稱帶進來、誠實標示
+      // 「僅規格名稱、明細待補」，不要整頁資料完全漏掉，也不假裝有完整數據。
+      const specs=tapSpecsFromText(p.text);
+      for(const spec of specs){
+        if(!groups.get(current).some(x=>x.spec===spec && !x.parsed)){
+          groups.get(current).push({spec,page:p.page,parsed:false});
+          totalFallbackSpecs++;
+        }
+      }
+    }
+  }
+  const series=[]; const vars=[]; let si=0;
+  const COATINGS=['白色','TC50','TIN','TICN'];
+  for(const [name,rowList] of groups){
+    if(!rowList.length)continue;
+    si++; const cp=String(si).padStart(2,'0');
+    const seriesMeta={catalog_page:cp,pdf_page:String(rowList[0]?.page||''),series_code:cp,public_name:name,public_name_en:name,catalog_header:{features:[],materials:[],unit:'MM',diagram_image:''},technical_schema:['THREAD_SPEC','PRECISION','FINISH','L','L1','D','K','LK','COATING','PRICE'],variation_count:0};
+    series.push(seriesMeta);
+    let vcount=0;
+    rowList.forEach((r,ri)=>{
+      const metric=r.spec.match(/^M(\d+(?:\.\d+)?)\*?(\d+(?:\.\d+)?)?/i);
+      if(r.parsed){
+        for(const coating of COATINGS){
+          const price=r.prices[coating];
+          const skuSpec=r.spec.replace(/\*/g,'X');
+          vars.push({
+            id:`catalog-${masterSku}-${cp}-${String(ri+1).padStart(4,'0')}-${coating}`,
+            variation_name:`${name}｜${r.spec}｜${r.precision}｜${r.finish}｜${coating}`,
+            sku:`TAP-${skuSpec}-${r.precision}-${r.finish}-${coating}`,
+            sku_manual_locked:false, price:0, sale_price:0, stock_qty:0, is_active:false,
+            attributes:{'系列':name,'螺紋規格':r.spec,'精度':r.precision,'食付':r.finish,'塗層':coating},
+            technical_params:{
+              catalog_master:true,catalog_master_sku:masterSku,catalog_group_code:'01',catalog_group_name:cat,
+              catalog_series_code:cp,catalog_series_name:name,catalog_page:cp,catalog_pdf_page:String(r.page),
+              thread_spec:r.spec,thread_diameter_mm:metric?Number(metric[1]):null,
+              precision:r.precision,finish:r.finish,
+              length_mm:r.L,thread_length_mm:r.L1,shank_dia_mm:r.D,square_dia_mm:r.K,square_length_mm:r.LK,
+              coating,price_rmb:price,
+              min_dia_A:metric?Number(metric[1]):null, tool_bar_dia_D:r.D,
+              catalog_values:[r.precision,r.finish,r.L,r.L1,r.D,r.K,r.LK,coating,price],
+              sku_status:'待確認（OCR自動解析，上架前請人工核對規格與報價）',
+              source_meta:{type:'ocr_table_parsed',confidence:'unverified_ocr'}
+            }
+          });
+          vcount++;
+        }
+      }else{
+        vars.push({
+          id:`catalog-${masterSku}-${cp}-${String(ri+1).padStart(4,'0')}-fallback`,
+          variation_name:`${name}｜${r.spec}`,
+          sku:'', sku_manual_locked:false, price:0, sale_price:0, stock_qty:0, is_active:false,
+          attributes:{'系列':name,'螺紋規格':r.spec},
+          technical_params:{
+            catalog_master:true,catalog_master_sku:masterSku,catalog_group_code:'01',catalog_group_name:cat,
+            catalog_series_code:cp,catalog_series_name:name,catalog_page:cp,catalog_pdf_page:String(r.page),
+            thread_spec:r.spec,thread_diameter_mm:metric?Number(metric[1]):null,
+            sku_status:'待確認（僅抓到規格名稱，表格明細解析失敗，需人工補值）',
+            source_meta:{type:'fallback_spec_only',confidence:'low'}
+          }
+        });
+        vcount++;
+      }
+    });
+    seriesMeta.variation_count=vcount;
+  }
+  if(!series.length)throw Error('PDF 已讀取，但沒有辨識到絲攻規格。若為掃描 PDF，請確認 OCR 元件已成功載入。');
+  return {
+    external_id:masterSku,sku:masterSku,source_type:'catalog',source_platform:'catalog_pdf',
+    product_type:'variable',brand:'',name:cat,display_name:cat,price:0,category:'切削刀具',
+    subcategory:'螺紋加工',subcategory_detail:'絲攻',sale_mode:'auto',fulfillment_type:'voucher',
+    stock_tracking_enabled:false,stock_qty:0,low_stock_qty:3,sort_order:100,is_active:false,
+    image_url:'',gallery_urls:[],attributes:[{name:'系列',values:series.map(x=>x.public_name)},{name:'螺紋規格',values:vars.map(v=>v.technical_params.thread_spec)}],
+    option_groups:[],variations:vars,
+    catalog_meta:{version:4,mode:'catalog_master',status:'pdf_draft',master_sku:masterSku,public_name:cat,public_name_en:cat,
+      hide_supplier_brand:true,hide_supplier_name:true,source_pdf:{filename,pages:parsed.length,parser:'pdfjs+tesseract-browser-v2-table-aware',rows_parsed:totalRowsParsed,fallback_spec_only:totalFallbackSpecs},
+      catalog_groups:[{group_code:'01',public_group_name:cat,series}],
+      catalog_index_master:{version:4,groups:[{group_code:'01',public_group_name:cat,items:series.map(x=>({catalog_page:x.catalog_page,pdf_page:x.pdf_page,public_name:x.public_name,public_name_en:x.public_name_en}))}]},
+      internal_source:{supplier_brand:brand,supplier_name:brand}}
+  };
+}
+async function buildMasterFromPdf(file){
+  const lib=await ensurePdfJs(),buf=await file.arrayBuffer(),doc=await lib.getDocument({data:buf}).promise;
+  const parsed=[]; let embeddedChars=0;
+  for(let n=1;n<=doc.numPages;n++){
+    pdfLog(`讀取 PDF 第 ${n}/${doc.numPages} 頁…`);
+    const page=await doc.getPage(n),{text,lines}=await pdfPageText(page);
+    embeddedChars+=text.length; parsed.push({page:n,text,lines});
+  }
+  // Catalog-aware fast mode:
+  // 1) If native text already yields thread specs, NEVER OCR the whole page.
+  // 2) Cover / TOC / advertising / explanatory pages are skipped.
+  // 3) OCR only a page that looks like a product/spec table but native text yields no thread spec.
+  const compact=t=>String(t||'').replace(/\s+/g,' ').trim();
+  const nativeSpecs=t=>tapSpecsFromText(compact(t));
+  const looksLikeNonProductPage=t=>{
+    const x=compact(t);
+    if(!x)return false;
+    const toc=/(目錄|目录|CONTENTS|公司簡介|公司简介|ABOUT\s+US|注意事項|注意事项|使用說明|使用说明)/i.test(x);
+    const specWords=/(規格|规格|精度|全長|全长|螺紋長|螺纹长|柄徑|柄径|四方|價格|价格|TICN|TIN|TC50)/i.test(x);
+    return toc && !specWords;
+  };
+  const looksLikeSpecPage=t=>{
+    const x=compact(t);
+    const specWords=/(絲攻|丝攻|TAP|規格|规格|精度|全長|全长|螺紋長|螺纹长|柄徑|柄径|四方|TC50|TICN|TIN|UNC|UNF|NPT|BSP)/i.test(x);
+    const nums=(x.match(/\d+(?:\.\d+)?/g)||[]).length;
+    return specWords && nums>=4;
+  };
+
+  let ocrCount=0, nativeSpecPages=0, skippedPages=0, emptyNativePages=0;
+  for(let n=1;n<=doc.numPages;n++){
+    const native=parsed[n-1].text;
+    const specs=nativeSpecs(native);
+
+    if(specs.length){
+      nativeSpecPages++;
+      parsed[n-1].ocr_used=false;
+      parsed[n-1].native_specs=specs;
+      pdfLog(`快速解析 ${n}/${doc.numPages}｜原生文字已抓到 ${specs.length} 個規格，略過 OCR｜OCR ${ocrCount} 頁`);
+      continue;
+    }
+
+    // 原生文字幾乎是空的（掃描型頁面，沒有文字層）時，looksLikeNonProductPage／
+    // looksLikeSpecPage 兩者都是靠關鍵字比對原生文字，空字串必然判不出任何結果，
+    // 等同於「沒有依據」而不是「判斷為非規格頁」。過去的寫法會把這種頁面誤當成
+    // 「非規格頁」直接跳過、永遠不觸發 OCR，導致整份掃描型 PDF 幾乎解析不到任何
+    // 規格。這裡改成：只有在原生文字「足夠長、看得出內容」的情況下，才用關鍵字
+    // 判斷是否要跳過；原生文字太短／是空的，一律視為需要 OCR 才能判斷，不再跳過。
+    const hasUsableNativeText=compact(native).length>=15;
+    if(hasUsableNativeText){
+      if(looksLikeNonProductPage(native) || !looksLikeSpecPage(native)){
+        skippedPages++;
+        parsed[n-1].ocr_used=false;
+        pdfLog(`快速解析 ${n}/${doc.numPages}｜非規格頁／無需 OCR｜OCR ${ocrCount} 頁`);
+        continue;
+      }
+    }else{
+      emptyNativePages++;
+    }
+
+    const page=await doc.getPage(n);
+    const {text:ocrText,lines:ocrLines}=await ocrPdfPage(page,n,doc.numPages);
+    ocrCount++;
+    parsed[n-1].text=(native+' '+ocrText).trim();
+    parsed[n-1].lines=[...(parsed[n-1].lines||[]),...ocrLines];
+    parsed[n-1].ocr_used=true;
+    parsed[n-1].ocr_specs=tapSpecsFromText(ocrText);
+  }
+
+  const master=buildPdfMaster(parsed,$('pdfBrand').value.trim()||'CATALOG',$('pdfCatalogName').value.trim()||file.name.replace(/\.pdf$/i,''),file.name);
+  master.catalog_meta.source_pdf.ocr_pages=ocrCount;
+  master.catalog_meta.source_pdf.native_spec_pages=nativeSpecPages;
+  master.catalog_meta.source_pdf.skipped_pages=skippedPages;
+  master.catalog_meta.source_pdf.empty_native_pages=emptyNativePages;
+  master.catalog_meta.source_pdf.native_pages=doc.numPages-ocrCount;
+  master.catalog_meta.source_pdf.validation_mode='catalog_native_specs_first+ocr_on_empty_or_unclassifiable_pages';
+  return master;
+}
+
+function mergeExisting(m,old){
+  if(!old)return m;
+  const key=v=>{
+    const sku=String(v?.sku||'').trim();
+    if(sku)return 'SKU:'+sku;
+    const tp=v?.technical_params||{};
+    return 'SPEC:'+String(tp.catalog_series_name||'')+'|'+String(tp.thread_spec||v?.attributes?.['螺紋規格']||'');
+  };
+  const byKey=new Map((old.variations||[]).map(v=>[key(v),v]));
+  m.id=old.id;m.image_url=old.image_url||m.image_url;m.gallery_urls=old.gallery_urls||m.gallery_urls;
+  m.variations=m.variations.map(v=>{
+    const o=byKey.get(key(v));
+    return o?{...v,id:o.id||v.id,price:Number(o.price||0),sale_price:Number(o.sale_price||o.price||0),stock_qty:Number(o.stock_qty||0),image_url:o.image_url||v.image_url||'',is_active:o.is_active===true}:v;
+  });
+  return m;
+}
+async function loadExisting(){const t=token();if(!t)throw Error('AUTH_REQUIRED：請先登入 PMKTOOLS Admin');const r=await fetch(API+'/api/pmk-products',{headers:{authorization:'Bearer '+t},cache:'no-store'});const j=await r.json().catch(()=>({}));if(!r.ok)throw Error(j.error||`HTTP ${r.status}`);existing=j.products||[]}
+function render(){const groups=master?.catalog_meta?.catalog_groups||[],ser=groups.flatMap(g=>g.series||[]),vc=master?.variations?.length||0;$('stats').innerHTML=`<div class=stat><b>R2 商品</b><br>1</div><div class=stat><b>系列</b><br>${ser.length}</div><div class=stat><b>規格</b><br>${vc}</div><div class=stat><b>Master SKU</b><br>${esc(master?.external_id||'')}</div>`;$('series').innerHTML=ser.map(x=>`<span style="display:inline-block;margin:3px;padding:6px 9px;background:#eef2ff;border-radius:6px"><b>${esc(x.public_name||x.series_code)}</b>　${esc(x.series_code)} (${x.variation_count})</span>`).join('')}
+$('file').onchange=()=>{
+  const f=$('file').files[0],isPdf=!!f&&/\.pdf$/i.test(f.name);
+  $('pdfFields').style.display=isPdf?'block':'none';
+  $('save').disabled=true; master=null; raw=null;
+  $('log').textContent=f?`已選擇：${f.name}\n按「讀取／預覽」開始。`:'等待 PDF／JSON…';
+};
+$('preview').onclick=async()=>{
+  try{
+    const f=$('file').files[0]; if(!f)throw Error('請選 PDF 或 JSON');
+    const isPdf=/\.pdf$/i.test(f.name)||f.type==='application/pdf';
+    $('save').disabled=true;
+    if(isPdf){
+      master=await buildMasterFromPdf(f);
+    }else{
+      raw=JSON.parse(await f.text()); master=buildMaster(raw);
+    }
+    await loadExisting();
+    const old=existing.find(p=>String(p.external_id||p.sku||'')===master.external_id);
+    master=mergeExisting(master,old); render(); $('save').disabled=false;
+    const ser=master.catalog_meta.catalog_groups[0].series.length;
+    $('log').textContent=`預覽完成：${isPdf?'PDF':'JSON'} → 1 個型錄主商品 / ${ser} 系列 / ${master.variations.length} 規格\n${old?'將更新既有主檔並保留既有價格/庫存/圖片':'將建立新主檔'}\n${isPdf?`快速校驗：原生規格頁 ${master.catalog_meta.source_pdf.native_spec_pages||0} / OCR ${master.catalog_meta.source_pdf.ocr_pages||0}（其中掃描無文字層強制OCR ${master.catalog_meta.source_pdf.empty_native_pages||0} 頁）/ 略過非規格頁 ${master.catalog_meta.source_pdf.skipped_pages||0}。\nPDF 辨識出的規格先以「待確認」保存；未辨識到原廠 SKU 時 SKU 保持空白，不自行造號。`:''}`;
+  }catch(e){$('log').textContent='錯誤：'+e.message;$('save').disabled=true}
+}
+$('save').onclick=async()=>{if(!master)return;const adminToken=token();if(!adminToken){$('log').textContent='寫入失敗：AUTH_REQUIRED｜請先登入 PMKTOOLS Admin，再回到型錄匯入。';return;} if(!confirm(`正式寫入 R2？\n\nPDF 匯入資料會先以待確認型錄保存，不會自動上架。\n\n只會寫入 1 個型錄主商品：${master.external_id}\n系列 ${master.catalog_meta.catalog_groups[0].series.length}\n規格 ${master.variations.length}`))return;try{$('save').disabled=true;$('log').textContent='寫入中…';const r=await fetch(API+'/api/pmk-product-save',{method:'POST',headers:{'content-type':'application/json','authorization':'Bearer '+adminToken},body:JSON.stringify({id:master.id||'',product:master})});const j=await r.json().catch(()=>({}));if(!r.ok||j.ok===false)throw Error(j.error||`HTTP ${r.status}`);await loadExisting();const chk=existing.find(p=>String(p.external_id||p.sku||'')===master.external_id);if(!chk)throw Error('寫入後驗證失敗：R2 找不到主檔');$('log').textContent=`✓ R2 寫入並重新讀取驗證完成\n主檔：${master.external_id}\nR2 商品只新增/更新 1 筆\n系列：${master.catalog_meta.catalog_groups[0].series.length}\n規格：${master.variations.length}`;}catch(e){$('log').textContent='寫入失敗：'+e.message}finally{$('save').disabled=false}}
+</script></body></html>
