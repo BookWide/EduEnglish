@@ -35,7 +35,7 @@
       if (Date.now() - last < 30000 && /_enter$/.test(eventName)) return;
       sessionStorage.setItem(dedupeKey, String(Date.now()));
 
-      await fetch("https://jeajrwpmrgczimmrflxo.supabase.co/functions/v1/activity-log", {
+      await fetch("https://bookwide-hiking-api.pmktools.workers.dev/sb/functions/v1/activity-log", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
