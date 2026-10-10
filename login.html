@@ -186,7 +186,7 @@
         <!-- Left: Email / Password -->
         <section class="col">
           <h1 id="title">登入</h1>
-          <p class="sub">支援 <b>Email/密碼</b>，以及 <b>Google</b> 一鍵登入（Facebook / LINE / 微信 先預留）。</p>
+          <p class="sub">支援 <b>Email/密碼</b>，以及 <b>Google</b>、<b>LINE</b> 一鍵登入（Facebook / 微信 先預留）。</p>
 
           <div class="field">
             <label class="label" for="email">電子信箱</label>
@@ -239,9 +239,9 @@
             用 Facebook 帳號登入（預留）
           </button>
 
-          <button class="pbtn" id="btnLine" type="button" disabled>
+          <button class="pbtn" id="btnLine" type="button">
             <span class="picon" aria-hidden="true">LINE</span>
-            用 LINE 帳號登入（預留）
+            用 LINE 帳號登入／註冊
           </button>
 
           <button class="pbtn" id="btnWeChat" type="button" disabled>
@@ -250,7 +250,7 @@
           </button>
 
           <div class="note">
-            目前已先把 Google (Supabase Providers) 打通；接下來我們再一個一個把 LINE / FB / 微信接上。
+            Google、LINE 都可以一鍵登入；第一次用 LINE 登入會自動建立 BookWide 會員。
           </div>
         </aside>
       </div>
@@ -262,6 +262,21 @@
     </div>
   </div>
 
+
+  <!-- LINE 一鍵註冊的會員：補填 Email（收據、通知用）-->
+  <div id="emailAskModal" class="line-setup-modal" role="dialog" aria-modal="true" aria-labelledby="emailAskTitle">
+    <div class="line-setup-card">
+      <div class="line-setup-icon">✉</div>
+      <h2 id="emailAskTitle">LINE 登入成功！</h2>
+      <p>請留一個常用 Email，付款收據、訂閱通知會寄到這裡。我們會寄一封確認信，點信裡的按鈕就完成。</p>
+      <input id="emailAskInput" type="email" inputmode="email" autocomplete="email" placeholder="name@example.com" style="width:100%;box-sizing:border-box;margin:10px 0 4px;padding:12px 14px;border:1px solid #cbd5e1;border-radius:12px;font-size:16px">
+      <div id="emailAskMsg" style="display:none;margin:6px 0;font-size:14px;line-height:1.6"></div>
+      <div class="line-setup-actions">
+        <button id="btnEmailAskSend" class="btn-line" type="button">寄確認信</button>
+        <button id="btnEmailAskLater" class="btn-later" type="button">稍後再說，先進入 BookWide</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 註冊完成後：加入官方 LINE／完成綁定導引 -->
   <div id="lineSetupModal" class="line-setup-modal" role="dialog" aria-modal="true" aria-labelledby="lineSetupTitle">
@@ -429,6 +444,58 @@
       })
     : null;
 
+  // ===== LINE 一鍵註冊：沒有 Email 的會員先用 line_xxx@line.bookwide.net 代號 =====
+  const LINE_PLACEHOLDER_DOMAIN = '@line.bookwide.net';
+  let emailAskShown = false;
+  function needsRealEmail(session){
+    const e = String(session?.user?.email || '').toLowerCase();
+    if(!e.endsWith(LINE_PLACEHOLDER_DOMAIN)) return false;
+    try{ if(sessionStorage.getItem('bw_email_ask_later') === '1') return false; }catch(_e){}
+    return true;
+  }
+  function emailAskMsg(text, ok){
+    const el = $('emailAskMsg'); el.style.display = 'block';
+    el.style.color = ok ? '#166534' : '#b91c1c'; el.textContent = text;
+  }
+  function showEmailAsk(){
+    if(emailAskShown) return; emailAskShown = true;
+    hideMsg();
+    $('emailAskModal').classList.add('open');
+    document.body.style.overflow = 'hidden';
+    setTimeout(()=>$('emailAskInput')?.focus(), 50);
+  }
+  async function sendEmailAsk(){
+    const email = String($('emailAskInput').value || '').trim().toLowerCase();
+    if(!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return emailAskMsg('請輸入正確的 Email。');
+    const btn = $('btnEmailAskSend'); btn.disabled = true; btn.textContent = '寄送中…';
+    try{
+      const { error } = await supabaseClient.auth.updateUser({ email }, { emailRedirectTo: location.origin + '/login.html?next=' + encodeURIComponent(getNextUrl()) });
+      if(error) throw error;
+      emailAskMsg('確認信已寄到 ' + email + '，請到信箱點「確認 Email」。（找不到請看垃圾郵件）', true);
+      btn.textContent = '已寄出';
+      $('btnEmailAskLater').textContent = '先進入 BookWide';
+    }catch(err){
+      const m = String(err?.message || err);
+      emailAskMsg(/already|已經有/.test(m) ? '這個 Email 已經有 BookWide 帳號：請改用該帳號登入，再到帳戶頁綁定 LINE。' : ('寄送失敗：' + m));
+      btn.disabled = false; btn.textContent = '寄確認信';
+    }
+  }
+  function emailAskLater(){
+    try{ sessionStorage.setItem('bw_email_ask_later', '1'); }catch(_e){}
+    $('emailAskModal').classList.remove('open');
+    document.body.style.overflow = '';
+    goNext();
+  }
+  $('btnEmailAskSend')?.addEventListener('click', sendEmailAsk);
+  $('btnEmailAskLater')?.addEventListener('click', emailAskLater);
+  $('emailAskInput')?.addEventListener('keydown', e=>{ if(e.key === 'Enter') sendEmailAsk(); });
+  function afterLogin(session){
+    if(needsRealEmail(session)){ showEmailAsk(); return; }
+    if(emailAskShown) return;
+    showMsg('已登入，正在導回…', 'ok');
+    goNext();
+  }
+
   async function redirectIfLoggedIn(){
     if(!supabaseClient) return;
     try{
@@ -438,8 +505,7 @@
           showMsg('帳號建立成功，請完成最後一步。', 'ok');
           showLineSetupDialog();
         }else{
-          showMsg('已登入，正在導回…', 'ok');
-          goNext();
+          afterLogin(session);
         }
       }
     }catch(e){
@@ -480,7 +546,7 @@
       });
     }catch(err){
       console.error(err);
-      showMsg('LINE 登入失敗：' + (err?.message || err) + '（請確認 Supabase 已啟用 LINE Provider，並設定 Redirect URL）', 'err');
+      showMsg('LINE 登入失敗：' + (err?.message || err), 'err');
       if(btn) btn.disabled = false;
     }
   }
@@ -609,8 +675,7 @@ async function signInWithEmail(){
           showMsg('BookWide 帳號建立成功！請完成最後一步。', 'ok');
           showLineSetupDialog();
         }else{
-          showMsg('已登入，正在導回…', 'ok');
-          goNext();
+          afterLogin(session);
         }
       }
     });
