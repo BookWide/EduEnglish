@@ -2085,13 +2085,15 @@ function BW_playerStartDeviceWatcher(userId){
 
 async function BW_playerIdleLogoutNow(){
   if(BW_PLAYER_KICKING) return;
+  // 2026-10：正在播放（影片、YouTube、背景聆聽）就不算閒置。
+  try{ if(!activePaused()){ BW_playerResetIdleTimer(); return; } }catch(_e){}
   BW_PLAYER_KICKING = true;
   try{ pauseActive && pauseActive(); }catch(_e){}
   try{ alert('閒置超過 30 分鐘，系統已自動登出'); }catch(_e){}
   try{
     BW_playerStopIdleLogout();
     try{ if (BW_PLAYER_DEVICE_WATCH_TIMER) clearInterval(BW_PLAYER_DEVICE_WATCH_TIMER); }catch(_e){}
-    await playerSupa.auth.signOut();
+    await playerSupa.auth.signOut({ scope:'local' });
   }catch(_e){}
   location.href = (ROOT_BASE || '') + '/index.html?idle=1';
 }
@@ -2206,6 +2208,7 @@ const SUPABASE_URL = 'https://bookwide-hiking-api.pmktools.workers.dev/sb';
           <video id="player" playsinline controls></video>
           <audio id="ktvBgmAudio" preload="auto"></audio>
           <audio id="ktvVocalAudio" preload="auto"></audio>
+          <audio id="bwBgAudio" preload="none" playsinline></audio>
           <div id="mobileSubtitle" aria-live="polite"></div>
           <div id="mobileTopLine" aria-live="polite"></div>
         </div>
@@ -2214,6 +2217,7 @@ const SUPABASE_URL = 'https://bookwide-hiking-api.pmktools.workers.dev/sb';
           <button class="btn" id="btnToggleControls" type="button">⚙ 控制</button>
           <button class="btn" id="btnMobileRepeatAll" type="button" title="播完整片後自動重播">🔁 循環</button>
           <button class="btn" id="btnMobileKtvAudioMode" type="button" title="原唱 / 伴唱（兩音軌混音）" style="display:none">🎤 原唱</button>
+          <button class="btn" id="btnBgListen" type="button" title="切成只播聲音，鎖螢幕或切到其他 App 也能繼續聽" style="display:none">🎧 背景聆聽</button>
 
           <div class="row row-main">
             <button class="btn" id="btnPrev">⏮ 上一句</button>
@@ -3120,7 +3124,10 @@ function getYoutubeIdFromUrl(url=''){
 }
 
 function isUsingYouTube(){ return activeSource==='youtube' && ytPlayer; }
+function BW_bgAudioEl(){ return document.getElementById('bwBgAudio'); }
+function isUsingBgAudio(){ return activeSource==='bgaudio' && !!BW_bgAudioEl(); }
 function getCurrentPlaybackTime(){
+  if(isUsingBgAudio()) return Number(BW_bgAudioEl().currentTime)||0;
   if(isUsingYouTube()){
     try{return Number(ytPlayer.getCurrentTime())||0;}catch(e){return 0;}
   }
@@ -3128,6 +3135,7 @@ function getCurrentPlaybackTime(){
 }
 function setCurrentPlaybackTime(sec){
   const t=Math.max(0, Number(sec)||0);
+  if(isUsingBgAudio()){ try{ BW_bgAudioEl().currentTime=t; }catch(e){} return; }
   if(isUsingYouTube()){
     try{ ytPlayer.seekTo(t, true); }catch(e){}
     return;
@@ -3135,6 +3143,7 @@ function setCurrentPlaybackTime(sec){
   try{ video.currentTime=t; }catch(e){}
 }
 function playActive(){
+  if(isUsingBgAudio()){ BW_bgAudioEl().play().catch(()=>{}); return; }
   if(isUsingYouTube()){
     try{ ytPlayer.playVideo(); }catch(e){}
     return;
@@ -3142,6 +3151,7 @@ function playActive(){
   video.play().catch(()=>{});
 }
 function pauseActive(){
+  if(isUsingBgAudio()){ try{ BW_bgAudioEl().pause(); }catch(e){} return; }
   if(isUsingYouTube()){
     try{ ytPlayer.pauseVideo(); }catch(e){}
     return;
@@ -3156,8 +3166,10 @@ function BW_forcePauseForCoinGate(){
   try{ if(ytPlayer && typeof ytPlayer.pauseVideo === 'function') ytPlayer.pauseVideo(); }catch(e){}
   try{ const bgm = document.getElementById('ktvBgmAudio'); if(bgm) bgm.pause(); }catch(e){}
   try{ const vocal = document.getElementById('ktvVocalAudio'); if(vocal) vocal.pause(); }catch(e){}
+  try{ const bg = document.getElementById('bwBgAudio'); if(bg) bg.pause(); }catch(e){}
 }
 function activePaused(){
+  if(isUsingBgAudio()) return BW_bgAudioEl().paused;
   if(isUsingYouTube()){
     try{ return ytPlayer.getPlayerState() !== 1; }catch(e){ return true; }
   }
@@ -3169,7 +3181,100 @@ function setPlaybackRateActive(rate){
     try{ ytPlayer.setPlaybackRate(r); }catch(e){}
   }
   video.playbackRate=r;
+  try{ if(isUsingBgAudio()) BW_bgAudioEl().playbackRate=r; }catch(e){}
 }
+
+/* === 2026-10 MUSIC 背景聆聽 ===
+   YouTube 嵌入播放器離開畫面就會停（YouTube 限制），iPhone 也會在背景暫停 <video>。
+   按「🎧 背景聆聽」→ 改用 R2 的 mp4_url 以 <audio> 只播聲音（從同一秒接續），
+   鎖螢幕／切 App 仍繼續；鎖定畫面顯示歌名與播放控制（Media Session）。
+   只給已解鎖（或已付費通過）的歌使用，避免繞過試聽 90 秒。 */
+window.BW_BG_LISTEN_ALLOWED = false;
+let BW_BG_PREV_SOURCE = 'html5';
+function BW_bgListenSrc(){
+  const row = window.__ASSET_ROW__ || {};
+  const u = String(row.mp4_url || '').trim();
+  return /^https:\/\//i.test(u) ? u : '';
+}
+function BW_bgListenRefresh(){
+  const btn = document.getElementById('btnBgListen');
+  if(!btn) return;
+  const ok = (cat === 'music') && window.BW_BG_LISTEN_ALLOWED && !!BW_bgListenSrc();
+  btn.style.display = ok ? '' : 'none';
+  btn.textContent = isUsingBgAudio() ? '📺 回到影片' : '🎧 背景聆聽';
+  btn.classList.toggle('blue', isUsingBgAudio());
+}
+function BW_bgListenMediaSession(){
+  try{
+    if(!('mediaSession' in navigator)) return;
+    const row = window.__ASSET_ROW__ || {};
+    const art = String(row.cover_url || '').trim();
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: String(row.title || slug || 'BookWide'),
+      artist: 'BookWide 音樂',
+      album: 'BookWide',
+      artwork: art ? [{ src: art, sizes: '512x512' }] : []
+    });
+    const a = BW_bgAudioEl();
+    navigator.mediaSession.setActionHandler('play', ()=>{ a.play().catch(()=>{}); });
+    navigator.mediaSession.setActionHandler('pause', ()=>{ a.pause(); });
+    navigator.mediaSession.setActionHandler('seekbackward', (d)=>{ a.currentTime = Math.max(0, a.currentTime - (d.seekOffset || 10)); });
+    navigator.mediaSession.setActionHandler('seekforward', (d)=>{ a.currentTime = a.currentTime + (d.seekOffset || 10); });
+    try{ navigator.mediaSession.setActionHandler('seekto', (d)=>{ if(d && d.seekTime != null) a.currentTime = d.seekTime; }); }catch(_e){}
+  }catch(_e){}
+}
+function BW_bgListenEnter(){
+  const src = BW_bgListenSrc();
+  const a = BW_bgAudioEl();
+  if(!src || !a) return;
+  const t = getCurrentPlaybackTime();
+  const wasPaused = activePaused();
+  BW_BG_PREV_SOURCE = (activeSource === 'youtube') ? 'youtube' : 'html5';
+  // 停掉影片與伴唱音軌
+  try{ if(ytPlayer && ytPlayer.pauseVideo) ytPlayer.pauseVideo(); }catch(_e){}
+  try{ video.pause(); }catch(_e){}
+  try{ document.getElementById('ktvBgmAudio')?.pause(); document.getElementById('ktvVocalAudio')?.pause(); }catch(_e){}
+  if(ytTickTimer){ clearInterval(ytTickTimer); ytTickTimer=null; }
+  if(a.dataset.src !== src){ a.src = src; a.dataset.src = src; }
+  a.playbackRate = Number(video.playbackRate) || 1;
+  activeSource = 'bgaudio';
+  const start = () => { try{ a.currentTime = t; }catch(_e){} };
+  if(a.readyState >= 1) start(); else a.addEventListener('loadedmetadata', start, { once:true });
+  // 一定要在使用者點擊當下呼叫 play()，iPhone 才允許。
+  a.play().catch(err => { console.warn('[bgListen] play failed', err); });
+  if(wasPaused && t > 0){ /* 使用者原本暫停也直接開始播，背景聆聽就是要聽 */ }
+  BW_bgListenMediaSession();
+  BW_bgListenRefresh();
+}
+function BW_bgListenExit(){
+  const a = BW_bgAudioEl();
+  const t = Number(a?.currentTime) || 0;
+  const wasPlaying = a && !a.paused;
+  try{ a.pause(); }catch(_e){}
+  if(BW_BG_PREV_SOURCE === 'youtube' && ytPlayer){
+    showYouTube();
+    try{ ytPlayer.seekTo(t, true); if(wasPlaying) ytPlayer.playVideo(); }catch(_e){}
+  }else{
+    showHtml5();
+    try{ video.currentTime = t; if(wasPlaying) video.play().catch(()=>{}); }catch(_e){}
+  }
+  BW_bgListenRefresh();
+}
+(function(){
+  const init = () => {
+    const btn = document.getElementById('btnBgListen');
+    const a = BW_bgAudioEl();
+    if(!btn || !a) return;
+    btn.addEventListener('click', () => { isUsingBgAudio() ? BW_bgListenExit() : BW_bgListenEnter(); });
+    a.addEventListener('timeupdate', () => { if(isUsingBgAudio()) { try{ handlePlaybackTick(); }catch(_e){} } });
+    a.addEventListener('play', () => { try{ if(cat === 'music') BW_setSingalongButtonState(true); }catch(_e){} });
+    a.addEventListener('pause', () => { try{ if(cat === 'music') BW_setSingalongButtonState(false); }catch(_e){} });
+    a.addEventListener('ended', () => { try{ window.BW_repeatAllRestart && window.BW_repeatAllRestart(); }catch(_e){} });
+    a.addEventListener('error', () => { if(isUsingBgAudio()){ alert('這首歌的背景聆聽音檔讀取失敗，已回到影片。'); BW_bgListenExit(); } });
+    BW_bgListenRefresh();
+  };
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
+})();
 
 
 /* === MUSIC KTV 音源切換：原唱 MP4 → 伴奏 MP4 → 靜音 ===
@@ -6965,6 +7070,7 @@ async function setupGuestCoinGate(){
   };
 
   const showUnlockedState = () => {
+    window.BW_BG_LISTEN_ALLOWED = true; try{ BW_bgListenRefresh(); }catch(_e){}
     if (coinBadge) coinBadge.textContent = '已解鎖';
     if (trialBadge) trialBadge.textContent = '遊客重看不扣幣';
     if (coinCostChip) {
@@ -7126,6 +7232,7 @@ async function setupCoinGate(user){
   };
 
   const showUnlockedState = () => {
+    window.BW_BG_LISTEN_ALLOWED = true; try{ BW_bgListenRefresh(); }catch(_e){}
     if (coinBadge) coinBadge.textContent = '已解鎖';
     if (trialBadge) trialBadge.textContent = '本期重看不扣幣';
     if (coinCostChip) {
