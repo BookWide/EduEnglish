@@ -185,6 +185,37 @@
 
   <div class="wrap">
 
+    <details class="foldCard" id="foldExtCourses">
+      <summary>外部課程上下架（英文文法／日文文法／日文發音…YouTube 播放清單）</summary>
+      <div class="card" style="margin-bottom:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <div style="color:var(--muted);font-size:13px">首頁「綜合」分頁的課程卡。下架後首頁不顯示、播放頁也打不開；改完記得按「儲存」。</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn" type="button" id="extAddBtn" style="background:#0f766e">＋ 新增課程</button>
+            <button class="btn" type="button" id="extSaveBtn">💾 儲存</button>
+          </div>
+        </div>
+        <div id="extStatus" style="margin:8px 0;font-size:13px;color:var(--muted)">讀取中…</div>
+        <div id="extList"></div>
+        <div id="extEditor" style="display:none;margin-top:12px;padding:12px;border:1px dashed var(--line);border-radius:14px">
+          <div style="font-weight:900;margin-bottom:8px" id="extEditorTitle">編輯課程</div>
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px">
+            <label>課程名稱<input id="extF_title" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:10px"></label>
+            <label>老師／來源<input id="extF_teacher" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:10px"></label>
+            <label>程度<input id="extF_level" placeholder="例：初級、基礎～進階" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:10px"></label>
+            <label>卡片顏色<select id="extF_accent" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:10px"><option value="green">綠</option><option value="blue">藍</option></select></label>
+          </div>
+          <label style="display:block;margin-top:8px">YouTube 播放清單網址（備查）<input id="extF_playlist" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:10px"></label>
+          <label style="display:block;margin-top:8px">課程影片（一行一課：<b>影片網址或 ID | 標題</b>，標題可省略）
+            <textarea id="extF_lessons" rows="10" style="width:100%;padding:8px;border:1px solid var(--line);border-radius:10px;font-family:monospace"></textarea></label>
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <button class="btn" type="button" id="extF_ok">套用</button>
+            <button class="btn" type="button" id="extF_cancel" style="background:#64748b">取消</button>
+          </div>
+        </div>
+      </div>
+    </details>
+
     <details class="foldCard" id="foldImport">
       <summary>新增影片 / 匯入 JSON</summary>
     <div class="card" style="margin-bottom:10px;">
@@ -2243,6 +2274,103 @@ els.tbody.addEventListener('click', async (ev)=>{
       location.href="/index.html";
     }
   })();
+</script>
+
+<script>
+/* === 2026-10 外部課程上下架（資料存在 Worker R2：/api/bw-external-courses）=== */
+(function(){
+  const API = 'https://bookwide-hiking-api.pmktools.workers.dev/api/bw-external-courses';
+  let courses = [], dirty = false, editing = -1;
+  const $ = id => document.getElementById(id);
+  const escH = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const status = (t, bad) => { const el = $('extStatus'); if (el){ el.textContent = t; el.style.color = bad ? '#dc2626' : 'var(--muted)'; } };
+  const ytId = s => { s = String(s || '').trim(); const m = s.match(/(?:v=|youtu\.be\/|embed\/|shorts\/)([A-Za-z0-9_-]{6,20})/); return m ? m[1] : (/^[A-Za-z0-9_-]{6,20}$/.test(s) ? s : ''); };
+  async function token(){ const { data:{ session } } = await supa.auth.getSession(); if (!session?.access_token) throw new Error('登入已失效'); return session.access_token; }
+
+  function render(){
+    const box = $('extList'); if (!box) return;
+    if (!courses.length){ box.innerHTML = '<div style="padding:10px;color:var(--muted)">目前沒有外部課程。</div>'; return; }
+    box.innerHTML = courses.map((c, i) => `
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px;border:1px solid var(--line);border-radius:12px;margin:6px 0;background:${c.is_published ? '#fff' : '#f8fafc'}">
+        <span style="padding:3px 9px;border-radius:999px;font-size:12px;font-weight:900;background:${c.is_published ? '#dcfce7' : '#fee2e2'};color:${c.is_published ? '#166534' : '#991b1b'}">${c.is_published ? '已上架' : '已下架'}</span>
+        <div style="flex:1;min-width:180px"><b>${escH(c.course_title)}</b>｜${(c.lesson_ids || []).length} 課
+          <div style="font-size:12px;color:var(--muted)">${escH([c.teacher, c.course_level, c.course_id].filter(Boolean).join('｜'))}</div></div>
+        <button class="btn" type="button" data-a="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} style="background:#64748b">▲</button>
+        <button class="btn" type="button" data-a="down" data-i="${i}" ${i === courses.length - 1 ? 'disabled' : ''} style="background:#64748b">▼</button>
+        <button class="btn" type="button" data-a="toggle" data-i="${i}" style="background:${c.is_published ? '#dc2626' : '#16a34a'}">${c.is_published ? '下架' : '上架'}</button>
+        <button class="btn" type="button" data-a="edit" data-i="${i}" style="background:#0f766e">編輯</button>
+        <button class="btn" type="button" data-a="del" data-i="${i}" style="background:#7f1d1d">刪除</button>
+      </div>`).join('');
+  }
+  function markDirty(){ dirty = true; status('有尚未儲存的變更，請按「💾 儲存」。'); render(); }
+
+  async function load(){
+    try{
+      const r = await fetch(API + '?all=1', { cache:'no-store' });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d?.error || ('HTTP ' + r.status));
+      courses = d.courses || [];
+      dirty = false;
+      status(d.from_default ? '目前是預設清單（尚未在後台儲存過）。' : `最後更新：${(d.updated_at || '').replace('T', ' ').slice(0, 16)}`);
+      render();
+    }catch(e){ status('讀取失敗：' + e.message, true); }
+  }
+  async function save(){
+    try{
+      status('儲存中…');
+      const r = await fetch(API, { method:'POST', headers:{ 'Content-Type':'application/json', Authorization:'Bearer ' + await token() }, body: JSON.stringify({ courses }) });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d?.error || ('HTTP ' + r.status));
+      courses = d.courses || courses; dirty = false;
+      status('✅ 已儲存，首頁重新整理後生效。'); render();
+      try{ toast('外部課程', '已儲存'); }catch(_e){}
+    }catch(e){ status('儲存失敗：' + e.message, true); alert('儲存失敗：' + e.message); }
+  }
+  function openEditor(i){
+    editing = i;
+    const c = i >= 0 ? courses[i] : { course_title:'', teacher:'', course_level:'', accent:'green', playlist_url:'', lesson_ids:[], lesson_titles:[] };
+    $('extEditorTitle').textContent = i >= 0 ? `編輯：${c.course_title}` : '新增課程';
+    $('extF_title').value = c.course_title || ''; $('extF_teacher').value = c.teacher || '';
+    $('extF_level').value = c.course_level || ''; $('extF_accent').value = c.accent === 'blue' ? 'blue' : 'green';
+    $('extF_playlist').value = c.playlist_url || '';
+    $('extF_lessons').value = (c.lesson_ids || []).map((id, k) => c.lesson_titles?.[k] ? `${id} | ${c.lesson_titles[k]}` : id).join('\n');
+    $('extEditor').style.display = ''; $('extEditor').scrollIntoView({ behavior:'smooth', block:'center' });
+  }
+  function applyEditor(){
+    const title = $('extF_title').value.trim(); if (!title) return alert('請填課程名稱');
+    const ids = [], titles = []; const bad = [];
+    $('extF_lessons').value.split('\n').map(l => l.trim()).filter(Boolean).forEach(l => {
+      const [a, ...rest] = l.split('|'); const id = ytId(a);
+      if (!id) { bad.push(l); return; }
+      ids.push(id); titles.push(rest.join('|').trim());
+    });
+    if (!ids.length) return alert('至少要有一課 YouTube 影片');
+    if (bad.length && !confirm(`有 ${bad.length} 行看不出 YouTube 影片 ID，會略過：\n${bad.slice(0, 5).join('\n')}\n\n繼續？`)) return;
+    const base = editing >= 0 ? courses[editing] : { course_id: 'course-' + Date.now().toString(36), category:'pro', is_published:false };
+    const c = { ...base, course_title:title, teacher:$('extF_teacher').value.trim(), course_level:$('extF_level').value.trim(), accent:$('extF_accent').value, playlist_url:$('extF_playlist').value.trim(), lesson_ids:ids, lesson_titles: titles.some(Boolean) ? titles : [] };
+    if (editing >= 0) courses[editing] = c; else courses.push(c);
+    $('extEditor').style.display = 'none'; editing = -1; markDirty();
+  }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    $('extList')?.addEventListener('click', e => {
+      const b = e.target.closest('button[data-a]'); if (!b) return;
+      const i = Number(b.dataset.i), a = b.dataset.a;
+      if (a === 'up' && i > 0) [courses[i - 1], courses[i]] = [courses[i], courses[i - 1]];
+      else if (a === 'down' && i < courses.length - 1) [courses[i + 1], courses[i]] = [courses[i], courses[i + 1]];
+      else if (a === 'toggle') courses[i].is_published = !courses[i].is_published;
+      else if (a === 'edit') return openEditor(i);
+      else if (a === 'del') { if (!confirm(`確定刪除「${courses[i].course_title}」？（只刪清單，不影響 YouTube）`)) return; courses.splice(i, 1); }
+      markDirty();
+    });
+    $('extAddBtn')?.addEventListener('click', () => openEditor(-1));
+    $('extSaveBtn')?.addEventListener('click', save);
+    $('extF_ok')?.addEventListener('click', applyEditor);
+    $('extF_cancel')?.addEventListener('click', () => { $('extEditor').style.display = 'none'; editing = -1; });
+    load();
+  });
+  window.addEventListener('beforeunload', e => { if (dirty){ e.preventDefault(); e.returnValue = ''; } });
+})();
 </script>
 </body>
 </html>
