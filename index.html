@@ -3249,9 +3249,13 @@ if (btnTryHero) {
             continue;
           }
 
-          // 過期或 30 秒內將過期，先清掉，避免 supabase-js getSession 跳 Invalid JWT。
+          // 2026-10：通行證過期但還有續期憑證（refresh_token）→ 保留，交給 supabase-js 自動換新，
+          //          不再整包刪掉（手機切 App 回來頁面重載就被登出的主因）。
+          //          沒有續期憑證才清掉，避免 supabase-js getSession 跳 Invalid JWT。
           if(payload.exp && payload.exp * 1000 < Date.now() + 30000){
-            localStorage.removeItem(k);
+            const refresh = j.refresh_token || (j.currentSession && j.currentSession.refresh_token) || (j.session && j.session.refresh_token) || "";
+            if(refresh) window.__BW_NEED_TOKEN_REFRESH = true;
+            else localStorage.removeItem(k);
           }
         }
       }catch(_e){}
@@ -3266,6 +3270,13 @@ const SUPABASE_URL  = 'https://bookwide-hiking-api.pmktools.workers.dev/sb';
 
     supa = window.supa ?? createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     window.supa = supa;
+
+    // 2026-10：通行證已過期 → 立刻用續期憑證換新；換新失敗（續期憑證也失效）時 supabase-js 會自行清除。
+    if (window.__BW_NEED_TOKEN_REFRESH) {
+      window.__BW_TOKEN_REFRESH_PROMISE = supa.auth.refreshSession()
+        .then(r => { if (r?.error) console.warn('[auth] refresh failed', r.error.message); return r; })
+        .catch(e => { console.warn('[auth] refresh error', e); });
+    }
 
     /* ========= BookWide 閒置 30 分鐘自動登出 ========= */
     let BW_IDLE_TIMER = null;
