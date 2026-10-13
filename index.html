@@ -2051,9 +2051,56 @@ if (autoplay) {
       }
     }
 
+    // 2026-10：已解鎖的教材保留在首頁，只在卡片加「已解鎖」標記，不再移除。
     function removeUnlockedItems(items) {
-      if (CURRENT_USER_IS_ADMIN || !CURRENT_UNLOCKED_SLUGS.size) return (items || []).slice();
-      return (items || []).filter(v => !CURRENT_UNLOCKED_SLUGS.has(String(v.slug || '').trim()));
+      return (items || []).slice();
+    }
+    function BW_isUnlockedItem(v) {
+      return CURRENT_UNLOCKED_SLUGS.has(String(v?.slug || '').trim());
+    }
+
+    // 「適合我」：依和我的程度距離分層（同程度 → 差一級 → 其他；音樂/旅遊/未標程度視同同級），
+    // 每分類最多 NON_ADMIN_PER_CATEGORY_LIMIT 片，先填滿近的層，每層內照原本每週輪動。
+    function BW_mineDistance(v) {
+      const cat = String(v?.category || '');
+      const lv = Number(v?.difficulty_level || 0);
+      if (cat === 'travel' || cat === 'music' || !lv) return 0;
+      return Math.abs(lv - Number(CURRENT_MY_DIFFICULTY_LEVEL || 0));
+    }
+    function BW_mineRankedPick(items, reserveItems) {
+      const seen = new Set();
+      const all = [];
+      for (const v of [...(items || []), ...(reserveItems || [])]) {
+        const key = `${v.category}::${v.slug}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        all.push(v);
+      }
+      const perCat = CURRENT_USER_IS_ADMIN ? Infinity : NON_ADMIN_PER_CATEGORY_LIMIT;
+      const byCat = {};
+      for (const v of all) {
+        const cat = String(v.category || '').trim() || 'other';
+        (byCat[cat] = byCat[cat] || []).push(v);
+      }
+      const preferredCats = ['travel','story','music','movie','news','pro','monk'];
+      const cats = preferredCats.filter(c => byCat[c]?.length)
+        .concat(Object.keys(byCat).filter(c => !preferredCats.includes(c)).sort());
+      const result = [];
+      for (const cat of cats) {
+        const tiers = {};
+        for (const v of byCat[cat]) (tiers[BW_mineDistance(v)] = tiers[BW_mineDistance(v)] || []).push(v);
+        let taken = 0;
+        for (const d of Object.keys(tiers).map(Number).sort((a, b) => a - b)) {
+          const tier = tiers[d];
+          const start = Number.isFinite(perCat) ? BW_rotationStart(tier.length, perCat) : 0;
+          for (let i = 0; i < tier.length && taken < perCat; i++) {
+            result.push(tier[(start + i) % tier.length]);
+            taken++;
+          }
+          if (taken >= perCat) break;
+        }
+      }
+      return result;
     }
 
     // 輪動週數：以固定起點（2026-01-05 週一）算自然週，每週一自動換一批；不受方案 4 週上限卡死。
@@ -2834,8 +2881,11 @@ function renderGrid() {
           if (String(ml || "other") !== currentMusicLang) return false;
         }
 
-        const effectiveLevel = (currentLevel === 'mine') ? CURRENT_MY_DIFFICULTY_LEVEL : Number(currentLevel || 0);
-        if (!kw && String(v.category || '') !== 'travel' && effectiveLevel && Number(v.difficulty_level) !== Number(effectiveLevel)) return false;
+        // 2026-10：「適合我」不再隱藏其他程度，改在後面依程度距離排序（BW_mineRankedPick）。
+        //          音樂依語言挑選，和旅遊一樣不套程度篩選。
+        const effectiveLevel = (currentLevel === 'mine') ? 0 : Number(currentLevel || 0);
+        const levelExempt = ['travel','music'].includes(String(v.category || ''));
+        if (!kw && !levelExempt && effectiveLevel && Number(v.difficulty_level) !== Number(effectiveLevel)) return false;
         if (kw && !(
           (v.title || "").toLowerCase().includes(kw) ||
           (v.slug  || "").toLowerCase().includes(kw)
@@ -2845,7 +2895,9 @@ function renderGrid() {
 
       let primaryFiltered = industryFiltered.filter(filterFn);
       const reserveFiltered = (baseItems || []).filter(filterFn);
-      let limited = buildViewerItems(primaryFiltered, reserveFiltered);
+      let limited = (!kw && currentLevel === 'mine' && CURRENT_MY_DIFFICULTY_LEVEL)
+        ? BW_mineRankedPick(primaryFiltered, reserveFiltered)
+        : buildViewerItems(primaryFiltered, reserveFiltered);
       console.debug('[index-visible]', {
         category: currentCategory,
         level: currentLevel,
@@ -2887,6 +2939,7 @@ function renderGrid() {
         card.innerHTML = `
           <div class="card-thumb">
             ${BW_guestCanUse() ? '<span class="bw-guest-card-badge">依長度扣幣</span>' : ''}
+            ${BW_isUnlockedItem(v) ? '<span style="position:absolute;top:8px;left:8px;z-index:2;padding:3px 9px;border-radius:999px;background:#16a34a;color:#fff;font-size:12px;font-weight:900;box-shadow:0 2px 6px rgba(0,0,0,.25)">✅ 已解鎖</span>' : ''}
             <img src="${cover}" alt="${v.title}" loading="lazy"
                  onerror="this.style.display='none'; this.parentElement.style.background='#020617';">
           </div>
