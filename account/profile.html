@@ -1089,6 +1089,16 @@ label{
 
   <main class="wrap">
     <div class="card">
+      <!-- 2026-10：LINE 一鍵註冊會員補填 Email（寄確認信，點了才生效） -->
+      <section class="section" id="bwEmailSection" style="display:none;margin-bottom:16px;padding:14px;border:1px solid #fde68a;background:#fffbeb;border-radius:14px">
+        <h2 class="section-title" style="margin:0 0 6px">📧 補填你的 Email</h2>
+        <div class="section-desc" style="margin-bottom:10px">你是用 LINE 註冊的，目前還沒有 Email。補填後可收付款收據與通知，也能改用 Email 登入。</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <input id="bwEmailInput" class="input" type="email" inputmode="email" autocomplete="email" placeholder="you@example.com" style="flex:1;min-width:200px;padding:10px;border:1px solid #d1d5db;border-radius:10px;font-size:16px">
+          <button id="bwEmailSend" class="btn" type="button">寄確認信</button>
+        </div>
+        <div id="bwEmailMsg" style="margin-top:8px;font-size:14px;line-height:1.6"></div>
+      </section>
 <section class="section" id="crmSection" hidden aria-hidden="true" style="display:none!important">
         <h2 class="section-title">會員關係 CRM（管理資料）</h2>
         <div class="section-desc">此區為 Admin／群主管理資料，一般會員 Profile 不顯示。</div>
@@ -1323,6 +1333,59 @@ label{
     });
 
     const DASHBOARD_URL = './learning-dashboard.html';
+
+    // ===== 2026-10 LINE 會員補填 Email =====
+    // LINE 一鍵註冊的會員 Email 是 line_xxx@line.bookwide.net 代號；
+    // 在這裡填真的 Email → 後端寄「BookWide｜確認你的 Email」→ 點信中按鈕後才正式換成新 Email。
+    const BW_LINE_EMAIL_DOMAIN = '@line.bookwide.net';
+    const bwIsLinePlaceholder = (e) => String(e || '').trim().toLowerCase().endsWith(BW_LINE_EMAIL_DOMAIN);
+    function bwEmailMsg(text, kind){
+      const el = document.getElementById('bwEmailMsg'); if (!el) return;
+      el.textContent = text || '';
+      el.style.color = kind === 'error' ? '#b91c1c' : kind === 'ok' ? '#166534' : '#374151';
+    }
+    function bwRenderEmailSection(user){
+      const sec = document.getElementById('bwEmailSection'); if (!sec) return;
+      const placeholder = user && bwIsLinePlaceholder(user.email);
+      sec.style.display = placeholder ? '' : 'none';
+      const head = document.getElementById('userEmail');
+      if (head && user) head.textContent = placeholder ? 'LINE 會員（尚未填 Email）' : (user.email || '');
+      if (placeholder && user.new_email) bwEmailMsg(`確認信已寄到 ${user.new_email}，請到信箱點「確認 Email」。`, 'ok');
+      // 確認信連結回來時，網址 # 會帶錯誤訊息（例如 Email 已被使用、連結過期）
+      try{
+        const h = new URLSearchParams(String(location.hash || '').replace(/^#/, ''));
+        const code = h.get('error_code');
+        if (code){
+          const map = { email_exists:'這個 Email 已經有 BookWide 帳號，請用那個帳號登入後再綁定 LINE。', otp_expired:'確認連結已過期或已使用，請重新寄一次確認信。' };
+          if (placeholder) bwEmailMsg(map[code] || ('確認失敗：' + (h.get('error_description') || code)), 'error');
+          history.replaceState(null, '', location.pathname + location.search);
+        }
+      }catch(_e){}
+    }
+    async function bwSendEmailConfirm(){
+      const input = document.getElementById('bwEmailInput');
+      const btn = document.getElementById('bwEmailSend');
+      const email = String(input?.value || '').trim().toLowerCase();
+      if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || bwIsLinePlaceholder(email)){
+        bwEmailMsg('請輸入正確的 Email。', 'error'); input?.focus(); return;
+      }
+      btn.disabled = true; const old = btn.textContent; btn.textContent = '寄送中…'; bwEmailMsg('');
+      try{
+        const redirect = location.origin + location.pathname;
+        const { data, error } = await supabase.auth.updateUser({ email }, { emailRedirectTo: redirect });
+        if (error) throw error;
+        bwEmailMsg(`✅ 確認信已寄到 ${email}，請到信箱（含垃圾郵件匣）點「確認 Email」，完成後重新整理這頁。`, 'ok');
+        input.value = '';
+      }catch(e){
+        bwEmailMsg('寄送失敗：' + (e?.message || e), 'error');
+      }finally{
+        btn.disabled = false; btn.textContent = old;
+      }
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('bwEmailSend')?.addEventListener('click', bwSendEmailConfirm);
+      document.getElementById('bwEmailInput')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') bwSendEmailConfirm(); });
+    });
 
     let DOMAIN_LABEL = {};
 
@@ -1876,6 +1939,7 @@ label{
         }
 
         $('#userEmail').textContent = currentUser.email || '';
+        try{ bwRenderEmailSection(currentUser); }catch(_e){}
         await loadDomainOptions('');
 
         const activeOrder = await fetchLatestActiveSubscription(currentUser.id);
