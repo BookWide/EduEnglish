@@ -148,6 +148,15 @@ textarea{min-height:108px;resize:vertical}
         助學申請不需付款。請先登入帳號，分享你的學習目標與目前需求；審核通過後，BookWide 會協助開通學習會員。
       </div>
 
+      <!-- 2026-10：管理員代會員申請（沒有 Email 的 LINE 會員也能用） -->
+      <section class="form" id="adminProxyBox" style="display:none;border-color:#fde68a;background:#fffbeb">
+        <div class="fieldLabel" style="font-size:14px;color:#92400e">🛠 管理員代會員申請</div>
+        <div style="font-size:12px;color:#92400e;margin:4px 0 8px;font-weight:800">選會員後，下方表單送出的申請會算在該會員名下；送出後到後台審核通過即可開通。</div>
+        <input id="proxySearch" type="search" placeholder="搜尋會員名稱 / Email（例：蔡國賢）">
+        <select id="proxyMember" style="margin-top:8px"><option value="">— 不代申請（用我自己的帳號）—</option></select>
+        <div id="proxyHint" style="font-size:12px;color:#64748b;margin-top:6px;font-weight:750">讀取會員名單中…</div>
+      </section>
+
       <section class="form">
         <div class="fieldGrid">
           <div class="fieldRow">
@@ -239,6 +248,40 @@ async function initAuthEmail(showMessage=true){
   return { ok:false, token:'', email:'' };
 }
 
+// ===== 管理員代會員申請 =====
+const BW_ADMIN_EMAILS = ['pmktools@gmail.com'];
+let proxyMembers = [];
+function proxyLabel(m){ return `${m.name || '（未命名）'}｜${m.email || (m.via === 'line' ? 'LINE 會員（無 Email）' : '無 Email')}${m.sub_status === 'active' ? '｜訂閱中' : ''}`; }
+function renderProxyOptions(){
+  const sel = $('proxyMember'); if(!sel) return;
+  const q = ($('proxySearch')?.value || '').trim().toLowerCase();
+  const keep = sel.value;
+  const list = proxyMembers.filter(m => !q || String(m.name || '').toLowerCase().includes(q) || String(m.email || '').toLowerCase().includes(q)).slice(0, 200);
+  sel.innerHTML = '<option value="">— 不代申請（用我自己的帳號）—</option>' + list.map(m => `<option value="${m.id}">${proxyLabel(m).replace(/</g,'&lt;')}</option>`).join('');
+  if (list.some(m => m.id === keep)) sel.value = keep;
+  else if (q && list.length === 1) sel.value = list[0].id;
+  updateProxyHint();
+}
+function updateProxyHint(){
+  const id = $('proxyMember')?.value || '';
+  const m = proxyMembers.find(x => x.id === id);
+  $('proxyHint').textContent = m ? `將代「${m.name || m.email || id}」送出申請。` : `共 ${proxyMembers.length} 位會員；未選擇時用你自己的帳號申請。`;
+  if (m && !$('scholarName').value.trim()) $('scholarName').value = m.name || '';
+}
+async function initAdminProxy(token, email){
+  if(!BW_ADMIN_EMAILS.includes(String(email || '').toLowerCase())) return;
+  $('adminProxyBox').style.display = '';
+  try{
+    const r = await fetch('https://bookwide-hiking-api.pmktools.workers.dev/api/bw-admin/members?limit=1000', { headers:{ Authorization:'Bearer ' + token }, cache:'no-store' });
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok || !d.ok) throw new Error(d.msg || d.error || ('HTTP ' + r.status));
+    proxyMembers = (d.members || []).filter(m => m.id);
+    renderProxyOptions();
+  }catch(e){ $('proxyHint').textContent = '會員名單讀取失敗：' + (e.message || e); }
+}
+$('proxySearch')?.addEventListener('input', renderProxyOptions);
+$('proxyMember')?.addEventListener('change', updateProxyHint);
+
 $('submitScholarship')?.addEventListener('click', async ()=>{
   try{
     const auth = await initAuthEmail(false);
@@ -272,6 +315,7 @@ $('submitScholarship')?.addEventListener('click', async ()=>{
       body: JSON.stringify({
         action:'submit',
         email: auth.email,
+        onBehalfUserId: ($('proxyMember')?.value || '') || undefined,
         plan: 'scholarship',
         planLabel: '學習支持資格 / 後台審核',
         amount: 0,
@@ -296,6 +340,12 @@ $('submitScholarship')?.addEventListener('click', async ()=>{
       throw new Error(j.error || rawText || `HTTP ${res.status}`);
     }
 
+    const proxyM = proxyMembers.find(x => x.id === ($('proxyMember')?.value || ''));
+    if (proxyM){
+      setScholarStatus(`已代「${(proxyM.name || proxyM.email || '會員').replace(/</g,'&lt;')}」送出學習支持申請。<br>申請編號：<span class="mono">${j.request_id || scholarshipNo}</span><br>請到後台審核頁按「通過」完成開通。`, 'ok');
+      $('scholarReason').value = ''; $('scholarName').value = ''; $('proxyMember').value = ''; updateProxyHint();
+      return;
+    }
     setScholarStatus(`已成功送出學習支持申請。<br>申請編號：<span class="mono">${j.request_id || scholarshipNo}</span><br>審核通過後，BookWide 會協助開通學習會員。`, 'ok');
     $('submitScholarship').disabled = true;
   }catch(e){
@@ -303,7 +353,7 @@ $('submitScholarship')?.addEventListener('click', async ()=>{
   }
 });
 
-initAuthEmail(true);
+initAuthEmail(true).then(a => { if (a?.ok) initAdminProxy(a.token, a.email); });
 </script>
 </body>
 </html>
