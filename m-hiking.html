@@ -1438,6 +1438,32 @@ body.card-pick-active .sticker-maker-btn{background:#f2a51a!important;color:#111
       <div id="laDailySpecialStatus" class="notice" style="margin-top:10px">尚未判斷。</div>
           </div>
     </details>
+    <details class="card-source-box daily-fold" id="financeEnglishFold" ontoggle="if(this.open&&typeof finLoadOnce==='function')finLoadOnce()">
+      <summary><span>📈 財商英語（每月定期不定額）</span><span id="finSummary" class="small">點開載入</span></summary>
+      <div class="daily-fold-body">
+        <div class="small" style="margin-bottom:8px">數據來自「股票 AI V3」。扣款日（V3 設定的每月幾號，遇週末順延週一）當天、與日安同一時間，只發給下面選定的會員：<b>完整版</b>＝含本次倍數；<b>教育版</b>＝只有行情＋英文單字、不含投入建議。當天這些會員收「財商英語＋自己的每日學習」1 張卡，取代日安；其他會員照常收日安。</div>
+        <div class="filters">
+          <div class="field"><label>自動發送</label><select id="finEnabled"><option value="false">停用</option><option value="true">啟用</option></select></div>
+          <div class="field"><label>按鈕連結（選填）</label><input id="finPlayerUrl" type="url" placeholder="https://bookwide.net/…"></div>
+          <div class="field"><label>按鈕文字</label><input id="finPlayerLabel" value="立即學習"></div>
+        </div>
+        <div class="small" style="margin:8px 0 6px">每位會員要收哪一版：<span id="finCount"></span></div>
+        <div id="finMemberList" class="line-recipient-list"><span class="small">讀取中…</span></div>
+        <div class="btns" style="margin:10px 0">
+          <button class="btn" type="button" onclick="finSave(this)">儲存財商英語設定</button>
+          <button class="btn secondary" type="button" onclick="finShowPreview('full')">預覽完整版</button>
+          <button class="btn secondary" type="button" onclick="finShowPreview('education')">預覽教育版</button>
+          <button class="btn gray" type="button" onclick="finLoad()">重新整理</button>
+        </div>
+        <div class="btns" style="margin:0 0 10px;align-items:center">
+          <select id="finTestTarget" style="min-width:0;flex:1 1 200px"><option value="">選擇測試對象</option></select>
+          <button class="btn gold" type="button" onclick="finTest(this)">測試發送（完整版）</button>
+        </div>
+        <div id="finStatus" class="notice">尚未讀取。</div>
+        <pre id="finPreview" style="white-space:pre-wrap;background:#f6f8f6;border:1px solid #dce8df;border-radius:12px;padding:12px;margin:10px 0;font-size:13px;line-height:1.6;display:none"></pre>
+        <div id="finHistory" class="small"></div>
+      </div>
+    </details>
     <details class="card-source-box daily-fold" id="historyEditorFold">
       <summary><span>📜 歷史上的今天資料</span><span class="small">新增／管理 Player</span></summary>
       <div class="daily-fold-body">
@@ -8224,6 +8250,75 @@ async function v261BirthdayStopSchedule(button){const enabled=document.getElemen
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',build);else build();
   const old=window.openLineCardPanel;window.openLineCardPanel=function(type){if(old)old(type);build();};
 })();
+</script>
+<script>
+/* 財商英語（每月定期不定額）— 後端：/api/line-automation/finance、/finance-run */
+let finLoaded=false,finData=null;
+function finLoadOnce(){if(!finLoaded)finLoad()}
+function finMembers(){
+  const map=new Map();
+  for(const m of (finData?.members||[]))if(m.line_user_id)map.set(m.line_user_id,{id:m.line_user_id,name:m.display_name||m.email||'會員'});
+  for(const t of (typeof lineAutoTargets!=='undefined'&&Array.isArray(lineAutoTargets)?lineAutoTargets:[]))if(t&&t.id&&t.active!==false&&!map.has(t.id))map.set(t.id,{id:t.id,name:t.display_name||t.name||'LINE 會員'});
+  return [...map.values()].sort((a,b)=>a.name.localeCompare(b.name,'zh-Hant'));
+}
+function finRender(){
+  const c=finData?.config||{},full=new Set(c.full_ids||[]),edu=new Set(c.edu_ids||[]),rows=finMembers();
+  document.getElementById('finEnabled').value=c.enabled?'true':'false';
+  document.getElementById('finPlayerUrl').value=c.player_url||'';
+  document.getElementById('finPlayerLabel').value=c.player_label||'立即學習';
+  document.getElementById('finMemberList').innerHTML=rows.length?rows.map(m=>{const v=full.has(m.id)?'full':edu.has(m.id)?'education':'';return `<div style="display:flex;align-items:center;gap:8px;justify-content:space-between;border:1px solid #e3ebe5;border-radius:10px;padding:6px 8px"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">👤 ${escHtml(m.name)}</span><select data-fin-id="${escHtml(m.id)}" onchange="finCount()" style="flex:0 0 auto"><option value="" ${v===''?'selected':''}>不收</option><option value="full" ${v==='full'?'selected':''}>完整版</option><option value="education" ${v==='education'?'selected':''}>教育版</option></select></div>`}).join(''):'<span class="small">目前沒有已綁定 LINE 的會員。</span>';
+  document.getElementById('finTestTarget').innerHTML='<option value="">選擇測試對象</option>'+rows.map(m=>`<option value="${escHtml(m.id)}">${escHtml(m.name)}</option>`).join('');
+  finCount();
+  const p=finData?.preview,st=document.getElementById('finStatus');
+  const lines=[];
+  if(!finData?.feed_ready)lines.push('⚠ 尚未設定 FINANCE_FEED_TOKEN（Cloudflare → bookwide-hiking-api → Settings → Secret）');
+  if(finData?.feed_error)lines.push('⚠ '+finData.feed_error);
+  if(p)lines.push(`扣款日：每月 ${(p.days||[]).join('、')} 號｜今天${p.due?`<b>是</b>本月第 ${p.round+1} 次扣款日`:'不是扣款日'}｜下次：${p.next_date||'—'}｜本次倍數 ${p.multiplier} 倍（距一年高點 -${((p.drawdown||0)*100).toFixed(1)}%）｜單字 ${escHtml(p.lesson||'')}`);
+  if(finData?.last_error?.error)lines.push(`上次排程錯誤（${escHtml(finData.last_error.at||'')}）：${escHtml(finData.last_error.error)}`);
+  st.innerHTML=lines.join('<br>')||'已讀取。';
+  const h=finData?.history||[];
+  document.getElementById('finHistory').innerHTML=h.length?'最近發送：<br>'+h.map(x=>`${escHtml(x.date)}｜第 ${(x.round??0)+1} 次｜${x.multiplier} 倍｜完整版 ${x.full_sent} 人、教育版 ${x.education_sent} 人${x.skipped?`、略過 ${x.skipped}`:''}${x.failed?`、失敗 ${x.failed}`:''}`).join('<br>'):'尚無發送紀錄。';
+  document.getElementById('finSummary').textContent=c.enabled?`已啟用｜完整版 ${(c.full_ids||[]).length} 人、教育版 ${(c.edu_ids||[]).length} 人${p?.next_date?`｜下次 ${p.next_date}`:''}`:'未啟用';
+}
+function finCount(){
+  const sel=[...document.querySelectorAll('#finMemberList select[data-fin-id]')];
+  const f=sel.filter(x=>x.value==='full').length,e=sel.filter(x=>x.value==='education').length;
+  const el=document.getElementById('finCount');if(el)el.textContent=`完整版 ${f} 人、教育版 ${e} 人`;
+}
+async function finLoad(){
+  const st=document.getElementById('finStatus');
+  if(typeof BOOKWIDE_IS_SUPER_ADMIN!=='undefined'&&!BOOKWIDE_IS_SUPER_ADMIN){st.textContent='只有 BookWide Admin 可設定財商英語。';return}
+  st.textContent='讀取中…';
+  try{finData=await hikingApi('/api/line-automation/finance',{method:'GET',admin:false});finLoaded=true;finRender()}
+  catch(e){st.textContent='讀取失敗：'+e.message+'（若是 404，代表 bookwide-hiking-api 還沒部署新版 worker.js／line-core.js）'}
+}
+async function finSave(btn){
+  const sel=[...document.querySelectorAll('#finMemberList select[data-fin-id]')];
+  const body={enabled:document.getElementById('finEnabled').value==='true',
+    full_ids:sel.filter(x=>x.value==='full').map(x=>x.dataset.finId),
+    edu_ids:sel.filter(x=>x.value==='education').map(x=>x.dataset.finId),
+    player_url:document.getElementById('finPlayerUrl').value.trim(),
+    player_label:document.getElementById('finPlayerLabel').value.trim()||'立即學習'};
+  if(body.enabled&&!body.full_ids.length&&!body.edu_ids.length&&!confirm('已啟用但沒有選任何會員，確定儲存？'))return;
+  const old=btn?.textContent;if(btn){btn.disabled=true;btn.textContent='儲存中…'}
+  try{await hikingApi('/api/line-automation/finance',{method:'POST',admin:false,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await finLoad();alert('財商英語設定已儲存。')}
+  catch(e){alert('儲存失敗：'+e.message)}finally{if(btn){btn.disabled=false;btn.textContent=old}}
+}
+function finShowPreview(mode){
+  const pre=document.getElementById('finPreview'),p=finData?.preview?.preview;
+  pre.style.display='block';
+  pre.textContent=p?(mode==='education'?p.education:p.full):'目前沒有預覽（請確認 FINANCE_FEED_TOKEN 與 V3 數據介面）。';
+}
+async function finTest(btn){
+  const id=document.getElementById('finTestTarget').value;
+  if(!id){alert('請先選擇測試對象');return}
+  if(!confirm('會用 LINE 發 1 則測試訊息給這位會員（會用掉 1 則額度），確定？'))return;
+  const old=btn?.textContent;if(btn){btn.disabled=true;btn.textContent='發送中…'}
+  try{const r=await hikingApi('/api/line-automation/finance-run',{method:'POST',admin:false,headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'test',test_ids:[id]})});
+    if(r.ok===false)throw new Error(r.error||'發送失敗');
+    const n=r.results?.full?.sent_count||0;alert(n?'測試訊息已送出。':'沒有送出，請看狀態訊息。')}
+  catch(e){alert('測試發送失敗：'+e.message)}finally{if(btn){btn.disabled=false;btn.textContent=old}}
+}
 </script>
 </body>
 </html>
