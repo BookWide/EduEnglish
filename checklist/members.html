@@ -46,6 +46,9 @@ dialog{border:0;border-radius:16px;padding:18px;width:min(460px,92vw);box-shadow
 dialog textarea{width:100%;min-height:120px}
 .tpl{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
 .tpl button{font-size:12px;padding:5px 10px}
+.mg-row{display:grid;gap:4px;margin:8px 0}.mg-row label{font-size:13px;color:var(--muted)}.mg-row select{width:100%}
+#mgOut{font-size:13px;line-height:1.7;background:#f8fafc;border-radius:10px;padding:10px;margin:8px 0;display:none}
+#mgOut b{color:var(--ink)}#mgOut .warn{color:var(--bad);font-weight:700}
 @media(max-width:700px){.m{grid-template-columns:44px 1fr}.av{width:44px;height:44px}.act{grid-column:1/3;flex-direction:row;flex-wrap:wrap;min-width:0}.notes{grid-column:1/3}}
 </style>
 </head>
@@ -69,6 +72,14 @@ dialog textarea{width:100%;min-height:120px}
   <textarea id="dlgText"></textarea>
   <div style="font-size:12px;color:#64748b;margin:6px 0">由 BookWide English 官方帳號送出，會算進每月推播額度。送出後會自動記到備註。</div>
   <div style="display:flex;gap:8px;justify-content:flex-end"><button class="ghost" id="dlgCancel">取消</button><button class="line" id="dlgSend">送出</button></div>
+</dialog>
+<dialog id="dlgMerge">
+  <h3 style="margin:0 0 6px">合併帳號</h3>
+  <div class="mg-row"><label>保留這個帳號</label><select id="mgKeep"></select></div>
+  <div style="text-align:center"><button class="ghost" id="mgSwap" type="button" style="font-size:12px;padding:4px 10px">⇅ 對調</button></div>
+  <div class="mg-row"><label>併入後停用</label><select id="mgDrop"></select></div>
+  <div id="mgOut"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end"><button class="ghost" id="mgCancel" type="button">取消</button><button class="ghost" id="mgPreview" type="button">預覽</button><button id="mgGo" type="button" disabled style="background:var(--bad)">確認合併</button></div>
 </dialog>
 <div class="msg" id="toast"></div>
 <script src="https://unpkg.com/@supabase/supabase-js@2.48.0/dist/umd/supabase.js"></script>
@@ -124,6 +135,7 @@ function render(){
         <button class="line" data-act="line" ${m.line?'':'disabled title="這位會員沒有綁定 LINE"'}>LINE 傳訊息</button>
         <select data-act="crm">${Object.entries(CRM).map(([k,l])=>`<option value="${k}" ${m.crm_status===k?'selected':''}>${l}</option>`).join('')}</select>
         <button class="ghost" data-act="note">備註</button>
+        <button class="ghost" data-act="merge">合併帳號</button>
       </div>
       <div class="notes"><textarea data-act="notetext">${esc(m.crm_notes)}</textarea><div style="text-align:right"><button data-act="savenote">儲存備註</button></div></div>
     </div>`}).join('');
@@ -133,6 +145,7 @@ $('list').addEventListener('click',async e=>{
   if(b.dataset.act==='note')card.classList.toggle('open');
   if(b.dataset.act==='savenote'){b.disabled=true;try{const t=card.querySelector('textarea').value;await api('/api/bw-admin/members',{method:'POST',body:JSON.stringify({user_id:id,crm_notes:t})});m.crm_notes=t;toast('備註已儲存');render()}catch(err){toast('失敗：'+err.message)}finally{b.disabled=false}}
   if(b.dataset.act==='line')openDlg(m);
+  if(b.dataset.act==='merge')openMerge(m);
 });
 $('list').addEventListener('change',async e=>{
   const s=e.target.closest('[data-act="crm"]');if(!s)return;const id=s.closest('.m').dataset.id,m=ALL.find(x=>x.id===id);
@@ -149,6 +162,29 @@ $('dlgCancel').onclick=()=>$('dlg').close();
 $('dlgSend').onclick=async()=>{const t=$('dlgText').value.trim();if(!t||!CUR)return;const b=$('dlgSend');b.disabled=true;
   try{await api('/api/bw-admin/line-push',{method:'POST',body:JSON.stringify({user_id:CUR.id,text:t})});if(CUR.crm_status==='new'){await api('/api/bw-admin/members',{method:'POST',body:JSON.stringify({user_id:CUR.id,crm_member_status:'contacted'})}).catch(()=>{});CUR.crm_status='contacted'}$('dlg').close();toast('已用 LINE 送出');load()}
   catch(err){toast('送出失敗：'+err.message)}finally{b.disabled=false}};
+// ---- 合併帳號 ----
+const mgLabel=m=>`${m.name||'（未命名）'}｜${m.email||'LINE 未填 Email'}｜${(VIA[m.via]||[m.via])[0]}｜${(SUB[m.sub_status]||SUB.none)[0]}`;
+function mgOptions(sel,selected){sel.innerHTML='<option value="">— 請選擇 —</option>'+ALL.map(m=>`<option value="${esc(m.id)}" ${m.id===selected?'selected':''}>${esc(mgLabel(m))}</option>`).join('')}
+function mgReset(){$('mgOut').style.display='none';$('mgGo').disabled=true}
+function openMerge(m){
+  mgOptions($('mgKeep'),m.id);
+  const nm=(m.name||'').trim();const guess=nm?ALL.find(x=>x.id!==m.id&&(x.name||'').trim()===nm):null;
+  mgOptions($('mgDrop'),guess?guess.id:'');mgReset();$('dlgMerge').showModal()}
+$('mgKeep').onchange=mgReset;$('mgDrop').onchange=mgReset;
+$('mgSwap').onclick=()=>{const k=$('mgKeep').value,d=$('mgDrop').value;mgOptions($('mgKeep'),d);mgOptions($('mgDrop'),k);mgReset()};
+$('mgCancel').onclick=()=>$('dlgMerge').close();
+async function mgCall(dry){const keep_id=$('mgKeep').value,drop_id=$('mgDrop').value;
+  if(!keep_id||!drop_id||keep_id===drop_id)throw new Error('請選兩個不同的帳號');
+  return api('/api/bw-admin/members',{method:'POST',body:JSON.stringify({action:'merge',keep_id,drop_id,dry_run:dry})})}
+const mgDate=v=>v?String(v).slice(0,10):'—';
+$('mgPreview').onclick=async()=>{const b=$('mgPreview');b.disabled=true;
+  try{const j=await mgCall(true),r=j.result||{},moved=(j.moves||[]).reduce((n,x)=>n+x.rows,0);
+    $('mgOut').innerHTML=`合併後：<br>Email：<b>${esc(r.email)}</b><br>登入方式：<b>${esc((r.logins||[]).map(x=>(VIA[x]||[x])[0]).join('、')||'—')}</b><br>LINE：<b>${r.line_user_id?'已綁定':'未綁定'}</b>　到期：<b>${esc(mgDate(r.expires_at))}</b>　金幣：<b>${Number(r.wallet_coins||0)}</b><br>搬移資料：<b>${moved} 筆</b>（訂單、解鎖、學習紀錄等）<br><span class="warn">「${esc(j.drop?.name||j.drop?.email||'')}」合併後會停用，無法復原。</span>`;
+    $('mgOut').style.display='block';$('mgGo').disabled=false}
+  catch(err){$('mgOut').innerHTML=`<span class="warn">${esc(err.message)}</span>`;$('mgOut').style.display='block'}finally{b.disabled=false}};
+$('mgGo').onclick=async()=>{const b=$('mgGo');b.disabled=true;
+  try{await mgCall(false);$('dlgMerge').close();toast('已合併完成');load()}
+  catch(err){toast('合併失敗：'+err.message);b.disabled=false}};
 $('q').oninput=render;$('days').onchange=render;$('reload').onclick=load;
 load();
 </script>
