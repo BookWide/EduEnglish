@@ -2196,7 +2196,7 @@ async function loadWorkerData(){const data=await hikingApi('/api/bootstrap',{adm
   return data;
 }
 let _bwPoolSyncDebounceTimer=null;
-async function refreshWorkerData(){await loadWorkerData();
+async function refreshWorkerData(){await loadWorkerData();window.__bwMemo={};
   // V41.14：三個畫面分開畫，中間讓瀏覽器喘口氣，避免大相簿（2000+ 張）一次重畫卡住。
   const _yield=()=>new Promise(r=>setTimeout(r,0));
   renderV3Candidates();await _yield();
@@ -3161,7 +3161,7 @@ function albumPhotoUrls(a){if(typeof a==='string') return isImageUrl(a)?[a.trim(
   if(a?.cover_url) list.push(a.cover_url);
   return [...new Set(list.map(normalizePhotoUrl).filter(isImageUrl))];
 }
-function commonPhotoUrls(){return [...new Set((state.photos||[]).map(normalizePhotoUrl).filter(isImageUrl))]}
+function commonPhotoUrls(){return bwMemo('commonPhotos',[state.photos],()=>[...new Set((state.photos||[]).map(normalizePhotoUrl).filter(isImageUrl))]).slice()}
 function photoDateVariants(date){const d=normDateStr(date||'');
   const m=d.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if(!m) return [];
@@ -3172,7 +3172,9 @@ function photoDateVariants(date){const d=normDateStr(date||'');
 }
 function sharedPhotoUrlsForDate(date){const vars=photoDateVariants(date).map(x=>x.toLowerCase());
   if(!vars.length) return [];
-  return commonPhotoUrls().filter(u=>{ const t=String(u||'').toLowerCase(); return vars.some(v=>t.includes(v)); });
+  const cache=bwMemo('sharedByDate',[state.photos],()=>({lower:commonPhotoUrls().map(u=>[u,String(u||'').toLowerCase()]),byKey:new Map()}));
+  const key=vars.join('|');if(cache.byKey.has(key))return cache.byKey.get(key).slice();
+  const out=cache.lower.filter(([u,t])=>vars.some(v=>t.includes(v))).map(([u])=>u);cache.byKey.set(key,out);return out.slice();
 }
 function albumAllPhotoUrls(a){return [...new Set([...albumPhotoUrls(a), ...sharedPhotoUrlsForDate(a&&a.date)].map(normalizePhotoUrl).filter(isImageUrl))];
 }
@@ -3876,12 +3878,17 @@ async function editPhotoHolidayTags(url,event){if(event){event.stopPropagation()
 async function editPhotoSolarTags(url,event){if(event){event.stopPropagation();event.preventDefault();}const t=photoTagSummary(url);const choices=Object.keys(SOLAR_TERM_LABELS);const lines=choices.map((x,i)=>`${i+1}. ${SOLAR_TERM_LABELS[x]}${t.solar_terms.includes(x)?' ✓':''}`).join('\n');const raw=prompt(`24 節氣素材池（可輸入編號或代碼，逗號分隔）\n${lines}`,t.solar_terms.join(','));if(raw===null)return;const solar_terms=[...new Set(raw.split(',').map(x=>x.trim()).filter(Boolean).map(x=>{const n=Number(x);return Number.isInteger(n)&&n>=1&&n<=choices.length?choices[n-1]:x;}))];await savePhotoCardTag(url,{...t,solar_terms});}
 async function editPhotoBirthdayTags(url,event){if(event){event.stopPropagation();event.preventDefault();}const t=photoTagSummary(url);const raw=prompt('生日素材池：輸入 * 代表所有壽星共用；也可輸入會員 Email／ID，逗號分隔。',t.birthdays.length?t.birthdays.join(','):'*');if(raw===null)return;const birthdays=[...new Set(raw.split(',').map(x=>x.trim()).filter(Boolean))];await savePhotoCardTag(url,{...t,birthdays});}
 function cardTagButtonsHtml(url){if(!BOOKWIDE_IS_ADMIN)return '';const photoId=lineAutoGreetingId(url);const inPool=isEffectiveGreetingPhoto(url);return `<div class="card-tag-bar">${photoId?`<span style="display:inline-flex;align-items:center;padding:4px 7px;border-radius:999px;background:#eef4ff;color:#174ea6;font-size:11px;font-weight:900">ID ${escHtml(photoId)}</span>`:''}<span class="card-tag-btn ${inPool?'active':''}" style="cursor:default">${inPool?'🌄 日安池':'🚫 已排除'}</span></div>`;}
+// V41.14：大相簿（2000+ 張）效能——原本每張照片都要從頭掃一遍全部相簿（張數²），會讓頁面「無回應」。
+// 改成建一次對照表，資料一變（重新讀取或 1.5 秒後）自動重建。
+function bwMemo(name,deps,build){const c=(window.__bwMemo=window.__bwMemo||{})[name];const now=Date.now();
+  if(c&&now-c.t<1500&&c.deps.length===deps.length&&c.deps.every((d,i)=>d===deps[i]))return c.v;
+  const v=build();window.__bwMemo[name]={t:now,deps,v};return v;}
 function greetingPhotoMeta(url){const target=String(url||'').split('?')[0];
-  for(const event of (state.albums||[])){
-    const items=Array.isArray(event?.photo_items)?event.photo_items:[];
-    const found=items.find(item=>String(item?.url||'').split('?')[0]===target);
-    if(found) return found;}
-  return null;
+  const map=bwMemo('photoMeta',[state.albums],()=>{const m=new Map();
+    for(const event of (state.albums||[])){const items=Array.isArray(event?.photo_items)?event.photo_items:[];
+      for(const item of items){const k=String(item?.url||'').split('?')[0];if(k&&!m.has(k))m.set(k,item);}}
+    return m;});
+  return map.get(target)||null;
 }
 function isGreetingExcluded(url){return greetingPhotoMeta(url)?.exclude_from_greeting===true;
 }
@@ -6220,7 +6227,8 @@ function lineAutoGreetingPoolItems(){
     .map(x=>({id:String(x.id),url:normalizePhotoUrl(x.url)}));
 }
 function lineAutoGreetingId(url){
-  return lineAutoGreetingPoolItems().find(x=>x.url===normalizePhotoUrl(url))?.id||'';
+  const map=bwMemo('greetingIds',[lineAutoLastConfig,state.albums,state.photos],()=>new Map(lineAutoGreetingPoolItems().map(x=>[x.url,x.id])));
+  return map.get(normalizePhotoUrl(url))||'';
 }
 function greetingHistoryKey(value){const raw=String(value||lineAutoTodayTaipei()).trim(),m=raw.match(/(?:\d{4}-)?(\d{2})-(\d{2})$/);return m?`${m[1]}-${m[2]}`:''
 }
